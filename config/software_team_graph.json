@@ -1,0 +1,240 @@
+{
+  "name": "software_team",
+  "graph_mode": "directed_cycle",
+  "tick_period_s": 300,
+  "pre_handle": "",
+  "post_handle": "",
+  "nodes": [
+    {
+      "name": "planer",
+      "iport": [["doc/input.md"]],
+      "oport": [["doc/specification.md"]],
+      "attr": {"is_src": true, "is_sink": false, "role": "PM"},
+      "proc": "pm_proc"
+    },
+    {
+      "name": "archer",
+      "iport": [["doc/specification.md"]],
+      "oport": [["doc/architectural_design.md", "doc/organizational_structure.md", "doc/overall_iter_plan.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "SE"},
+      "proc": "se_proc"
+    },
+    {
+      "name": "mde",
+      "iport": [["doc/architectural_design.md", "doc/organizational_structure.md", "doc/overall_iter_plan.md"]],
+      "oport": [["doc/module_design.md", "doc/module_iter_plan.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "MDE"},
+      "proc": "mde_proc"
+    },
+    {
+      "name": "te",
+      "iport": [["doc/architectural_design.md", "doc/organizational_structure.md", "doc/overall_iter_plan.md"]],
+      "oport": [["doc/overall_test_plan.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "TE"},
+      "proc": "te_proc"
+    },
+    {
+      "name": "mte",
+      "iport": [["doc/overall_test_plan.md"]],
+      "oport": [["doc/module_test_cases.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "MTE"},
+      "proc": "mte_proc"
+    },
+    {
+      "name": "ste",
+      "iport": [["doc/overall_test_plan.md"]],
+      "oport": [["doc/sys_test_cases.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "STE"},
+      "proc": "ste_proc"
+    },
+    {
+      "name": "fo",
+      "iport": [["doc/module_design.md", "doc/module_iter_plan.md"]],
+      "oport": [["doc/feature_process.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "FO"},
+      "proc": "fo_proc"
+    },
+    {
+      "name": "mto",
+      "iport": [["doc/module_test_cases.md", "doc/feature_process.md"]],
+      "oport": [["test/module_tests_report.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "MTO"},
+      "proc": "mto_proc"
+    },
+    {
+      "name": "sto",
+      "iport": [["doc/sys_test_cases.md", "test/module_tests_report.md"]],
+      "oport": [["test/sys_tests_report.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "STO"},
+      "proc": "sto_proc"
+    },
+    {
+      "name": "qa",
+      "iport": [["test/sys_tests_report.md"]],
+      "oport": [["qa/verdict.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "QA"},
+      "proc": "qa_proc"
+    },
+    {
+      "name": "release",
+      "iport": [["qa/verdict.md"]],
+      "oport": [["release/notes.md", "release/changelog.md", "release/user_guide.md"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "release"},
+      "proc": "release_proc"
+    },
+    {
+      "name": "release_done",
+      "iport": [["release/notes.md", "release/changelog.md", "release/user_guide.md"]],
+      "oport": [],
+      "attr": {"is_src": false, "is_sink": true, "role": "null"},
+      "proc": ""
+    }
+  ],
+  "gates": [
+    {"name": "check_pm_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_se_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_mde_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_te_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_mte_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_ste_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_fo_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_mto_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_sto_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_qa_gate", "op": "check_output", "enum_dir": [true, false]},
+    {"name": "check_release_gate", "op": "check_output", "enum_dir": [true, false]}
+  ],
+  "edges": [
+    {
+      "name": "planer_loop",
+      "inode": "planer", "onode": "planer", "driver": "tick",
+      "gate": "planer_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "planer_to_archer",
+      "inode": "planer", "onode": "archer", "driver": "manual",
+      "gate": "planer_gate", "gate_value": true,
+      "cmd": "cmd_push_spec_to_archer"
+    },
+    {
+      "name": "archer_loop",
+      "inode": "archer", "onode": "archer", "driver": "tick",
+      "gate": "archer_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "archer_to_mde",
+      "inode": "archer", "onode": "mde", "driver": "manual",
+      "gate": "archer_gate", "gate_value": true, "parallel": true,
+      "cmd": "cmd_archer_review_approve"
+    },
+    {
+      "name": "archer_to_te",
+      "inode": "archer", "onode": "te", "driver": "manual",
+      "gate": "archer_gate", "gate_value": true, "parallel": true,
+      "cmd": "cmd_archer_review_approve"
+    },
+    {
+      "name": "mde_loop",
+      "inode": "mde", "onode": "mde", "driver": "tick",
+      "gate": "mde_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "mde_to_fo",
+      "inode": "mde", "onode": "fo", "driver": "tick",
+      "gate": "mde_gate", "gate_value": true, "cmd": "cmd_mde_to_fo"
+    },
+    {
+      "name": "te_loop",
+      "inode": "te", "onode": "te", "driver": "tick",
+      "gate": "te_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "te_to_mte",
+      "inode": "te", "onode": "mte", "driver": "tick",
+      "gate": "te_gate", "gate_value": true, "parallel": true,
+      "cmd": "cmd_te_to_mte"
+    },
+    {
+      "name": "te_to_ste",
+      "inode": "te", "onode": "ste", "driver": "tick",
+      "gate": "te_gate", "gate_value": true, "parallel": true,
+      "cmd": "cmd_te_to_ste"
+    },
+    {
+      "name": "mte_loop",
+      "inode": "mte", "onode": "mte", "driver": "tick",
+      "gate": "mte_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "mte_to_mto",
+      "inode": "mte", "onode": "mto", "driver": "tick",
+      "gate": "mte_gate", "gate_value": true, "cmd": "cmd_mte_to_mto"
+    },
+    {
+      "name": "fo_loop",
+      "inode": "fo", "onode": "fo", "driver": "tick",
+      "gate": "fo_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "fo_to_mto",
+      "inode": "fo", "onode": "mto", "driver": "tick",
+      "gate": "fo_gate", "gate_value": true, "parallel": true,
+      "cmd": "cmd_fo_to_mto"
+    },
+    {
+      "name": "fo_to_sto",
+      "inode": "fo", "onode": "sto", "driver": "tick",
+      "gate": "fo_gate", "gate_value": true, "parallel": true,
+      "cmd": "cmd_fo_to_sto"
+    },
+    {
+      "name": "mto_loop",
+      "inode": "mto", "onode": "mto", "driver": "tick",
+      "gate": "mto_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "mto_to_sto",
+      "inode": "mto", "onode": "sto", "driver": "tick",
+      "gate": "mto_gate", "gate_value": true, "cmd": "cmd_mto_to_sto"
+    },
+    {
+      "name": "ste_loop",
+      "inode": "ste", "onode": "ste", "driver": "tick",
+      "gate": "ste_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "ste_to_sto",
+      "inode": "ste", "onode": "sto", "driver": "tick",
+      "gate": "ste_gate", "gate_value": true, "cmd": "cmd_ste_to_sto"
+    },
+    {
+      "name": "sto_loop",
+      "inode": "sto", "onode": "sto", "driver": "tick",
+      "gate": "sto_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "sto_to_qa",
+      "inode": "sto", "onode": "qa", "driver": "tick",
+      "gate": "sto_gate", "gate_value": true, "cmd": "cmd_sto_to_qa"
+    },
+    {
+      "name": "qa_loop",
+      "inode": "qa", "onode": "qa", "driver": "tick",
+      "gate": "qa_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "qa_to_release",
+      "inode": "qa", "onode": "release", "driver": "manual",
+      "gate": "qa_gate", "gate_value": true, "cmd": "cmd_qa_approve"
+    },
+    {
+      "name": "release_loop",
+      "inode": "release", "onode": "release", "driver": "tick",
+      "gate": "release_gate", "gate_value": false, "cmd": "cmd_back"
+    },
+    {
+      "name": "release_publish",
+      "inode": "release", "onode": "release_done", "driver": "manual",
+      "gate": "release_gate", "gate_value": true, "cmd": "cmd_publish_approved"
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+{
+    "name": "test_for_complex",
+    "graph_mode": "directed_cycle",
+    "tick_period_s": 0.5,
+    "pre_handle": "",
+    "post_handle": "",
+    "nodes": [
+        {
+            "name": "fetcher",
+            "iport": [["config/seed.txt"]],
+            "oport": [["data/raw.json"]],
+            "attr": {"is_src": true, "is_sink": false, "role": "raw"},
+            "proc": "tfc_fetcher_proc"
+        },
+        {
+            "name": "worker_a",
+            "iport": [["data/raw.json"]],
+            "oport": [["data/a_done.json"], ["data/a_batch_1.json"], ["data/a_batch_2.json"]],
+            "attr": {"is_src": false, "is_sink": false, "role": "worker"},
+            "proc": "tfc_worker_a_proc"
+        },
+        {
+            "name": "worker_b",
+            "iport": [["data/raw.json"]],
+            "oport": [["data/b_done.json"], ["data/b_batch_1.json"], ["data/b_batch_2.json"]],
+            "attr": {"is_src": false, "is_sink": false, "role": "worker"},
+            "proc": "tfc_worker_b_proc"
+        },
+        {
+            "name": "worker_c",
+            "iport": [["data/raw.json"]],
+            "oport": [["data/c_done.json"], ["data/c_batch_1.json"], ["data/c_batch_2.json"]],
+            "attr": {"is_src": false, "is_sink": false, "role": "worker"},
+            "proc": "tfc_worker_c_proc"
+        },
+        {
+            "name": "joiner",
+            "iport": [["data/a_done.json"], ["data/b_done.json"], ["data/c_done.json"]],
+            "oport": [["data/joined.json"]],
+            "attr": {"is_src": false, "is_sink": false, "role": "merge"},
+            "proc": "tfc_joiner_proc"
+        },
+        {
+            "name": "verifier",
+            "iport": [["data/joined.json"]],
+            "oport": [["data/verified.json"]],
+            "attr": {"is_src": false, "is_sink": false, "role": "verify"},
+            "proc": "tfc_verifier_proc"
+        },
+        {
+            "name": "publisher",
+            "iport": [["data/verified.json"]],
+            "oport": [["release/notes.md"], ["release/changelog.md"]],
+            "attr": {"is_src": false, "is_sink": true, "role": "release"},
+            "proc": "tfc_publisher_proc"
+        }
+    ],
+    "gates": [
+        {
+            "name": "fetcher_raw_gate",
+            "op": "tfc_fetcher_raw_gate",
+            "enum_dir": [true, false]
+        },
+        {
+            "name": "worker_a_threshold_gate",
+            "op": "tfc_worker_a_threshold_gate",
+            "enum_dir": [true, false]
+        },
+        {
+            "name": "all_workers_done_gate",
+            "op": "tfc_all_workers_done_gate",
+            "enum_dir": [true, false]
+        },
+        {
+            "name": "joiner_iport_gate",
+            "op": "tfc_joiner_iport_gate",
+            "enum_dir": [true, false]
+        },
+        {
+            "name": "verifier_valid_gate",
+            "op": "tfc_verifier_valid_gate",
+            "enum_dir": [true, false]
+        }
+    ],
+    "edges": [
+        {
+            "name": "fetcher_loop",
+            "inode": "fetcher",
+            "onode": "fetcher",
+            "driver": "tick",
+            "gate": "fetcher_raw_gate",
+            "gate_value": false,
+            "cmd": "tfc_fetcher_loop_cmd"
+        },
+        {
+            "name": "fetcher_to_worker_a",
+            "inode": "fetcher",
+            "onode": "worker_a",
+            "driver": "tick",
+            "gate": "fetcher_raw_gate",
+            "gate_value": true,
+            "parallel": true,
+            "cmd": "tfc_fetcher_to_a_cmd"
+        },
+        {
+            "name": "fetcher_to_worker_b",
+            "inode": "fetcher",
+            "onode": "worker_b",
+            "driver": "tick",
+            "gate": "fetcher_raw_gate",
+            "gate_value": true,
+            "parallel": true,
+            "cmd": "tfc_fetcher_to_b_cmd"
+        },
+        {
+            "name": "fetcher_to_worker_c",
+            "inode": "fetcher",
+            "onode": "worker_c",
+            "driver": "tick",
+            "gate": "fetcher_raw_gate",
+            "gate_value": true,
+            "parallel": true,
+            "cmd": "tfc_fetcher_to_c_cmd"
+        },
+        {
+            "name": "worker_a_loop",
+            "inode": "worker_a",
+            "onode": "worker_a",
+            "driver": "tick",
+            "gate": "worker_a_threshold_gate",
+            "gate_value": false,
+            "cmd": "tfc_worker_a_loop_cmd"
+        },
+        {
+            "name": "worker_a_to_joiner",
+            "inode": "worker_a",
+            "onode": "joiner",
+            "driver": "tick",
+            "gate": "all_workers_done_gate",
+            "gate_value": true,
+            "cmd": "tfc_worker_a_to_joiner_cmd"
+        },
+        {
+            "name": "joiner_loop",
+            "inode": "joiner",
+            "onode": "joiner",
+            "driver": "tick",
+            "gate": "joiner_iport_gate",
+            "gate_value": false,
+            "cmd": "tfc_joiner_loop_cmd"
+        },
+        {
+            "name": "joiner_to_verifier",
+            "inode": "joiner",
+            "onode": "verifier",
+            "driver": "tick",
+            "gate": "joiner_iport_gate",
+            "gate_value": true,
+            "cmd": "tfc_joiner_pass_cmd"
+        },
+        {
+            "name": "verifier_loop",
+            "inode": "verifier",
+            "onode": "verifier",
+            "driver": "tick",
+            "gate": "verifier_valid_gate",
+            "gate_value": false,
+            "cmd": "tfc_verifier_loop_cmd"
+        },
+        {
+            "name": "verifier_to_publisher",
+            "inode": "verifier",
+            "onode": "publisher",
+            "driver": "tick",
+            "gate": "verifier_valid_gate",
+            "gate_value": true,
+            "cmd": "tfc_verifier_pass_cmd"
+        }
+    ]
+}

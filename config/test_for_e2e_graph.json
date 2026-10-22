@@ -1,0 +1,75 @@
+{
+  "name": "test_for_e2e",
+  "graph_mode": "directed_cycle",
+  "tick_period_s": 30,
+  "pre_handle": "",
+  "post_handle": "",
+  "nodes": [
+    {
+      "name": "harvester",
+      "iport": [["config/seed.txt"]],
+      "oport": [
+        ["data/raw_batch_1.json"],
+        ["data/raw_batch_2.json"],
+        ["data/raw_batch_3.json"]
+      ],
+      "attr": {"is_src": true, "is_sink": false, "role": "fetcher"},
+      "proc": "harvester_proc"
+    },
+    {
+      "name": "qa_reviewer",
+      "iport": [["data/harvester_done.json"]],
+      "oport": [["data/qa_pass_1.json"]],
+      "attr": {"is_src": false, "is_sink": false, "role": "qa"},
+      "proc": "qa_reviewer_proc"
+    },
+    {
+      "name": "publisher",
+      "iport": [["data/qa_pass_1.json"]],
+      "oport": [["release/notes.md"], ["release/changelog.md"]],
+      "attr": {"is_src": false, "is_sink": true, "role": "release"},
+      "proc": "publisher_proc"
+    }
+  ],
+  "gates": [
+    {
+      "name": "harvester_threshold_gate",
+      "op": "harvester_threshold_gate",
+      "enum_dir": [true, false]
+    },
+    {
+      "name": "manual_publish_gate",
+      "op": "manual_publish_gate",
+      "enum_dir": [true, false]
+    }
+  ],
+  "edges": [
+    {
+      "name": "harvester_loop",
+      "inode": "harvester",
+      "onode": "harvester",
+      "driver": "tick",
+      "gate": "harvester_threshold_gate",
+      "gate_value": false,
+      "cmd": "harvester_loop_cmd"
+    },
+    {
+      "name": "harvester_to_qa",
+      "inode": "harvester",
+      "onode": "qa_reviewer",
+      "driver": "tick",
+      "gate": "harvester_threshold_gate",
+      "gate_value": true,
+      "cmd": "harvester_pass_cmd"
+    },
+    {
+      "name": "qa_to_publisher",
+      "inode": "qa_reviewer",
+      "onode": "publisher",
+      "driver": "manual",
+      "gate": "manual_publish_gate",
+      "gate_value": true,
+      "cmd": "qa_approve_cmd"
+    }
+  ]
+}
