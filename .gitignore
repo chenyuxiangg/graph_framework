@@ -1,0 +1,70 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- 打包 / 构建 ----------
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---------- 虚拟环境 (uv / venv) ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- 依赖缓存 ----------
+.uv-cache/
+.pdm-build/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# ---------- 测试 ----------
+.pytest_cache/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+nosetests.xml
+.tox/
+.hypothesis/
+
+# ---------- 运行时产物 ----------
+*.log
+logs/
+tmp/
+temp/
+*.pid
+*.db
+*.sqlite3
+*.jsonl
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---------- 编辑器 / IDE ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 其他 ----------
+.idea_modules/
+*.bak
+*.tmp
