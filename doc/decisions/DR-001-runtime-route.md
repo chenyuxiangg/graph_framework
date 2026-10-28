@@ -13,7 +13,7 @@
 | 资产 | 内容 | 问题 |
 |---|---|---|
 | 现有 Python 仓（graph_base） | 10,172 行；187 个测试（162 通过）；tick 轮询 + 子进程 worker + 门控迁移 + JSON 文件状态；无 LLM/Agent | 语义与 v1.1 不同；2 个 P0 缺陷；状态/调度模型不足以支撑"可复现 + Agent" |
-| 《详细设计 v1.1》+ 规格冻结 v1.2 | 6 章语义；76 条审计缺陷已收敛为 v1.2（5,467 行、9 分册）；技术 spike 8 项实测 | 0 行实现；原方案 Rust 进程内 PyO3 有 3 个执行模型假设被 spike 证伪 |
+| 《详细设计 v1.1》+ 规格冻结 v1.2 | 6 章语义；76 条审计缺陷已收敛为 v1.2（00–08 共 5,406 行、10 分册含索引/溯源）；技术 spike 8 项实测 | 0 行实现；原方案 Rust 进程内 PyO3 有 3 个执行模型假设被 spike 证伪 |
 
 ## 2. 决策
 
@@ -24,7 +24,7 @@
 | D3 | **用户代码 = Python 子进程 worker**（非进程内 PyO3） | 进程隔离天然解决 GIL、崩溃污染、超时无法终止三个问题；worker 可独立升级/复用现有 Python 资产 |
 | D4 | **现有 Python 仓 = 只读参考资产** | 复用其**语义与经验**（门控/返工/人工边/并行扇出/进程派发/测试场景），不直接作为产品代码；冻结为 `legacy/`，M5 后退役 |
 | D5 | **事件驱动取代 tick 轮询** | tick 仅作为 CLI 内部驱动保留兼容；run 状态以事件循环 + SQLite trace 为权威，不再依赖文件轮询 |
-| D6 | **可复现分级承诺** | L1 调度可重放；L2 结果可重算（记录节点输出与 LLM 响应）；L3 外部副作用不承诺（见 architecture §5） |
+| D6 | **可复现分级承诺** | L1 调度可重放；**L2 结果可重放（recorded outputs，不重算）**；L3 外部副作用不承诺、不提供 dry-run（见 architecture §5） |
 
 ## 3. 为什么不选另外两条路
 
@@ -43,7 +43,7 @@
 | 状态/端口/终态判定 | 概念保留（类型化端口），实现重写 | `zgraph-kernel`（M2） |
 | `ProcessDispatcher`（setsid、超时、回收、日志） | **经验移植**：进程组、超时 kill、僵尸回收、stderr 截断 | `zgraph-worker`（M3） |
 | monitor 事件/告警 | 映射为 trace 事件与告警 | `zgraph-trace`（M2） |
-| CLI（validate/run/tick/trigger-edge/rollback） | 保留 validate/run/trace；tick 移除；manual 边用 `trigger` 子命令 | `zgraph-cli`（M5） |
+| CLI（validate/run/tick/trigger-edge/rollback） | 保留 validate/run/trace，新增 `replay`/`--record`；tick 移除；manual 边用 `trigger` 子命令；**`rollback` 不迁移**（v1 无回滚语义，需人工重跑；如需要另立需求） | `zgraph-cli`（M5） |
 | 187 个测试 | **作为行为参考**，挑 15–20 个转写为 e2e | `tests/`（M1–M5） |
 | 17 个示例 worker | 挑选 3–5 个迁移为 worker SDK 示例 | `python/workers/`（M3） |
 | zlog 本地库 | **不迁移**（隐式路径依赖）；worker SDK 用标准 `logging` + 结构化 stderr | — |
@@ -65,10 +65,24 @@
 |---|---|---|
 | O-1 | 自定义 Python 门控：v1 只支持 Rust 内置 op，还是加常驻 gate worker？ | M1 前（默认：内置 op） |
 | O-2 | worker 是否复用池化（按 module 常驻）？ | M3 前（默认：先一节点一进程） |
-| O-3 | 可复现 L2 的记录粒度（记录 worker output / 仅 hash） | M2 前（默认：`--record` 记录 output） |
+| O-3 | 可复现 L2 的记录粒度 | **已定**：`--record` 默认 `hash`；L2 重放要求运行期 `--record=full`（architecture §5.2/§5.3；ISSUE-016 已关闭） |
 | O-4 | legacy 是整体删除还是永久保留 | M5 决策 |
 | O-5 | `doc/graph_base_design.md` 的定位（历史设计 vs 实现说明） | M0 随 README 调整 |
 
 ## 6. 验收锚点
 
-本决策落地后，以 `doc/spec-v1.2/07-验收用例.md` 的 AC-01..AC-12 为验收基线（机制替换：PyO3 调用 → worker 子进程；`NodeContext.emit` → 协议 `emit` 消息）。每个里程碑必须给出：可运行产物 + 测试 + 评审记录 + 进度/台账更新。
+本决策落地后，以 `doc/spec-v1.2/07-验收用例.md` 的 AC-01..AC-12 为验收基线；**机制替换清单**如下（详见 `doc/architecture-v2.md` §8 的 D1–D12）：
+
+| # | v1.2 语义 | v2 落地 |
+|---|---|---|
+| 1 | 进程内 PyO3 调用 Python | worker 子进程 + NDJSON 协议 v1 |
+| 2 | `NodeContext`（Rust 对象） | Python worker SDK `ctx`（emit/log/get_var/user_id/cancel/deadline；无 cancel_token） |
+| 3 | 超时 = stop-waiting + `NodeAbandoned` | 超时 = **杀进程组**；`NodeAbandoned` 不产生；AC-06 改写 |
+| 4 | 工具在 Harness 进程内执行、模块缓存、共享信号量 | 工具每次调用一个 worker 子进程；无缓存；全局并发上限 |
+| 5 | 门控是用户 Python 函数 | v1 用 **Rust 内置 op**（`check_output`/`compare`/`manual`）；自定义门控 M1 定稿 |
+| 6 | 图加载期 import Python 符号 + 签名校验 | 加载期只校验格式；存在性/签名在 worker 启动时校验 |
+| 7 | 单解释器 + CPU/IO 信号量（1/4） | 每节点一进程；全局 `max_workers` + 每 run 上限；`exec_class` 忽略 |
+| 8 | CLI 只有 validate/run/trace，v1 不做重放 | 增 `replay` 与 `--record`；L1/L2 重放；`--dry-run` 不实现 |
+| 9 | 无 seed/时间注入 | `PYTHONHASHSEED=0`（spawn 设置）+ `run.seed` + `ctx.now()/ctx.random()` |
+
+每个里程碑必须给出：可运行产物 + 测试 + 评审记录 + 进度/台账更新。

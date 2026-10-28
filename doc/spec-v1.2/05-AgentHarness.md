@@ -1,5 +1,6 @@
 # 图模型驱动工作流框架 · 规格冻结 v1.2 · 分册 05：Agent Harness
 
+> **⚠ v2 落地偏差**：本分册的进程内执行/超时/门控/并发等假设，已被 [`doc/architecture-v2.md`](../architecture-v2.md) §8 偏差表（D1–D12）修订；实现以偏差表为准，本分册保留为语义基准。
 > **状态**：规格冻结（编码前置）。本分册定义 **Agent 执行壳**的字段级契约：AgentConfig、`LlmProvider`（genai transport）、上下文组装与 token 预算、Harness 状态机与 tool loop、工具注册表、错误映射、流式事件、输出契约、`AgentProvider` 扩展点。
 > **权威锚点**：[00 总纲](00-总纲.md)。本分册的枚举、错误码、默认值、不变式**一律不得偏离 00**；若发现偏差，见 §5.11 对齐检查（列出需 00 补录的常量与待裁定项）。
 > **选型前提**（`../决策记录-01-范围与Harness.md` §3）：**自研六阶段薄壳 + `genai` 0.7.2 仅作 LLM transport**；不引入任何外部 Harness（Codex / DSH 均只作参考实现）。

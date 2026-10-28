@@ -1,0 +1,12 @@
+[package]
+name = "zgraph-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Technical feasibility spike for the graph-model-driven workflow framework (Rust + PyO3 + tokio + SQLite)"
+
+[dependencies]
+pyo3 = "0.30.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }

@@ -18,9 +18,12 @@
 | ISSUE-011 | P3 | config/workers | `config/index.md` 自述：除 planer/archer 外各节点 `proc` 为空（走 `proc_bypass`），software_team 产物需用户自建 worker，尚未内置 | software_team 图只能跑框架、不能产出真实业务结果 | 明确 worker 交付范围；按模块补充 worker 与单测 | open | 2026-10-28 |
 | ISSUE-012 | P1 | process | `merge.sh --dry-run` 会删除作者的 worktree（自验证发现） | 误执行 dry-run 会丢失未合并工作区（可恢复但危险） | 已修复：dry-run 只检查不清理；REV-002 | fixed | 2026-10-28 |
 | ISSUE-013 | P1 | process | legacy Python 实现与新 Rust 代码尚未物理隔离 | 目录/CI 混淆，误改风险 | M0：`legacy/` 归档、排除 CI、README 标注只读 | open | 2026-10-29 |
-| ISSUE-014 | P1 | kernel | 自定义 Python 门控方案未定（Rust 内置 op vs 常驻 gate worker） | 影响 DSL 门控能力与性能 | M1 前定稿（DR-001 O-1，默认内置 op） | open | 2026-10-29 |
+| ISSUE-014 | P1 | kernel | 自定义 Python 门控方案未定（Rust 内置 op vs 常驻 gate worker） | 影响 DSL 门控能力与性能 | **v1 默认内置 op**（check_output/compare/manual）；Python 门控 M1 前定稿（DR-001 O-1） | open | 2026-10-29 |
 | ISSUE-015 | P1 | worker | worker 协议 v1 仅有草案，无兼容测试 | 协议演进导致内核/worker 不兼容 | M0 冻结协议文档 + 双方版本校验 + 兼容用例 | open | 2026-10-29 |
-| ISSUE-016 | P1 | trace | 可复现 L2 的记录粒度未定（worker output 原文 vs hash） | 影响结果重算能力与存储量 | M2 前定稿（DR-001 O-3，默认 `--record` 存原文+hash） | open | 2026-10-29 |
+| ISSUE-016 | P1 | trace | 可复现 L2 的记录粒度未定 | 影响结果重算能力与存储量 | **已定**：`--record` 默认 `hash`；L2 需运行期 `--record=full`（architecture §5.2/§5.3） | fixed | 2026-10-29 |
 | ISSUE-017 | P2 | worker | worker 每节点冷启动约 50–100ms，未实测、未池化 | 高频小节点吞吐受限 | M3 基准后决定是否池化（O-2） | open | 2026-10-29 |
 | ISSUE-018 | P2 | process | 双语言工具链（cargo/rustfmt/clippy + uv/pytest）尚无 CI | 质量门禁不可自动化 | M0 建 CI 并同步 AGENTS 模块表 | open | 2026-10-29 |
 | ISSUE-019 | P1 | process | `CLAUDE.md` 冻结且写明 Python 技术栈，与 Rust 宿主冲突（文件禁止修改） | 规范适用边界不清，Rust 代码可能被误按 Python 规范检查 | 解释为 Python 规范；Rust 用 rustfmt/clippy 等价约束；M0 CI 分别检查；需用户在 M0 确认该解释 | open | 2026-10-29 |
+| ISSUE-020 | P1 | docs | spec v1.2 与 v2 的 D1–D12 偏差尚未回写 spec 正文（当前由 architecture §8 覆盖） | 后续实现者可能误读 spec 原文 | M0–M2 逐条回写并更新 PROVENANCE hash | open | 2026-10-29 |
+| ISSUE-021 | P2 | process | legacy 测试/`doc/test-baseline.txt` 与新的 Rust 双栈门禁如何退役未定义 | 合并门禁语义混乱 | M0 定义双基线；M5 归档 legacy 基线 | open | 2026-10-29 |
+| ISSUE-022 | P2 | worker | worker 幂等/外部副作用声明尚未写入节点契约与验收 | 影响 L3 诚实性 | M3 前写入 worker SDK 契约与 AC | open | 2026-10-29 |

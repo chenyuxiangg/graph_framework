@@ -1,17 +1,18 @@
-> **落地说明（DR-001）**：本规格是**语义基准**；宿主语言与技术形态已由
-> [`doc/decisions/DR-001-runtime-route.md`](../decisions/DR-001-runtime-route.md) 冻结为
-> **Rust 内核 + Python 子进程 worker**。阅读时请做如下替换：
-> - PyO3/进程内 Python 调用 → **worker 子进程 + NDJSON 协议**（见 `doc/architecture-v2.md` §3）
-> - `NodeContext`（Rust 对象）→ Python worker SDK 的 `ctx`（emit/log/get_var/user_id）
-> - 门控 Python 函数 → v1 先用 **Rust 内置 op**（自定义 Python 门控见 ISSUE-014）
-> 其余语义（DSL、状态机、Delivery、冷峻失败、trace、验收）不变。
-
 # 规格冻结 v1.2 · 索引
 
-> **状态**：规格冻结（**纯文档阶段，未写任何内核代码**——按用户 2026-10-28 指示）。
-> **目的**：把《详细设计 v1.1》的 43 条阻塞级问题收敛成可直接编码的契约，用作文档评审与后续开发的唯一依据。
-> **上游**：`../可行性评估-详细设计v1.1.md`（评估）、`../决策记录-01-范围与Harness.md`（6 项拍板 + 范围边界）
-> **依据**：`_audit/spec-audit.md`（76 条缺陷）、`_spike/REPORT.md`（8 项实测）、`_research/*`（Codex / Rust 生态 / DSH）
+> **版本与来源**：v1.2（规格冻结版），冻结日期 2026-10-29；源稿为外部《详细设计 v1.0/1.1》（HTML，58 KB），
+> 经 76 条独立审计后收敛，并在冻结期做了 9 高 + 4 缺口 + 27 中低回填（记录见 [08 §8.6](08-审计关闭矩阵.md)）。
+> **本仓库内文件是唯一可核验版本**；来源、文件 hash 与回填说明见 [`PROVENANCE.md`](PROVENANCE.md)；
+> 文中出现的 `_spike/*`、`_research/*`、`_audit/*`、`决策记录-01` 等历史引用，仓库内替代位置见 [`REFERENCES.md`](REFERENCES.md)。
+>
+> **落地说明（DR-001）**：本规格是**语义基准**；实现形态为 **Rust 内核 + Python 子进程 worker**。
+> 与进程内执行相关的假设（PyO3、stop-waiting、门控 Python 函数、单解释器并发、CLI 无 replay 等）
+> 已由 [`doc/architecture-v2.md`](../architecture-v2.md) §8 的 **D1–D12 偏差表**统一修订；
+> 02–07 各分册顶部有偏差 banner。冲突时以偏差表为准。
+
+> **状态**：规格冻结（纯文档）。本规格是内核实现的语义基准。
+> **上游（仓库内）**：[可行性评估](../analysis/feasibility-assessment-v1.1.md)、[决策记录 01](../analysis/decision-record-01-scope.md)、[规格审计](../analysis/spec-audit-v1.1.md)、[技术 spike](../analysis/spike/REPORT.md)、[两份调研](../analysis/research-harness-alternatives.md)
+> **偏差**：[architecture-v2 §8](../architecture-v2.md)（D1–D12）；**来源与 hash**：[PROVENANCE.md](PROVENANCE.md)；**引用映射**：[REFERENCES.md](REFERENCES.md)
 
 ---
 
