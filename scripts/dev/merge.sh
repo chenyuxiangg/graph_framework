@@ -105,22 +105,27 @@ fi
 git merge --ff-only "${BRANCH}" || die "非 fast-forward：请确认分支已 rebase 到 origin/main"
 info "已合并 ${BRANCH} -> main"
 
-# 8) 清理 worktree 与分支
+# 8) 清理 worktree
 for wt in $(git worktree list --porcelain | awk -v b="refs/heads/${BRANCH}" '
   $1=="worktree"{w=$2} $1=="branch"{if($2==b){print w}}'); do
   git worktree remove --force "${wt}" >/dev/null 2>&1 || true
   info "已删除 worktree: ${wt}"
 done
-git branch -d "${BRANCH}" >/dev/null || die "分支删除失败（检查是否已完全合并）"
-info "已删除分支: ${BRANCH}"
 
-# 9) 可选推送
+# 9) 可选推送（先推送：失败时保留分支便于重试）
 if [ "${PUSH}" = 1 ]; then
   git push origin main
   info "已推送 origin/main"
 else
   info "未推送（加 --push 推送 origin/main）"
 fi
+
+# 10) 删除分支
+# 注意：ff 合并后分支必为 HEAD 祖先；不能用 `git branch -d`（它要求已合并到 upstream，
+# 而轻量/本地分支的 upstream 仍是 origin/main —— push 前/未 push 时会误报“未完全合并”）。
+git merge-base --is-ancestor "${BRANCH}" HEAD || die "分支不是 HEAD 祖先，拒绝删除: ${BRANCH}"
+git branch -D "${BRANCH}" >/dev/null || die "分支删除失败: ${BRANCH}"
+info "已删除分支: ${BRANCH}"
 
 cat <<EOF
 

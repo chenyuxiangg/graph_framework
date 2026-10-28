@@ -27,3 +27,5 @@
 | ISSUE-020 | P1 | docs | spec v1.2 与 v2 的 D1–D12 偏差、以及 4 个新错误码（`NODE_WORKER_HANDSHAKE/PROTOCOL/IMPORT`、`REPLAY_RECORD_MISSING`）尚未回写 spec 正文（当前由 architecture §8/§8.2 覆盖） | 后续实现者可能误读 spec 原文 | M0–M2 逐条回写 spec 00/03/04/05/06，并更新 PROVENANCE hash | open | 2026-10-29 |
 | ISSUE-021 | P2 | process | legacy 测试/`doc/test-baseline.txt` 与新的 Rust 双栈门禁如何退役未定义 | 合并门禁语义混乱 | M0 定义双基线；M5 归档 legacy 基线 | open | 2026-10-29 |
 | ISSUE-022 | P2 | worker | worker 幂等/外部副作用声明尚未写入节点契约与验收 | 影响 L3 诚实性 | M3 前写入 worker SDK 契约与 AC | open | 2026-10-29 |
+| ISSUE-023 | P1 | process | `merge.sh` 用 `git branch -d` 删除分支，在 push 前会因 upstream 未更新而误报“未完全合并”，导致合并门禁在最后一步失败 | 每次合并需手工收尾，门禁不可靠 | **已修复**：ff 合并后校验分支是 HEAD 祖先，改用 `git branch -D`；删除顺序改为 push 后；REV-002 覆盖 | fixed | 2026-10-29 |
+| ISSUE-024 | P3 | docs | REV-001 #22：spec README 00 行数 263→264、执行模型历史行、PROVENANCE banner 范围（01 无 banner）、ISSUE-020 错误码计数、architecture §8.1/§8.2 顺序等 5 处文字问题 | 不影响语义，影响可读性 | M0 前随 docs 提交修正（或并入 ISSUE-020 回写） | open | 2026-10-29 |
