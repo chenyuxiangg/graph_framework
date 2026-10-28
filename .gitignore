@@ -68,3 +68,13 @@ desktop.ini
 .idea_modules/
 *.bak
 *.tmp
+
+# ---------- 本地 worktree（并行开发，见 AGENTS.md） ----------
+.worktrees/
+
+# ---------- 本地分析/证据材料（不入库） ----------
+# docs/、_audit/、_research/、_spike/ 为本地设计与验证材料，与本仓资产无关
+docs/
+_audit/
+_research/
+_spike/
