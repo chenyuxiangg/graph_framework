@@ -24,6 +24,6 @@
 | ISSUE-017 | P2 | worker | worker 每节点冷启动约 50–100ms，未实测、未池化 | 高频小节点吞吐受限 | M3 基准后决定是否池化（O-2） | open | 2026-10-29 |
 | ISSUE-018 | P2 | process | 双语言工具链（cargo/rustfmt/clippy + uv/pytest）尚无 CI | 质量门禁不可自动化 | M0 建 CI 并同步 AGENTS 模块表 | open | 2026-10-29 |
 | ISSUE-019 | P1 | process | `CLAUDE.md` 冻结且写明 Python 技术栈，与 Rust 宿主冲突（文件禁止修改） | 规范适用边界不清，Rust 代码可能被误按 Python 规范检查 | 解释为 Python 规范；Rust 用 rustfmt/clippy 等价约束；M0 CI 分别检查；需用户在 M0 确认该解释 | open | 2026-10-29 |
-| ISSUE-020 | P1 | docs | spec v1.2 与 v2 的 D1–D12 偏差尚未回写 spec 正文（当前由 architecture §8 覆盖） | 后续实现者可能误读 spec 原文 | M0–M2 逐条回写并更新 PROVENANCE hash | open | 2026-10-29 |
+| ISSUE-020 | P1 | docs | spec v1.2 与 v2 的 D1–D12 偏差、以及 4 个新错误码（`NODE_WORKER_HANDSHAKE/PROTOCOL/IMPORT`、`REPLAY_RECORD_MISSING`）尚未回写 spec 正文（当前由 architecture §8/§8.2 覆盖） | 后续实现者可能误读 spec 原文 | M0–M2 逐条回写 spec 00/03/04/05/06，并更新 PROVENANCE hash | open | 2026-10-29 |
 | ISSUE-021 | P2 | process | legacy 测试/`doc/test-baseline.txt` 与新的 Rust 双栈门禁如何退役未定义 | 合并门禁语义混乱 | M0 定义双基线；M5 归档 legacy 基线 | open | 2026-10-29 |
 | ISSUE-022 | P2 | worker | worker 幂等/外部副作用声明尚未写入节点契约与验收 | 影响 L3 诚实性 | M3 前写入 worker SDK 契约与 AC | open | 2026-10-29 |
