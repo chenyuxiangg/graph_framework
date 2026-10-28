@@ -7,8 +7,7 @@
 | 模块 | 状态 | 当前任务 | 负责 | 分支 / worktree | 更新 |
 |---|---|---|---|---|---|
 | docs | done | DR-001/架构 v2/spec v1.2 已合并（552466e） | lead | — | 2026-10-29 |
-| process | review | 修 merge.sh 分支删除（ISSUE-023） | lead | feat/process-fix-merge-branch-delete | 2026-10-29 |
-| process | next | M0：Cargo workspace、协议 schema、worker SDK、CI、legacy 冻结、双栈门禁 | 待定 | — | 2026-10-29 |
+| process | review | 修 merge.sh 分支删除（ISSUE-023，REV-003 复审中）；随后 M0 | lead | feat/process-fix-merge-branch-delete | 2026-10-29 |
 | dsl | next | M1：DSL 类型 + R1–R14 + graph_hash | 待定 | — | 2026-10-29 |
 | kernel | next | M2：状态机/事件循环/Delivery/门控/冷峻失败/超时 kill | 待定 | — | 2026-10-29 |
 | trace | next | M2：TraceEvent + SQLite + L1 replay + L2 记录表 | 待定 | — | 2026-10-29 |
@@ -18,7 +17,7 @@
 | e2e | next | M1–M5：AC-01..AC-12 移植 | 待定 | — | 2026-10-29 |
 
 **下一步**
-1. 合并 process 修复（REV-002）→ 门禁可用。
+1. 合并 process 修复（REV-003）→ 门禁可用（注意自举两阶段，见 ISSUE-023）。
 2. M0 骨架（workspace/协议/SDK/CI/legacy 冻结）。
 3. M1 起按 `doc/architecture-v2.md` §6 的 AC→里程碑映射开发。
 

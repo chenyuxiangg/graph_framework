@@ -108,13 +108,13 @@ info "已合并 ${BRANCH} -> main"
 # 8) 清理 worktree
 for wt in $(git worktree list --porcelain | awk -v b="refs/heads/${BRANCH}" '
   $1=="worktree"{w=$2} $1=="branch"{if($2==b){print w}}'); do
-  git worktree remove --force "${wt}" >/dev/null 2>&1 || true
+  git worktree remove --force "${wt}" >/dev/null || die "worktree 删除失败: ${wt}"
   info "已删除 worktree: ${wt}"
 done
 
 # 9) 可选推送（先推送：失败时保留分支便于重试）
 if [ "${PUSH}" = 1 ]; then
-  git push origin main
+  git push origin main || die "推送失败（main 已合并、分支保留；修复后重跑本脚本或手动 push）"
   info "已推送 origin/main"
 else
   info "未推送（加 --push 推送 origin/main）"

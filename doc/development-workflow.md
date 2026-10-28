@@ -110,3 +110,13 @@ git commit -m "docs(process): 更新进度与问题台账"
 | — | — | — | — |
 
 > 负责人随任务变化；以 `doc/progress.md` 为准。
+
+## 8. 门禁脚本自身的合并（自举两阶段）
+
+若某分支修改了 `scripts/dev/merge.sh`，合并它时运行的是 **main 上的旧脚本**，可能出现：
+
+1. 旧脚本完成评审检查、测试、ff 合并后，在"删除分支"步骤失败（exit 1），但此时 main 已更新、worktree 已清理、分支保留；
+2. 在新 main 上重跑 `merge.sh <branch>` 即完成（幂等：已合并 → 直接走清理/删分支）。
+
+这不是故障，是自举顺序的固有限制；第一次失败需在评审记录与台账中注明。`merge.sh` 的改动必须附
+`bash scripts/dev/selftest-merge.sh` 的自测结果（在临时 clone 中验证 dry-run/真实合并/清理）。
