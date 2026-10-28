@@ -16,3 +16,4 @@
 | ISSUE-009 | P3 | e2e | 无覆盖率配置/门槛；187 个 test function 的实际覆盖未知 | 质量不可度量 | 引入 coverage（pytest-cov），定 P2 阶段门槛（如核心 kernel ≥80%） | open | 2026-10-28 |
 | ISSUE-010 | P3 | cli | `scripts/graph_base_cli.py` 未作为 pyproject 入口点，只能 `python scripts/...` 调用 | 使用不便、难以在 PATH 中分发 | 增加 `[project.scripts] graph-base = ...`（需把 CLI 移入包或提供 shim） | open | 2026-10-28 |
 | ISSUE-011 | P3 | config/workers | `config/index.md` 自述：除 planer/archer 外各节点 `proc` 为空（走 `proc_bypass`），software_team 产物需用户自建 worker，尚未内置 | software_team 图只能跑框架、不能产出真实业务结果 | 明确 worker 交付范围；按模块补充 worker 与单测 | open | 2026-10-28 |
+| ISSUE-012 | P1 | process | `merge.sh --dry-run` 会删除作者的 worktree（自验证发现） | 误执行 dry-run 会丢失未合并工作区（可恢复但危险） | 已修复：dry-run 只检查不清理；REV-002 | fixed | 2026-10-28 |

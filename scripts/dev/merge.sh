@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 合并门禁：评审记录 -> 工作区干净 -> 同步 main -> 测试无新增失败 -> ff-only 合并 -> 清理 worktree/分支
 # 用法：bash scripts/dev/merge.sh <branch> [--push] [--dry-run]
+#       PYTHON_BIN=/path/to/python 可指定带 pytest 的解释器（无 uv 环境用）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,19 +32,7 @@ git diff --quiet && git diff --cached --quiet || die "main 工作区有未提交
 git rev-parse --verify "refs/heads/${BRANCH}" >/dev/null 2>&1 || die "分支不存在: ${BRANCH}"
 [ "${BRANCH}" != "main" ] || die "不能合并 main 到自己"
 
-# 3) 评审记录：分支匹配、结论通过、无模板占位
-review=""
-while IFS= read -r f; do
-  [ -n "${f}" ] || continue
-  if grep -qE "^[[:space:]]*[-*]?[[:space:]]*\*{0,2}分支\*{0,2}[[:space:]]*[：:][[:space:]]*\`?${BRANCH}\`?[[:space:]]*$" "${f}"; then review="${f}"; break; fi
-done < <(find doc/reviews -maxdepth 1 -name 'REV-*.md' -type f | sort)
-[ -n "${review}" ] || die "未找到包含 “分支: ${BRANCH}” 的评审记录（doc/reviews/REV-*.md）"
-grep -q "REV-<NNN>" "${review}" && die "评审记录仍是模板占位: ${review}"
-grep -q "<评审人>" "${review}" && die "评审记录缺少真实评审人: ${review}"
-grep -qE "结论[：:][[:space:]]*\**通过" "${review}" || die "评审结论不是“通过”: ${review}"
-info "评审记录: ${review} -> 通过"
-
-# 4) 找到分支的 worktree；没有则建临时 worktree 用于测试
+# 3) 定位分支 worktree；没有则建临时 worktree（评审记录与测试都在分支上下文执行）
 branch_wt="$(git worktree list --porcelain | awk -v b="refs/heads/${BRANCH}" '
   $1=="worktree"{wt=$2} $1=="branch"{if($2==b){print wt; exit}}')"
 tmp_wt=""
@@ -55,6 +44,23 @@ if [ -z "${branch_wt}" ]; then
 fi
 cleanup() { [ -n "${tmp_wt}" ] && git worktree remove --force "${tmp_wt}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+
+# 4) 评审记录：分支匹配、结论通过、无模板占位（允许在 main 或分支内）
+review=""
+for base in "${ROOT}" "${branch_wt}"; do
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    if grep -qE "^[[:space:]]*[-*]?[[:space:]]*\*{0,2}分支\*{0,2}[[:space:]]*[：:][[:space:]]*\`?${BRANCH}\`?[[:space:]]*$" "${f}"; then
+      review="${f}"; break
+    fi
+  done < <(find "${base}/doc/reviews" -maxdepth 1 -name 'REV-*.md' -type f 2>/dev/null | sort)
+  [ -n "${review}" ] && break
+done
+[ -n "${review}" ] || die "未找到包含 “分支: ${BRANCH}” 的评审记录（doc/reviews/REV-*.md，main 或分支内）"
+grep -q "REV-<NNN>" "${review}" && die "评审记录仍是模板占位: ${review}"
+grep -q "<评审人>" "${review}" && die "评审记录缺少真实评审人: ${review}"
+grep -qE "结论[：:][[:space:]]*\**通过" "${review}" || die "评审结论不是“通过”: ${review}"
+info "评审记录: ${review} -> 通过"
 
 [ -z "$(git -C "${branch_wt}" status --porcelain)" ] || die "分支工作区不干净: ${branch_wt}"
 
@@ -91,9 +97,7 @@ info "测试通过门槛：失败 ${current_n} 项，基线 ${base_n} 项，无�
 [ -z "${fixed}" ] || info "注意：有失败项已修复，请缩小 doc/test-baseline.txt: ${fixed}"
 
 if [ "${DRY}" = 1 ]; then
-  info "dry-run 结束：检查全部通过，未执行合并"
-  git worktree remove --force "${branch_wt}" >/dev/null 2>&1 || true
-  tmp_wt=""
+  info "dry-run 结束：检查全部通过，未执行合并（不清理作者 worktree）"
   exit 0
 fi
 
