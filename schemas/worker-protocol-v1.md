@@ -58,6 +58,9 @@
 7. **流式读取上限**（M3）：supervisor 对 emit 帧累计计数，超过 `max_events`（默认 4096）或
    `max_bytes`（默认 8 MiB）即丢弃后续 emit 并计数（可丢，§2；**禁止无界聚合导致 OOM**）。
    统计随 `WorkerRun.streaming` 返回；`log` 帧不聚合（只保证持续读取，stderr 另走 §4.2 尾保留）。
+8. **有界帧读取**（M3）：supervisor 按 `MAX_FRAME_BYTES`（8 MiB）**分块**累积单帧，
+   读入超过上限立即判 `NODE_WORKER_PROTOCOL` 并杀进程组；**不得**先整行读入再解码
+   （不可信 worker 的超大无换行行会 OOM supervisor/内核）。半行 EOF 仍为协议错误。
 
 ## 5. 错误码（与 `doc/architecture-v2.md` §8.2 对齐）
 
@@ -67,6 +70,8 @@
 ## 6. 协议 v1 验收检查单（M0 + M3；状态：`[x]` 已实现/有测试）
 
 - `[x]` `hello` 超时（5s，测试用 300ms）/ `v` 不匹配 / 缺字段 → 拒绝并 kill
+  - 解码层单测：`unsupported_version_is_rejected` / `hello_requires_all_fields`
+  - supervisor 集成（拒绝 + kill 进程组 + PID 消失）：`supervisor_m3::hello_version_mismatch_is_rejected_and_process_group_killed` / `hello_missing_sdk_version_is_rejected_and_process_group_killed`
 - `[x]` `hello_ack` 前不执行用户代码（`python/tests/test_runtime.py::test_no_execution_before_hello_ack`，标记文件负例）
 - `[x]` `run` 载荷含 `seed` / `deadline_ms` / `global_vars`
 - `[x]` 重复 `result` 检测（进程退出后读残余帧）；`[x]` exit 0 无 result（fixture 测试）
@@ -77,7 +82,8 @@
 - `[x]` 同步用户函数执行中收到 `cancel` → 标志置位、协作退出（Python 侧）
 - `[x]` supervisor 发送 cancel → 2s → SIGTERM → 1s → SIGKILL 进程组：`supervisor_m3::cancel_escalates_through_sigterm_to_sigkill_group`（fixture 忽略 SIGTERM，必须走到 SIGKILL；PID 消失）
 - `[x]` 内核超时/取消 abort 的 drop 路径杀进程组：`executor_m3::kernel_timeout_kills_worker_process_group_including_grandchild`、`executor_m3::kernel_cancel_kills_worker_process_group`（含孙进程、5s 内无残留）
-- `[x]` 半行帧 / 非法 UTF-8（`invalid_utf8_frame_is_rejected`）/ 超 8 MiB（帧解码层）
+- `[x]` 半行帧 / 非法 UTF-8（`invalid_utf8_frame_is_rejected`）
+- `[x]` 超 8 MiB：解码层 `Frame::from_line` 单测 + supervisor **有界读取**集成测试（写 >8 MiB 无换行 → `NODE_WORKER_PROTOCOL` + 杀进程组）：`supervisor_m3::oversized_frame_without_newline_is_protocol_error_and_killed`
 - `[x]` 流式读取上限：`supervisor_m3::emit_event_limit_drops_frames_and_keeps_counting` / `emit_byte_limit_drops_frames_and_keeps_counting`（超限丢弃计数、保留字节有界）
 - `[x]` 帧空闲超时：`supervisor_m3::frame_idle_timeout_applies_when_no_kernel_deadline`（`deadline_ms=0`）与 `frame_timeout_is_suspended_when_kernel_deadline_present`（有 deadline 时豁免）
 - `[x]` 超时不等待：显式 kill + wait/reap（run 超时与 hello 超时两条路径，`*_kills_and_reaps_process` 断言 PID 消失）
