@@ -747,35 +747,67 @@ fn assert_timeout_trace(reader: &TraceReader, run_id: &str) {
     assert_eq!(run.error_code.as_deref(), Some("NODE_TIMEOUT"));
     assert_eq!(run.abandoned_tasks, 0, "D1: abandoned_tasks 恒 0");
     assert!(run.killed_workers >= 1);
-    assert_eq!(
-        instance_status(reader, run_id, "slow"),
-        TraceInstanceStatus::TimedOut
-    );
 
-    // 已知内核 M2 差异（已上报 lead，ISSUE 候选）：超时路径只把 NODE_TIMEOUT 写到
-    // run 级（runs.error_code / RunFinished.error），实例快照未回填 error_code/error
-    // （Crashed 路径在 fail_crashed 中有回填）。这里按 run 级契约断言，实例侧断言
-    // 终态 + NodeTimedOut.elapsed_ms。
+    // kernel REV-011：TimedOut 迁移快照回填 NodeError::Timeout{elapsed_ms} 与
+    // NODE_TIMEOUT，经 bridge 映射后 trace 的 instances.error/error_code 与
+    // transitions.error_code/error 均非 NULL。
+    let slow = instance(reader, run_id, "slow");
+    assert_eq!(slow.status, TraceInstanceStatus::TimedOut);
+    assert_eq!(slow.error_code.as_deref(), Some("NODE_TIMEOUT"));
+    let instance_error = slow.error.clone().expect("instances.error 非 NULL");
+    let instance_elapsed = timeout_elapsed_ms(&instance_error);
+
+    let transitions = reader.transitions(run_id).expect("transitions");
+    let timed_out = transitions
+        .iter()
+        .find(|row| {
+            row.instance_id == slow.instance_id && row.to_status == TraceInstanceStatus::TimedOut
+        })
+        .expect("slow 的 TimedOut 迁移");
+    assert_eq!(timed_out.error_code.as_deref(), Some("NODE_TIMEOUT"));
+    let transition_error = timed_out.error.clone().expect("transitions.error 非 NULL");
+    assert_eq!(
+        transition_error, instance_error,
+        "transitions.error 与 instances.error 同形"
+    );
+    assert_eq!(timeout_elapsed_ms(&transition_error), instance_elapsed);
+
     let all = events(reader, run_id);
     assert_eq!(count_kind(&all, "NodeTimedOut"), 1);
-    let timed_out_event = all
-        .iter()
-        .find(|event| event.kind == "NodeTimedOut")
-        .expect("NodeTimedOut event");
-    let elapsed_ms = timed_out_event.payload["elapsed_ms"]
-        .as_u64()
-        .expect("elapsed_ms payload");
-    assert!(elapsed_ms >= 90, "elapsed_ms={elapsed_ms}");
     assert_eq!(
         count_kind(&all, "NodeAbandoned"),
         0,
         "D1: v2 不产生 NodeAbandoned"
     );
+    let timed_out_event = all
+        .iter()
+        .find(|event| event.kind == "NodeTimedOut")
+        .expect("NodeTimedOut event");
+    let event_elapsed = timed_out_event.payload["elapsed_ms"]
+        .as_u64()
+        .expect("elapsed_ms payload");
+    assert_eq!(event_elapsed, instance_elapsed, "同一 elapsed_ms 测量值");
+    assert!(event_elapsed >= 90, "elapsed_ms={event_elapsed}");
     assert_eq!(all.last().expect("last").payload["status"], "Failed");
     assert_eq!(
         all.last().expect("last").payload["error"]["code"],
         "NODE_TIMEOUT"
     );
+}
+
+/// 断言 bridge 的 `NodeError::Timeout` JSON 形状并返回 `elapsed_ms`。
+fn timeout_elapsed_ms(error: &Value) -> u64 {
+    assert_eq!(error["code"], "NODE_TIMEOUT");
+    assert_eq!(error["kind"], "Timeout", "NodeError::Timeout 变体：{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("timeout")),
+        "message 应描述超时：{error}"
+    );
+    error["elapsed_ms"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("error.elapsed_ms missing: {error}"))
 }
 
 #[tokio::test]
