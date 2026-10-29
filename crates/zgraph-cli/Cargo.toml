@@ -14,6 +14,10 @@ path = "src/main.rs"
 serde_json.workspace = true
 zgraph-dsl = { path = "../zgraph-dsl" }
 zgraph-kernel = { path = "../zgraph-kernel" }
+zgraph-trace = { path = "../zgraph-trace" }
 
 [dev-dependencies]
 serde_json.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+zgraph-kernel = { path = "../zgraph-kernel", features = ["test-hooks"] }
