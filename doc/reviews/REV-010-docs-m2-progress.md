@@ -144,3 +144,22 @@ ISSUE-042：fixed ✓，引用 0deefd9 ✓、REV-011 ✓
 ## 6. 条件关闭记录
 
 不适用：本记录结论为 **通过**，无前置条件。
+
+## 7. 修订复审（2026-10-29，`48852d3`）
+
+> 触发：首轮通过（`ed2ac96`）后，Lead 按本记录 §3 建议落实 7 项。本轮只复审增量（`ed2ac96..48852d3`，3 files, +7/−5：`README.md` 1 行、`doc/issues.md` 1 行新增 + 2 行改写 + 规则 1 行、`doc/progress.md` 2 行），独立复跑 + 程序化校验。
+
+- **逐项核对**：
+  1. **ISSUE-060（P3 · process）** 新增，汇总 REV-007/008/009 未逐条落台账的低优先建议（RunHandle drop / start_run 需 runtime / builtin gate in-loop / 多 end warning / progress payload 重复 message / bridge start-error 仅断言 Err / 长测试函数）→ 覆盖本轮建议 #1 所列缺口 ✓（措辞小瑕疵见下方新增建议 a）。
+  2. **ISSUE-050 标注为 ISSUE-020 子项**（M2 批次），progress 阻塞行同步写“spec 回写 = ISSUE-020 的 ISSUE-050 子项”；**ISSUE-041 措辞**改为“写端与 reader 均未校验 `RunFinished` 终态/唯一性”，对齐 REV-008 #9 原文 ✓。
+  3. `doc/issues.md` 顶部新增规则“模块列允许「主责/协作」复合标签（如 `kernel/e2e`），首个为主要责任模块（同 ISSUE-011 先例）” ✓。
+  4. **progress 阻塞行**改为 `ISSUE-014/015/020/033–041/043–059`（排除已 fixed 的 ISSUE-042）✓。
+  5. **progress 下一步 #2** 统一为“M3 建立 `tests/e2e/**` 并迁移 M2 验收用例；M4 Harness / M5 CLI run·replay（ISSUE-052）” ✓（e2e 模块行仍写 M3–M5，可接受，见建议 b）。
+  6. **README cli 行**改为“M1：`validate`；M2：`trace`；`run`/`replay` 见 M5”，仅 1 行变化 ✓。
+  7. **done 行里程碑 hash** 保持（接受为合并点追溯）✓。
+- **程序化校验**：台账 60 行，`ISSUE-001..060` **连续、无重复、无缺号**，max=060（新增 1 行 ISSUE-060 + 2 行改写）；每行 **8 列齐全**；级别/状态合法；progress **23 行 / 18 非空行 ≤30**、四块与 main hash/状态不变；README 仅目标行；`git diff --name-only` 仅 3 files；worktree 干净、基于 `origin/main=4a15271` 可 ff；新增提交 message 含 `Review: REV-010` / `Agent: lead`。
+- **门禁复跑**：`bash scripts/dev/check.sh` = **CHECK PASSED**（progress 非空 18、CLAUDE.md 未改、分支命名等 13 项）；`cargo test --workspace` = **249 passed / 0 failed**；pytest = **20 passed**。
+- **本轮新增建议（2 条，不阻塞）**：
+  a) ISSUE-060 文本列“多 end 冲突 warning”与既有 ISSUE-044 重复（044 已 open）；“trace 部分测试函数 >60 行”实际还含 kernel 测试（REV-007 #14）。建议 060 注明“多 end 项与 ISSUE-044 关联、不重复跟踪”，并把“长测试函数”写成 kernel/trace/cli 测试（或移除多 end 项）。
+  b) progress e2e 模块行仍写“M3–M5 …（REV-009 后迁移 `tests/e2e`）”，与下一步“M3 建立 `tests/e2e/**`”措辞略有差异，建议后续统一（不阻塞）。
+- **结论：维持通过**。首轮 7 项建议已全部落实/接受，新增 2 条措辞级建议；无新阻塞/重要项。合并门禁以本段更新后的记录为准（`结论：通过` 不变）。
