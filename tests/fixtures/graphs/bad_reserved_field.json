@@ -1,0 +1,15 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "reserved-field" },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [],
+      "config": {},
+      "on_error": { "route": "fallback" }
+    }
+  ],
+  "edges": []
+}

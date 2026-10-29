@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "ungated-cycle" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "a",
+      "type": "python_node",
+      "inputs": [
+        { "name": "x", "type": "string", "required": true },
+        { "name": "z", "type": "string", "required": true }
+      ],
+      "config": { "module": "m", "function": "a" }
+    },
+    {
+      "id": "b",
+      "type": "python_node",
+      "inputs": [{ "name": "y", "type": "string", "required": true }],
+      "config": { "module": "m", "function": "b" }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "a", "to_input_port": "x" },
+    { "from": "a", "to_node": "b", "to_input_port": "y" },
+    { "from": "b", "to_node": "a", "to_input_port": "z" }
+  ]
+}

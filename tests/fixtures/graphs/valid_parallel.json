@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "parallel-fanout" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "a",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "module": "workers.parallel", "function": "a" }
+    },
+    {
+      "id": "b",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "module": "workers.parallel", "function": "b" }
+    },
+    {
+      "id": "done",
+      "type": "end",
+      "inputs": [
+        { "name": "ra", "type": "any", "required": true },
+        { "name": "rb", "type": "any", "required": true }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "a", "to_input_port": "x" },
+    { "from": "start", "to_node": "b", "to_input_port": "x" },
+    { "from": "a", "to_node": "done", "to_input_port": "ra" },
+    { "from": "b", "to_node": "done", "to_input_port": "rb" }
+  ]
+}

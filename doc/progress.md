@@ -7,7 +7,7 @@
 | 模块 | 状态 | 当前任务 | 负责 | 分支 / worktree | 更新 |
 |---|---|---|---|---|---|
 | process | review | M0：workspace/协议/SDK/CI/legacy 冻结/双栈门禁 | lead | feat/process-m0-scaffold | 2026-10-29 |
-| dsl | next | M1：DSL 类型 + R1–R14 + graph_hash | 待定 | — | 2026-10-29 |
+| dsl | review | M1：类型/loader/R1–R14/graph_hash/validate CLI（REV-005） | dsl-spec-writer | feat/dsl-m1-loader | 2026-10-29 |
 | kernel | next | M2：状态机/事件循环/Delivery/门控/冷峻失败/超时 kill | 待定 | — | 2026-10-29 |
 | trace | next | M2：TraceEvent + SQLite + L1 replay + L2 记录表 | 待定 | — | 2026-10-29 |
 | worker | next | M3：进程组 kill/并发上限/协议异常分支（ISSUE-025） | 待定 | — | 2026-10-29 |
@@ -17,7 +17,7 @@
 
 **下一步**
 1. REV-004 评审通过 → 合并 M0 → 推送。
-2. M1 DSL：类型/loader/R1–R14/graph_hash/validate。
+2. M1 DSL 实现完成（测试全绿）→ 待 REV-005 独立评审后合并。
 
 **阻塞**
 - 无硬阻塞；ISSUE-014（门控模型）、ISSUE-015/025（协议分支补齐）、ISSUE-020（spec 回写）按里程碑推进。

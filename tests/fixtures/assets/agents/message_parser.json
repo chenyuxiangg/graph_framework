@@ -1,0 +1,16 @@
+{
+  "id": "message_parser",
+  "name": "消息解析器",
+  "model": {
+    "provider": "openai_compatible",
+    "name": "deepseek-chat",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "temperature": 0.2,
+    "max_tokens": 2048
+  },
+  "role_prompt_file": "prompts/message_parser.md",
+  "tools": [],
+  "max_iterations": 10,
+  "timeout_ms": 60000
+}

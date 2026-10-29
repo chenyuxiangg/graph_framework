@@ -1,0 +1,8 @@
+{
+  "metadata": { "name": "missing-version" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} }
+  ],
+  "edges": []
+}

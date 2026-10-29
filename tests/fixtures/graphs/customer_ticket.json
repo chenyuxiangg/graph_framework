@@ -1,0 +1,79 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "客服工单处理流",
+    "description": "用户提问 → 知识库检索 → 生成回答 → 判断是否需要人工介入",
+    "author": "demo"
+  },
+  "entry_points": ["input_parser"],
+  "nodes": [
+    {
+      "id": "input_parser",
+      "type": "agent_call",
+      "inputs": [
+        { "name": "user_message", "type": "string", "required": true }
+      ],
+      "trigger": "all",
+      "config": { "agent_id": "message_parser", "timeout_ms": 60000 }
+    },
+    {
+      "id": "kb_search",
+      "type": "agent_call",
+      "inputs": [
+        { "name": "query", "type": "string", "required": true }
+      ],
+      "trigger": "all",
+      "config": { "agent_id": "kb_searcher" }
+    },
+    {
+      "id": "answer_generator",
+      "type": "agent_call",
+      "inputs": [
+        { "name": "user_query", "type": "string", "required": true },
+        { "name": "kb_result", "type": "object", "required": true }
+      ],
+      "trigger": "all",
+      "config": { "agent_id": "answer_writer" }
+    },
+    {
+      "id": "human_escalation_check",
+      "type": "python_node",
+      "inputs": [
+        { "name": "answer", "type": "object", "required": true }
+      ],
+      "trigger": "all",
+      "config": { "module": "gates.hr", "function": "need_human_check", "exec_class": "io" }
+    },
+    {
+      "id": "human_handoff",
+      "type": "agent_call",
+      "inputs": [
+        { "name": "context", "type": "object", "required": true }
+      ],
+      "trigger": "all",
+      "config": { "agent_id": "human_handoff_agent" }
+    },
+    {
+      "id": "end_success",
+      "type": "end",
+      "inputs": [
+        { "name": "result", "type": "any", "required": true }
+      ],
+      "trigger": "all",
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "input_parser", "to_node": "kb_search", "to_input_port": "query" },
+    { "from": "kb_search", "to_node": "answer_generator", "to_input_port": "kb_result" },
+    { "from": "input_parser", "to_node": "answer_generator", "to_input_port": "user_query" },
+    { "from": "answer_generator", "to_node": "human_escalation_check", "to_input_port": "answer" },
+    {
+      "from": "human_escalation_check",
+      "to_node": "human_handoff",
+      "to_input_port": "context",
+      "gate": { "function": "check_output", "params": { "path": "need_human", "equals": true } }
+    },
+    { "from": "answer_generator", "to_node": "end_success", "to_input_port": "result" }
+  ]
+}

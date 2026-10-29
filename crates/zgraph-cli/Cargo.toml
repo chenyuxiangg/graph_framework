@@ -11,5 +11,9 @@ name = "zgraph"
 path = "src/main.rs"
 
 [dependencies]
+serde_json.workspace = true
 zgraph-dsl = { path = "../zgraph-dsl" }
 zgraph-kernel = { path = "../zgraph-kernel" }
+
+[dev-dependencies]
+serde_json.workspace = true

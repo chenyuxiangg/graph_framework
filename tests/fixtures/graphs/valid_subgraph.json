@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "with-subgraph-definition" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "sub",
+      "type": "subgraph",
+      "inputs": [{ "name": "q", "type": "string", "required": true }],
+      "config": { "subgraph_id": "inner" }
+    },
+    {
+      "id": "done",
+      "type": "end",
+      "inputs": [{ "name": "r", "type": "any", "required": true }],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "sub", "to_input_port": "q" },
+    { "from": "sub", "to_node": "done", "to_input_port": "r" }
+  ],
+  "subgraphs": [
+    {
+      "id": "inner",
+      "nodes": [
+        {
+          "id": "pin",
+          "type": "python_node",
+          "inputs": [{ "name": "p", "type": "string", "required": true }],
+          "config": { "module": "workers.inner", "function": "pin" }
+        },
+        {
+          "id": "inner_end",
+          "type": "end",
+          "inputs": [{ "name": "o", "type": "any", "required": true }],
+          "config": {}
+        }
+      ],
+      "edges": [
+        { "from": "pin", "to_node": "inner_end", "to_input_port": "o" }
+      ],
+      "input_mapping": { "q": "pin.p" },
+      "output_mapping": { "r": "inner_end.o" }
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "subgraph-bad" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} }
+  ],
+  "edges": [],
+  "subgraphs": [
+    {
+      "id": "inner",
+      "nodes": [
+        {
+          "id": "pin",
+          "type": "python_node",
+          "inputs": [{ "name": "p", "type": "string", "required": true }],
+          "config": { "module": "m", "function": "f" }
+        }
+      ],
+      "edges": [],
+      "input_mapping": {},
+      "output_mapping": {}
+    }
+  ]
+}

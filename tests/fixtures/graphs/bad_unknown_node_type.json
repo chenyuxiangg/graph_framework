@@ -1,0 +1,9 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "unknown-node-type" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "human_node", "inputs": [], "config": {} }
+  ],
+  "edges": []
+}

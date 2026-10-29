@@ -1,0 +1,32 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "symbol-conflict" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "conflicting_node",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "module": "builtin", "function": "compare" }
+    },
+    {
+      "id": "n1",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "module": "m", "function": "f" }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "conflicting_node", "to_input_port": "x" },
+    {
+      "from": "start",
+      "to_node": "n1",
+      "to_input_port": "x",
+      "gate": {
+        "function": "compare",
+        "params": { "path": "score", "op": "gte", "value": 1 }
+      }
+    }
+  ]
+}

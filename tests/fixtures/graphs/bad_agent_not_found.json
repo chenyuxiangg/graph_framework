@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "agent-not-found" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "agent_node",
+      "type": "agent_call",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "agent_id": "ghost_agent" }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "agent_node", "to_input_port": "x" }
+  ]
+}

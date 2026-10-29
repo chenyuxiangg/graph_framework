@@ -1,0 +1,9 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "bad-entry" },
+  "entry_points": ["start", "ghost"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} }
+  ],
+  "edges": []
+}

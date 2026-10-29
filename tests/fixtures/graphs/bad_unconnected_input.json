@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "unconnected-input" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "n1",
+      "type": "python_node",
+      "inputs": [
+        { "name": "x", "type": "string", "required": true },
+        { "name": "y", "type": "string", "required": true }
+      ],
+      "config": { "module": "m", "function": "f" }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "n1", "to_input_port": "x" }
+  ]
+}
