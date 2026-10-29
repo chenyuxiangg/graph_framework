@@ -931,12 +931,14 @@ impl RunLoop {
             self.last_event_at = Instant::now();
             if evaluation.passed {
                 self.buffer_write(&target, &edge.to_port, output.clone());
-                self.settle_edge(&edge.to_node, edge.index);
-                self.maybe_make_ready(&target);
-            } else {
-                self.settle_edge(&edge.to_node, edge.index);
-                self.cascade_skip(&edge.to_node);
             }
+            self.settle_edge(&edge.to_node, edge.index);
+            if evaluation.passed {
+                self.maybe_make_ready(&target);
+            }
+            // 结算后统一复核：即便本条边是"放行"边，目标节点也可能因其它入边被
+            // 拦截而永远无法就绪；若此时全部入边已结算 → 必须转 Skipped（01 §1.2.3）。
+            self.maybe_skip_after_settle(&edge.to_node);
         }
     }
 
@@ -1078,6 +1080,17 @@ impl RunLoop {
             .entry(node_id.to_string())
             .or_default()
             .insert(edge_index);
+    }
+
+    /// `settle_edge` 之后的统一复核：目标节点全部入边已结算时，
+    /// 未就绪的 Pending 实例必须转 `Skipped` 并迭代级联（01 §1.2.3 / 03 §3.4.2）。
+    ///
+    /// 为什么放行分支也必须调用：最后结算的入边可能是"被拦截的那条"，
+    /// 也可能是"放行边"但节点 `trigger=all` 仍缺其它（被拦截的）端口；
+    /// 若只从 blocked 分支触发级联，后一种情况会留下 Pending，
+    /// 静默超过 `deadlock_grace_ms` 后被误判 `RUN_DEADLOCK`。
+    fn maybe_skip_after_settle(&mut self, node_id: &str) {
+        self.cascade_skip(node_id);
     }
 
     /// 就绪判定（01 §1.3）：`start` 恒就绪；All 需 required 全覆盖；Any 需至少一个。
