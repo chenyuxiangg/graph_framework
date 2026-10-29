@@ -21,3 +21,10 @@ chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# 故障注入用例（死锁/强制超时/ticker）只在 `test-hooks` feature 下编译。
+# 用法：`cargo test -p zgraph-kernel --features test-hooks`
+[[test]]
+name = "test_hooks"
+path = "tests/test_hooks.rs"
+required-features = ["test-hooks"]
