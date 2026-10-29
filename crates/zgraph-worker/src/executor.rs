@@ -256,8 +256,12 @@ pub fn map_failure(failure: WorkerFailure) -> NodeError {
             kind: WorkerErrorKind::Protocol,
         },
         WorkerFailure::Cancelled => NodeError::Cancelled,
-        WorkerFailure::Spawn(message) => NodeError::Config {
-            message: format!("spawn worker: {message}"),
+        // spec 03 §3.9.4 步 1：worker spawn 失败（解释器不存在/exec 失败等）→
+        // `NODE_WORKER_CRASH`；`NODE_CONFIG_ERROR` 只覆盖「非 Harness 资产加载失败」
+        // （spec 00 §0.4），不覆盖进程启动失败。`NodeError::NodeWorker` 只携带 kind
+        // （D10/§8.2），OS 错误细节暂无承载字段（已知限制，见 schema §7）。
+        WorkerFailure::Spawn(_) => NodeError::NodeWorker {
+            kind: WorkerErrorKind::Crash,
         },
         WorkerFailure::Exit { .. } => NodeError::NodeWorker {
             kind: WorkerErrorKind::Crash,
@@ -410,10 +414,69 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_maps_to_config_error() {
-        match map_failure(WorkerFailure::Spawn("no python".to_string())) {
-            NodeError::Config { message } => assert!(message.contains("no python")),
-            other => panic!("unexpected mapping: {other:?}"),
+    fn spawn_failure_maps_to_worker_crash() {
+        // spec 03 §3.9.4：spawn 失败 → NODE_WORKER_CRASH（不是 NODE_CONFIG_ERROR）。
+        let mapped = map_failure(WorkerFailure::Spawn("no python".to_string()));
+        assert_eq!(
+            mapped,
+            NodeError::NodeWorker {
+                kind: WorkerErrorKind::Crash
+            }
+        );
+        assert_eq!(mapped.code(), "NODE_WORKER_CRASH");
+    }
+
+    #[test]
+    fn worker_self_reported_timeout_is_a_protocol_violation() {
+        // 04 §4.1.4：Timeout 只允许内核/AgentCallHandler 产生；worker 自报按协议错误处理。
+        assert_eq!(
+            map_worker_error(&worker_error(CODE_TIMEOUT)),
+            NodeError::NodeWorker {
+                kind: WorkerErrorKind::Protocol
+            }
+        );
+    }
+
+    #[test]
+    fn return_not_dict_maps_to_business_error_with_original_code() {
+        assert_eq!(
+            map_worker_error(&worker_error(crate::protocol::CODE_RETURN_NOT_DICT)),
+            NodeError::BusinessError {
+                code: crate::protocol::CODE_RETURN_NOT_DICT.to_string(),
+                message: "boom".to_string(),
+            }
+        );
+    }
+
+    /// 内核只把 `python_node` 交给执行器；其它 handler 类型属框架不变量违反。
+    #[test]
+    fn python_handler_rejects_non_python_node() {
+        let text = serde_json::json!({
+            "version": "1.0",
+            "metadata": {"name": "t"},
+            "entry_points": ["start"],
+            "nodes": [
+                {"id": "start", "type": "start", "inputs": [], "config": {}},
+                {"id": "work", "type": "python_node",
+                 "inputs": [{"name": "x", "type": "any", "required": true}],
+                 "config": {"module": "m", "function": "f"}},
+                {"id": "done", "type": "end",
+                 "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+            ],
+            "edges": [
+                {"from": "start", "to_node": "work", "to_input_port": "x"},
+                {"from": "work", "to_node": "done", "to_input_port": "r"}
+            ]
+        })
+        .to_string();
+        let loaded = zgraph_dsl::load_graph(text.as_bytes()).expect("valid graph");
+        let graph = zgraph_kernel::CompiledGraph::compile(&loaded).expect("compile");
+        let start = graph.nodes.get("start").expect("start node");
+        match python_handler(start) {
+            Err(NodeError::Internal { message }) => {
+                assert!(message.contains("python_node"), "message: {message}");
+            }
+            other => panic!("non-python node must be rejected, got {other:?}"),
         }
     }
 

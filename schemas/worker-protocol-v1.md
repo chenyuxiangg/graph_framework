@@ -91,6 +91,8 @@
 - `[x]` 全局与每 run 并发上限：`executor_m3::global_limit_serializes_parallel_branches` / `per_run_limit_serializes_parallel_branches` / `branches_run_concurrently_within_limits`（按执行区间是否重叠断言）
 - `[x]` emit 流式入内核：`executor_m3::emit_frames_are_forwarded_to_kernel_streaming_sink`（5 类事件全部进 `TraceSink::streaming`）
 - `[x]` 错误映射矩阵（D10/§8.2）：`executor_m3::{python_exception_maps_to_python_exception, sdk_business_error_maps_to_business_error, custom_business_code_is_preserved_in_node_error, import_failure_maps_to_worker_import, exit_without_result_maps_to_worker_protocol, signal_exit_maps_to_worker_crash}`
+- `[x]` spawn 失败 → `NODE_WORKER_CRASH`（spec 03 §3.9.4）：`executor::tests::spawn_failure_maps_to_worker_crash`
+- `[x]` 单测补充（REV-012 #15）：`executor::tests::{worker_self_reported_timeout_is_a_protocol_violation, return_not_dict_maps_to_business_error_with_original_code, python_handler_rejects_non_python_node}`
 
 > 退出约定：worker 在写完 `result`/`error` 后 **flush stderr 并 `os._exit`**（跳过 atexit），
 > 因此用户代码不应依赖 `atexit`/`finally` 的收尾（worker 契约，见 §4）。
@@ -109,3 +111,6 @@ M3 起 `schemas/worker-protocol-v1.md` §6 检查单**无 `[M3]` 残留**；以�
    不会被主动清理（M3 不承诺，L3 副作用边界）。
 5. **平台范围**：进程组语义仅 Unix（`process_group` + `nix`）；非 Unix 退化为直接 kill 子进程，
    不保证孙进程回收。
+6. **spawn 失败的 OS 细节不入错误载荷**：spec 03 §3.9.4 规定 spawn 失败 → `NODE_WORKER_CRASH`；
+   `NodeError::NodeWorker` 只携带 `kind`（D10/§8.2），解释器路径/`OS error` 暂无承载字段
+   （不新增 NodeError 变体的前提下接受该限制；M4+ 引入日志后可记录）。
