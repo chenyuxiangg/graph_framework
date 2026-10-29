@@ -236,7 +236,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 
 > 说明：spec v1.2 已入库为语义基准；以下偏差是 Rust 内核 + 子进程 worker 的**必然调整**。
 > 受影响分册顶部有 banner 指回本表；M0–M2 逐条回写 spec（ISSUE-020），回写后本表保留为决策记录。
-> **回写状态（2026-10-30）**：D1–D12 与 §8.2 错误码/指标已回写 spec v1.2 正文（00/01/02/03/04/06/07，见 `doc/spec-v1.2/PROVENANCE.md` §2.5）；spec 正文与冲突时以 spec 为准，本表仅作决策记录。
+> **回写状态（2026-10-30）**：D1–D12 与 §8.2 错误码/指标已回写 spec v1.2 正文（00/01/02/03/04/06/07，见 `doc/spec-v1.2/PROVENANCE.md` §2 第 4 条）；spec 正文与冲突时以 spec 为准，本表仅作决策记录。
 > 每条偏差以 **D#** 编号，供代码注释、评审与测试引用。
 
 | # | spec 位置 | v1.2 原文语义 | v2 落地 | 理由/影响 |
@@ -247,7 +247,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | D4 | 04 §4.3.6、03 §3.5 | 单解释器；Python 并发 CPU=1 / IO=4 信号量；`exec_class` 决定类别 | 每节点一进程；全局 `max_workers`（CPU×2）+ 每 run 上限（8）；**`exec_class` 保留但忽略**（池化时再启用）；模块缓存随进程销毁 | 进程隔离后 GIL 不再是限制；无需 CPU/IO 分类 |
 | D5 | 04 §4.2、05 §5.4 | 无 seed/时间注入契约；`ctx` 无 `now/random` | 新增 `seed`（run 载荷）、`PYTHONHASHSEED=0`（supervisor spawn 设置）、`ctx.now()`/`ctx.random()`；SDK 按 seed 初始化 `random`/`numpy` | 可复现 L2 的基础 |
 | D6 | 05 §5.6、02 R14、07 AC-02/04 | 门控是用户 Python 函数（图加载期 import + 签名校验）；fixture 用 Python gate | v1 门控 = **Rust 内置 op**（`check_output`/`compare`/`manual`）；DSL `gate.function` 只解析内置 op；Python 门控延后（ISSUE-014）；fixture 改用内置 op | 图加载期不执行用户 Python（安全 + 无阻塞） |
-| D7 | 02 §2.5、04 §4.7、02 R14 | 图加载期 import Python 节点符号并做签名校验；`DSL_SYMBOL_NOT_FOUND`/`DSL_SIGNATURE_MISMATCH` 在加载期报 | 图加载期**不 import** 用户 Python；`python_node` 只校验 `module/function` 格式；存在性/签名在 **worker 启动时**校验，失败 `NODE_WORKER_IMPORT`（Crashed）；`DSL_SYMBOL_*` 只用于内置 gate op 名称 | 避免加载期执行用户代码；错误从加载期后移到运行期（已登记） |
+| D7 | 02 §2.5、04 §4.7、02 R14 | 图加载期 import Python 节点符号并做签名校验；`DSL_SYMBOL_NOT_FOUND`/`DSL_SIGNATURE_MISMATCH` 在加载期报 | 图加载期**不 import** 用户 Python；`python_node` 的 `module/function` **格式非法仍在加载期报 `DSL_SYMBOL_NOT_FOUND`**；存在性/签名在 **worker 启动时**校验，失败 `NODE_WORKER_IMPORT`（Crashed）；`DSL_SIGNATURE_MISMATCH`/`DSL_SYMBOL_CONFLICT` 只用于内置 gate op 与跨类同名 | 避免加载期执行用户代码；import/签名错误从加载期后移到运行期（已登记） |
 | D8 | 07 AC-09/AC-12 | 并行断言基于 in-process spike：a/b 同时 Running 且总耗时 <0.45s；Python 并发 CPU=1/IO=4 | 含进程冷启动（每个 ~50–100ms）：断言改为"a/b 的 Running 区间重叠，且总耗时显著小于串行（M3 实测后定阈值，初值 <1.0s）"；AC-12 改为"全局/每 run worker 上限生效、run 间隔离" | 子进程启动成本与并发模型变化 |
 | D9 | 06 §6.10、§6.2 | v1 不做图重放；`runs` 表无版本/seed/输出列；CLI 只有 validate/run/trace | 新增 L1/L2 重放：`runs` 增列 + `recorded_outputs`/`llm_calls` 表；CLI 增 `replay` 与 `--record`；`--dry-run` 不实现 | 产品"可复现"承诺需要账本与重放 |
 | D10 | 00 §0.3、§0.4、01 §1.4 | `NodeError`/`Delivery` 为 Rust 进程内类型；错误码表无跨进程错误 | 不变（仍为 Rust 类型）；`NodeError` 增 `NodeWorker { kind }` 变体；新增错误码见 §8.2 | 跨进程错误需要新变体与新码 |
@@ -275,7 +275,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `NodeAbandoned` | 事件 | **v2 不产生**（D1）；enum 保留兼容，文档标 deprecated | — |
 | `RunMetrics.killed_workers` | 指标 | 因超时/取消被 kill 的 worker 数 | 替代 `abandoned_tasks`（后者恒 0） |
 
-> 上述错误码/事件已回写 spec 00 §0.3/§0.4（2026-10-30，PROVENANCE §2.5 已更新 hash；ISSUE-020 子项 ISSUE-050）。
+> 上述错误码/事件已回写 spec 00 §0.3/§0.4（2026-10-30，PROVENANCE §2 第 4 条已更新 hash；ISSUE-020 子项 ISSUE-050）。
 
 ## 9. 溯源
 
