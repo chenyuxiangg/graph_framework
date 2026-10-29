@@ -120,3 +120,42 @@ wc -l doc/progress.md               # 26（≤30，四块结构齐全）
 | C3 | 补登 REV-013 #3（整包广播示例口径/无 kernel Delivery 级验证）到 ISSUE-071 或新 ISSUE | 待 Lead 追加台账行 | — |
 | C4 | ISSUE-014 fixed 与 spec 02/04 + architecture 引用统一（保留 in-progress 或改引用到新 ISSUE） | 待 Lead 决策并同步台账/正文 | — |
 | C5 | 合并顺序：e2e 先合并 → wrapup rebase；复核 progress/README/索引的 e2e/313/REV-015/016 引用与最终结论行 | 待 e2e 合并 + rebase 后由 Lead/复审确认 | — |
+
+### 6.1 复审（2026-10-30，reviewer-b，HEAD `4de4ae8`；rebase 后 base=`542a911`）
+
+**复审范围**：作者修正提交 `4de4ae8`（`bdca974..HEAD` = 3 files, +9/−9：`README.md`/`doc/issues.md`/`doc/progress.md`；`doc/reviews/README.md` 与 `doc/test-baseline.txt` 本次未改）+ rebase 后全量复核。**独立看文件 + 亲跑测试，不采信自述**。
+
+| 条件 | 结果 | 关闭证据 |
+|---|---|---|
+| C1 | ⚠️ **未完全关闭**（progress ✅ / README ❌） | `doc/progress.md:22` 已改为逐项级别「ISSUE-061，P2 / ISSUE-066，P2 / ISSUE-063，**P3**」，与台账一致；但 **`README.md:21` 仍为「M3 遗留 P2 见 doc/issues.md（ISSUE-061/063/066 等）」**，仍把 P3 的 ISSUE-063 归入 P2——修正提交未改该行。 |
+| C2 | ✅ 已关闭 | `README.md:51` 已改为「worker 协议 v1（M0 冻结，M3 检查单闭环）；DSL JSON Schema 未实现（ISSUE-029）」，与 `schemas/` 实际内容及 ISSUE-029 一致。 |
+| C3 | ✅ 已关闭 | `doc/issues.md:79`（ISSUE-071）已补 REV-013 #3（整包广播示例口径不一致 / 4 条子进程用例未经 kernel Delivery 级验证）；`doc/issues.md:70`（ISSUE-062）已补 `workers.cycle` docstring 前置条件（REV-013 #1）。 |
+| C4 | ✅ 已关闭 | `doc/issues.md:22` ISSUE-014 状态改回 `in-progress`，建议列注明「v1 内置 op 已定稿并回写；自定义 Python 门控延后，spec 02/04 与 architecture 共 10 处仍引用 ISSUE-014」——与 spec/arch 引用一致，不再自相矛盾。 |
+| C5 | ✅ 已关闭 | rebase 后 `base=origin/main=`**`542a911`**；`tests/e2e/` 已存在（5 个 test 文件）、`doc/reviews/REV-015-*.md` 已随合并到位；reviews 索引 REV-015/016 链接指向实际文件；**独立 `cargo test --workspace` = 313 passed / 0 failed**、`pytest` = 44 passed → progress「313+」口径成立。 |
+| 建议 #6–#10 | ✅ #6–#9 已落实；#10 待最终关闭 | #6 ISSUE-068 已交叉引用 ISSUE-072；#7 ISSUE-017 数字已对齐 268–290ms / 490–506ms（REV-015 §7.2）；#8 ISSUE-022 已改 in-progress；#9 README「CI 全绿」已改为「本地双栈测试全绿…CI 已配置」；#10 索引 REV-016 行仍预写「通过」，待 C1 关闭后成立。 |
+
+**复审验证命令与结果**
+
+```bash
+cd /Users/zyzs/lczyzs/code/zgraph/.worktrees/docs-lead
+git rev-parse HEAD                      # 4de4ae89f24f65d16a38113b08741160ebbdc079
+git merge-base origin/main HEAD         # 542a911ef4ea7ca09ec09828fb4266feeed2d828 == origin/main（已 rebase）
+git diff --stat bdca974..HEAD           # 3 files changed, 9 insertions(+), 9 deletions(-)
+cargo test --workspace                  # 313 passed / 0 failed
+PYTHONPATH=python .venv/bin/python -m pytest   # 44 passed
+wc -l doc/progress.md                   # 26（≤30；当前阶段/进行中/下一步/阻塞 四块齐全）
+bash scripts/dev/check.sh               # CHECK PASSED
+git status --porcelain                  # 空
+```
+
+- 台账结构：脚本核对 **72 行、ID `ISSUE-001..072` 无重号/缺号、每行 8 列**；状态分布 `fixed 22 / open 38 / in-progress 8 / wontfix 4`（ISSUE-014/022 改 in-progress 后一致）。
+- 索引一致性：`doc/reviews/README.md` **17 行（000–016）** 与 `doc/reviews/` 实际文件（REV-000..016 均存在）一致；REV-015/016 链接有效。
+- 范围/元数据：`542a911..HEAD` 共 6 files = 5 个收尾文件 + 本评审记录；`4de4ae8` author/committer=`chenyuxiangg <1007423165@qq.com>`，正文含 `Review: REV-016` / `Agent: lead`；README 属 process 跨模块改动仍在 Lead 提交正文的授权声明范围内。
+
+**复审结论：仍有条件（C1 README:21 未同步；C2–C5 已全部关闭）**
+
+剩余唯一条件（一行文本修正，无需其它改动）：把 `README.md:21` 的「M3 遗留 **P2** 见…（ISSUE-061/063/066 等）」改为逐项/正确级别，例如：
+
+> legacy 退役决策；M3 遗留项见 [`doc/issues.md`](doc/issues.md)（ISSUE-061 P2 / ISSUE-063 P3 / ISSUE-066 P2 等）。
+
+修正后（索引 REV-016 行的「通过」即成为最终状态）请回我复审；我追加 §6.2 并将本记录结论转「通过」。
