@@ -725,6 +725,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zgraph-e2e"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zgraph-cli",
+ "zgraph-dsl",
+ "zgraph-kernel",
+ "zgraph-trace",
+ "zgraph-worker",
+]
+
+[[package]]
 name = "zgraph-harness"
 version = "0.1.0"
 

@@ -1,0 +1,49 @@
+[package]
+name = "zgraph-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "M3 e2e 验收包：真 kernel run + 真 Python worker 子进程 + 真 SQLite trace"
+
+# 测试文件直接放在包根（07 §7.1 期望 `tests/e2e/*.rs`），因此关闭自动发现并用
+# `[[test]] path` 显式声明；公共辅助在 `common/mod.rs` 由各用例
+# `#[path = "common/mod.rs"] mod common;` 引入。
+autotests = false
+
+[dev-dependencies]
+zgraph-cli = { path = "../../crates/zgraph-cli" }
+zgraph-dsl = { path = "../../crates/zgraph-dsl" }
+zgraph-kernel = { path = "../../crates/zgraph-kernel" }
+zgraph-trace = { path = "../../crates/zgraph-trace" }
+zgraph-worker = { path = "../../crates/zgraph-worker" }
+serde_json.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+chrono.workspace = true
+
+# 进程存活性断言（`kill(pid, 0)`）；与 `zgraph-worker` 同一版本，仅 Unix 提供。
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }
+
+[[test]]
+name = "timeout_kill"
+path = "timeout_kill.rs"
+
+[[test]]
+name = "parallel"
+path = "parallel.rs"
+
+[[test]]
+name = "cancel"
+path = "cancel.rs"
+
+[[test]]
+name = "fault_injection"
+path = "fault_injection.rs"
+
+[[test]]
+name = "concurrency"
+path = "concurrency.rs"
