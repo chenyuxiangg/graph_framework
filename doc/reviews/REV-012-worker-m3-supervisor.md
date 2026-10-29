@@ -126,7 +126,54 @@ test result: FAILED. 13 passed; 1 failed; ...
 ### 5.1 跨模块授权与第二评审
 
 - 跨模块改动（kernel `context.rs`/`run.rs`、`Cargo.lock`）主评审初步核对：改动最小、无行为变化、依赖方向正确（详见 §4.4 与 §2），**但按 Task 约定由 `reviewer-b` 做第二评审**。
-- **跨模块第二评审：待 reviewer-b 追加**（请追加：kernel 接口暴露面是否最小、`seed`/`global_vars` 语义与 spec 04 §4.2 一致性、Cargo.lock/依赖边与 process 边界合规性、schemas 口径与实现一致性）。
+- **跨模块第二评审：已完成（reviewer-b，2026-10-30，HEAD `67a60a2`）**，结论与证据见 §5.1.1；此前「待 reviewer-b 追加」的状态保留于 git 历史，记录 §1「不通过」历史与 reviewer-a 的 §7 复审均未删除。
+
+#### 5.1.1 第二评审结论与证据（reviewer-b，2026-10-30，HEAD `67a60a2`）
+
+**范围**：`a6f4f5c..67a60a2` 的**跨模块部分**——`crates/zgraph-kernel/src/context.rs`（seed 字段 + `seed()`/`global_vars()` + 单测）、`crates/zgraph-kernel/src/run.rs`（+2 行传 seed）、`Cargo.lock`（nix/cfg_aliases + `zgraph-worker→zgraph-kernel` 边）、`crates/zgraph-worker/Cargo.toml`（kernel 依赖 + `cfg(unix)` nix + dev-only dsl）、依赖方向与架构一致性；外加本次 spawn 失败映射裁决（`67a60a2`）与 reviewer-a §7.3 #15 的三条补测。**独立核对文件与实现，不采信自述**。
+
+**结论：第二评审通过**（跨模块第二评审结论：通过）。裁决：**按 spec 改代码（选项①）**——`NODE_WORKER_CRASH` 对齐 spec 03 §3.9.4 步 1 / 00 §0.4；跨模块授权改动本身无必改项，无阻塞。
+
+**一、a6f4f5c..67a60a2 跨模块授权部分（无必改）**
+
+| 核对项 | 结果与证据 |
+|---|---|
+| 依赖方向/无环 | ✅ `crates/zgraph-kernel/Cargo.toml` 未改（kernel 无反向依赖）；`cargo tree -p zgraph-kernel` 精确 `grep -F zgraph-worker` **为空**（注：`grep -i worker` 会因 worktree 路径 `worker-agent-a` 误命中 kernel 自身行）；`cargo metadata` 工作区边 = `kernel→dsl`、`worker→kernel`（+dev-only `worker→dsl`）、`cli→dsl/kernel/trace`，**cycles: NONE**。worker 仅实现 kernel 公开 trait/类型（`NodeExecutor`/`NodeContext`/`NodeError`，`executor.rs:23-27`）——adapter→core 方向正确 |
+| kernel 改动最小性 | ✅ 仅 `context.rs` +55（`seed` 字段 + 2 只读访问器 + 2 单测）与 `run.rs` +2（`seed: self.options.seed`）；`NodeContextInit` 仍 `pub(crate)`、字段仍私有、无 `Arc`/可变引用外泄；两访问器是 executor 构造 `run` 载荷所必需（`NodeExecution` 仅给 `&NodeContext`，无替代路径） |
+| `seed`/`global_vars` 语义（D5/04 §4.2） | ✅ `seed()` 来自 `RunOptions.seed`（与 trace `runs.seed` 同源，kernel `run.rs:513/758`）；`global_vars()` 返回 `&HashMap`（同一份执行期冻结的 `Arc` 快照的只读借用，不构成写接口，与 04 §4.2「global_vars 快照/禁写」一致）；跨模块集成实测：`cargo test -p zgraph-worker --test executor_m3 run_payload_carries_seed_user_global_vars_and_deadline -- --exact` → **1 passed**（seed=7 + global_vars 透传 Python 探针） |
+| nix 平台门控 | ✅ 仅 `[target.'cfg(unix)'.dependencies]`（worker/Cargo.toml:17-19）；唯一 `use nix` 在 `#[cfg(unix)] fn send_group_signal`（supervisor.rs:148-158），`#[cfg(not(unix))]` no-op（:161）；`process_group(0)` 在 `#[cfg(unix)]` 下（:202-203），`Supervisor::signal` 非 Unix 追加 `child.start_kill()`（:446-452）；schema §7 第 5 条已声明「非 Unix 退化为直接 kill 子进程」。**限制**：本机仅装 `aarch64-apple-darwin`/`wasm32`，无 Windows target，非 Unix 为**静态核对**（未交叉编译） |
+| Cargo.lock/process 边界 | ✅ 仅新增 `nix 0.29` + `cfg_aliases` 与 `zgraph-worker` 的 `nix/zgraph-dsl/zgraph-kernel` 依赖边，无其它包版本变动；新增外部依赖 nix 未提升到 `[workspace.dependencies]`（ISSUE-030 先例，建议 process 后续统一，不影响本分支） |
+
+**二、spawn 失败映射裁决落地（`67a60a2`，选项①）**
+
+- `git diff 9634fa1..67a60a2` = 2 files, +74/−6：`executor.rs` 的 `map_failure(WorkerFailure::Spawn)` 由 `NodeError::Config` 改为 `NodeError::NodeWorker { kind: WorkerErrorKind::Crash }`（对外码 **NODE_WORKER_CRASH**），注释明确「`NODE_CONFIG_ERROR` 只覆盖非 Harness 资产加载失败（00 §0.4），不覆盖进程启动失败」——与 spec 03 §3.9.4 步 1 一致。
+- 单测真实存在且断言充分：`spawn_failure_maps_to_worker_crash` 同时断言 `NodeError::NodeWorker{kind:Crash}` 与 `mapped.code()=="NODE_WORKER_CRASH"`（旧 `spawn_failure_maps_to_config_error` 已删除，无残留旧语义引用）。
+- schema 同步：§6 检查单新增该用例名与 #15 三条用例名；§7 新增第 6 条「spawn 失败 OS 细节不入错误载荷」已知限制（与 kernel `NodeWorker{kind}` 现状一致）。
+
+**三、reviewer-a §7.3 #15 的补测验证（真实存在且通过）**
+
+`cargo test -p zgraph-worker --lib` → **24 passed / 0 failed**，其中逐条确认在列且 ok：
+`executor::tests::spawn_failure_maps_to_worker_crash`、`executor::tests::worker_self_reported_timeout_is_a_protocol_violation`（`CODE_TIMEOUT→NodeWorker{Protocol}`，对应 04 §4.1.4）、`executor::tests::return_not_dict_maps_to_business_error_with_original_code`（`NODE_RETURN_NOT_DICT→BusinessError` 且 code 原样保留）、`executor::tests::python_handler_rejects_non_python_node`（非 `python_node` handler → `Internal`，用真实 DSL 图 + `CompiledGraph::compile` 构造）。
+
+**四、独立亲跑命令与结果（worktree 内，`CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home`，未共享 target）**
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test -p zgraph-worker --lib` | **24 passed / 0 failed**（含 §三 4 条 delta 用例） |
+| `cargo test -p zgraph-kernel --all-features` | **83 passed / 0 failed**（含新增 context 单测） |
+| `cargo test --workspace`（独立跑 1 次） | **294 passed / 0 failed** |
+| `cargo fmt --all -- --check` | exit 0 |
+| `cargo clippy -p zgraph-worker --all-targets -- -D warnings`（另 `-p zgraph-kernel --all-targets --all-features` 亦 exit 0） | exit 0 |
+| `bash scripts/dev/check.sh` | `CHECK PASSED`；`git status --porcelain` 空 |
+| 分支状态 | base=merge-base=`a6f4f5c`；`origin/main=33d55e8` **不是** HEAD 祖先（**未 rebase**，符合要求）；`67a60a2` author/committer=`chenyuxiangg <1007423165@qq.com>`，正文含 `Review: REV-012`/`Agent: worker-dev` |
+
+**五、遗留建议（不阻塞，建议 Lead 合并时登记/跟踪）**
+
+1. arch §8.2「`NODE_WORKER_CRASH` 记录 signal/exit」仍未落地：`WorkerFailure::Exit{code,stderr}` 在 `map_failure` 丢弃，`NodeError::NodeWorker` 仅 kind、无 trace/log 承载——建议 ISSUE（M4+ 经日志记录；`67a60a2` 只为 spawn OS 细节补了 schema §7 第 6 条，两者可合并跟踪）。
+2. REV-014 合并后的 spec 04 §4.2 尚未覆盖新公开 API：§4.2.1 Rust 代码块未列 `seed` 字段（仅字段来源表有）、§4.2.2 方法表未列 `seed()`/`global_vars()`；且 seed 来源写 `RunSpec.seed`，实际为 `RunSpec.options.seed`（`RunOptions.seed`）——建议 docs ISSUE 回写（非本分支）。
+3. nix 未进 `[workspace.dependencies]`（ISSUE-030 先例，process 后续统一）。
+
+**可合并性（跨模块视角）**：跨模块授权改动 + spawn 裁决 + #15 补测均**通过**；`merge.sh` 会先 rebase 到最新 `origin/main`（33d55e8）并重跑 `cargo test --workspace`（本机独立跑 294 passed；rebase 后若有冲突/失败由合并方按脚本处理）。
 
 ## 6. 条件关闭记录
 
