@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -166,5 +168,31 @@ def test_cancel_is_cooperative() -> None:
         assert frame["kind"] == "error"
         assert frame["payload"]["code"] == "NODE_CANCELLED"
         assert proc.wait(timeout=5) == 2
+    finally:
+        proc.kill()
+
+
+def test_no_execution_before_hello_ack(tmp_path: Path) -> None:
+    marker: Path = tmp_path / "marker.txt"
+    proc = _spawn()
+    try:
+        hello: dict[str, Any] = _readline(proc)
+        assert hello["kind"] == "hello"
+        assert proc.stdin is not None
+        # 未发 hello_ack：等待 0.3s，用户代码不得执行（标记文件不出现）
+        time.sleep(0.3)
+        assert not marker.exists(), "worker executed user code before hello_ack"
+        # 发 ack 后再发 run：必须执行
+        proc.stdin.write(encode_frame("hello_ack", {"accepted": True}))
+        proc.stdin.write(json.dumps(_run_frame("marker_worker", "run", {"marker": str(marker)})).encode("utf-8") + b"\n")
+        proc.stdin.flush()
+        frames: list[dict[str, Any]] = []
+        while True:
+            frame = _readline(proc)
+            frames.append(frame)
+            if frame["kind"] in {"result", "error"}:
+                break
+        assert frames[-1]["kind"] == "result"
+        assert marker.exists(), "worker must execute after hello_ack"
     finally:
         proc.kill()

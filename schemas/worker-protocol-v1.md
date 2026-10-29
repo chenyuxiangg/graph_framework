@@ -55,15 +55,15 @@
 ## 6. M0 验收检查单（状态：`[x]` 已实现/有测试；`[M3]` 延后并登记 ISSUE-025）
 
 - `[x]` `hello` 超时（5s，测试用 300ms）/ `v` 不匹配 / 缺字段 → 拒绝并 kill
-- `[x]` `hello_ack` 前不执行用户代码
+- `[x]` `hello_ack` 前不执行用户代码（`python/tests/test_runtime.py::test_no_execution_before_hello_ack`，标记文件负例）
 - `[x]` `run` 载荷含 `seed` / `deadline_ms` / `global_vars`
 - `[x]` 重复 `result` 检测（进程退出后读残余帧）；`[x]` exit 0 无 result（fixture 测试）；`[M3]` result 后不退出（supervisor 层）
 - `[x]` stderr 持续排空 + 8 KiB 尾部截断（压力用例）
 - `[x]` 用户 `print()` 不污染协议；`input()` 抛错
 - `[x]` 同步用户函数执行中收到 `cancel` → 标志置位、协作退出（Python 侧）
 - `[M3]` supervisor 发送 cancel → 2s → SIGTERM → 1s → SIGKILL 进程组
-- `[x]` 半行帧 / 非法 UTF-8 / 超 8 MiB（帧解码层）；`[M3]` 流式读取上限与帧空闲超时
-- `[x]` 超时不等待：显式 kill + wait/reap（单进程，测试断言 PID 消失）
+- `[x]` 半行帧 / 非法 UTF-8（`invalid_utf8_frame_is_rejected`）/ 超 8 MiB（帧解码层）；`[M3]` 流式读取上限与帧空闲超时
+- `[x]` 超时不等待：显式 kill + wait/reap（run 超时与 hello 超时两条路径，`*_kills_and_reaps_process` 断言 PID 消失）
 - `[M3]` 进程组 kill（孙进程）/ 全局与每 run 并发上限
 
 > 退出约定：worker 在写完 `result`/`error` 后 **flush stderr 并 `os._exit`**（跳过 atexit），

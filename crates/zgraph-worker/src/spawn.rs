@@ -140,18 +140,21 @@ pub async fn run_worker(
     let stderr_task = tokio::spawn(drain_stderr(stderr, config.max_stderr_bytes));
     let inner = drive(&mut child, stdin, stdout, request, config);
     let result = tokio::time::timeout(config.timeout, inner).await;
+
+    // 任何失败路径（含握手超时/协议错误）都必须显式 kill + wait/reap，
+    // 不能只依赖 kill_on_drop（否则僵尸进程窗口不可控）。
+    if !matches!(result, Ok(Ok(_))) {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
     let stderr_tail = match tokio::time::timeout(Duration::from_secs(1), stderr_task).await {
         Ok(Ok(text)) => text,
         _ => String::new(),
     };
 
     match result {
-        Err(_) => {
-            // 显式 kill + wait/reap：不能只依赖 kill_on_drop（会留下僵尸进程，窗口期不可控）。
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(WorkerFailure::Timeout(config.timeout))
-        }
+        Err(_) => Err(WorkerFailure::Timeout(config.timeout)),
         Ok(Ok(mut run)) => {
             run.stderr = stderr_tail;
             Ok(run)
@@ -258,11 +261,10 @@ async fn read_frame_line(
 async fn ensure_no_trailing_frame(
     reader: &mut BufReader<ChildStdout>,
 ) -> Result<(), WorkerFailure> {
-    // 进程已退出（ensure_exit 已 wait），管道中若还有帧必为 result 之后的非法帧。
-    match tokio::time::timeout(Duration::from_millis(50), read_frame_line(reader)).await {
-        Ok(Ok(Some(_))) => Err(protocol_error("duplicate/trailing frame after result")),
-        Ok(Ok(None)) | Err(_) => Ok(()),
-        Ok(Err(err)) => Err(err),
+    // 进程已退出（ensure_exit 已 wait），管道已关闭：一次 read_until 读到 EOF 或残余数据。
+    match read_frame_line(reader).await? {
+        Some(_) => Err(protocol_error("duplicate/trailing frame after result")),
+        None => Ok(()),
     }
 }
 

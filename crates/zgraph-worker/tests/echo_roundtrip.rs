@@ -88,18 +88,7 @@ async fn worker_timeout_kills_and_reaps_process() {
         .expect("worker must write pid before sleeping")
         .trim()
         .to_string();
-    for _ in 0..40 {
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !alive {
-            return; // 已被 kill 且 wait/reap 完成
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("worker pid {pid} still alive after timeout (zombie/not reaped)");
+    assert_pid_reaped(&pid);
 }
 
 #[tokio::test]
@@ -116,10 +105,16 @@ async fn import_failure_is_reported() {
 }
 
 #[tokio::test]
-async fn hello_timeout_is_reported() {
+async fn hello_timeout_kills_and_reaps_process() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pid_file = temp.path().join("hello.pid");
+    let script = "import os,sys,time; open(sys.argv[1],'w').write(str(os.getpid())); time.sleep(5)";
     let mut config = worker_config(Duration::from_secs(5));
-    config.program = python_program();
-    config.args = vec!["-c".to_string(), "import time; time.sleep(5)".to_string()];
+    config.args = vec![
+        "-c".to_string(),
+        script.to_string(),
+        pid_file.display().to_string(),
+    ];
     config.hello_timeout = Duration::from_millis(300);
     let request = sample_request("unused", "run", serde_json::json!({}));
     let err = run_worker(&config, &request)
@@ -129,6 +124,26 @@ async fn hello_timeout_is_reported() {
         WorkerFailure::Protocol(protocol) => assert_eq!(protocol.code, "NODE_WORKER_HANDSHAKE"),
         other => panic!("expected handshake error, got {other:?}"),
     }
+    let pid: String = std::fs::read_to_string(&pid_file)
+        .expect("probe must write pid")
+        .trim()
+        .to_string();
+    assert_pid_reaped(&pid);
+}
+
+fn assert_pid_reaped(pid: &str) {
+    for _ in 0..40 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("pid {pid} still alive (zombie/not reaped)");
 }
 
 #[tokio::test]
@@ -160,6 +175,25 @@ async fn exit_without_result_is_rejected() {
     match err {
         WorkerFailure::Protocol(protocol) => {
             assert!(protocol.message.contains("closed stdout before result"));
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invalid_utf8_frame_is_rejected() {
+    let config = fixture_config("invalid_utf8_worker.py", Duration::from_secs(5));
+    let request = sample_request("unused", "run", serde_json::json!({}));
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("must reject invalid utf-8");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert!(
+                protocol.message.contains("invalid utf-8"),
+                "unexpected message: {}",
+                protocol.message
+            );
         }
         other => panic!("expected protocol error, got {other:?}"),
     }
