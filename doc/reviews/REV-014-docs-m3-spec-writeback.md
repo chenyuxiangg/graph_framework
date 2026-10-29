@@ -189,3 +189,43 @@ git diff --name-only 66af480..HEAD        # 10 文件，仅 doc/spec-v1.2/** + d
 | R5（建议） | `02-DSL与校验.md:531`（§2.5.4 expected/actual） | `{"symbol","kind","format_or_op"}` 为自造键；实现为 python_node `{"symbol","kind":"python_node","format"}` / gate `{"symbol","kind":"gate","allowed"}`，建议写精确形状 |
 
 > 说明：C1（PROVENANCE 引用）、C3（04 §4.9）已完全关闭；C2 主口径、C4 主体已关闭，仅余 R1–R3 三处文本残留。作者修正 R1–R3（建议同轮 R4/R5）后，复审即可以「通过」结论追加 §6.2，合并门禁随之开放。本评审未改任何文档正文/台账/进度/README，未 merge/push。
+
+### 6.2 最终复审（2026-10-30，reviewer-b；HEAD `3205f98`）
+
+**复审范围**：作者残留修正提交 `3205f98`（`07ce558..HEAD` = 3 files, +8/−7，仅 `02-DSL与校验.md` / `04-节点接口与扩展点.md` / `PROVENANCE.md`）+ 重跑 hash/行数/check。独立看文件与实现，不采信作者自述。
+
+#### 6.2.1 R1–R5 关闭核对
+
+| 项 | 结果 | 关闭证据（文件:行 / 实现） |
+|---|---|---|
+| R1（C2 残留） | ✅ 已关闭 | `04-节点接口与扩展点.md:773`（§4.7.4 汇总行）已补「② **python_node 的 `module/function` 格式非法**（`bad_format`；D7 保留在加载期）」，定位改为「gate：`symbol`、`edge_index`；python_node：`node_id`」；与 `04:404`、`02:531` 及 `crates/zgraph-dsl/src/symbols.rs:239-252`（`symbol_not_found_python` → `at_node`/`bad_format`）一致。 |
+| R2（C4 残留） | ✅ 已关闭 | `04:272`（§4.3.1 示例）已改为 `from zgraph_worker import BusinessError   # 业务异常（可选导入；不提供 zgraph 兼容包）`，与 §4.3.4 `:361` 示例一致。 |
+| R3（C4 残留） | ✅ 已关闭 | `04:287` 已改为「Python SDK `zgraph_worker` 由仓库 `python/zgraph_worker` 提供…**不提供 `zgraph` 兼容包**」，与 `04:361` 一致；全仓无「Python 包 `zgraph` 由框架随 CLI/bin 提供」残留。 |
+| R4（建议） | ✅ 已按实现修正 | `04:324`（§4.3.3 `log` 行）改为「SDK **不做类型校验**；非 JSON 可序列化的 message 在写 `log` 帧时异常，由 runtime 归一为错误帧」；与 `python/zgraph_worker/ctx.py:68-70`（`log` 直接 `log_sink`、无校验）及 runtime `except Exception` → 错误帧一致。 |
+| R5（建议） | ✅ 已按实现修正 | `02:531`（§2.5.4 expected/actual）改为实现真实形状：python_node `expected {"symbol","kind":"python_node","format":"module.function"}` / `actual {"symbol","module","function"}`；gate `expected {"symbol","kind":"gate","allowed":[...]}` / `actual {"symbol","kind":"gate"}`；与 `crates/zgraph-dsl/src/symbols.rs:239-270` 逐键一致。 |
+
+#### 6.2.2 最终复审验证命令与结果
+
+```bash
+cd doc/spec-v1.2 && shasum -a 256 0*.md && wc -l 0*.md
+# 9 分册 SHA-256/行数逐项与 PROVENANCE §3 一致（脚本逐行比对 ALL_OK）；
+# 02=506f058f…(913)、04=9facd268…(876)、其余不变；00–08 合计 5530 行；
+# README 分册表 9 行逐项一致（02=913、04=876，故无需改动）
+bash scripts/dev/check.sh                  # 12 项 OK → CHECK PASSED，exit 0
+PYTHONPATH=python .venv/bin/python -m pytest   # 20 passed（base 仍早于 REV-013；rebase 后 44）
+git status --porcelain                     # 空
+git diff --name-only 07ce558..HEAD         # 3 files：仅 02/04/PROVENANCE（+8/−7）
+git diff --name-only 2863490..HEAD         # 全部在 doc/
+```
+
+- 残留 grep（全仓，排除 `doc/reviews/` 与本记录）：`zgraph.Cancelled` / `zgraph.NodeError` / `zgraph.EmitError` / `from zgraph import` / `zgraph.NodeCtx` / `zgraph.GateCtx` 均 **0 命中**；悬空「PROVENANCE §2.5」仅 `PROVENANCE.md:34` 的复盘说明（有意保留，非有效引用）。
+- `PROVENANCE §2 第 5 条` 已补 R1–R5 说明（`PROVENANCE.md:39`）；§2 第 4 条回写批次仍为 `:24`，引用正确。
+- 范围/副作用：`07ce558..HEAD` 未改 `crates/**`、`python/**`、`tests/**`、`doc/issues.md`、`doc/progress.md`、`doc/reviews/README.md`；作者提交 author/committer=`chenyuxiangg <1007423165@qq.com>`、正文含 `Review: REV-014` / `Agent: docs-writer`。
+
+#### 6.2.3 最终复审结论
+
+**复审结论：通过**
+
+- 原 §1 的 C1–C4 已全部关闭（C1/C3 见 §6.1；C2 残留 R1、C4 残留 R2/R3 及建议 R4/R5 见本节 6.2.1），§6.1 的「仍有条件」保留为历史记录。
+- 本记录满足 `merge.sh` 门禁：`分支: feat/docs-m3-spec-writeback` + 「结论：通过」；分支可执行 `scripts/dev/merge.sh feat/docs-m3-spec-writeback`（可 ff；merge.sh 会先 rebase 到最新 `origin/main` 并重跑测试，届时 pytest 预期 44 passed）。
+- 本评审未改任何文档正文/台账/进度/README；未 merge/push。
