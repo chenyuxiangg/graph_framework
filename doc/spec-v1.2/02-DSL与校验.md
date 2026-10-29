@@ -528,7 +528,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 | 错误码 | 触发条件（任一） | `expected` / `actual` | 定位 |
 |---|---|---|---|
-| `DSL_SYMBOL_NOT_FOUND` | ① **python_node 格式非法**：`config.module` 非点分 Python 标识符 / `config.function` 非 Python 标识符（`bad_format`；D7 保留在加载期）② **内置 gate op 路径**：符号名格式非法（非标识符）/ 内置 op 名不存在（不在 `check_output`/`compare`/`manual` 名单） | 对象 `{"symbol":…,"kind":…,"format_or_op":…}` / 原符号串 | python_node：`node_id`；gate：`edge_index` |
+| `DSL_SYMBOL_NOT_FOUND` | ① **python_node 格式非法**：`config.module` 非点分 Python 标识符 / `config.function` 非 Python 标识符（`bad_format`；D7 保留在加载期）② **内置 gate op 路径**：符号名格式非法（非标识符）/ 内置 op 名不存在（不在 `check_output`/`compare`/`manual` 名单） | python_node：`expected {"symbol","kind":"python_node","format":"module.function"}` / `actual {"symbol","module","function"}`；gate：`expected {"symbol","kind":"gate","allowed":[...]}` / `actual {"symbol","kind":"gate"}` | python_node：`node_id`；gate：`edge_index` |
 | `DSL_SIGNATURE_MISMATCH` | **仅内置 gate op 路径**：op 存在但 `gate.params` 不满足该 op 的 `params` 契约（04 §4.6/§4.7.2） | 对象 `{"symbol","kind":"gate","expected":<op 契约>}` / 实际 `params` | gate：`edge_index` |
 | `DSL_SYMBOL_CONFLICT` | ① 同一符号名在图内同时被内置 gate op 与 `python_node` 要求（跨类同名，`builtin.<op>` vs 用户 `module.function`）② 进程级 Registry 已存在同名但**期望契约不同**的内置 op（§2.5.6） | 对象 `{"symbol":…,"existing_kind":…,"requested_kind":…}` | 后出现的位置 |
 

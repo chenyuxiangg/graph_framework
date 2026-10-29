@@ -36,6 +36,7 @@
    - **C3 04 §4.9 对齐表**：节首结论改为「回写后已复核」；A2 改「8 变体（含 `NodeWorker`，D10）」；A7 改「`STREAMING_CHANNEL_CAP` 仅规范容量（M2 单通道 8192，ISSUE-033）、`stream_tx` → `emitter`、`PYTHON_CONCURRENCY_*` v2 忽略（D4）、并发上限 `MAX_WORKERS`/`MAX_WORKERS_PER_RUN`」；A17 补 M2 单通道临时口径。
    - **C4 SDK 名称/基类**：04 §4.3.3/§4.3.4/§4.5.3 的 Python 异常/包名统一为 `zgraph_worker.*`（`WorkerCancelled`/`BusinessError`/`ReturnNotDictError`/`ProtocolError`），`ProtocolError` 基类改为 `Exception`（**不是** `ValueError`），未捕获 → worker `error` 帧 `NODE_WORKER_PROTOCOL` → `NodeWorker{Protocol}`；`GateCtx` 改为预留名 `zgraph_worker.GateCtx`。
    - **建议项**：#5 `config.exec_class` 标 D4 v2 忽略；#6「派发前」统一为「run 启动后、实例创建前」（ISSUE-046）；#7 修复 04 §4.6.2 粗体不配对；#8 01 `RunState.killed_workers` → `u64`（对齐实现/00）；#9 `ctx` 只读表述改为「公有属性 + 约定只读，SDK 不做写入保护」。
+   - **复审 R1–R5**（2026-10-30，复审提交 `07ce558`）：R1 `04 §4.7.4` 汇总行补 python_node 格式非法与 `node_id` 定位；R2 `04 §4.3.1` 示例改 `from zgraph_worker import BusinessError`；R3 `04 §4.3.1` 删除“`zgraph` 由框架提供”表述、明确不提供兼容包；R4 `04 §4.3.3` `log` 失败列改实现口径（SDK 不做类型校验）；R5 `02 §2.5.4` expected/actual 改实现真实形状（python_node `format` / gate `allowed`）。
    - 本次改动后按 `shasum -a 256 0*.md` / `wc -l 0*.md` 重新实测并更新 §3（合计 **5530 行**）与 README 行数表。
 6. **后续修订规则**：任何对 spec 的修改**必须**同步本文件 §3 的 SHA-256/行数、在 §2 追加修订记录（日期 + 范围 + 关联 ISSUE/REV），并在评审记录中引用。
 
@@ -45,9 +46,9 @@
 |---|---|---|
 | `00-总纲.md` | ce26ecf52dd6302534073e2f669d4a61191357056e05cb9f7d5cd65a0eadbb7c | 287 |
 | `01-领域模型与状态机.md` | accb0e481fbd101a00a03a8a95518862b6f6232745667959e4bb646fbe28c283 | 302 |
-| `02-DSL与校验.md` | 8de5ccc2c1fcb2e574c5df89b2f3935c40b80f254a375eb6828421da85543d35 | 913 |
+| `02-DSL与校验.md` | 506f058fa68b816c2e1b5e4d2cded718007e9cda8b14be6cace387d254933eb5 | 913 |
 | `03-调度器与生命周期.md` | 5f6c91bb45f6677a55f6e8d9b25c178a958c9adf7c96bbb2ca04401c5e47f002 | 388 |
-| `04-节点接口与扩展点.md` | a649a765c064f7a556d9818f0897782efce29b215345410b7ba57d58a0400978 | 876 |
+| `04-节点接口与扩展点.md` | 9facd26862ca390c71ff7c40cf7ef7ff4750b90e8f9ff3090f3941cd6b25145b | 876 |
 | `05-AgentHarness.md` | 43c85a6ee6884e82c766abbb2987341bc0388900482ff7bbbf8d7b201492b871 | 1172 |
 | `06-存储与可观测.md` | fdc42157c749a21b7cff9359ccedcfee3e41e271b95fc2503dde0b511acf9feb | 985 |
 | `07-验收用例.md` | 26c39fe35fee35ee04c391b604f79caeaf3ba55a1d1431ef18a4bbd90029007a | 195 |
