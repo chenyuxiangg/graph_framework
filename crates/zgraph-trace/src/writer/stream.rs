@@ -107,12 +107,21 @@ pub(crate) struct Segment {
 pub(crate) struct Aggregator {
     buffers: HashMap<BufferKey, DeltaBuffer>,
     next_index: HashMap<IndexKey, i64>,
+    /// 同批次内 snapshot/transition 先于 Streaming 到达时的 node_id 回填来源
+    /// （事务尚未提交，DB 查询看不到本批 upsert）。
+    node_ids: HashMap<String, String>,
 }
 
 impl Aggregator {
     /// 当前是否有未落库的 delta 缓冲。
     pub(crate) fn is_empty(&self) -> bool {
         self.buffers.is_empty()
+    }
+
+    /// 记录实例 → 节点映射（snapshot/transition 路由时调用，供 node_id 回填）。
+    pub(crate) fn note_instance(&mut self, instance_id: &str, node_id: &str) {
+        self.node_ids
+            .insert(instance_id.to_string(), node_id.to_string());
     }
 
     /// 处理一条 `Streaming` 输入：delta 入缓冲（可能提前分段），非 delta 立即成段。
@@ -206,6 +215,10 @@ impl Aggregator {
             instance_id: delta.instance_id.to_string(),
             kind: delta.kind,
         };
+        if let Some(node_id) = delta.node_id.as_deref() {
+            self.node_ids
+                .insert(delta.instance_id.to_string(), node_id.to_string());
+        }
         let buffer = self
             .buffers
             .entry(key.clone())
@@ -250,10 +263,7 @@ impl Aggregator {
             kind: key.kind.as_str(),
         };
         let segment_index = self.assign_index(conn, &index_key)?;
-        let node_id = match buffer.node_id {
-            Some(node_id) => Some(node_id),
-            None => lookup_instance_node(conn, &key.instance_id)?,
-        };
+        let node_id = self.resolve_node(conn, buffer.node_id, &key.instance_id)?;
         let (text, text_chars, text_bytes, truncated) = finalize_text(buffer.text);
         batch.push_segment(Segment {
             run_id: key.run_id.clone(),
@@ -293,11 +303,8 @@ impl Aggregator {
             kind,
         };
         let segment_index = self.assign_index(conn, &index_key)?;
-        let node_id = match node_id {
-            Some(node_id) => Some(node_id),
-            None => lookup_instance_node(conn, &instance_id)?,
-        };
-        let mut segment = Segment {
+        let node_id = self.resolve_node(conn, node_id, &instance_id)?;
+        let segment = Segment {
             run_id,
             instance_id,
             node_id,
@@ -316,41 +323,22 @@ impl Aggregator {
             first_at: at.clone(),
             last_at: at,
         };
-        match event {
-            StreamingEvent::ToolCallStart {
-                call_id,
-                tool_name,
-                args_summary,
-            } => {
-                segment.call_id = Some(call_id);
-                segment.tool_name = Some(tool_name);
-                segment.summary = Some(args_summary);
-            }
-            StreamingEvent::ToolCallEnd {
-                call_id,
-                tool_name,
-                ok,
-                result_summary,
-            } => {
-                segment.call_id = Some(call_id);
-                segment.tool_name = Some(tool_name);
-                segment.ok = Some(ok);
-                segment.summary = result_summary;
-            }
-            StreamingEvent::Progress { percent, message } => {
-                segment.text_chars =
-                    Some(i64::try_from(message.chars().count()).unwrap_or(i64::MAX));
-                segment.text_bytes = Some(i64::try_from(message.len()).unwrap_or(i64::MAX));
-                segment.percent = Some(i64::from(percent));
-                segment.text = Some(message);
-            }
-            StreamingEvent::TokenDelta { .. } | StreamingEvent::ReasoningDelta { .. } => {
-                return Err(TraceError::Storage(
-                    "delta event routed to non-delta segment".to_string(),
-                ));
-            }
+        fill_non_delta(segment, event)
+    }
+
+    fn resolve_node(
+        &self,
+        conn: &Connection,
+        explicit: Option<String>,
+        instance_id: &str,
+    ) -> Result<Option<String>, TraceError> {
+        if explicit.is_some() {
+            return Ok(explicit);
         }
-        Ok(segment)
+        if let Some(node_id) = self.node_ids.get(instance_id) {
+            return Ok(Some(node_id.clone()));
+        }
+        lookup_instance_node(conn, instance_id)
     }
 
     fn assign_index(&mut self, conn: &Connection, key: &IndexKey) -> Result<i64, TraceError> {
@@ -372,6 +360,43 @@ impl Aggregator {
             }
         }
     }
+}
+
+fn fill_non_delta(mut segment: Segment, event: StreamingEvent) -> Result<Segment, TraceError> {
+    match event {
+        StreamingEvent::ToolCallStart {
+            call_id,
+            tool_name,
+            args_summary,
+        } => {
+            segment.call_id = Some(call_id);
+            segment.tool_name = Some(tool_name);
+            segment.summary = Some(args_summary);
+        }
+        StreamingEvent::ToolCallEnd {
+            call_id,
+            tool_name,
+            ok,
+            result_summary,
+        } => {
+            segment.call_id = Some(call_id);
+            segment.tool_name = Some(tool_name);
+            segment.ok = Some(ok);
+            segment.summary = result_summary;
+        }
+        StreamingEvent::Progress { percent, message } => {
+            segment.text_chars = Some(i64::try_from(message.chars().count()).unwrap_or(i64::MAX));
+            segment.text_bytes = Some(i64::try_from(message.len()).unwrap_or(i64::MAX));
+            segment.percent = Some(i64::from(percent));
+            segment.text = Some(message);
+        }
+        StreamingEvent::TokenDelta { .. } | StreamingEvent::ReasoningDelta { .. } => {
+            return Err(TraceError::Storage(
+                "delta event routed to non-delta segment".to_string(),
+            ));
+        }
+    }
+    Ok(segment)
 }
 
 fn lookup_instance_node(

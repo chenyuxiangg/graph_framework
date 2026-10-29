@@ -128,15 +128,25 @@ impl Writer {
             return;
         }
         match input {
-            TraceInput::InstanceSnapshot(_) => batch.push_snapshot(input),
-            TraceInput::Transition { record, snapshot } if record.to.is_terminal() => {
-                if let Err(err) =
-                    self.state
-                        .aggregator
-                        .flush_instance(&self.conn, &record.instance_id, batch)
-                {
-                    self.record_fatal(err);
-                    return;
+            TraceInput::InstanceSnapshot(snapshot) => {
+                self.state
+                    .aggregator
+                    .note_instance(&snapshot.instance_id, &snapshot.node_id);
+                batch.push_snapshot(TraceInput::InstanceSnapshot(snapshot));
+            }
+            TraceInput::Transition { record, snapshot } => {
+                self.state
+                    .aggregator
+                    .note_instance(&snapshot.instance_id, &snapshot.node_id);
+                if record.to.is_terminal() {
+                    if let Err(err) =
+                        self.state
+                            .aggregator
+                            .flush_instance(&self.conn, &record.instance_id, batch)
+                    {
+                        self.record_fatal(err);
+                        return;
+                    }
                 }
                 batch.push_event(TraceInput::Transition { record, snapshot });
             }
