@@ -130,7 +130,28 @@ PROBE serial run#2 elapsed=488.244291ms status=Completed
 ### 5.2 跨模块 process 授权与第二评审
 
 - 授权：Lead（task-4）批准根 `Cargo.toml`/`Cargo.lock` 的 process 边界改动；实测 `Cargo.lock` 仅新增 `zgraph-e2e` 包条目（无新增第三方 crate），`Cargo.toml` 仅 +1 行 member；`cargo build/check/test --workspace`、clippy、CI 默认 `cargo test --workspace` 均不受破坏（本机 313 passed ×2）。
-- **process 边界第二评审：待 reviewer-b 追加**（请复核：workspace 成员新增/`autotests=false`+`[[test]]` 结构、`nix` dev-dependency 版本一致性与是否应提升 workspace.dependencies、test-only 包对 CI `cargo test --workspace` 时长影响（本机 e2e 增量约 6–7s/次））。
+- **process 边界第二评审：已完成（reviewer-b，2026-10-30）**，结论与证据见下 §5.2.1；此前“待 reviewer-b 追加”状态保留于 git 历史。
+
+#### 5.2.1 第二评审结论与证据（reviewer-b，2026-10-30，HEAD `1a4d7cc`）
+
+**范围**：`23123cf..1a4d7cc` 的 **process 边界部分**——根 `Cargo.toml` 新增 workspace 成员、`Cargo.lock` 新增 `zgraph-e2e` 包条目、`tests/e2e/Cargo.toml` 的 test-only 包结构与依赖、依赖图/无环、CI 自动覆盖、nix 版本唯一性、对生产构建/merge 门禁的影响。**独立看文件 + 亲跑命令，不采信自述**。说明：分析期间分支 HEAD 由 `5ed6fa9` 前进到 `1a4d7cc`（reviewer-a §7 复审提交，仅 `doc/reviews/REV-015-*.md` +52/−1），process 三文件在 `5ed6fa9..1a4d7cc` **未变**；工作区最终 clean。
+
+**process 边界第二评审结论：通过**。授权范围内**无必改项**；nix 重复声明（IS12）为**非阻塞建议**。
+
+| 核对项 | 结果与证据 |
+|---|---|
+| workspace 成员/命名/路径 | ✅ 根 `Cargo.toml` 仅 +1 行 `"tests/e2e"`（members 共 7 个）；路径符合 architecture §2.1「`tests/e2e/ # Rust 集成 + Python worker 端到端`」与 AGENTS §2 `e2e` 模块（`tests/e2e/**`）；package `zgraph-e2e` 命名与 `zgraph-*` 一致；base=merge-base=`origin/main`=`23123cf`（可 ff） |
+| Cargo.lock 仅增量/无漂移 | ✅ 脚本逐包比对 23123cf vs HEAD：包数 **85→86**，`added=["zgraph-e2e"]`、`removed=[]`、**version_drift=NONE**；`zgraph-e2e` 为 path 成员（无 `source`），依赖边=chrono/nix/serde_json/tempfile/tokio/zgraph-{cli,dsl,kernel,trace,worker}；**nix 仅 1 个 0.29.0**（无第二版本） |
+| test-only 包结构 | ✅ `tests/e2e/Cargo.toml`：`publish=false`、workspace 继承 version/edition/rust-version/license/authors；`autotests=false` + **5 个 `[[test]] path`** 与 `tests/e2e/{timeout_kill,parallel,cancel,fault_injection,concurrency}.rs` 逐一对应；全部依赖在 `[dev-dependencies]`（**normal deps 为空**），`nix` 在 `[target.'cfg(unix)'.dev-dependencies]` |
+| 依赖图无环 | ✅ `cargo metadata`：e2e→{cli,dsl,kernel,trace,worker}、cli→{dsl,kernel,trace}、worker→{dsl,kernel}、kernel→dsl、dsl/trace/harness 无 zgraph 依赖；**cycles: NONE** |
+| 生产构建无影响 | ✅ `cargo metadata --no-deps` 显示 `zgraph-e2e` targets **仅 5 个 `test`（无 lib/bin）**；`cargo tree -p zgraph-e2e --edges normal` 只有自身；`cargo build --workspace` exit 0、`cargo build -p zgraph-e2e` exit 0（无目标/无产物）；`publish=false` |
+| workspace 测试/CI 自动覆盖 | ✅ `cargo test --workspace --no-run` exit 0 并编译出 5 个 e2e 可执行（`Executable cancel.rs / concurrency.rs / fault_injection.rs / parallel.rs / timeout_kill.rs`）；`cargo test -p zgraph-e2e -- --list` = **19 tests**；`.github/workflows/ci.yml` 本分支未改：rust job `cargo test --workspace` 自动纳入新成员、`ZGRAPH_PYTHON: python3` 在 base 已存在、`clippy --workspace --all-targets`/`fmt --all` 同样覆盖；python job（`uv run pytest`）只跑 `python/`，不受影响 |
+| 平台门控 | ✅ 5 个 e2e 测试文件均 `#![cfg(unix)]`，`nix` 仅 `cfg(unix)` dev-dep → 非 Unix 下测试 crate 为空、可编译（不做 Windows 运行验证，与既有平台限制一致） |
+| nix 重复声明（IS12） | ⚠️ 非阻塞建议：`crates/zgraph-worker/Cargo.toml`（cfg(unix) normal dep）与 `tests/e2e/Cargo.toml`（cfg(unix) dev dep）均声明 `nix = {version="0.29", features=["signal","process"]}`；Cargo.lock 单版本统一 → **当前可接受**；建议 process 模块后续提升到 `[workspace.dependencies]`（两处 `nix.workspace = true`），防单边升级漂移。与 reviewer-a #12「仅登记」决定一致 |
+| 质量门禁/洁净度 | ✅ `cargo check --workspace` / `cargo build --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` / `bash scripts/dev/check.sh` 均 exit 0；worktree clean（HEAD=`1a4d7cc`） |
+| 对 merge 门禁的影响 | ℹ️ `scripts/dev/merge.sh:79` 的 `cargo test --workspace --quiet` 现包含 19 个 e2e 测试（本机需 `python3`/Unix，与既有 worker 测试相同；reviewer-a 实测全量 313 passed；`doc/test-baseline.txt` 为空）；e2e 时序余量风险见 §7.4①，非 process 缺陷 |
+
+**结论/可合并性（process 视角）**：根 `Cargo.toml`/`Cargo.lock`/`tests/e2e/Cargo.toml` 合规，test-only 成员不影响生产构建，CI 未改亦自动覆盖 e2e；**无阻塞项，可合并**（merge.sh 会 rebase 到最新 `origin/main` 并重跑 `cargo test --workspace`）。唯一建议：nix 提升 `[workspace.dependencies]`（非阻塞，随 IS12 台账跟踪）。
 
 ### 5.3 非阻塞遗留（需 Lead 登记 / 后续处理）
 
