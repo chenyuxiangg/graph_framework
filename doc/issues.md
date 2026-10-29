@@ -2,6 +2,7 @@
 
 > 规则（见 `AGENTS.md` §7）：评审无法当场修复的问题、已知缺陷、环境阻塞、设计分歧必须登记；不允许用代码注释/TODO 代替。
 > 级别：`P0` 阻塞开发 / `P1` 高 / `P2` 中 / `P3` 低。状态：`open` / `in-progress` / `fixed` / `wontfix`。
+> 模块列允许「主责/协作」复合标签（如 `kernel/e2e`），首个为主要责任模块（同 ISSUE-011 先例）。
 
 | ID | 级别 | 模块 | 问题 | 影响 | 建议 | 状态 | 登记日期 |
 |---|---|---|---|---|---|---|---|
@@ -45,7 +46,7 @@
 | ISSUE-038 | P3 | trace | `instances.created_seq` 恒 NULL（M2 允许）；`instances` 排序用 rowid，无 node_order 保证 | 需要“实例创建事件序号”的查询不可用；CLI 实例列表顺序不保证 DSL 顺序 | M5 按需回填 created_seq；CLI 需要稳定顺序时按 node_id 排序 | open | 2026-10-29 |
 | ISSUE-039 | P2 | trace | 迁移前无 `VACUUM INTO` 备份；DB 文件/目录权限未按 06 §6.9 设 0600/0700 | 迁移失败回滚保障与数据保密未达 spec | M5 补备份/权限处理与测试 | open | 2026-10-29 |
 | ISSUE-040 | P3 | trace | 写线程内存态 `node_ids`/`next_index` 只增不减；`streaming_dropped` 计数在 handle 级 | 超长多 run 场景内存缓慢增长；多 handle 时统计口径需确认 | M5 定期清理终态 run 的聚合状态，明确 dropped 归属 | open | 2026-10-29 |
-| ISSUE-041 | P3 | trace | reader 不校验 `RunFinished` 唯一性/终态（I5 由 kernel 保证）；AC-03 自检未在存储层强制 | 外部写入/损坏库时回放可能看到非法终态 | M5 增加 `trace --stats`/回放自检（非致命告警） | open | 2026-10-29 |
+| ISSUE-041 | P3 | trace | 写端与 reader 均未校验 `RunFinished` 终态/唯一性（I5 由 kernel 保证）；AC-03 自检未在存储层强制 | 外部写入/损坏库时回放可能看到非法终态；重复 RunFinished 不会被拒 | M5 在写端或回放自检中校验（非致命告警+ISSUE 提示） | open | 2026-10-29 |
 | ISSUE-042 | P3 | kernel | executor 的 `execute()` 同步段（future 构造前）panic 不被 `CatchPanic` 捕获，会走 deadline（默认 180s）后 TimedOut 而非 NODE_INTERNAL | 仅异常 executor 实现触发 | **已修**：`CatchPanic::new(async move { executor.execute(execution).await })` + 回归测试（REV-011，0deefd9）；测试在未修复时需等 180s 才失败，后续可用短 timeout 加速回归 | fixed | 2026-10-29 |
 | ISSUE-043 | P2 | kernel | spec 自相冲突：00 §0.2 `EdgeIndex`=usize 别名 与 01 §1.1.2 `EdgeIndex` 结构体同名；M2 保留结构体、数值别名改 `EdgeIdx=usize` | 代码与 spec 00 字面不一致；后续模块可能误用 | 回写 00 §0.2/01 §1.1.2（并入 ISSUE-020），或 v1.3 统一改名 | open | 2026-10-29 |
 | ISSUE-044 | P3 | kernel | 多 end 同名 key 冲突未打 warning（kernel 无日志设施；覆盖语义已实现） | 冲突不可观测，调试成本高 | M3+ 引入统一日志后补 warning | open | 2026-10-29 |
@@ -54,7 +55,7 @@
 | ISSUE-047 | P2 | kernel/e2e | M2 验收用 in-process FakeExecutor：AC-06 的“真进程组 kill/无残留子进程”、AC-07 真 worker 场景、AC-08/09/12 分别依赖 M3/M4/M5 | M2 DoD 以 D1 改写口径通过；真进程/LLM/多 run 场景未覆盖 | M3 换真 worker 后补 `tests/e2e/timeout_kill.rs` 等，回归 AC-06/07 | open | 2026-10-29 |
 | ISSUE-048 | P3 | cli | `zgraph trace` 未实现 06 §6.8.3 的 “run still in progress (pid N)” 提示（`RunRow` 无 owner_pid） | Running/Paused 且 owner 存活时仅按 exit 0 回放，无 pid 提示 | M3/M5 trace reader 增 owner_pid 后补 | open | 2026-10-29 |
 | ISSUE-049 | P3 | cli | `trace --json` 的 interrupted 截断提示写 stderr（保持 stdout 纯 NDJSON）；06 未明确该组合 | 脚本消费者需同时读 stderr 才知道截断 | M5 定案（可考虑在 RunFinished 缺失时附加 JSON 诊断行） | open | 2026-10-29 |
-| ISSUE-050 | P2 | docs | ISSUE-020 的 M0–M2 spec 回写仍未执行；M2 新增待回写项：单通道/RecordMode 取值/EdgeIndex 命名/NodeTimedOut.at/subgraph 时机/§8.2 错误码 | spec 正文与实现偏差累积，后续实现者可能误读 | 单列 docs 任务（M2 后立即或 M5 前）逐条回写 00/03/04/06 并更新 PROVENANCE hash | open | 2026-10-29 |
+| ISSUE-050 | P2 | docs | **ISSUE-020 子项**：M0–M2 spec 回写仍未执行；M2 新增待回写项：单通道/RecordMode 取值/EdgeIndex 命名/NodeTimedOut.at/subgraph 时机/§8.2 错误码/NodeError JSON 形状 | spec 正文与实现偏差累积，后续实现者可能误读 | 作为 ISSUE-020 的 M2 批次一并回写 00/03/04/06 并更新 PROVENANCE hash | open | 2026-10-29 |
 | ISSUE-051 | P3 | kernel/cli | kernel 的 trace 记录类型未 derive serde；cli 桥接层手动逐字段映射（约 1 个文件） | 字段新增时桥接需同步改，存在漂移风险 | M3 评估给 kernel 记录加 serde（仅增不删）或抽共享 DTO | open | 2026-10-29 |
 | ISSUE-052 | P3 | e2e | M2 AC 验收测试落在 `crates/zgraph-cli/tests/acceptance_m2.rs`（composition root）；07 §7.1 期望的 `tests/e2e/**` 与 `examples/**` 资产路径尚未建立（ISSUE-028 同源） | 与 07 文档路径不一致；M3–M5 迁移 e2e 时需映射 | M3 建立 `tests/e2e/**` 后迁移/复用；或更新 07 路径说明 | open | 2026-10-29 |
 | ISSUE-053 | P2 | cli/docs | bridge 的 `NodeError→JSON` 为自定扁平形状（`{code,kind,business_code?,traceback?,elapsed_ms?}`）；06 §6.2.5/§6.2.7 只写“JSON: NodeError”，无 canonical schema | AC-05/AC-06 已锁定该形状；traceback 保留；后续 CLI/回放依赖该形状 | 并入 ISSUE-020 回写 06：冻结 NodeError JSON schema（或引入共享 serde DTO）；M3 可复用该形状 | open | 2026-10-29 |
@@ -64,3 +65,4 @@
 | ISSUE-057 | P3 | cli | `validate.rs` 的模块可见性由 `pub(crate)` 改为 `pub`，经 lib re-export 扩大了无谓公开 API | API 面变大，后续维护成本 | 恢复 `pub(crate)`，lib 只暴露 `dispatch`/`run`/必要类型 | open | 2026-10-29 |
 | ISSUE-058 | P3 | cli | `--stats` 静默忽略 `--since-seq/--limit/--kinds`；AC-03 未断言 transitions.seq 与 events(Transition).seq 1:1；trace 测试缺 Running/Paused（无 RunFinished）、`:memory:` 等场景 | 行为语义不明确；存储自检覆盖不足 | M5 明确 stats 是否受过滤影响并回写 06；补 1:1 与运行中场景测试 | open | 2026-10-29 |
 | ISSUE-059 | P3 | cli | `--stats` 与 `--json` 组合、`-q` 等参数边界在 06 中未细化；M1 validate 用法退出码 3 与 06 §6.10.5 的 2 并存 | 文档/实现口径不完全统一 | 并入 ISSUE-020/02 §2.7.4 回写，统一 CLI 用法错误退出码 | open | 2026-10-29 |
+| ISSUE-060 | P3 | process | REV-007/008/009 中未逐条落台账的低优先评审建议汇总：丢弃 `RunHandle` 不自动取消、`start_run` 需 Tokio runtime、builtin gate 在事件循环内求值、多 end 冲突 warning、progress payload 重复 message、bridge start-error 测试仅断言 Err、trace 部分测试函数 >60 行 | 单条价值低但遗漏会降低评审闭环质量 | 每条在 M3 开工前复核，必要时转独立 ISSUE；本行作为评审建议汇总接受 | open | 2026-10-29 |

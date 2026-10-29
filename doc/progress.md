@@ -17,7 +17,7 @@
 
 **下一步**
 1. M3 worker：真子进程 + 进程组 kill + 并发上限 + 协议异常分支；回归 AC-06/07 真进程断言（ISSUE-047）。
-2. M4 Harness / M5 CLI run·replay + e2e 迁移（ISSUE-052）。
+2. M3 建立 `tests/e2e/**` 并迁移 M2 验收用例；M4 Harness / M5 CLI run·replay（ISSUE-052）。
 
 **阻塞**
-- 无硬阻塞；ISSUE-014/015/020/033–059 按里程碑推进（spec 回写 = ISSUE-050）。
+- 无硬阻塞；ISSUE-014/015/020/033–041/043–059 按里程碑推进（spec 回写 = ISSUE-020 的 ISSUE-050 子项）。
