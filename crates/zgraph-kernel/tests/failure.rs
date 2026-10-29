@@ -413,3 +413,46 @@ async fn cancelled_without_flag_is_normalized_to_internal() {
         Some(InstanceStatus::Crashed)
     );
 }
+
+/// 执行器在返回 future **之前**同步 panic（REV-007 残留：原 CatchPanic 只包 future）。
+struct SyncPanicExecutor;
+
+impl NodeExecutor for SyncPanicExecutor {
+    fn execute<'a>(
+        &'a self,
+        _execution: NodeExecution<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, NodeError>> + Send + 'a>> {
+        panic!("sync executor boom");
+    }
+}
+
+#[tokio::test]
+async fn executor_sync_panic_normalizes_to_internal_and_fails_fast() {
+    let started = Instant::now();
+    let (outcome, sink) =
+        common::run_with_sink(common::linear_spec(), Arc::new(SyncPanicExecutor)).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "sync panic must fail immediately, not at the 180s deadline (took {elapsed:?})"
+    );
+    assert_eq!(outcome.status, RunStatus::Failed);
+    let error = outcome.error.expect("run error");
+    assert_eq!(error.code, "NODE_INTERNAL");
+    assert!(
+        error.message.contains("sync executor boom"),
+        "sync panic payload should be surfaced: {}",
+        error.message
+    );
+    let crashed = common::snapshots_of(&sink, "work")
+        .into_iter()
+        .find(|snapshot| snapshot.status == InstanceStatus::Crashed)
+        .expect("crashed snapshot");
+    assert_eq!(crashed.error_code.as_deref(), Some("NODE_INTERNAL"));
+    assert!(
+        sink.timed_out().is_empty(),
+        "sync panic must not be reported as NodeTimedOut"
+    );
+    common::assert_lifecycle_once(&sink);
+}

@@ -773,7 +773,10 @@ impl RunLoop {
             };
             // 00 §0.7 / 04 §4.1.1：执行器 panic 必须归一化为 Internal（Crashed），
             // 不能静默留到实例 deadline 才判 TimedOut。
-            match CatchPanic::new(executor.execute(execution)).await {
+            // 注意把 `execute` 的**同步段**也包进 async 块：如果实现在返回 future 前
+            // 就 panic，直接 `CatchPanic::new(executor.execute(..))` 仍会漏出。
+            let call = async move { executor.execute(execution).await };
+            match CatchPanic::new(call).await {
                 Ok(Ok(output)) => {
                     let evaluations = evaluate_outgoing(&graph, &node_id, &output);
                     let _ = tx.send(RuntimeEvent::Completed {
@@ -922,12 +925,21 @@ impl RunLoop {
         );
     }
 
-    /// 普通执行失败：Running→Crashed → 冷峻 `fail_run`。
-    fn fail_crashed(&mut self, instance_id: &str, node_id: &str, error: NodeError) {
+    /// 回填实例的错误与错误码（迁移前调用，随迁移 snapshot 进入 trace）。
+    ///
+    /// 为什么必须在 `transition` 之前：`InstanceSnapshot.{error_code,error}` 是
+    /// trace writer 落 `instances.error/error_code` 与 `transitions.error_code/error`
+    /// 的唯一来源（06 §6.2.5/§6.2.7）；迁移后再写不会进入该次 transition 快照。
+    fn set_instance_error(&mut self, instance_id: &str, error: NodeError) {
         if let Some(record) = self.instances.get_mut(instance_id) {
             record.error_code = Some(error.code().to_string());
-            record.error = Some(error.clone());
+            record.error = Some(error);
         }
+    }
+
+    /// 普通执行失败：Running→Crashed → 冷峻 `fail_run`。
+    fn fail_crashed(&mut self, instance_id: &str, node_id: &str, error: NodeError) {
+        self.set_instance_error(instance_id, error.clone());
         if !self.transition_or_fail(instance_id, InstanceStatus::Crashed, "execution failed") {
             return;
         }
@@ -1308,6 +1320,9 @@ impl RunLoop {
             }
             self.emitter
                 .node_timed_out(&self.run_id, &instance_id, elapsed_ms, now_rfc3339());
+            // 回填实例错误：trace 的 instances.error/error_code 与 transitions.* 都取自
+            // 迁移时传入的 InstanceSnapshot（06 §6.2.5/§6.2.7），不写则 AC-06 落库为 NULL。
+            self.set_instance_error(&instance_id, NodeError::Timeout { elapsed_ms });
             if !self.transition_or_fail(&instance_id, InstanceStatus::TimedOut, "timeout") {
                 return;
             }
