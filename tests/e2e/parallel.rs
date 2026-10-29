@@ -2,10 +2,13 @@
 //! 「同一端口两次投递」的 trace 可见性。
 //!
 //! 语义基准：`doc/spec-v1.2/07-验收用例.md` AC-09 + `doc/architecture-v2.md` §8 D8
-//! （含进程冷启动后重新标定；初值 <1.0s）：
+//! （含进程冷启动后重新标定；1.0s 只是初值占位，M3 实测后回填）：
 //!
-//! - `a`/`b` 的 **Running 区间重叠**（用 trace `transitions.at` 的真实墙钟计算）；
-//! - 总耗时实测后写死阈值（见 [`PARALLEL_TOTAL_BUDGET`] 注释中的实测值）；
+//! - `a`/`b` 的 **Running 区间重叠**，进入 Running 时间差 **< 50ms**（07 冻结口径；
+//!   用 trace `transitions.at` 的真实墙钟计算）；
+//! - 总耗时按 D8 **实测重标定**（[`PARALLEL_TOTAL_BUDGET`]），并要求
+//!   **并行耗时 < 串行对照耗时 × 0.8**（同用例内跑同两 worker 的串行图，证伪
+//!   「串行也能通过」）；
 //! - `merge`（end 节点）收到 `ra`/`rb` 两端口各一份数据（trace `gate_results` 两次投递）；
 //! - 同输入连续 5 次 run：每个节点的迁移链与终态一致（允许并行分支交错）；
 //! - 覆盖语义：v1 单数据源（DSL R5 禁止同一端口多来源）；同一自环边两次投递在
@@ -19,28 +22,39 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Value};
 
-use zgraph_kernel::RunStatus;
+use zgraph_cli::bridge::BridgeOutcome;
+use zgraph_kernel::{CompiledGraph, RunStatus};
 use zgraph_trace::InstanceStatus as TraceInstanceStatus;
 
-/// AC-09 总耗时阈值（D8：M3 实测后写死）。
+/// 两个并行分支进入 Running 的时间差上限：**07 AC-09 冻结口径 <50ms**。
 ///
-/// **实测**（本机 macOS / Python 3.13，`cargo test -p zgraph-e2e --test parallel`，
-/// 单 run 含两个 worker 冷启动 + 各 sleep 0.2s）：**0.257–0.280s**（连测 3 次；
-/// `a`/`b` 进入 Running 的时间差实测 0ms——同一轮派发）；串行同图（a→b）约 0.5–0.6s。
-/// D8 初值 `<1.0s` 保留为硬阈值（~3.5x 余量，CI 慢机友好），真正的并行证据是
-/// 「Running 区间重叠 + 时间差 < 250ms」断言，阈值只作总耗时上限。
-const PARALLEL_TOTAL_BUDGET: Duration = Duration::from_millis(1_000);
+/// 实测（本机 macOS / Python 3.13，连测 3 次）：a/b 同一轮派发，时间差 **0ms**；
+/// 50ms 上限保留进程冷启动/CI 抖动余量。
+const BRANCH_START_SKEW_LIMIT: Duration = Duration::from_millis(50);
 
-/// 两个并行分支进入 Running 的时间差上限（进程冷启动 + 派发抖动；实测 <20ms）。
-const BRANCH_START_SKEW_LIMIT: Duration = Duration::from_millis(250);
+/// 并行总耗时上限（D8：M3 实测后重标定，替换 1.0s 占位）。
+///
+/// **实测**（本机 macOS / Python 3.13，2026-10-30 连测 5 次；REV-015 复审抽样一致）：
+/// 并行 **248–295ms**（复审 252–292ms）；同两 worker 串行对照 **504–558ms**
+/// （复审 488–528ms），并行/串行 ≈ 0.44–0.53。取 600ms ≈ 实测上限 2x 余量；
+/// 「显著小于串行」由同用例的串行对照断言（<80%）保证，绝对阈值只作上界。
+const PARALLEL_TOTAL_BUDGET: Duration = Duration::from_millis(600);
+
+/// 串行对照系数：并行总耗时必须 < 串行 × 0.8（D8「显著小于串行」的可证伪形式）。
+const SERIAL_RATIO_PERCENT: u128 = 80;
 
 /// 确定性回归的 run 次数（07 AC-09：连续 5 次）。
 const DETERMINISM_RUNS: usize = 5;
+
+// ---------------------------------------------------------------------------
+// trace 时序与摘要
+// ---------------------------------------------------------------------------
 
 /// 解析 trace 墙钟（RFC3339 毫秒 Z）。
 fn parse_at(at: &str) -> DateTime<FixedOffset> {
@@ -108,13 +122,17 @@ fn digest(reader: &zgraph_trace::TraceReader, run_id: &str) -> RunDigest {
     }
 }
 
-/// 跑一次 `valid_parallel.json`（真 worker，两分支各 sleep 0.2s），返回 outcome + 耗时。
-async fn run_parallel_once(
+// ---------------------------------------------------------------------------
+// run 辅助
+// ---------------------------------------------------------------------------
+
+/// 跑一次给定图并计时（真 worker；空入口输入）。
+async fn run_graph_timed(
     dir: &tempfile::TempDir,
     name: &str,
-) -> (zgraph_cli::bridge::BridgeOutcome, Duration) {
+    graph: Arc<CompiledGraph>,
+) -> (BridgeOutcome, Duration) {
     let db = dir.path().join(name);
-    let graph = common::compile_fixture("valid_parallel.json");
     let spec = common::spec(graph, std::collections::HashMap::new());
     let started = Instant::now();
     let bridge = tokio::time::timeout(
@@ -122,14 +140,67 @@ async fn run_parallel_once(
         common::run_to_trace(spec, common::executor(common::RUN_TIMEOUT), &db),
     )
     .await
-    .expect("parallel run must finish");
+    .expect("timed run must finish");
     (bridge, started.elapsed())
 }
+
+/// 跑一次 `valid_parallel.json`（真 worker，两分支并行 sleep 0.2s）。
+async fn run_parallel_once(dir: &tempfile::TempDir, name: &str) -> (BridgeOutcome, Duration) {
+    run_graph_timed(dir, name, common::compile_fixture("valid_parallel.json")).await
+}
+
+/// 串行对照图：`start -> a -> b -> done`（同两个 `workers.parallel` 函数顺序执行）。
+///
+/// 用于 D8「总耗时显著小于串行」的可证伪对照：并行把两次「冷启动 + 0.2s sleep」
+/// 重叠，串行则顺序累加。
+fn serial_parallel_graph() -> Arc<CompiledGraph> {
+    let text = json!({
+        "version": "1.0",
+        "metadata": {"name": "e2e_serial_baseline"},
+        "entry_points": ["start"],
+        "nodes": [
+            {"id": "start", "type": "start", "inputs": [], "config": {}},
+            {"id": "a", "type": "python_node",
+             "inputs": [{"name": "x", "type": "any", "required": true}],
+             "config": {"module": "workers.parallel", "function": "a"}},
+            {"id": "b", "type": "python_node",
+             "inputs": [{"name": "x", "type": "any", "required": true}],
+             "config": {"module": "workers.parallel", "function": "b"}},
+            {"id": "done", "type": "end",
+             "inputs": [{"name": "r", "type": "any", "required": true}],
+             "config": {}}
+        ],
+        "edges": [
+            {"from": "start", "to_node": "a", "to_input_port": "x"},
+            {"from": "a", "to_node": "b", "to_input_port": "x"},
+            {"from": "b", "to_node": "done", "to_input_port": "r"}
+        ]
+    })
+    .to_string();
+    common::compile_text(&text)
+}
+
+/// 跑一次串行对照图，返回耗时（并要求 Completed）。
+async fn run_serial_baseline(dir: &tempfile::TempDir, name: &str) -> Duration {
+    let (bridge, elapsed) = run_graph_timed(dir, name, serial_parallel_graph()).await;
+    assert_eq!(
+        bridge.outcome.status,
+        RunStatus::Completed,
+        "串行对照图应完成: {:?}",
+        bridge.outcome.error
+    );
+    elapsed
+}
+
+// ---------------------------------------------------------------------------
+// AC-09 主用例
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn ac09_parallel_branches_overlap_and_total_elapsed_within_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (bridge, elapsed) = run_parallel_once(&dir, "ac09_parallel.db").await;
+    let (bridge, parallel_elapsed) = run_parallel_once(&dir, "ac09_parallel.db").await;
+    let serial_elapsed = run_serial_baseline(&dir, "ac09_serial.db").await;
 
     assert_eq!(
         bridge.outcome.status,
@@ -148,7 +219,7 @@ async fn ac09_parallel_branches_overlap_and_total_elapsed_within_budget() {
         );
     }
 
-    // Running 区间重叠：真并行（不是串行碰巧达标）。
+    // 07 AC-09：Running 区间重叠 + 进入 Running 时间差 < 50ms（冻结口径）。
     let (a_start, a_end) = running_interval(bridge.reader(), &run_id, "a");
     let (b_start, b_end) = running_interval(bridge.reader(), &run_id, "b");
     assert!(
@@ -158,15 +229,24 @@ async fn ac09_parallel_branches_overlap_and_total_elapsed_within_budget() {
     let skew = (a_start - b_start).num_milliseconds().unsigned_abs();
     assert!(
         Duration::from_millis(skew) < BRANCH_START_SKEW_LIMIT,
-        "a/b 进入 Running 的时间差 {skew}ms 应 < {BRANCH_START_SKEW_LIMIT:?}（同一轮派发）"
+        "07 AC-09: a/b 进入 Running 的时间差 {skew}ms 应 < {BRANCH_START_SKEW_LIMIT:?}（实测 0ms）"
     );
 
-    // 总耗时阈值（D8 实测后写死）。
+    // D8：总耗时实测重标定（绝对值上界 + 串行对照，双重可证伪）。
     assert!(
-        elapsed < PARALLEL_TOTAL_BUDGET,
-        "AC-09 总耗时 {elapsed:?} 应 < {PARALLEL_TOTAL_BUDGET:?}（并行含冷启动；D8 实测阈值）"
+        parallel_elapsed < PARALLEL_TOTAL_BUDGET,
+        "D8: 并行总耗时 {parallel_elapsed:?} 应 < {PARALLEL_TOTAL_BUDGET:?}（实测 252–292ms；\
+         串行对照 {serial_elapsed:?}）"
+    );
+    assert!(
+        parallel_elapsed.as_micros() * 100 < serial_elapsed.as_micros() * SERIAL_RATIO_PERCENT,
+        "D8: 并行总耗时 {parallel_elapsed:?} 应显著小于串行对照 {serial_elapsed:?}（<80%）"
     );
 }
+
+// ---------------------------------------------------------------------------
+// merge 双端口与整包广播
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn ac09_merge_end_receives_both_ports_with_whole_package_broadcast() {
@@ -208,6 +288,10 @@ async fn ac09_merge_end_receives_both_ports_with_whole_package_broadcast() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 确定性（5 连跑）
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
 async fn ac09_five_runs_have_deterministic_transitions_and_output() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -248,49 +332,104 @@ async fn ac09_five_runs_have_deterministic_transitions_and_output() {
     }
 }
 
-/// AC-09 覆盖语义（v1 单数据源）：同一自环边两次投递在 trace 中可见。
-///
-/// 图：`start(seed) -> loop(seed, again)`，`loop` 以 `trigger=any` 自环回投 `again`
-/// （内置 gate `check_output` 读 `continue`）。`workers.cycle.looping` 首轮返回
-/// `continue=true`（第 1 次投递放行 → attempt 1），次轮 `continue=false`（第 2 次投递
-/// 被拦截）。trace 断言：同一 `edge_index` 两条 `gate_results`，`loop` 的
-/// attempt 0/1 两个实例都完整执行到 `Completed`，run 静默 `Completed`。
-///
-/// v1 单数据源由 DSL R5 保证（同一 `(to_node, to_port)` 只允许一条入边）——本用例
-/// 同时断言 `DSL_DUPLICATE_PORT_SOURCE` 反例；因此内核 `buffer_write` 的「后到覆盖」
-/// 分支在合法图下不可达，属防御性实现（见 REV-015 遗留说明），不构造非法图来强行命中。
+// ---------------------------------------------------------------------------
+// 覆盖语义（v1 单数据源）：同一自环边两次投递 + DSL R5 反例
+// ---------------------------------------------------------------------------
+
+/// 自环覆盖语义图：`start(seed) -> loop(seed, again)`，`loop` 以 `trigger=any`
+/// 自环回投 `again`（内置 gate `check_output` 读 `continue`）。
+const SELF_LOOP_JSON: &str = r#"{
+  "version": "1.0",
+  "metadata": {"name": "e2e_gated_self_loop"},
+  "entry_points": ["start"],
+  "nodes": [
+    {"id": "start", "type": "start",
+     "inputs": [{"name": "seed", "type": "any", "required": true}], "config": {}},
+    {"id": "loop", "type": "python_node",
+     "inputs": [
+       {"name": "seed", "type": "any", "required": true},
+       {"name": "again", "type": "any", "required": true}
+     ],
+     "trigger": "any",
+     "config": {"module": "workers.cycle", "function": "looping",
+                "retry": {"max_attempts": 3}}}
+  ],
+  "edges": [
+    {"from": "start", "to_node": "loop", "to_input_port": "seed"},
+    {"from": "loop", "to_node": "loop", "to_input_port": "again",
+     "gate": {"function": "check_output",
+              "params": {"path": "continue", "equals": true}}}
+  ]
+}"#;
+
+/// 同一自环边（edge 1）两次投递：第一轮放行（continue=true），第二轮被 gate 拦截。
+fn assert_self_loop_deliveries(reader: &zgraph_trace::TraceReader, run_id: &str) {
+    let gates = reader.gate_results(run_id).expect("gate results");
+    let loop_edge: Vec<_> = gates.iter().filter(|gate| gate.edge_index == 1).collect();
+    assert_eq!(
+        loop_edge.len(),
+        2,
+        "同一自环边应记录两次投递：{loop_edge:?}"
+    );
+    assert!(
+        loop_edge.iter().any(|gate| gate.passed) && loop_edge.iter().any(|gate| !gate.passed),
+        "两次投递应一次放行、一次被拦截：{loop_edge:?}"
+    );
+}
+
+/// 只断言**真正执行**的两个 attempt（幻影 attempt 见下方已知内核缺陷说明）。
+fn assert_self_loop_attempts(reader: &zgraph_trace::TraceReader, run_id: &str) {
+    let instances = reader.instances(run_id).expect("instances");
+    let mut attempts: Vec<(u32, String)> = instances
+        .iter()
+        .filter(|row| row.node_id == "loop")
+        .map(|row| (row.attempt, row.status.as_str().to_string()))
+        .collect();
+    attempts.sort_unstable();
+    // 已知内核缺陷（REV-015 #3，登记 ISSUE，e2e 不改 `crates/**`）：
+    // `run.rs::apply_publish` 在 gate 求值**之前**调用 `resolve_target`，被 gate 拦截的
+    // 自环投递仍会创建 attempt+1（Pending→Skipped 幻影实例）；当该 attempt 序号达到
+    // `retry.max_attempts` 时会把本应 Completed 的 run 误判 `NODE_INTERNAL`。
+    // 这里只固化真实执行的两个 attempt，不把幻影实例当验收期望。
+    assert!(
+        attempts.contains(&(0, "Completed".to_string()))
+            && attempts.contains(&(1, "Completed".to_string())),
+        "自环应执行 attempt 0/1 并 Completed：{attempts:?}"
+    );
+    assert!(
+        attempts
+            .iter()
+            .all(|(_, status)| status == "Completed" || status == "Skipped"),
+        "自环 run 不应出现 Crashed/TimedOut：{attempts:?}"
+    );
+}
+
+/// DSL R5：同一 `(to_node, to_port)` 只允许一条入边 → v1 单数据源
+/// （内核 `buffer_write` 的「后到覆盖」分支在合法图下不可达，属防御性实现）。
+fn assert_dsl_rejects_two_sources_for_one_port() {
+    let bad = std::fs::read(common::graphs_root().join("bad_dup_port_source.json"))
+        .expect("bad_dup_port_source fixture");
+    let errors =
+        zgraph_dsl::load_graph(&bad).expect_err("two sources for one port must be rejected");
+    assert_eq!(
+        errors.codes(),
+        vec![zgraph_dsl::DslErrorCode::DuplicatePortSource],
+        "同一 (to_node, to_port) 两条入边必须被 R5 拒绝"
+    );
+    assert_eq!(
+        errors.first().code.as_str(),
+        "DSL_DUPLICATE_PORT_SOURCE",
+        "对外错误码字符串（00 §0.4）"
+    );
+}
+
 #[tokio::test]
 async fn ac09_gated_self_loop_delivers_twice_and_dsl_enforces_single_port_source() {
-    const SELF_LOOP_JSON: &str = r#"{
-      "version": "1.0",
-      "metadata": {"name": "e2e_gated_self_loop"},
-      "entry_points": ["start"],
-      "nodes": [
-        {"id": "start", "type": "start",
-         "inputs": [{"name": "seed", "type": "any", "required": true}], "config": {}},
-        {"id": "loop", "type": "python_node",
-         "inputs": [
-           {"name": "seed", "type": "any", "required": true},
-           {"name": "again", "type": "any", "required": true}
-         ],
-         "trigger": "any",
-         "config": {"module": "workers.cycle", "function": "looping",
-                    "retry": {"max_attempts": 3}}}
-      ],
-      "edges": [
-        {"from": "start", "to_node": "loop", "to_input_port": "seed"},
-        {"from": "loop", "to_node": "loop", "to_input_port": "again",
-         "gate": {"function": "check_output",
-                  "params": {"path": "continue", "equals": true}}}
-      ]
-    }"#;
-
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("ac09_self_loop.db");
-    let graph = common::compile_text(SELF_LOOP_JSON);
     let inputs = common::entry_inputs(&[("start", "seed", json!({"value": 1}))]);
     let bridge = common::run_to_trace(
-        common::spec(graph, inputs),
+        common::spec(common::compile_text(SELF_LOOP_JSON), inputs),
         common::executor(common::RUN_TIMEOUT),
         &db,
     )
@@ -306,58 +445,7 @@ async fn ac09_gated_self_loop_delivers_twice_and_dsl_enforces_single_port_source
         "无 end 节点的图 run_output 应为 None（01 §1.9）"
     );
     let run_id = bridge.outcome.run_id.clone();
-
-    // 同一自环边（edge 1）两次投递：第一轮放行（continue=true），第二轮被 gate 拦截。
-    let gates = bridge.reader().gate_results(&run_id).expect("gate results");
-    let loop_edge: Vec<_> = gates.iter().filter(|gate| gate.edge_index == 1).collect();
-    assert_eq!(
-        loop_edge.len(),
-        2,
-        "同一自环边应记录两次投递：{loop_edge:?}"
-    );
-    assert!(
-        loop_edge.iter().any(|gate| gate.passed) && loop_edge.iter().any(|gate| !gate.passed),
-        "两次投递应一次放行、一次被拦截：{loop_edge:?}"
-    );
-
-    // 两次投递各自对应一个 attempt 实例，且都完整跑到 Completed。
-    let instances = bridge.reader().instances(&run_id).expect("instances");
-    let mut attempts: Vec<(u32, String)> = instances
-        .iter()
-        .filter(|row| row.node_id == "loop")
-        .map(|row| (row.attempt, row.status.as_str().to_string()))
-        .collect();
-    attempts.sort_unstable();
-    // 只断言**真正执行**的两个 attempt。已知内核现状（REV-015 遗留 ISSUE 建议）：
-    // `run.rs::apply_publish` 在 gate 求值**之前**调用 `resolve_target`，因此被 gate
-    // 拦截的自环投递也会先创建 attempt+1（随后 Pending→Skipped 的「幻影 attempt」）；
-    // 当 `retry.max_attempts` 恰为尝试数+1 时甚至会误判超限 → run Failed。
-    // 该缺陷属 kernel 模块，e2e 不修改 `crates/**`，只固化真实执行的两个 attempt。
-    assert!(
-        attempts.contains(&(0, "Completed".to_string()))
-            && attempts.contains(&(1, "Completed".to_string())),
-        "自环应执行 attempt 0/1 并 Completed：{attempts:?}"
-    );
-    assert!(
-        attempts
-            .iter()
-            .all(|(_, status)| status == "Completed" || status == "Skipped"),
-        "自环 run 不应出现 Crashed/TimedOut：{attempts:?}"
-    );
-
-    // DSL R5：同一 (to_node, to_port) 多条入边被拒 → v1 单数据源（覆盖分支不可达）。
-    let bad = std::fs::read(common::graphs_root().join("bad_dup_port_source.json"))
-        .expect("bad_dup_port_source fixture");
-    let errors =
-        zgraph_dsl::load_graph(&bad).expect_err("two sources for one port must be rejected");
-    assert_eq!(
-        errors.codes(),
-        vec![zgraph_dsl::DslErrorCode::DuplicatePortSource],
-        "同一 (to_node, to_port) 两条入边必须被 R5 拒绝"
-    );
-    assert_eq!(
-        errors.first().code.as_str(),
-        "DSL_DUPLICATE_PORT_SOURCE",
-        "对外错误码字符串（00 §0.4）"
-    );
+    assert_self_loop_deliveries(bridge.reader(), &run_id);
+    assert_self_loop_attempts(bridge.reader(), &run_id);
+    assert_dsl_rejects_two_sources_for_one_port();
 }

@@ -6,7 +6,8 @@
 //! - **AC-07 事件循环不阻塞**：真 worker 正在执行（fixture 已写 pid 文件、进入 sleep）
 //!   时发 Pause，`Paused` 必须在 **100ms** 内可见——事件循环若同步等待子进程则做不到。
 //!   （字面 ticker 断言在 M2 已用 in-process 节点 + `test-hooks.tick_probe` 覆盖；
-//!   e2e 不为通过测试而引入 test-hooks，改用同规格的「控制命令延迟」口径。）
+//!   e2e 按 REV-015 #2 不引入 test-hooks，改用同规格的「控制命令延迟」口径，真 worker
+//!   ticker 由 Lead 登记 ISSUE 后续补。）
 //! - **AC-10 暂停**：第 1 个执行中暂停 → 第 2 个不派发（等待 1s 无新 pid/新 Running），
 //!   Resume 后完成；
 //! - **AC-10 取消**：真 worker 在飞时 Cancel → run `Cancelled`、无 `Failed`、在飞实例
@@ -18,12 +19,13 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::json;
 
-use zgraph_cli::bridge::start_traced_run;
+use zgraph_cli::bridge::{start_traced_run, TracedRun};
 use zgraph_kernel::RunStatus;
 use zgraph_trace::InstanceStatus as TraceInstanceStatus;
 
@@ -88,6 +90,60 @@ fn assert_cancelled_trace(reader: &zgraph_trace::TraceReader, run_id: &str) {
     assert!(finished.get("error").is_none_or(|value| value.is_null()));
 }
 
+// ---------------------------------------------------------------------------
+// AC-07 + AC-10：暂停/恢复
+// ---------------------------------------------------------------------------
+
+/// 等真 worker 开始执行后发 Pause，断言 `Paused` 在 [`PAUSE_VISIBLE_LIMIT`] 内可见。
+///
+/// 这是 AC-07「事件循环不阻塞」的真 worker 口径：worker 子进程在 `sleep` 期间，
+/// 若事件循环同步等待子进程，Pause 只能等 worker 结束才被处理。
+async fn assert_pause_visible_while_worker_running(traced: &TracedRun, first_pid: &Path) {
+    common::wait_for_file(first_pid).await;
+    assert_eq!(traced.status(), RunStatus::Running);
+
+    let started = Instant::now();
+    assert!(traced.pause(), "pause command accepted");
+    let visible =
+        common::wait_until(PAUSE_VISIBLE_LIMIT, || traced.status() == RunStatus::Paused).await;
+    let latency = started.elapsed();
+    assert!(
+        visible,
+        "AC-07: 真 worker 执行中 Pause 应在 {PAUSE_VISIBLE_LIMIT:?} 内可见（事件循环不得阻塞），\
+         实际 {latency:?}"
+    );
+    assert_eq!(traced.status(), RunStatus::Paused);
+}
+
+/// 暂停期间第 1 个在飞完成，但第 2 个不得被派发（等待 [`PAUSE_HOLD`] 无新 pid 文件）。
+async fn assert_pause_blocks_second_dispatch(traced: &TracedRun, second_pid: &Path) {
+    tokio::time::sleep(PAUSE_HOLD).await;
+    assert_eq!(traced.status(), RunStatus::Paused, "暂停期间不得自行恢复");
+    assert!(
+        !second_pid.exists(),
+        "AC-10: 暂停期间第 2 个节点不得被派发（{} 不应出现）",
+        second_pid.display()
+    );
+}
+
+/// trace 证据：second 的 Ready→Running 发生在 Resume **之后**（暂停窗口内确未派发）。
+fn assert_second_dispatched_after_resume(
+    reader: &zgraph_trace::TraceReader,
+    run_id: &str,
+    resumed_at: DateTime<FixedOffset>,
+) {
+    let transitions = reader.transitions(run_id).expect("transitions");
+    let second_running = transitions
+        .iter()
+        .find(|row| row.node_id == "second" && row.to_status == TraceInstanceStatus::Running)
+        .expect("second 的 Running 迁移");
+    let at = parse_at(&second_running.at);
+    assert!(
+        at >= resumed_at - chrono::Duration::milliseconds(50),
+        "AC-10: second 应在 Resume 之后派发：running_at={at} resumed_at={resumed_at}"
+    );
+}
+
 #[tokio::test]
 async fn ac07_ac10_pause_is_visible_within_100ms_and_blocks_second_dispatch() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -108,34 +164,10 @@ async fn ac07_ac10_pause_is_visible_within_100ms_and_blocks_second_dispatch() {
     let traced = start_traced_run(spec, common::executor(common::RUN_TIMEOUT), &db)
         .expect("start traced run");
 
-    // 等第 1 个节点**真的**开始执行（fixture 已写 pid，随后 sleep 0.5s）。
-    common::wait_for_file(&first_pid).await;
-    assert_eq!(traced.status(), RunStatus::Running);
+    assert_pause_visible_while_worker_running(&traced, &first_pid).await;
+    assert_pause_blocks_second_dispatch(&traced, &second_pid).await;
 
-    // AC-07：真 worker 在飞时 Pause 必须被事件循环立刻处理（<100ms）。
-    let pause_started = Instant::now();
-    assert!(traced.pause(), "pause command accepted");
-    let visible =
-        common::wait_until(PAUSE_VISIBLE_LIMIT, || traced.status() == RunStatus::Paused).await;
-    let latency = pause_started.elapsed();
-    assert!(
-        visible,
-        "AC-07: Pause 应在 {PAUSE_VISIBLE_LIMIT:?} 内可见（事件循环不得阻塞），实际 {latency:?}"
-    );
-    assert_eq!(traced.status(), RunStatus::Paused);
-    let paused_at = Utc::now();
-
-    // AC-10：暂停期间第 1 个在飞完成，第 2 个不得派发（等待 1s 无新 pid 文件）。
-    tokio::time::sleep(PAUSE_HOLD).await;
-    assert_eq!(traced.status(), RunStatus::Paused, "暂停期间不得自行恢复");
-    assert!(
-        !second_pid.exists(),
-        "暂停期间第 2 个节点不得被派发（{} 不应出现）",
-        second_pid.display()
-    );
-
-    // Resume 后完成。
-    let resumed_at = Utc::now();
+    let resumed_at = Utc::now().fixed_offset();
     assert!(traced.resume(), "resume command accepted");
     let bridge = tokio::time::timeout(Duration::from_secs(10), traced.wait())
         .await
@@ -157,27 +189,16 @@ async fn ac07_ac10_pause_is_visible_within_100ms_and_blocks_second_dispatch() {
             TraceInstanceStatus::Completed,
         );
     }
-
-    // trace 证据：second 的 Ready→Running 发生在 Resume 之后（暂停期间确实没派发）。
-    let transitions = bridge.reader().transitions(&run_id).expect("transitions");
-    let second_running = transitions
-        .iter()
-        .find(|row| row.node_id == "second" && row.to_status == TraceInstanceStatus::Running)
-        .expect("second 的 Running 迁移");
-    let at = parse_at(&second_running.at);
-    assert!(
-        at >= paused_at - chrono::Duration::milliseconds(50),
-        "second 不应在暂停窗口内派发：running_at={at} paused_at={paused_at}"
-    );
-    assert!(
-        at >= resumed_at - chrono::Duration::milliseconds(50),
-        "second 应在 Resume 之后派发：running_at={at} resumed_at={resumed_at}"
-    );
+    assert_second_dispatched_after_resume(bridge.reader(), &run_id, resumed_at);
 
     // 正常完成后 worker 不残留（无僵尸）。
     let second_pid_value = common::read_pid(&second_pid);
     common::assert_pid_gone(second_pid_value, common::PID_GONE_TIMEOUT).await;
 }
+
+// ---------------------------------------------------------------------------
+// AC-10：取消（真 worker 在飞）+ 幂等
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn ac10_cancel_kills_in_flight_worker_and_is_idempotent() {

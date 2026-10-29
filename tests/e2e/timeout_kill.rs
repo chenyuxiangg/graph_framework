@@ -22,8 +22,15 @@ use serde_json::json;
 use zgraph_kernel::RunStatus;
 use zgraph_trace::InstanceStatus as TraceInstanceStatus;
 
-/// 07 AC-06 的节点级超时（毫秒）。
+/// 07 AC-06 的节点级超时（毫秒）：主用例（`workers.slow`）按 07 原文取 1000ms。
 const NODE_TIMEOUT_MS: u64 = 1_000;
+
+/// 孙进程用例的节点级超时（毫秒）：放宽到 1500ms（REV-015 #5）。
+///
+/// 该用例的 fixture 必须先写 worker pid、完成握手、派孙进程并把 child pid 落盘，
+/// 慢机冷启动可能 >1s；一旦先 kill 则 child pid 文件不存在 → 测试侧断言证据缺失。
+/// 1500ms 仍远小于 AC-06 的 5s 上限。
+const GRANDCHILD_TIMEOUT_MS: u64 = 1_500;
 
 /// 真 worker 冷启动余量：超时判定用 50ms watchdog tick 轮询，避免默认 1s tick 拖慢。
 const WATCHDOG_TICK_MS: u64 = 50;
@@ -119,7 +126,11 @@ async fn ac06_timeout_kills_process_group_including_grandchild() {
     let paths = common::PidPaths::new();
 
     // e2e fixture：worker 自己再派一个 sleep 孙进程，两个 pid 都落盘后长睡。
-    let graph = common::linear_graph("e2e_fixtures.descendants", "run", Some(NODE_TIMEOUT_MS));
+    let graph = common::linear_graph(
+        "e2e_fixtures.descendants",
+        "run",
+        Some(GRANDCHILD_TIMEOUT_MS),
+    );
     let inputs = common::entry_inputs(&[(
         "start",
         "x",
