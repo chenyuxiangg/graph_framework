@@ -754,6 +754,8 @@ impl RunLoop {
             attempt,
             user_id: self.user_id.clone(),
             global_vars: self.global_vars.clone(),
+            // D5：run 级 seed 进入 NodeContext，供跨进程执行器写入 run 载荷。
+            seed: self.options.seed,
             cancel: self.cancel.clone(),
             emit_dropped: self.emit_dropped.clone(),
             emitter: self.emitter.clone(),

@@ -26,6 +26,7 @@ pub(crate) struct NodeContextInit {
     pub(crate) attempt: crate::types::Attempt,
     pub(crate) user_id: String,
     pub(crate) global_vars: Arc<HashMap<String, Value>>,
+    pub(crate) seed: u64,
     pub(crate) cancel: Arc<AtomicBool>,
     pub(crate) emit_dropped: Arc<AtomicU64>,
     pub(crate) emitter: Emitter,
@@ -41,6 +42,7 @@ pub struct NodeContext {
     attempt: crate::types::Attempt,
     user_id: String,
     global_vars: Arc<HashMap<String, Value>>,
+    seed: u64,
     cancel: Arc<AtomicBool>,
     emit_dropped: Arc<AtomicU64>,
     emitter: Emitter,
@@ -57,6 +59,7 @@ impl NodeContext {
             attempt: init.attempt,
             user_id: init.user_id,
             global_vars: init.global_vars,
+            seed: init.seed,
             cancel: init.cancel,
             emit_dropped: init.emit_dropped,
             emitter: init.emitter,
@@ -111,6 +114,18 @@ impl NodeContext {
         self.global_vars.get(key)
     }
 
+    /// run 级全局变量的**只读快照**（跨进程执行器序列化进 `run` 载荷，D2/D5）。
+    ///
+    /// 与 [`Self::get_var`] 同一份快照：执行开始后不可变，调用方不得据此回写。
+    pub fn global_vars(&self) -> &HashMap<String, Value> {
+        &self.global_vars
+    }
+
+    /// 本次执行的确定性种子（run 级 `RunOptions.seed`，D5）。
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
     /// run 级取消标志快照（`Acquire`，非同步点）。
     pub fn cancel_requested(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
@@ -132,5 +147,45 @@ impl NodeContext {
     pub fn node_deadline_remaining_ms(&self) -> u64 {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trace::NullTraceSink;
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    fn context() -> NodeContext {
+        let mut vars = HashMap::new();
+        vars.insert("greeting".to_string(), Value::from("hi"));
+        NodeContext::new(NodeContextInit {
+            run_id: "run-1".to_string(),
+            instance_id: "inst-1".to_string(),
+            node_id: "node-1".to_string(),
+            attempt: 2,
+            user_id: "u1".to_string(),
+            global_vars: Arc::new(vars),
+            seed: 42,
+            cancel: Arc::new(AtomicBool::new(false)),
+            emit_dropped: Arc::new(AtomicU64::new(0)),
+            emitter: Emitter::new(Arc::new(NullTraceSink), false),
+            deadline: Instant::now() + Duration::from_secs(1),
+        })
+    }
+
+    #[test]
+    fn exposes_seed_from_run_options() {
+        assert_eq!(context().seed(), 42);
+    }
+
+    #[test]
+    fn exposes_readonly_global_vars_snapshot() {
+        let ctx = context();
+        let vars = ctx.global_vars();
+        assert_eq!(vars.get("greeting"), Some(&Value::from("hi")));
+        assert_eq!(vars.len(), 1);
+        assert_eq!(ctx.get_var("greeting"), Some(&Value::from("hi")));
     }
 }
