@@ -37,7 +37,7 @@
 //! # 快速开始
 //!
 //! ```
-//! use zgraph_trace::{InstanceStatus, RunMetrics, RunStartedInfo, RunStatus, TraceWriter};
+//! use zgraph_trace::{RunMetrics, RunStartedInfo, RunStatus, TraceWriter};
 //!
 //! let dir = tempfile::tempdir().expect("tempdir");
 //! let writer = TraceWriter::open(dir.path().join("trace.db")).expect("open trace db");
@@ -66,7 +66,6 @@
 //! writer.flush().expect("flush");
 //! let reader = zgraph_trace::TraceReader::open_readonly(dir.path().join("trace.db")).expect("reader");
 //! assert_eq!(reader.run("run-1").expect("query").map(|run| run.status), Some(RunStatus::Completed));
-//! let _ = InstanceStatus::Completed;
 //! writer.close().expect("close");
 //! ```
 
