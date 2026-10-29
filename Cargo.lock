@@ -687,6 +687,7 @@ dependencies = [
 name = "zgraph-cli"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

@@ -10,7 +10,7 @@ use zgraph_dsl::{load_graph_with_options, LoadOptions, Location, ValidationRepor
 
 /// `validate` 的参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidateArgs {
+pub struct ValidateArgs {
     /// 图定义文件路径。
     pub graph: PathBuf,
     /// 是否输出 JSON 容器（02 §2.7.2）。
@@ -20,7 +20,7 @@ pub(crate) struct ValidateArgs {
 }
 
 /// 解析 `validate` 之后的参数。
-pub(crate) fn parse(args: &[String]) -> Result<ValidateArgs, String> {
+pub fn parse(args: &[String]) -> Result<ValidateArgs, String> {
     let mut graph = None;
     let mut json = false;
     let mut assets_dir = None;
@@ -52,7 +52,7 @@ pub(crate) fn parse(args: &[String]) -> Result<ValidateArgs, String> {
 }
 
 /// 执行 `validate` 并返回进程退出码。
-pub(crate) fn run(args: &ValidateArgs) -> ExitCode {
+pub fn run(args: &ValidateArgs) -> ExitCode {
     let display = args.graph.display().to_string();
     let bytes = match std::fs::read(&args.graph) {
         Ok(bytes) => bytes,
