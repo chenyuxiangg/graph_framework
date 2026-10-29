@@ -28,7 +28,7 @@ cargo run -p zgraph-cli -- --version
 uv sync --extra dev
 uv run pytest -q
 
-# 本地无 uv 时（仅临时验证）：python3 -m venv .venv && .venv/bin/pip install pytest
+# 若本机没有 uv：先安装 uv（brew install uv 或官方安装脚本），不要用 pip 直接装项目依赖（CLAUDE.md）
 ```
 
 > 本机若 crates.io 直连不稳定，可参考 `.cargo/config.toml` 注释配置代理；沙箱环境需把 `CARGO_HOME` 指到可写目录。

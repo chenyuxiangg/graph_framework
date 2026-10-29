@@ -10,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWrit
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::protocol::{
-    Frame, Hello, ProtocolError, RunRequest, WorkerError, CODE_HANDSHAKE, CODE_PROTOCOL,
-    PROTOCOL_VERSION,
+    decode_frame_line, Frame, Hello, ProtocolError, RunRequest, WorkerError, CODE_HANDSHAKE,
+    CODE_PROTOCOL, PROTOCOL_VERSION,
 };
 
 /// worker 启动配置。
@@ -146,7 +146,12 @@ pub async fn run_worker(
     };
 
     match result {
-        Err(_) => Err(WorkerFailure::Timeout(config.timeout)),
+        Err(_) => {
+            // 显式 kill + wait/reap：不能只依赖 kill_on_drop（会留下僵尸进程，窗口期不可控）。
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(WorkerFailure::Timeout(config.timeout))
+        }
         Ok(Ok(mut run)) => {
             run.stderr = stderr_tail;
             Ok(run)
@@ -173,14 +178,12 @@ async fn drive(
     config: &WorkerConfig,
 ) -> Result<WorkerRun, WorkerFailure> {
     let mut writer = BufWriter::new(stdin);
-    let mut lines = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
 
-    let hello_line = tokio::time::timeout(config.hello_timeout, lines.next_line())
+    let hello_frame = tokio::time::timeout(config.hello_timeout, read_frame_line(&mut reader))
         .await
-        .map_err(|_| handshake_error("hello timeout"))?
-        .map_err(|err| protocol_error(format!("read hello: {err}")))?
+        .map_err(|_| handshake_error("hello timeout"))??
         .ok_or_else(|| handshake_error("worker exited before hello"))?;
-    let hello_frame = Frame::from_line(&hello_line)?;
     if hello_frame.kind != "hello" {
         return Err(handshake_error(format!(
             "expected hello, got {}",
@@ -207,12 +210,9 @@ async fn drive(
 
     let mut events = Vec::new();
     loop {
-        let line = lines
-            .next_line()
-            .await
-            .map_err(|err| protocol_error(format!("read frame: {err}")))?
+        let frame = read_frame_line(&mut reader)
+            .await?
             .ok_or_else(|| protocol_error("worker closed stdout before result"))?;
-        let frame = Frame::from_line(&line)?;
         match frame.kind.as_str() {
             "emit" => events.push(frame),
             "log" => {}
@@ -222,6 +222,7 @@ async fn drive(
                     .get("output")
                     .cloned()
                     .ok_or_else(|| protocol_error("result without output"))?;
+                ensure_no_extra_frame(&mut reader).await?;
                 ensure_exit(child, config.exit_grace).await?;
                 return Ok(WorkerRun {
                     output,
@@ -238,6 +239,29 @@ async fn drive(
                 return Err(protocol_error(format!("unexpected frame kind: {other}")));
             }
         }
+    }
+}
+
+async fn read_frame_line(
+    reader: &mut BufReader<ChildStdout>,
+) -> Result<Option<Frame>, WorkerFailure> {
+    let mut buffer: Vec<u8> = Vec::new();
+    let read = reader
+        .read_until(b'\n', &mut buffer)
+        .await
+        .map_err(|err| protocol_error(format!("read frame: {err}")))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    decode_frame_line(&buffer)
+        .map(Some)
+        .map_err(WorkerFailure::from)
+}
+
+async fn ensure_no_extra_frame(reader: &mut BufReader<ChildStdout>) -> Result<(), WorkerFailure> {
+    match tokio::time::timeout(Duration::from_millis(100), read_frame_line(reader)).await {
+        Ok(Ok(Some(_))) => Err(protocol_error("duplicate result/frame after result")),
+        _ => Ok(()),
     }
 }
 

@@ -71,7 +71,8 @@ if ! git merge-base --is-ancestor origin/main "${BRANCH}"; then
   git -C "${branch_wt}" rebase origin/main || die "rebase 冲突，请人工解决后重试"
 fi
 
-# 6) 测试：Rust 全绿 + Python 不得新增失败（对照 main 的 doc/test-baseline.txt）
+# 6a) Rust 测试（全绿）
+# 6b) Python 测试：不得新增失败（对照 main 的 doc/test-baseline.txt）
 if [ -f "${branch_wt}/Cargo.toml" ]; then
   command -v cargo >/dev/null 2>&1 || die "未找到 cargo（Rust 工程必须可测试）"
   info "执行 cargo test --workspace"
@@ -96,7 +97,7 @@ set +e
 ( cd "${branch_wt}" && "${PY[@]}" -m pytest -q --tb=no >/tmp/zgraph-merge-test.log 2>&1 )
 set -e
 awk '/^(FAILED|ERROR)/{print $2}' /tmp/zgraph-merge-test.log | sort > /tmp/zgraph-current-failures.txt || true
-grep -v '^#' doc/test-baseline.txt | sed '/^$/d' | sort > /tmp/zgraph-baseline.txt
+grep -v '^#' doc/test-baseline.txt | sed '/^$/d' | sort > /tmp/zgraph-baseline.txt || true
 new_fail="$(comm -23 /tmp/zgraph-current-failures.txt /tmp/zgraph-baseline.txt)"
 fixed="$(comm -13 /tmp/zgraph-current-failures.txt /tmp/zgraph-baseline.txt)"
 current_n="$(wc -l < /tmp/zgraph-current-failures.txt | tr -d ' ')"

@@ -67,7 +67,9 @@ def read_frame(stream: BinaryIO) -> dict[str, Any]:
     line: bytes = stream.readline()
     if not line:
         raise EOFError("worker stdin closed")
-    return decode_frame(line)
+    if not line.endswith(b"\n"):
+        raise ProtocolError("partial frame at EOF (missing trailing newline)")
+    return decode_frame(line[:-1])
 
 
 def _write_all(fd: int, data: bytes) -> None:

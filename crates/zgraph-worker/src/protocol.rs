@@ -83,6 +83,21 @@ impl Frame {
     }
 }
 
+/// 解析一行完整帧字节（**必须**以 `\n` 结尾；否则视为半行帧/协议错误）。
+pub fn decode_frame_line(bytes: &[u8]) -> Result<Frame, ProtocolError> {
+    let Some((&b'\n', body)) = bytes.split_last() else {
+        return Err(ProtocolError {
+            code: CODE_PROTOCOL,
+            message: "partial frame at EOF (missing trailing newline)".to_string(),
+        });
+    };
+    let line = std::str::from_utf8(body).map_err(|err| ProtocolError {
+        code: CODE_PROTOCOL,
+        message: format!("invalid utf-8 frame: {err}"),
+    })?;
+    Frame::from_line(line)
+}
+
 /// 协议错误（携带机器可读 `code`，映射到 NodeError）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -188,6 +203,13 @@ mod tests {
         let line = r#"{"v":9,"kind":"hello","payload":{}}"#;
         let err = Frame::from_line(line).expect_err("must reject");
         assert_eq!(err.code, CODE_HANDSHAKE);
+    }
+
+    #[test]
+    fn partial_frame_is_rejected() {
+        let err = decode_frame_line(br#"{"v":1,"kind":"run","payload":{}}"#).expect_err("partial");
+        assert_eq!(err.code, CODE_PROTOCOL);
+        assert!(err.message.contains("partial frame"));
     }
 
     #[test]

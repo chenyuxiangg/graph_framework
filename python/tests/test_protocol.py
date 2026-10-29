@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -12,6 +13,7 @@ from zgraph_worker.protocol import (
     ProtocolError,
     decode_frame,
     encode_frame,
+    read_frame,
 )
 
 
@@ -43,3 +45,8 @@ def test_payload_must_be_object() -> None:
     line: bytes = json.dumps({"v": 1, "kind": "hello", "payload": []}).encode("utf-8")
     with pytest.raises(ProtocolError):
         decode_frame(line)
+
+
+def test_partial_frame_at_eof_rejected() -> None:
+    with pytest.raises(ProtocolError):
+        read_frame(io.BytesIO(b'{"v":1,"kind":"run","payload":{}}'))

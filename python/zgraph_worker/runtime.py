@@ -175,7 +175,15 @@ def main() -> int:
     return _execute(protocol_fd, frame, cancel)
 
 
+def _shutdown(code: int) -> None:
+    """flush stderr 后强制退出（跳过 atexit/sys.exit；见协议文档 §4 的退出约定）。"""
+    try:
+        sys.stderr.flush()
+    finally:
+        os._exit(code)
+
+
 if __name__ == "__main__":
     # 后台 cancel reader 线程会阻塞在 stdin 读取；用 os._exit 跳过解释器 shutdown，
     # 避免 "could not acquire lock for BufferedReader at interpreter shutdown" 致命错误。
-    os._exit(main())
+    _shutdown(main())

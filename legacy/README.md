@@ -9,4 +9,4 @@
   - `config/software_team_graph.json` 的 gate 引用与定义不一致（ISSUE-002，wontfix）。
 - 可运行性：目录移动后**不保证**可直接运行（原实现按仓库根路径与 `src.*` 导入）；如需复跑，请 checkout 历史提交
   `50f05d2`（或更早）后按当时的 README 操作。
-- 任何新代码**禁止**放在本目录；旧模块 id（`kernel`/`scheduler`/...）已在 `AGENTS.md` §2 退役。
+- 任何新代码**禁止**放在本目录；旧模块 id（`scheduler`/`state-manager`/`dispatcher`/`monitor`/`orchestrator`/`workers`/`config`）已在 `AGENTS.md` §2 退役；`kernel`/`cli`/`e2e`/`docs`/`process` 保留 id 但路径迁到新目录。

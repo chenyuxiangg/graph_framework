@@ -67,7 +67,7 @@
 | O-2 | worker 是否复用池化（按 module 常驻）？ | M3 前（默认：先一节点一进程） |
 | O-3 | 可复现 L2 的记录粒度 | **已定**：`--record` 默认 `hash`；L2 重放要求运行期 `--record=full`（architecture §5.2/§5.3；ISSUE-016 已关闭） |
 | O-4 | legacy 是整体删除还是永久保留 | M5 决策 |
-| O-5 | `doc/graph_base_design.md` 的定位（历史设计 vs 实现说明） | M0 随 README 调整 |
+| O-5 | `legacy/graph_base_design.md` 的定位（历史设计 vs 实现说明） | M0 随 README 调整 |
 
 ## 6. 验收锚点
 

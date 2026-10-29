@@ -47,20 +47,28 @@
 5. **确定性**：supervisor spawn 时设置 `PYTHONHASHSEED=0`；SDK 按 `seed` 初始化 `random`/`numpy`；
    `ctx.now()`/`ctx.random()` 由 SDK 提供（直接调系统时间会破坏 L2，文档明示）。
 
-## 5. 错误码（与 `doc/architecture-v2.md` §8.1 对齐）
+## 5. 错误码（与 `doc/architecture-v2.md` §8.2 对齐）
 
 `NODE_WORKER_HANDSHAKE` / `NODE_WORKER_PROTOCOL` / `NODE_WORKER_IMPORT` / `NODE_WORKER_CRASH` /
 `NODE_PYTHON_EXCEPTION` / `NODE_BUSINESS_ERROR` / `NODE_RETURN_NOT_DICT` / `NODE_CANCELLED` / `NODE_TIMEOUT`
 
-## 6. M0 验收检查单（每项必须有测试）
+## 6. M0 验收检查单（状态：`[x]` 已实现/有测试；`[M3]` 延后并登记 ISSUE-025）
 
-- [ ] `hello` 超时 / `v` 不匹配 / 缺 `sdk_version` → 拒绝并 kill
-- [ ] `hello_ack` 前不执行用户代码
-- [ ] `run` 载荷含 `seed` / `deadline_ms` / `global_vars`
-- [ ] exit 0 无 result / result 后不退出 / 重复 result → 协议错误
-- [ ] stderr 大量输出不阻塞（排空 + 8 KiB 截断）
-- [ ] 用户 `print()` 不污染协议；`input()` 抛错
-- [ ] 同步用户函数执行中收到 cancel → 标志置位、协作退出
-- [ ] 卡帧 / 半行帧 / 非法 UTF-8 / 超 8 MiB → 协议错误
-- [ ] 超时 kill 进程组：无残留子进程/僵尸
-- [ ] 并发上限（全局/每 run）生效
+- `[x]` `hello` 超时（5s）/ `v` 不匹配 / 缺字段 → 拒绝并 kill
+- `[x]` `hello_ack` 前不执行用户代码
+- `[x]` `run` 载荷含 `seed` / `deadline_ms` / `global_vars`
+- `[x]` 重复 `result` 检测；`[M3]` exit 0 无 result、result 后不退出（supervisor 层）
+- `[x]` stderr 持续排空 + 8 KiB 尾部截断（压力用例）
+- `[x]` 用户 `print()` 不污染协议；`input()` 抛错
+- `[x]` 同步用户函数执行中收到 `cancel` → 标志置位、协作退出（Python 侧）
+- `[M3]` supervisor 发送 cancel → 2s → SIGTERM → 1s → SIGKILL 进程组
+- `[x]` 半行帧 / 非法 UTF-8 / 超 8 MiB（帧解码层）；`[M3]` 流式读取上限与帧空闲超时
+- `[x]` 超时不等待：显式 kill + wait/reap（单进程，测试断言 PID 消失）
+- `[M3]` 进程组 kill（孙进程）/ 全局与每 run 并发上限
+
+> 退出约定：worker 在写完 `result`/`error` 后 **flush stderr 并 `os._exit`**（跳过 atexit），
+> 因此用户代码不应依赖 `atexit`/`finally` 的收尾（worker 契约，见 §4）。
+
+## 7. 未覆盖项（M3，见 `doc/issues.md` ISSUE-025）
+
+supervisor 侧 cancel/信号升级、帧空闲超时、流式读取上限、exit-0-无-result 分支、进程组 kill、并发上限。
