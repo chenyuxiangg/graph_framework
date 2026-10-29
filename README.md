@@ -18,7 +18,7 @@
 `tests/e2e/**` 真子进程验收（AC-06/07/09/10 + 故障注入）；本地双栈测试全绿（`cargo test --workspace` / `pytest`），CI 已配置（`.github/workflows/ci.yml`）。
 
 **尚未实现（M4–M5）**：Agent Harness（LLM 流式/tool/预算）、CLI `run`/`replay`、多 run 隔离（AC-12）、
-legacy 退役决策；M3 遗留 P2 见 [`doc/issues.md`](doc/issues.md)（ISSUE-061/063/066 等）。
+legacy 退役决策；M3 遗留项见 [`doc/issues.md`](doc/issues.md)（ISSUE-061 P2 / ISSUE-063 P3 / ISSUE-066 P2 等）。
 
 ## 快速开始
 
