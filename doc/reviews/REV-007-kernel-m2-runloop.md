@@ -11,7 +11,7 @@
 
 ## 1. 结论
 
-**结论：不通过**
+**结论：通过**（修订复审：首轮 `b670899` 为「不通过」；作者 `f6978f4`/`50fa948` 修复后，2026-10-29 独立复审通过，见 §7。以下 §1–§6 为首轮评审原文，保留作历史。）
 
 **1 个阻塞项 + 2 个重要项**，其中阻塞项是状态机语义错误，会使合法图错误地以 `RUN_DEADLOCK` 失败，必须修复后复审：
 
@@ -21,7 +21,7 @@
 
 其余 12 项为建议级（含作者自报风险逐项裁定，见 §4.4）；主路径实测是扎实的：AC-01/02/05/06/07/10/11 的内核语义、trace sink 顺序（RunStarted 第一/RunFinished 恰一次最后）、两阶段 publish（gate 在 executor task 内 off-loop 求值、每条出边一条 GateResult 且按 EdgeIndex 升序）、超时 kill 语义（aborted、`abandoned_tasks=0`、`killed_workers` 计数）、Pause/Resume/Cancel 幂等、disable_settle 死锁注入均通过。
 
-> 本轮阻塞/重要项均未在作者测试中覆盖（`cargo test` 全绿但探针可复现）；按 AGENTS §3/§6，修复后由作者追加提交，本记录追加修订段复审。
+> 本轮阻塞/重要项均未在作者测试中覆盖（`cargo test` 全绿但探针可复现）；按 AGENTS §3/§6，修复后由作者追加提交，本记录追加修订段复审（见 §7）。
 
 ## 2. 四维评审
 
@@ -142,8 +142,24 @@ bash scripts/dev/check.sh                                   # 13 项 OK → CHEC
 - **待 Lead 确认登记 ISSUE（编号由 Lead 分配）**：#4 trace 记录类型重复/无 serde 的收敛方案；#5 subgraph 检测点与 04 §4.4.4 对齐；#6 resume 去重排序；#7 多 end 冲突 warning；#10 trace_backpressure M2 恒 0；#11 NodeContext 冻结面缺口；①`EdgeIndex`/`EdgeIdx` 命名偏差需回写 00 §0.2/01 §1.1.2。
 - **转告 cli（REV-009）**：`RunOptions` 必须用 `default()`+字段赋值/FRU 构造（`cargo test --workspace` 会经 dev-dep 特性合并打开 `test-hooks`，5 字段穷举 literal 编译失败）；`evaluate_gate` 仅便捷入口，发布路径用 `evaluate_gate_for`；trace 桥接需手写 kernel→trace 类型映射（含 `NodeError→JSON`）。
 - **进程项**：本分支未更新 `doc/progress.md`/`doc/issues.md`（worktree 干净）；合并时由 Lead 按 AGENTS §5/§7 更新。未 push/merge，`main` 未被本分支改动。
-- 本记录结论为 **不通过** → `merge.sh` 不应执行；作者修复后在本文件追加「修订复审」段（不删除本记录，AGENTS §6）。
+- 本记录首轮结论为 **不通过**（`b670899`）→ `merge.sh` 不应执行；作者 `f6978f4`/`50fa948` 修复后按 AGENTS §6 在本文件追加「修订复审」段，修订后结论见 §7（**通过**）。
 
 ## 6. 条件关闭记录
 
-不适用（结论为 **不通过**，非“有条件通过”）。修复提交后按 AGENTS §6 在本记录追加修订复审段；阻塞项清零前不得合并。
+不适用（非“有条件通过”）。首轮不通过项已在 §7 修订复审中逐项关闭。
+
+## 7. 修订复审（2026-10-29，`50fa948`）
+
+> 触发：首轮不通过（`b670899`）后，作者新增 `f6978f4`（阻塞 #1：结算后统一 `maybe_skip_after_settle` + `cascade_direction.rs` 两方向用例）与 `50fa948`（重要 #2/#3：executor panic、Timeout/Cancelled 归一化；建议 #6/#11/#13：resume 排序、NodeContext 身份 getter、AC-07 Pause 断言收紧）。本轮只复审增量，独立复跑 + 独立探针，不采信测试名。
+
+- **增量范围**：`b670899..50fa948`，7 files, +421/−18，全部 `crates/zgraph-kernel/**`（`src/{run,executor,context}.rs` + 4 个测试文件，含新增 `tests/cascade_direction.rs`）；无跨模块改动，worktree 干净。
+- **阻塞 #1 复核（行为级）**：修复后 `apply_publish` 在**结算后统一**调用 `maybe_skip_after_settle`→`cascade_skip`（放行/拦截两分支均复核）。独立探针（临时 `tests/zz_reviewer_probe.rs`，跑完已删除）：
+  - 拦截边先结算（a 立即 `{"ok":false}`；b 70ms 后放行）：`join=[Pending,Skipped]`、`done=Skipped`、run **Completed**、output=None、`timed_out=0`、elapsed=74ms；
+  - 放行边先结算（b 立即；a 70ms 后拦截）：同样 `join/done=Skipped`、Completed、`timed_out=0`、76ms。
+  - 作者新增 `cascade_direction.rs` 两个用例分别覆盖上述两方向，断言 join/done Skipped、`reason=all_sources_blocked`、无 NodeTimedOut、lifecycle 恰一次 → 真实覆盖，非改断言凑绿。**结论：阻塞项已关闭。**
+- **重要 #2（executor panic）**：`CatchPanic` 在**同一任务**内对 future `poll` 做 `std::panic::catch_unwind`（`AssertUnwindSafe`；`Pin<Box<F>>` 投影无需 unsafe，`#![forbid(unsafe_code)]` 保留，`src/**`/`tests/**` 无 `unsafe`）。独立探针：future 内 panic → **9.4ms** `NODE_INTERNAL`/`Crashed`，message 含 `executor panicked: poll boom`（panic payload 保留；非字符串 payload 退化为 generic 文案），无 NodeTimedOut；不吞 panic 信息（std panic hook 仍照常打印）。取消/超时路径不受影响：30s executor + 100ms 节点超时 → 102ms `NODE_TIMEOUT`/`TimedOut`、`killed_workers=1`、`abandoned_tasks=0`；`control` 协作取消用例仍绿。**残留边界（建议级，不阻塞）**：若 panic 发生在 `executor.execute(...)` 的**同步调用**内（future 构造前，`run.rs:774-779` 的 `CatchPanic::new(executor.execute(execution))` 之外），仍不被捕获 → **独立探针复现：203ms 后 `NODE_TIMEOUT`/`TimedOut`（默认 180s 超时下仍会挂 180s）**。建议后续把包装改为 `CatchPanic::new(async move { executor.execute(execution).await })`（或登记 ISSUE）；真实 executor 的 handler panic 在 future poll 内，主路径已覆盖。
+- **重要 #3（Timeout/Cancelled 归一化）**：`on_timeout_error` 按 `CompiledNode.node_type` 判定。独立探针：python_node 返回 `Timeout{9}` → `NODE_INTERNAL`/Crashed、**无** NodeTimedOut（message 含 `must not produce Timeout`）；agent_call 返回 `Timeout` → `NODE_TIMEOUT`/TimedOut、NodeTimedOut=1；`Cancelled` 且无取消标志 → `NODE_INTERNAL`/Crashed（message 含 `Cancelled without cancel flag`）→ 符合 04 §4.1.4 规则 1/2。
+- **建议项落地**：#6 `resume_pending` 现只处理 `node_current` 的当前实例（去重）并按 `node_order` 排序后入队（确定性；无直接单测断言排序，属防御性改进，低风险）；#11 `NodeContext` 新增 `run_id/instance_id/node_id/attempt` getter（`context.rs`），独立探针用自环图捕获 `attempt=[0,1]`、node_id=`looper`，证明 attempt 真实透传而非默认值；#13 `test_hooks.rs` Pause 断言收紧为 `<100ms`（AC-07，实测远低于门槛）；#12 测试长函数未处理（仍为建议级）。
+- **回归与数字**：`cargo fmt --all -- --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo clippy -p zgraph-kernel --all-targets --features test-hooks -- -D warnings` exit 0；`cargo test -p zgraph-kernel` = **76 passed / 0 failed**（首轮 70 全绿 + 6 新增）；`--features test-hooks` = **79 passed**；`--workspace` = **178 passed / 0 failed**；`bash scripts/dev/check.sh` = CHECK PASSED。额外 2 轮 kernel + hooks 连跑：每轮 19/19 test binary ok、无 FAILED/panicked（连同首轮复跑共 3 次，未见 flaky）。与作者自测 76/79/178 一致。
+- **四维更新**：功能正确性 ✅（阻塞/重要项已关闭，主路径+新增探针全过；残留建议见上）；代码结构合理性 ✅；逻辑性 ✅（Skipped 复核顺序、panic/Timeout 归一化、resume 确定性均按 spec 收敛；残留同步 execute() panic 边界）；可读性 ✅（CatchPanic/归一化注释解释“为什么”）。
+- **本轮结论：通过**。首轮阻塞 #1 与重要 #2/#3 已关闭；未发现新的阻塞项。首轮 §3 建议项 #4/#5/#7/#8/#9/#10/#12 处置不变（待 Lead 确认登记 ISSUE / M3-M5 跟踪）；新增 1 条建议级残留（同步 `execute()` panic 边界）。合并门禁以本段更新后的结论为准。
