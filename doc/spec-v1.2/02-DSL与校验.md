@@ -1,6 +1,6 @@
 # 图模型驱动工作流框架 · 规格冻结 v1.2 · 分册 02：DSL 与校验
 
-> **⚠ v2 落地偏差**：本分册的进程内执行/超时/门控/并发等假设，已被 [`doc/architecture-v2.md`](../architecture-v2.md) §8 偏差表（D1–D12）修订；实现以偏差表为准，本分册保留为语义基准。
+> **⚠ v2 落地偏差（已回写）**：本分册的进程内执行/超时/门控/并发/符号解析等假设，已按 [`doc/architecture-v2.md`](../architecture-v2.md) §8 偏差表（D1–D12）**回写为正文**（M0–M2 批次，2026-10-30，见 PROVENANCE §2.5）；正文与偏差表冲突时以正文为准。
 > **状态**：规格冻结（编码前置）。本分册冻结**图 DSL schema、加载期校验规则 R1–R14、错误响应契约、符号解析、graph_hash**；这些内容可直接转成 Loader / `types.rs` / CLI 的实现与测试。
 > **取代关系**：本分册细化并修正《详细设计 v1.1》第 1 章（`/tmp/designdoc/doc.txt` L84–L270）与第 6 章符号解析相关部分；冲突时**以本规格为准**，00 分册为本册的上级锚点。v1.1 原文保留作为意图参考与审计依据。
 > **范围**：仅内核（见 [`doc/analysis/decision-record-01-scope.md`](../analysis/decision-record-01-scope.md) §2）。子图**执行**、人工介入、Agent 资产平台、API/前端不在本规格内。
@@ -28,7 +28,7 @@
 |---|---|
 | DSL schema（TS 类型 + Rust serde 契约）、未知字段白名单 | **02（本册）** |
 | 校验规则 R1–R14、错误码使用、错误定位、错误响应结构、`zgraph validate` 输出 | **02（本册）** |
-| 图级符号解析（gate / python_node）与加载期签名校验的**时机、顺序、错误码** | **02（本册）**；签名判定细则见 04 §4.7 |
+| 图级 gate 内置 op 解析、python_node 格式校验的**时机、顺序、错误码**（D7） | **02（本册）**；判定细则见 04 §4.7 |
 | `graph_hash` 计算与版本策略 | **02（本册）** |
 | `CompiledGraph` 的**构造流程、DSL→产物映射、编译期不变式** | **02（本册）**；结构定义归 01 §1.1.1/§1.1.2（01 提供、02/03/04 只读消费） |
 | 运行期状态结构、状态机、Delivery/Publish | 01 / 03 |
@@ -66,7 +66,7 @@
 | 概念 | 定义 |
 |---|---|
 | `node_id` | 出错节点（或子图 id，见 §2.7.3） |
-| `edge_index` | `edges` 数组下标，0-based；与 00 §0.2 `EdgeIndex` 一致 |
+| `edge_index` | `edges` 数组下标，0-based；与 00 §0.2 `EdgeIdx`（数值别名）一致 |
 | `port` | 端口名（`inputs`/`outputs` 中声明的名字） |
 | 命名空间 | 主图与每个子图各自独立；节点/端口唯一性在命名空间内判定 |
 | assets-dir | R14c 的资产根：CLI `--assets-dir`（缺省 `.`）或 env `ZGRAPH_ASSETS`（见 §2.6.3） |
@@ -76,7 +76,7 @@
 
 ## 2.2 DSL schema 最终版（schema 版本 `"1.0"`）
 
-**一句话结论**：v1.2 只做**向后兼容的新增（可选/保留字段）**与**两处语义收紧 + 一处放宽**（end 端口约束、gate 符号全限定收紧；`created_at` 改可选），不重命名任何既有字段；`version` 仍为 `"1.0"`（00 §0.1）。
+**一句话结论**：v1.2 只做**向后兼容的新增（可选/保留字段）**与**两处语义收紧 + 一处放宽**（end 端口约束、gate 符号收窄为内置 op（v2 D6）；`created_at` 改可选），不重命名任何既有字段；`version` 仍为 `"1.0"`（00 §0.1）。
 
 ### 2.2.1 v1.2 变更清单
 
@@ -92,8 +92,8 @@
 | `config.retry.max_attempts` | **新增（生效）** | 同上，整数 ≥1 | 缺省 `DEFAULT_MAX_ATTEMPTS = 3`（00 §0.5）；仅自环/显式重试计数 | C-26 / S-08 |
 | `config.exec_class` | **新增（生效）** | 仅 `python_node`，枚举 `"cpu" \| "io"` | 选择 Python 并发信号量类别（CPU=1 / IO=4，00 §0.5）；缺省 `io`（`PYTHON_EXEC_CLASS_DEFAULT`）；与 04 §4.1 `python_exec_class()` 对应 | M-10 |
 | `on_error` | **保留字（不在 schema）** | v2 失败路由 | 任何位置出现 → R4 `DSL_UNSUPPORTED_FIELD`（v2 启用） | C-09 |
-| `GateDefinition.function` | **修订（语义收紧）** | 必须**全限定** `module.function`（≥1 个点）；v1.1 的短名 / `gates.` 前缀拼接写法**作废** | 格式非法 → R14b `DSL_SYMBOL_NOT_FOUND` | C-22 |
-| `NodeType."subgraph"` | **保留** | 定义 + 校验保留 | 加载期完整校验并通过；**运行期派发前拒绝**（`NODE_TYPE_UNSUPPORTED`，不创建实例）→ §2.6.1 | C-17 / D1 |
+| `GateDefinition.function` | **修订（语义收紧，v2 D6）** | 只接受内置 op 短名 `check_output`/`compare`/`manual`；v1.1 的 Python 全限定 `module.function` 写法作废（Python gate 延后，ISSUE-014） | 非内置 op 名 → R14b `DSL_SYMBOL_NOT_FOUND`；`params` 契约不符 → `DSL_SIGNATURE_MISMATCH` | C-22 / D6 |
+| `NodeType."subgraph"` | **保留** | 定义 + 校验保留 | 加载期完整校验并通过；**运行期（run 启动后、实例创建前）拒绝**（`NODE_TYPE_UNSUPPORTED`，不创建实例）→ §2.6.1 | C-17 / D1 |
 | `version` | 不变 | `"1.0"` | 其他值 → R3 `DSL_PARSE_ERROR` | M-20 |
 | 节点/端口 ID 字符集 | **新增约束** | 节点 id：1–64 字符 `[A-Za-z0-9_.-]`；端口名：1–64 字符 `^[A-Za-z_][A-Za-z0-9_]*$` | 违反 → R4 `DSL_PARSE_ERROR` | M-11（可定位性） |
 | `type` 未知/保留字符串 | **新增（明确）** | 不属于 5 个枚举的字符串 → 加载期 `DSL_UNSUPPORTED_NODE_TYPE` | 拒绝（fail-fast，message 列出合法类型） | M-11 |
@@ -114,7 +114,7 @@ interface GraphDefinition {
   entry_points: string[];           // R2/R7：非空；每项为已声明节点；禁止 end；start 若存在必须列入
   nodes: GraphNode[];               // R2/R4：非空
   edges: GraphEdge[];               // R2/R8–R13：允许为空
-  subgraphs?: SubgraphDefinition[]; // R6：v1 只定义+校验；节点引用在运行期派发前被拒绝（§2.6.1）
+  subgraphs?: SubgraphDefinition[]; // R6：v1 只定义+校验；节点引用在运行期 run 启动后、实例创建前被拒绝（§2.6.1）
 }
 
 interface GraphMetadata {
@@ -177,7 +177,7 @@ interface PythonNodeConfig extends CommonNodeConfig {
   function: string;  // 模块内函数名；全限定符号 = `${module}.${function}`（§2.5.1）
 }
 
-interface SubgraphConfig { subgraph_id: string }  // v1：加载期校验通过；运行期派发前拒绝（NODE_TYPE_UNSUPPORTED，04 §4.4.4）
+interface SubgraphConfig { subgraph_id: string }  // v1：加载期校验通过；运行期 run 启动后、实例创建前拒绝（NODE_TYPE_UNSUPPORTED，04 §4.4.4）
 
 interface StartEndConfig {}         // 必须恰好 {}；on_error → DSL_UNSUPPORTED_FIELD，其它未知键 → DSL_PARSE_ERROR
 
@@ -190,7 +190,7 @@ interface GraphEdge {
 }
 
 interface GateDefinition {
-  function: string;                 // v1.2 收紧：全限定符号 module.function（必须含点）
+  function: string;                 // v2 D6：内置 op 短名 check_output/compare/manual；params 契约见 04 §4.6
   params?: Record<string, unknown>; // 原样进入 GateContext.params（04 §4.6）
 }
 
@@ -218,7 +218,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | S-9 | 整数 | `timeout_ms: Option<u64>`、`max_attempts: Option<u32>` | 负数/浮点/字符串 → `DSL_PARSE_ERROR`；越界（0）→ R4 `DSL_PARSE_ERROR`（`expected: ">= 1"`） |
 | S-10 | 开放 Map（豁免扫描） | `gate.params`、`input_mapping`、`subgraph.*_mapping` 是 `serde_json::Map`/`BTreeMap` | 这些位置的键**不**参与未知字段预扫描（用户数据） |
 | S-11 | 子图递归 | `Option<Vec<SubgraphDefinition>>`，节点/边复用同一 `NodeDef`/`EdgeDef` | 校验递归时命名空间切换（§2.1.4）；错误定位前缀 `subgraphs[i]` |
-| S-12 | 编译产物 | `CompiledGraph` 全部字段 `pub` + `Arc` 共享（结构见 01 §1.1.1；构造见 §2.9） | `EdgeRef(EdgeIndex)`（00 §0.7）：编译产物只存 `usize`，不存引用 |
+| S-12 | 编译产物 | `CompiledGraph` 全部字段 `pub` + `Arc` 共享（结构见 01 §1.1.1；构造见 §2.9） | `EdgeRef(EdgeIdx)`（00 §0.2/§0.7）：编译产物只存 `usize`，不存引用 |
 
 ### 2.2.4 未知字段与必填键白名单（R4 的判定依据）
 
@@ -329,7 +329,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
       "from": "human_escalation_check",
       "to_node": "human_handoff",
       "to_input_port": "context",
-      "gate": { "function": "gates.hr.need_human" }
+      "gate": { "function": "check_output", "params": { "path": "need_human", "equals": true } }
     },
     { "from": "answer_generator", "to_node": "end_success", "to_input_port": "result" }
   ]
@@ -342,7 +342,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 |---|---|---|---|
 | 1 | `end_success.inputs: []`，却有边指向 `result` | `inputs: [{ "name": "result", "type": "any", "required": true }]` | C-15；R4 + R12 |
 | 2 | `metadata` 无 `created_at`（与 v1.1 必填矛盾） | 仍缺省，合法（字段改可选） | C-25；R3 |
-| 3 | gate `"function": "gate_need_human"`（短名） | `"gates.hr.need_human"`（全限定） | C-22；R14b |
+| 3 | gate `"function": "gate_need_human"`（Python 短名） | `"check_output"`（内置 op，D6；`params` 见示例） | C-22 / D6；R14b |
 | 4 | 无任何超时声明 | `input_parser.config.timeout_ms=60000`（示例演示新字段；`retry` 只在自环时有意义（v1 无显式重试），本图为 DAG 故不演示，见 §2.2.1） | C-01 |
 | 5 | 6 条边，`end_success` 为唯一 end | 不变（多 end 也合法；见 R4） | R4/R12 |
 | 6 | 无 start 节点 | 不引入（start 可选，§2.6.4） | §2.6.4 |
@@ -364,7 +364,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | R11 | ✅ | `(to_node,to_input_port)` 6 组互异 |
 | R12 | ✅ | 全部非 entry 节点的 `required` 端口均有入边；`end_success.result` 有来源 |
 | R13 | ✅ | 门控子图为 DAG（无环；无自环） |
-| R14 | ✅（需 fixture） | gate `gates.hr.need_human`、python_node `gates.hr.need_human_check` 与 4 个 agent 资产 id（`message_parser`/`kb_searcher`/`answer_writer`/`human_handoff_agent`）由 07 分册 e2e fixture 提供（AC-01/AC-04） |
+| R14 | ✅（需 fixture） | gate 内置 op `check_output`（D6）、python_node `gates.hr.need_human_check` 与 4 个 agent 资产 id（`message_parser`/`kb_searcher`/`answer_writer`/`human_handoff_agent`）由 07 分册 e2e fixture 提供（AC-01/AC-04） |
 
 > 注：`human_handoff` 是**叶节点**（无出边）——合法；run 结束以"无活跃实例"判定（00 §0.7 / 03 §3.9），不要求每个分支都汇入 end。
 
@@ -403,7 +403,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | **R11** | `(to_node, to_input_port)` 唯一 | `DSL_DUPLICATE_PORT_SOURCE` | 逐边插入 `Set<(to_node,to_input_port)>`；命中 → 报第二次出现 | `edge_index` + `node_id` + `port` |
 | **R12** | 输入来源完整 | `DSL_UNCONNECTED_INPUT` | 对每个 **非 entry** 节点：入边数 ≥1；`trigger=all` → 每个 `required:true` 端口有入边；`trigger=any` → ≥1 个 `required` 端口有入边（无 required 端口时 → ≥1 个端口有入边）。豁免：主图 `entry_points` 节点（含 start）、子图 `input_mapping` 值指向的内部节点 | `node_id`（+`port`） |
 | **R13** | 无门控环检测 | `DSL_CYCLE_DETECTED` | 构造 `G'` = 顶点为节点、边为**无 gate 的边**（**自环计入**）；对 `G'` 做 DFS 三色标记（顶点按 `nodes` 序、邻接按 `edges` 序）→ 发现回边即环 | `edge_index`（环内最小索引边）+ `node_id`（环起点） |
-| **R14** | 外部引用解析 | `DSL_SYMBOL_NOT_FOUND` / `DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT` / `DSL_AGENT_NOT_FOUND` | (a) 图级符号解析（gate / python_node）：格式 → import → 存在性 → 签名 → 冲突（§2.5）；(b) `agent_call.agent_id` 在资产索引中存在。**`subgraph` 节点不在此拒绝**（加载期通过，运行期派发前报 `NODE_TYPE_UNSUPPORTED`，§2.6.1） | `node_id` / `edge_index`（gate） |
+| **R14** | 外部引用解析 | `DSL_SYMBOL_NOT_FOUND` / `DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT` / `DSL_AGENT_NOT_FOUND` | (a) **gate**：格式 → 内置 op 查表 → `params` 契约 → 跨类冲突（§2.5；D6/D7）；**python_node 只做 `module/function` 格式校验，不 import**（导入/签名在 worker 启动期 → `NODE_WORKER_IMPORT`）；(b) `agent_call.agent_id` 在资产索引中存在（未提供资产根时跳过，§2.6.3）。**`subgraph` 节点不在此拒绝**（加载期通过，运行期 run 启动后、实例创建前报 `NODE_TYPE_UNSUPPORTED`，§2.6.1） | `edge_index`（gate）/ `node_id`（资产） |
 
 ### 2.4.2 错误信息模板与定位（message 为英文稳定模板，M-11）
 
@@ -423,9 +423,9 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | `DSL_UNCONNECTED_INPUT` | `input '{node_id}.{port}' has no incoming edge`；`node '{node_id}' has no incoming edge` | `node_id`（+`port`） | `graph.json: node 'X'` |
 | `DSL_SUBGRAPH_INVALID` | `subgraph '{subgraph_id}': {detail}`（`no_end`/`duplicate_id`/`bad_mapping_ref`/`duplicate_node_id`/`cycle`） | `node_id`=子图 id | `graph.json: subgraphs[i]` |
 | `DSL_CYCLE_DETECTED` | `ungated data cycle: {n1} -> {n2} -> ... -> {n1} (edges: [{indices}])` | `edge_index` + `node_id` | `graph.json: edges[i]` |
-| `DSL_SYMBOL_NOT_FOUND` | `symbol '{symbol}' not found: {detail}`（`bad_format`/`import_failed`/`attribute_missing`） | `node_id` 或 `edge_index` | `graph.json: node 'X'.config` / `edges[i].gate` |
-| `DSL_SIGNATURE_MISMATCH` | `signature mismatch for '{symbol}': expected {expected}, actual {actual}` | `node_id` 或 `edge_index` | 同上 |
-| `DSL_SYMBOL_CONFLICT` | `symbol conflict for '{symbol}': {kind_a} requires {sig_a}, {kind_b} requires {sig_b}` | `node_id` 或 `edge_index`（后出现者） | 同上 |
+| `DSL_SYMBOL_NOT_FOUND` | `symbol '{symbol}' not found: {detail}`（`bad_format`/`unknown_builtin_op`） | `edge_index`（gate） | `graph.json: edges[i].gate` |
+| `DSL_SIGNATURE_MISMATCH` | `signature mismatch for '{symbol}': expected {expected}, actual {actual}`（仅内置 gate op 的 `params` 契约） | `edge_index`（gate） | `graph.json: edges[i].gate` |
+| `DSL_SYMBOL_CONFLICT` | `symbol conflict for '{symbol}': {kind_a} and {kind_b} share the same name`（`builtin.<op>` vs python_node） | `edge_index` 或 `node_id`（后出现者） | `graph.json: edges[i].gate` / `node 'X'.config` |
 | `DSL_AGENT_NOT_FOUND` | `agent asset '{agent_id}' not found in index '{assets_dir}/agents'`；`duplicate agent asset id '{agent_id}'` | `node_id` | `graph.json: node 'X'.config.agent_id` |
 | `DSL_UNSUPPORTED_NODE_TYPE` | `node type '{type}' is not a known node type; allowed: [start, end, agent_call, python_node, subgraph]`（`subgraph` 的运行期拒绝用 `NODE_TYPE_UNSUPPORTED`，§2.6.1） | `node_id` | `graph.json: node 'X'` |
 
@@ -438,7 +438,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | 重复项 | 首次出现的下标 | 重复出现的下标 |
 | 枚举/格式 | 允许值数组或格式字符串（`"module.function"`） | 实际值 |
 | 环检测 | `"acyclic"` | 环路径数组（node id 序列） |
-| 签名 | 对象 `{"symbol":"…","kind":"…","expected":"(inputs, ctx)"}`（`kind` 取 `"gate"` 或 `"python_node"`） | 对象 `{"symbol":"…","kind":"…","actual":"str(inspect.signature(f))"}` |
+| 签名 | 对象 `{"symbol":"…","kind":"gate","expected":<op 的 params 契约>}` | 对象 `{"symbol":"…","kind":"gate","actual":<实际 params>}` |
 | 符号 / 资产 | 对象 `{"symbol":"…","kind":"…"}` / 资产 id | 同结构；失败原因写在 `message` |
 
 ### 2.4.3 正反例（每条规则 1 正 1 反）
@@ -458,41 +458,43 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | R11 | `input_parser→answer_generator.user_query`、`kb_search→answer_generator.kb_result` | `input_parser→kb_search.query` + `answer_generator→kb_search.query` → `DSL_DUPLICATE_PORT_SOURCE`（`node_id:"kb_search"`、`port:"query"`、`edge_index:后者`） |
 | R12 | 全部非 entry 的 required 端口均有入边 | `human_handoff`（非 entry）的 `context` 边删除 → `DSL_UNCONNECTED_INPUT`（`node_id:"human_handoff"`、`port:"context"`） |
 | R13 | 示例 DAG；或带 gate 的自环 `a → a` | 无 gate 的 `a→b→a` → `DSL_CYCLE_DETECTED`（`edge_index:` 环内最小边）；**无 gate 的自环 `a→a` 同样报错** |
-| R14 | gate `"gates.hr.need_human"`、python `"gates.hr.need_human_check"`、资产齐备 | gate 写短名 `"gate_need_human"` → `DSL_SYMBOL_NOT_FOUND`（`edge_index`，`expected:{"symbol":…,"kind":"gate"}`）；`agent_id:"ghost_agent"` → `DSL_AGENT_NOT_FOUND`；`type:"subgraph"` **加载期通过**，`zgraph run` 时派发前 `NODE_TYPE_UNSUPPORTED`（§2.6.1） |
+| R14 | gate 写内置 op 短名 `"check_output"`、python `"gates.hr.need_human_check"`（格式合法即可，不 import）、资产齐备 | gate 写 Python 风格名 `"gate_need_human"` → `DSL_SYMBOL_NOT_FOUND`（`edge_index`，`expected:{"symbol":…,"kind":"gate"}`）；`agent_id:"ghost_agent"` → `DSL_AGENT_NOT_FOUND`；`type:"subgraph"` **加载期通过**，`zgraph run` 时 run 启动后、实例创建前 `NODE_TYPE_UNSUPPORTED`（§2.6.1）；python_node 模块不存在 **加载期通过**，worker 启动时报 `NODE_WORKER_IMPORT`（运行期） |
 
 ### 2.4.4 本册对审计条目的裁定（D-02-xx，可编码）
 
 | 编号 | 裁定 | 关闭 |
 |---|---|---|
-| D-02-01 | **两级唯一性都强制**：R10 `(from,to_node)` → `DSL_DUPLICATE_EDGE`；R11 `(to_node,to_input_port)` → `DSL_DUPLICATE_PORT_SOURCE`。v1 **禁止 fan-in**（多源同端口）；`EdgeIndex.incoming` 保持单值 `HashMap<(NodeId,PortName), EdgeIndex>`（§2.9.1 / 01 §1.1.2），v2 再引入 reducer/合并语义 | C-04 / C-05 |
+| D-02-01 | **两级唯一性都强制**：R10 `(from,to_node)` → `DSL_DUPLICATE_EDGE`；R11 `(to_node,to_input_port)` → `DSL_DUPLICATE_PORT_SOURCE`。v1 **禁止 fan-in**（多源同端口）；`EdgeIndex.incoming` 保持单值 `HashMap<(NodeId,PortName), EdgeIdx>`（§2.9.1 / 01 §1.1.2），v2 再引入 reducer/合并语义 | C-04 / C-05 |
 | D-02-02 | `GraphMetadata.created_at` **可选**；存在则 UTC RFC3339；不参与 graph_hash。`metadata.name` 必填非空 | C-25 |
 | D-02-03 | v1.1 示例按 §2.3.1 修正：`end` 必须声明 **≥1 个 `required:true` 输入端口**，且每个 required 端口必须有入边（R4 + R12）。不引入"end/start 豁免端口校验"的特例 | C-15 |
 | D-02-04 | `end`：无出边（R8）、≥1 required 输入且有来源（R4/R12）、`trigger` 必须 `all`；数量 0..N（多 end 合法，用于分支收口）。`start`：无入边（R8）、必须在 `entry_points` 中、可多个、`inputs`（0..N）由 `entry_inputs` 注入且 handler 整包透传（04 §4.4.2）；`start` 可选（`entry_points` 是入口唯一真源） | S-01 / S-17 |
 | D-02-05 | **自环不豁免环检测**：无 gate 的自环 = 无门控纯数据环 → R13 `DSL_CYCLE_DETECTED`；带 gate 的自环合法，次数上限由 `retry.max_attempts`（缺省 3）与 03 的 attempt 语义共同约束 | C-26 |
 | D-02-06 | **未知字段一律拒绝**（§2.2.4 白名单）：保留字段（`on_error`、`from_output_port`）→ `DSL_UNSUPPORTED_FIELD`；其它未知键 → `DSL_PARSE_ERROR`。与 00 §0.4 的 `DSL_UNSUPPORTED_FIELD` 行一致（§2.11 P-02-01） | C-09 / M-11 |
-| D-02-07 | **子图节点：加载期通过、运行期派发前拒绝**。加载期完整校验（R6 + `subgraph_id` 引用存在），不视为错误；run 在"就绪 → 派发"处检测 `NodeType::Subgraph`：不创建实例、不构造 handler、run 立即 Failed、错误码 `NODE_TYPE_UNSUPPORTED`（00 运行期域），其余非终态转 Cancelled（04 §4.4.4 / 00 I9）。理由：保留 DSL 定义与校验能力（v1.1 直接启用）+ 决策记录 §2.2 + 00 运行期码不落空；代价：`validate` 通过但 run 必失败，属显式语义（"能加载、不能跑"）。`DSL_UNSUPPORTED_NODE_TYPE` 改用于加载期**未知/保留 `type` 字符串**（与 04 A5 一致） | C-17 / M-11 |
+| D-02-07 | **子图节点：加载期通过、运行期（run 启动后、实例创建前）拒绝**。加载期完整校验（R6 + `subgraph_id` 引用存在），不视为错误；run 启动成功后、创建实例前检测 `NodeType::Subgraph`：不创建实例、不构造 handler、run 立即 Failed、错误码 `NODE_TYPE_UNSUPPORTED`（00 运行期域；ISSUE-046），其余非终态转 Cancelled（04 §4.4.4 / 00 I9）。理由：保留 DSL 定义与校验能力（v1.1 直接启用）+ 决策记录 §2.2 + 00 运行期码不落空；代价：`validate` 通过但 run 必失败，属显式语义（"能加载、不能跑"）。`DSL_UNSUPPORTED_NODE_TYPE` 改用于加载期**未知/保留 `type` 字符串**（与 04 A5 一致） | C-17 / M-11 |
 | D-02-08 | 入口节点（`entry_points`）**不得有入边**（R8）：输入来源唯一（`RunSpec.entry_inputs`），消除双重来源歧义 | S-01 |
-| D-02-09 | 符号在**图加载期**解析并校验签名（R14b），运行期只查表；同名符号跨类（gate/python_node）→ `DSL_SYMBOL_CONFLICT` | C-20 / C-22 / S-18 |
+| D-02-09 | gate 内置 op 在**图加载期**解析并校验 `params`（R14b）；python_node 只校验格式、worker 启动期解析（D7）；同名符号跨类（gate/python_node）→ `DSL_SYMBOL_CONFLICT` | C-20 / C-22 / S-18 |
 | D-02-10 | `graph_hash` 只对**通过 R1–R13 的 DSL 内容**做白名单投影计算（§2.8.2）；不补齐默认值；不含 `description/author/created_at` | M-20 |
 
 ---
 
 ## 2.5 符号解析规格（关闭 C-20 / C-21 / C-22 / S-18）
 
-**一句话结论**：gate 与 python_node 的符号**统一为全限定 `module.function`**（必须含点），在**图加载期（R14b）**完成 import + 存在性 + 签名校验；运行期只按符号名查编译期符号表（不 import、不校验）。
+**一句话结论**：`python_node` 的符号是**全限定 `module.function`**（必须含点）；**v2（D6/D7）**下 `gate.function` 只接受**内置 op 短名**（`check_output`/`compare`/`manual`，加载期完成名称/`params` 契约校验，失败为 `DSL_SYMBOL_*`），且**图加载期不 import 用户 Python**——`python_node` 在加载期只校验 `module/function` **格式**，存在性与签名在 **worker 启动时**校验（失败为运行期 `NODE_WORKER_IMPORT`）。
 
 ### 2.5.1 命名（唯一形式）
 
 | 用法 | DSL 字段 | 符号（唯一键） | 格式规则 | 示例 |
 |---|---|---|---|---|
 | python_node | `config.module` + `config.function` | `${module}.${function}` | `module` 为点分 Python 标识符（`^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$`），`function` 为标识符；合并名必须含 ≥1 点（自动满足） | `gates.hr` + `need_human_check` → `gates.hr.need_human_check` |
-| gate | `gate.function`（**单字段**） | 值本身 | 必须**全限定**：`^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$`（≥1 个点） | `gates.hr.need_human` |
+| gate | `gate.function`（**单字段**） | 值本身 | **v2（D6）只接受 3 个内置 op 短名**：`check_output` / `compare` / `manual`（不含点；Python gate 延后，ISSUE-014）。canonical 符号 `builtin.<op>` 只用于跨类冲突检测 | `check_output` |
 
 | 作废写法（v1.1） | v1.2 处理 |
 |---|---|
-| gate 写短名 `"gate_need_human"` | R14b `DSL_SYMBOL_NOT_FOUND`，`expected:"module.function"` |
-| 解析器自动拼前缀 `gates.`（v1.1 §6.3） | **删除**：代码直接 import 全限定名，不再拼接 |
-| `gates.{name}` 中间写法 | 与全限定名等价，只要含点即合法 |
+| gate 写 `"gate_need_human"` | R14b `DSL_SYMBOL_NOT_FOUND`，`expected:["check_output","compare","manual"]` |
+| 解析器自动拼前缀 `gates.`（v1.1 §6.3） | **删除**：加载期只接受内置 op canonical 名（`builtin.<op>`），不再拼接/import |
+| `gates.{name}` 中间写法 | **v2 作废（D6/D7）**：Python gate 延后（ISSUE-014），`gate.function` 只接受内置 op（`check_output`/`compare`/`manual`，canonical `builtin.<op>`） |
+
+> **D7 回写（ISSUE-026/050）**：`python_node` 的符号串仍按上表格式校验（全限定名、合法标识符），但**图加载期不 import**；`DSL_SYMBOL_NOT_FOUND` / `DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT` 在 v2 只由**内置 gate op 名称/`params` 契约/跨类同名**触发。Python 节点的导入失败/签名不符是**运行期**错误：worker 启动时校验失败 → `NODE_WORKER_IMPORT`（实例 Crashed）。
 
 - `GateDefinition.function` 字段名**不改**（向后兼容）；v1.2 只收紧其取值语义（00 §0.1 的"修订"见 §2.11 P-02-04）。
 - 符号在**同一张图内**是唯一键：同一符号出现多次 → 只解析/登记一次（幂等）。
@@ -501,47 +503,50 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 | 顺序 | 来源 | `SymbolKind` | 遍历顺序 |
 |---|---|---|---|
-| 1 | 每个 `python_node` 节点 | `PythonNode` | `nodes` 数组顺序 |
-| 2 | 每条边的 `gate` | `Gate` | `edges` 数组顺序 |
+| 1 | 每个 `python_node` 节点 | `PythonNode` | `nodes` 数组顺序（**v2 只做格式校验，不 import**） |
+| 2 | 每条边的 `gate` | `Gate`（内置 op） | `edges` 数组顺序 |
 | 3 | — | — | **无第三类**：Agent 级 skills/tools 不在图加载期解析（§2.5.7） |
 
 - 去重按符号名；**同名跨 kind** 立即记为冲突（`DSL_SYMBOL_CONFLICT`），在 R14b 末尾统一报（定位：后出现的位置）。
 - 子图定义内的符号：v1 子图不执行 → **不收集**（子图定义段只做结构校验；节点运行时被拒，R14 不解析其符号）。
-- **与 04 §4.7.2 R1 的一致性**：skills/tools 归 Harness Loading（`HARNESS_CONFIG_LOAD` / `HARNESS_UNKNOWN_TOOL`），图级 R14 只解析 gate/python_node；04 §4.7.2 R1 已同步（P-02-07 已解决，2026-10-28）。
+- **与 04 §4.7.2 R1 的一致性**：skills/tools 归 Harness Loading（`HARNESS_CONFIG_LOAD` / `HARNESS_UNKNOWN_TOOL`），图级 R14 只解析 gate/python_node **格式与内置 op**；04 §4.7.2 R1 已同步（P-02-07 已解决，2026-10-28）。
 
 ### 2.5.3 解析时机与产物
 
 | 阶段 | 动作 | 失败错误码 | 产物 |
 |---|---|---|---|
-| 图加载期（R14b） | 格式校验 → `import` 模块 → 取属性 → 签名校验 → 注册句柄 | `DSL_SYMBOL_NOT_FOUND` / `DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT` | `ResolvedSymbols` 快照（04 §4.7；与 `CompiledGraph` 分离，run 同时持有两者） |
+| 图加载期（R14b） | **gate**：格式校验 → 内置 op 查表 → `params` 契约校验 → 登记；**python_node**：只做 `module/function` 格式校验，**不 import** | `DSL_SYMBOL_NOT_FOUND` / `DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT`（仅内置 gate op 与跨类同名） | `ResolvedSymbols` 快照（04 §4.7；`python_node` 只含格式信息） |
 | run 启动期 | **不解析**（只校验 `entry_inputs`，§2.3.4） | — | — |
-| 执行期 | 按句柄查表：`python_node` 节点 → `ResolvedSymbols.by_node`；gate → `by_gate_edge`（04 §4.7.3） | 缺失 = 框架 bug → `Internal`（fail-fast，不重试） | — |
+| 执行期（worker 启动） | supervisor spawn worker → worker `import` 用户模块 → 取属性 → 签名校验；失败回报 `NODE_WORKER_IMPORT` | `NODE_WORKER_IMPORT`（Crashed，§8.2） | worker 进程内符号句柄（不跨进程回传） |
+| 执行期（gate） | 按内置 op 名查表求值（Rust 内置，不调用用户 Python） | 缺失 = 框架 bug → `Internal`（fail-fast，不重试） | — |
 
-- `SymbolHandle` = 04 §4.7 `RegisteredFn` 的只读句柄（`Arc` 共享、`Send + Sync`）；句柄内部不必 `Clone`，图侧只借 `&`。
-- **R14b 的副作用边界**：`import` 会执行模块顶层代码——这是 Python 语义，无法避免；约定（04 §4.7）模块顶层 MUST 轻量、MUST NOT 发起网络/IO 副作用；违反属用户模块缺陷，不改变本册契约。
-- 符号解析**不产生 run**，失败只返回 DSL 错误（00 §0.4 DSL 域定义）。
+- `SymbolHandle` = 04 §4.7 `RegisteredGateOp` 的只读句柄（`Arc` 共享、`Send + Sync`）；v2 中该句柄只覆盖**内置 gate op**；`python_node` 的 `PythonSymbolRef` 只是格式信息，真实 Python 句柄位于 worker 进程内。
+- **副作用边界（D7）**：v2 的图加载期**不执行用户 Python**，因此不存在"加载期 import 产生副作用/阻塞"风险；用户模块顶层代码在 **worker 启动时**执行，副作用属 worker 进程。
+- 符号解析**不产生 run**，加载期失败只返回 DSL 错误（00 §0.4 DSL 域定义）；worker 导入失败已产生 run（运行期错误）。
 
 ### 2.5.4 `DSL_SYMBOL_*` 触发条件（精确判定）
 
 | 错误码 | 触发条件（任一） | `expected` / `actual` | 定位 |
 |---|---|---|---|
-| `DSL_SYMBOL_NOT_FOUND` | ① 符号名格式非法（gate 不含点 / 非法标识符）② `import` 抛 `ImportError`/`ModuleNotFoundError`/任何导入期异常 ③ 模块可导入但属性不存在（`AttributeError`） | 对象 `{"symbol":…,"kind":…,"module":…}` / 原符号串或异常摘要 | python_node：`node_id`；gate：`edge_index` |
-| `DSL_SIGNATURE_MISMATCH` | 可调用对象存在，但按 04 §4.3.5（S2–S5）不通过：非模块级函数 / `async def` / 参数个数 ≠ 2 或非位置参数 / 含 `*args`·`**kwargs`·keyword-only / 参数带默认值。**类型注解与返回注解只告警、不阻断**（关闭 P-10） | 对象 `{"symbol","kind","expected":"(inputs, ctx)"}`（gate 为 `(output, ctx)`） / 实际 `str(inspect.signature(f))` | 同上 |
-| `DSL_SYMBOL_CONFLICT` | ① 同一符号名在图内同时被 `Gate` 与 `PythonNode` 要求（两种签名要求不同）② 进程级 Registry 已存在同名但**期望签名不同**的符号（跨图加载，§2.5.6） | 对象 `{"symbol":…,"existing_kind":…,"requested_kind":…}` | 后出现的位置 |
+| `DSL_SYMBOL_NOT_FOUND` | **仅内置 gate op 路径**：① 符号名格式非法（非标识符）② 内置 op 名不存在（不在 `check_output`/`compare`/`manual` 名单） | 对象 `{"symbol":…,"kind":…,"op":…}` / 原符号串 | gate：`edge_index` |
+| `DSL_SIGNATURE_MISMATCH` | **仅内置 gate op 路径**：op 存在但 `gate.params` 不满足该 op 的 `params` 契约（04 §4.6/§4.7.2） | 对象 `{"symbol","kind":"gate","expected":<op 契约>}` / 实际 `params` | gate：`edge_index` |
+| `DSL_SYMBOL_CONFLICT` | ① 同一符号名在图内同时被内置 gate op 与 `python_node` 要求（跨类同名，`builtin.<op>` vs 用户 `module.function`）② 进程级 Registry 已存在同名但**期望契约不同**的内置 op（§2.5.6） | 对象 `{"symbol":…,"existing_kind":…,"requested_kind":…}` | 后出现的位置 |
 
 > 00 §0.4 已将 v1.1 的 `DSL_GATE_CONFLICT` / `DSL_GATE_SIGNATURE_MISMATCH` / `DSL_NODE_SIGNATURE_MISMATCH` 合并：本册严格使用合并后的三个码，`kind=gate|python_node` 放在 `expected`/`actual` 对象与 message 中（04 §4.3.5/§4.4 要求的 `symbol`/`kind` 字段即落在这里，**不新增错误对象顶层键**）。
+>
+> **D7 分工（ISSUE-026）**：`python_node` 的导入失败/签名不符属于**运行期**错误，**不产生** `DSL_*` 码；worker 启动时失败固定在 `NODE_WORKER_IMPORT`（实例 Crashed，§8.2）。`DSL_SYMBOL_*` 不再覆盖用户 Python 符号。
 
 ### 2.5.5 签名校验（契约：本册定错误与定位，判定算法在 04 §4.3.5）
 
-| 符号类型 | 强制（失败 → `DSL_SIGNATURE_MISMATCH`） | 仅告警（不阻断） |
-|---|---|---|
-| gate | 模块级同步函数；恰好 2 个位置参数 `(output, ctx)`；无 `*args`/`**kwargs`/keyword-only/默认值 | 返回注解（缺失或非 `bool`）→ warning；运行期仍严格校验 bool（04 §4.6.2） |
-| python_node | 模块级同步函数；恰好 2 个位置参数 `(inputs, ctx)`；同上 | 返回注解（缺失或非 `dict`）→ warning；运行期强制 `dict`（04 §4.3.2） |
+| 符号类型 | 强制口径（v2 / D7） |
+|---|---|
+| gate（内置 op） | 加载期校验 `gate.params` 满足内置 op 契约（`check_output`/`compare`/`manual`，04 §4.6）；不再校验 Python 函数签名 |
+| python_node | **不在加载期校验签名（D7）**；worker 启动时按 04 §4.3.5 的 S1–S5 校验，失败 → `NODE_WORKER_IMPORT`（Crashed）；返回注解只告警、运行期强制 `dict`（04 §4.3.2） |
 
-- **参数名不校验**（框架按位置调用），`(inputs, ctx)` / `(output, ctx)` 只是规范书写。
+- **参数名不校验**（框架按位置调用），`(inputs, ctx)` 只是规范书写。
 - **注解不阻断**（关闭 P-10）：`from __future__ import annotations` 下注解是字符串、`typing.Dict` 与 `dict` 不等价、装饰器可改写 `__signature__`——按注解硬比较会误杀合法函数（v1.1 P-10 的"恒失败"缺陷）。
-- 判定算法（S1–S7）见 04 §4.3.5；本册只规定**时机（R14b，加载期）**、错误码、`expected`/`actual` 结构与定位（`node_id` / `edge_index`）。
-- 04 与 05 的边界：`SymbolHandle` 类型、PyO3 调用细节、异常 traceback 归 04；本册只定义"何时、按什么顺序、报什么码、定位到哪"。
+- 判定算法（S1–S7）见 04 §4.3.5；v2 中判定发生在 **worker 启动期**（Python 侧），失败经协议映射为 `NODE_WORKER_IMPORT`；本册只规定 `python_node` 加载期**格式校验**职责。
+- 04 与 05 的边界：`SymbolHandle` 类型、worker 调用细节、异常 traceback 归 04；本册只定义"何时、按什么顺序、报什么码、定位到哪"。
 
 ### 2.5.6 热更新与生命周期（关闭 C-21 / S-18）
 
@@ -559,7 +564,8 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 | 层级 | 符号 | 解析时机 | 所有者 | 失败错误码 |
 |---|---|---|---|---|
-| 图级 | `gate`、`python_node` | 图加载期（R14b） | 02（规则）/ 04（实现） | `DSL_SYMBOL_*` |
+| 图级 | `gate`（内置 op；Python gate 延后） | 图加载期（R14b） | 02（规则）/ 04（实现） | `DSL_SYMBOL_*` |
+| 图级 | `python_node` | **worker 启动期**（v2 D7：加载期只校验格式） | 04 / worker | `NODE_WORKER_IMPORT`（运行期，§8.2） |
 | Agent 级 | skills / tools（`AgentConfig.tools`） | Harness Loading（run 期，懒加载） | 05 | `HARNESS_CONFIG_LOAD` / `HARNESS_UNKNOWN_TOOL` |
 
 - v1.1 §6.3 `collect_symbols` 的 `skills` 分支**删除**（C-20：DSL 无 skills 字段）。
@@ -569,7 +575,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 ## 2.6 v1 支持域与保留字行为
 
-**一句话结论**：v1 支持 `start`/`end`/`agent_call`/`python_node`；`subgraph` **定义保留、加载期校验通过、运行期派发前拒绝**（`NODE_TYPE_UNSUPPORTED`）；`on_error` 是保留字（出现即 `DSL_UNSUPPORTED_FIELD`）；`outputs`/`from_output_port` 保留但不改变 v1 的**整包广播**路由。
+**一句话结论**：v1 支持 `start`/`end`/`agent_call`/`python_node`；`subgraph` **定义保留、加载期校验通过、运行期 run 启动后且实例创建前拒绝**（`NODE_TYPE_UNSUPPORTED`；ISSUE-046）；`on_error` 是保留字（出现即 `DSL_UNSUPPORTED_FIELD`）；`outputs`/`from_output_port` 保留但不改变 v1 的**整包广播**路由。
 
 ### 2.6.1 子图（关闭 C-17 的"v1 口径"）
 
@@ -578,8 +584,8 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | DSL schema | `subgraphs` 段与 `SubgraphDefinition` **完整保留**（结构、必填、递归校验） |
 | 定义校验 | R6：`id` 图内唯一、≥1 个 `end`、不得含 `start`、`input_mapping`/`output_mapping` 引用存在且指向已声明端口、递归执行 R4/R5/R8–R13 |
 | 节点使用 | 加载期：`type:"subgraph"` 是 schema 已知类型，**校验通过**（含 `subgraph_id` 必须命中 `subgraphs` 段，R6） |
-| 运行时 | **派发前拒绝**：调度器在"就绪 → 派发"处检测 `NodeType::Subgraph`，不创建实例、不构造 handler；run 立即 `Failed`（错误码 `NODE_TYPE_UNSUPPORTED`，00 运行期域），其余非终态实例转 `Cancelled`（00 I9 / 04 §4.4.4） |
-| 何时报 | **运行期、派发前**（首个 `subgraph` 节点就绪、即将创建实例时）；既不是加载期，也不是"执行中"。trace 记 `node_id` + `instance_id=null`（06） |
+| 运行时 | **run 启动后、实例创建前整体拒绝（ISSUE-046）**：run 启动成功后在创建实例前检测到 `NodeType::Subgraph`，随即整 run `Failed`（错误码 `NODE_TYPE_UNSUPPORTED`，00 运行期域），不创建实例、不构造 handler，其余非终态实例转 `Cancelled`（00 I9 / 04 §4.4.4） |
+| 何时报 | **运行期、run 启动后且实例创建前**（不等"就绪 → 派发"）；既不是加载期，也不是"执行中"。trace 记 `node_id` + `instance_id=null`（06） |
 | 为什么不在加载期拒绝 | ① 00 §0.3 `NodeType` 注释"Subgraph: v1 运行时不支持" + 决策记录 §2.2 明文（"运行到 `subgraph` 节点返回 `NODE_TYPE_UNSUPPORTED`"）；② 保留"能加载、不能跑"的显式语义，v1.1 启用后同一批图资产直接可用；③ 若加载期拒绝，00 运行期域的 `NODE_TYPE_UNSUPPORTED` 成为死码；④ `validate` 的语义是"DSL 合法"，本就不保证可运行（资产可用性、LLM 连通性都在运行期） |
 | 代价（显式） | 含 `subgraph` 节点的图 `validate` 通过但 `run` 必失败；这是 v1 范围裁剪（D1）的已知语义，v1.1 启用子图后自动消失 |
 | 版本演进 | v1.1 新增 `SubgraphHandler` 后移除"派发前检查"；DSL 与校验规则不变（仍 R6）；`SubgraphConfig` 届时补 `input_mapping`/`output_mapping`（新增可选字段，兼容 schema 1.0） |
@@ -603,12 +609,14 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 | 项 | 规则 |
 |---|---|
-| 资产根 | CLI `--assets-dir <dir>`；env `ZGRAPH_ASSETS`；缺省 `.` |
+| 资产根 | CLI `--assets-dir <dir>`；env `ZGRAPH_ASSETS`；**未提供时跳过 R14c**（ISSUE-027，M2 口径；否则 `zgraph validate <graph>` 单文件不可用） |
 | 索引范围 | `<assets-dir>/agents/*.json`（单层、不递归；按文件名排序读入以保证确定性） |
 | id 来源 | 文件内 `"id"` 字段（= `AgentConfig.id`，05 §5.2.2）；文件名无关 |
 | 校验内容 | **仅**：索引可读、`id` 非空、`id` 全局唯一、图内每个 `agent_call.agent_id` 都能命中 |
 | 错误码 | 未命中 → `DSL_AGENT_NOT_FOUND`；同 id 多文件 → 同码，message 区分 `duplicate agent asset id`（§2.11 P-02-02） |
 | 不校验 | `AgentConfig` 字段合法性、模型连通性、prompt 文件存在性、tools 可解析性 → 全部归 05（运行期 `HARNESS_CONFIG_LOAD` 等） |
+
+> **跳过语义（ISSUE-027 回写）**：只有当**未提供** `--assets-dir` 且未设置 `ZGRAPH_ASSETS` 时才跳过 R14c；一旦显式提供资产根，`DSL_AGENT_NOT_FOUND` 强制生效。后果：未提供资产根时 `agent_call.agent_id` 的存在性延迟到运行期（M4 Harness Loading）才暴露，`validate` 结果因此受 CLI 参数影响——这是 M2 的**已知取舍**，在 06 §6.10.2 固定该行为。
 
 ### 2.6.4 v1 支持域总表
 
@@ -618,7 +626,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | `end` 节点 | ✅ | ✅ | ✅（run 输出，03） | — | v1 |
 | `agent_call` | ✅ | ✅ | ✅（真实 LLM / `--fake-llm`） | — | v1 |
 | `python_node` | ✅ | ✅ | ✅ | — | v1 |
-| `subgraph` 节点 | ✅ | ✅（结构 + 引用存在） | ❌（派发前拒绝，run Failed） | `NODE_TYPE_UNSUPPORTED`（运行期） | v1.1 |
+| `subgraph` 节点 | ✅ | ✅（结构 + 引用存在） | ❌（run 启动后、实例创建前拒绝，run Failed；ISSUE-046） | `NODE_TYPE_UNSUPPORTED`（运行期） | v1.1 |
 | `subgraphs` 定义段 | ✅ | ✅（R6） | —（不执行） | `DSL_SUBGRAPH_INVALID` | v1.1（执行） |
 | 未知/保留 `type` 字符串 | ❌（不在枚举） | 出现即错（R4） | ❌ | `DSL_UNSUPPORTED_NODE_TYPE`（加载期） | 待定义 |
 | `on_error` | ❌（保留字） | 出现即错 | ❌ | `DSL_UNSUPPORTED_FIELD`（加载期） | v2 |
@@ -711,7 +719,7 @@ $ echo $?    # 2
 | `--json` | stdout 输出 §2.7.2 容器（失败时不混入人类可读文本） |
 | `--structure-only` | 只跑 R1–R13；成功输出附带 `(external references not verified)` |
 | `--print-hash` | 额外输出 `graph_hash=<16hex>`（仅成功时） |
-| 退出码（`validate`） | `0` 合法；`2` DSL 错误；`1` 其他（文件不可读、内部错误） |
+| 退出码（`validate`） | `0` 合法；`2` DSL 错误；`1` 其他（文件不可读、内部错误）。**M1 临时口径（ISSUE-059）**：文件不可读/用法解析失败返回 `3`；M3 统一为「用法 → 2、IO/内部 → 1」（06 §6.10.5 已同步标注） |
 | 退出码（`run`） | DSL 错误 → `2` 且**不创建 run**；运行期结果退出码归 03/06（本册不定义） |
 
 ### 2.7.5 稳定性约定
@@ -826,16 +834,16 @@ $ echo $?    # 2
 | `nodes[].config.retry.max_attempts?` | `.nodes[id].max_attempts` | 缺省 `DEFAULT_MAX_ATTEMPTS`；仅自环/重试使用 |
 | `agent_call.config.agent_id` | `.nodes[id].handler = Agent{agent_id}` | R14c 已校验资产存在 |
 | `agent_call.config.input_mapping?` | `.nodes[id].handler = Agent{agent_id, input_mapping}` | 缺省 `{}`（identity 映射）；01 §1.1.1 已扩展该字段（P-02-09 已解决）；05 §5.9.3 消费 |
-| `python_node.config.module`+`.function` | `.nodes[id].handler = Python{module,function}` | 全限定符号 `"module.function"`（§2.5.1）；R14b 校验 |
-| `subgraph.config.subgraph_id` | `.nodes[id].handler = Subgraph{id}` | R6 已校验引用存在；运行期派发前拒绝（§2.6.1） |
+| `python_node.config.module`+`.function` | `.nodes[id].handler = Python{module,function}` | 全限定符号 `"module.function"`（§2.5.1）；R14b 仅格式校验（D7，不 import） |
+| `subgraph.config.subgraph_id` | `.nodes[id].handler = Subgraph{id}` | R6 已校验引用存在；运行期 run 启动后、实例创建前拒绝（§2.6.1） |
 | `start`/`end` 的 `config` | `.nodes[id].handler = Start` / `End` | 必须 `{}` |
 | `edges[]` | `.edges[i] { index: i, from, to_node, to_port, gate }` | `to_port` = DSL `to_input_port`；顺序保持 |
 | `edges[].from_output_port?` | **不进入产物** | v1 出现即 R9 `DSL_UNSUPPORTED_FIELD`（保留字段）；v2 启用字段级路由时由 01/02 增字段 |
-| `edges[].gate.function` | `.edges[i].gate.symbol`（`GateRef`） | 全限定，R14b 校验 |
+| `edges[].gate.function` | `.edges[i].gate.symbol`（`GateRef`） | 内置 op 短名（`check_output`/`compare`/`manual`），R14b 查表校验（D6） |
 | `edges[].gate.params?` | `.edges[i].gate.params` | 缺省 `{}`；原样传入 `GateContext.params` |
 | `subgraphs[]` | `.subgraphs: HashMap<SubgraphId, Arc<CompiledGraph>>` | 递归编译（v1 不执行） |
 | （解析产物） | **不在 `CompiledGraph`** | R14b 产出 04 §4.7 的 `ResolvedSymbols`（按 `NodeId` / `by_gate_edge` 索引） |
-| （派生索引） | `.edge_index: EdgeIndex` | 见 §2.9.2 步 4；`incoming` 单值（R11） |
+| （派生索引） | `.edge_index: EdgeIdx` | 见 §2.9.2 步 4；`incoming` 单值（R11） |
 | （计算产物） | `.graph_hash` | §2.8 |
 | `on_error` | — | 拒绝（`DSL_UNSUPPORTED_FIELD`，不进入产物） |
 
@@ -843,7 +851,7 @@ $ echo $?    # 2
 
 | # | 不变式 | 违反处理 |
 |---|---|---|
-| CI-1 | `edges[i].index == i`；每个 `EdgeIndex` 在 `outgoing`、`incoming`、`incoming_by_node` 中**各出现且仅出现一次** | `Internal`（框架 bug） |
+| CI-1 | `edges[i].index == i`；每个 `EdgeIdx` 在 `outgoing`、`incoming`、`incoming_by_node` 中**各出现且仅出现一次** | `Internal`（框架 bug） |
 | CI-2 | `incoming` 写入前键不存在（R11 保证无覆盖） | `assert!` |
 | CI-3 | `nodes` 键集合 == `node_order` 元素集合，无重复、无悬空 id | `assert!` |
 | CI-4 | 每条带 gate 的边在 `ResolvedSymbols.by_gate_edge` 有句柄；每个 `python_node` 在 `by_node` 有句柄 | `assert!` |
@@ -861,10 +869,10 @@ $ echo $?    # 2
 | C-04（incoming 单值 vs 多源同端口） | 裁定禁 fan-in；`incoming` 保持单值；R11 保证 | D-02-01 / §2.4.1 / §2.9.1 / 01 §1.1.2 |
 | C-05（规则 7 vs 不变式） | 拆分 R10/R11，两码 `DSL_DUPLICATE_EDGE`/`DSL_DUPLICATE_PORT_SOURCE` | D-02-01 / §2.4.1 |
 | C-15（示例自我违反） | 修正示例；`end` 必须声明 required 输入；示例自查表 | D-02-03 / §2.3 |
-| C-17（子图 mapping / 单 End） | R6 改为"至少一个 end"+mapping 引用校验；子图节点"加载通过 / 运行期派发前拒绝"（与 04 §4.4.4 联合关闭）；节点级 mapping 留 v1.1 | §2.6.1 / §2.4.1 |
+| C-17（子图 mapping / 单 End） | R6 改为"至少一个 end"+mapping 引用校验；子图节点"加载通过 / 运行期 run 启动后、实例创建前拒绝"（与 04 §4.4.4 联合关闭）；节点级 mapping 留 v1.1 | §2.6.1 / §2.4.1 |
 | C-20（skills 符号来源） | 两级符号解析：图级 R14b，Agent 级归 Harness | §2.5.7 |
 | C-21（热更新 vs Registry） | v1 不支持代码热替换；per-run `Arc` 冻结；无 evict | §2.5.6 |
-| C-22（gate 符号三写法） | 统一全限定 `module.function`；短名/前缀拼接作废 | §2.5.1 |
+| C-22（gate 符号三写法） | v1.2 曾统一为全限定 `module.function`；**v2 D6 改为内置 op 短名**（Python gate 延后，ISSUE-014） | §2.5.1 |
 | C-25（created_at 必填） | 改可选；R3 校验格式；不参与 hash | D-02-02 / §2.2.1 / §2.8.3 |
 | C-26（自环与环检测） | 自环不豁免；无 gate 自环报 `DSL_CYCLE_DETECTED`；次数上限走 `retry.max_attempts` | D-02-05 / R13 |
 | M-11（错误码分层/聚合） | 17 码映射到 R1–R14；跨规则 fail-fast + 同规则聚合 + 20 条上限；错误响应结构 | §2.1.3 / §2.4 / §2.7 |
@@ -885,8 +893,8 @@ $ echo $?    # 2
 |---|---|---|---|
 | P-02-01 | ✅ **已对齐**：00 §0.4 已增补 `DSL_UNSUPPORTED_FIELD`（"出现 v1 不支持/保留的字段（`from_output_port`、`on_error`）"） | 本册按该码执行：`on_error`（R4）与 `from_output_port`（R9）出现即报；不再用 `DSL_PARSE_ERROR` 兜底 | 无（00 已更新；02 §2.2.4/§2.4/§2.6.2 已同步） |
 | P-02-02 | 00 未覆盖"start/end 边方向非法"与"资产索引非法"的错误码归属 | 分别复用 `DSL_INVALID_EDGE_REF`（reason: `end_as_source`/`start_as_target`）与 `DSL_AGENT_NOT_FOUND`（message: `duplicate agent asset id`） | ✅ 已解决：不新增错误码（本册 §2.7.5 规定不新增） |
-| P-02-03 | 00 §0.4 DSL 行把 `DSL_UNSUPPORTED_NODE_TYPE` 描述为"使用了 v1 不支持的节点类型（如 `subgraph` 运行）"，与运行期码 `NODE_TYPE_UNSUPPORTED` 的职责重叠 | 裁定：`subgraph` = **运行期派发前** `NODE_TYPE_UNSUPPORTED`（决策记录 §2.2 / 04 §4.4.4）；`DSL_UNSUPPORTED_NODE_TYPE` = **加载期未知/保留 `type` 字符串** | 与 04 A5 一致：建议 00 修订该行说明为"使用了未知/保留的节点类型字符串" |
-| P-02-04 | `GateDefinition.function` 收紧为全限定名（v1.1 短名作废）与 00 §0.1"新增字段均为可选/保留字，向后兼容"的字面表述冲突 | 属**语义收紧**而非字段变更；v1.1 未实现，示例从未可运行，实际无迁移成本 | 00 §0.1 建议加一句"符号名格式收紧属 v1.2 修订"（或 08 矩阵注明） |
+| P-02-03 | 00 §0.4 DSL 行把 `DSL_UNSUPPORTED_NODE_TYPE` 描述为"使用了 v1 不支持的节点类型（如 `subgraph` 运行）"，与运行期码 `NODE_TYPE_UNSUPPORTED` 的职责重叠 | 裁定：`subgraph` = **运行期（run 启动后、实例创建前）** `NODE_TYPE_UNSUPPORTED`（决策记录 §2.2 / 04 §4.4.4）；`DSL_UNSUPPORTED_NODE_TYPE` = **加载期未知/保留 `type` 字符串** | 与 04 A5 一致：建议 00 修订该行说明为"使用了未知/保留的节点类型字符串" |
+| P-02-04 | `GateDefinition.function` 取值语义收紧与 00 §0.1"新增字段均为可选/保留字，向后兼容"的字面表述冲突 | 属**语义收紧**而非字段变更；v2 D6 进一步改为内置 op 短名（Python gate 延后） | 00 §0.1 已注明"符号名格式收紧属 v1.2 修订" |
 | P-02-05 | ✅ **已关闭**：决策记录 §2.1 已更正为“17 个 `DSL_*` 错误码”；00 §0.4 现列 17 个 | 以 00 为准 | ✅ 已回填（2026-10-28） |
 | P-02-06 | ✅ **已关闭**：00 §0.4 运行期域已增补 `RUN_ENTRY_INVALID` / `RUN_ENTRY_INPUT_MISSING` | 本册 §2.3.4 的 `RunSpec` 契约与 03 §3.1 的启动校验已对齐此两码 | 无 |
 | P-02-07 | **04 §4.7.2 R1③** 把 `agent_call` 的 skill 符号纳入**图加载期**收集（错误码走 `DSL_SYMBOL_*`）；与 00 §0.4（工具错误归 Harness 域）、05 §5.6/§5.11（tools 由 Agent 加载期校验 `HARNESS_CONFIG_LOAD`）冲突 | 本册按 00/05 裁定：图级 R14 只解析 gate/python_node；skills/tools 归 Harness Loading | lead/08 裁决；若采纳 04，则 02 需增"③ skill 符号"收集与错误码映射（改动点 §2.5.2/§2.5.4/§2.5.7） |
@@ -900,6 +908,6 @@ $ echo $?    # 2
 | `message` 语言 | 英文稳定模板（§2.4.2） | 03/06/07（CLI 与测试断言） |
 | 错误响应对象形状 | `{code,message,location,expected,actual}` + 容器 | 06（CLI）、07（断言） |
 | `CompiledGraph` 所有权 | **结构 01 §1.1.1 定义、02 构造**、01/03/04 只读消费 | 01 |
-| 符号句柄 | `RegisteredFn` 句柄 / `ResolvedSymbols` 快照（04 §4.7），与 `CompiledGraph` 分离 | 04 |
+| 符号句柄 | `RegisteredGateOp`（内置 gate）/ `PythonSymbolRef`（格式信息）/ `ResolvedSymbols` 快照（04 §4.7），与 `CompiledGraph` 分离 | 04 |
 | `AgentCallConfig.input_mapping` 语义 | 端口名 → Agent 输入字段，05 消费 | 05 |
 | `graph_hash` 存储列 | 06 `runs.graph_hash` | 06 |

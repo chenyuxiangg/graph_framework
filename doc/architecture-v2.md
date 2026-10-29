@@ -236,6 +236,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 
 > 说明：spec v1.2 已入库为语义基准；以下偏差是 Rust 内核 + 子进程 worker 的**必然调整**。
 > 受影响分册顶部有 banner 指回本表；M0–M2 逐条回写 spec（ISSUE-020），回写后本表保留为决策记录。
+> **回写状态（2026-10-30）**：D1–D12 与 §8.2 错误码/指标已回写 spec v1.2 正文（00/01/02/03/04/06/07，见 `doc/spec-v1.2/PROVENANCE.md` §2.5）；spec 正文与冲突时以 spec 为准，本表仅作决策记录。
 > 每条偏差以 **D#** 编号，供代码注释、评审与测试引用。
 
 | # | spec 位置 | v1.2 原文语义 | v2 落地 | 理由/影响 |
@@ -274,7 +275,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `NodeAbandoned` | 事件 | **v2 不产生**（D1）；enum 保留兼容，文档标 deprecated | — |
 | `RunMetrics.killed_workers` | 指标 | 因超时/取消被 kill 的 worker 数 | 替代 `abandoned_tasks`（后者恒 0） |
 
-> 上述错误码/事件必须在 M0–M2 回写 spec 00 §0.3/§0.4，并更新 PROVENANCE hash（ISSUE-020）。
+> 上述错误码/事件已回写 spec 00 §0.3/§0.4（2026-10-30，PROVENANCE §2.5 已更新 hash；ISSUE-020 子项 ISSUE-050）。
 
 ## 9. 溯源
 
