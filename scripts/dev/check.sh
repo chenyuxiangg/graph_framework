@@ -49,7 +49,7 @@ import ast, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 bad = []
-for pattern in ("src/**/*.py", "scripts/**/*.py", "tests/**/*.py"):
+for pattern in ("python/**/*.py", "tests/**/*.py"):
     for p in root.glob(pattern):
         try:
             ast.parse(p.read_text(encoding="utf-8"))
@@ -72,22 +72,19 @@ if [ -f doc/progress.md ]; then
   [ "${n}" -le 40 ] && ok "doc/progress.md 非空行 ${n}（目标 ≤30）" || bad "doc/progress.md 过长（${n} 行），请精简"
 fi
 
-# 8) 图配置 JSON 合法性（有则校验）
-if command -v python3 >/dev/null 2>&1 && ls config/*.json >/dev/null 2>&1; then
-  if python3 - <<'PY'
-import json, sys
-from pathlib import Path
-bad = []
-for p in sorted(Path("config").glob("*.json")):
-    try:
-        json.loads(p.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        bad.append(f"{p}:{exc.lineno}: {exc.msg}")
-if bad:
-    print("\n".join(bad)); sys.exit(1)
-PY
-  then ok "config/*.json JSON 合法性通过"; else bad "config/*.json 存在非法 JSON"; fi
+# 8) Rust 格式检查（M0 起双栈；需 rustfmt）
+if [ -f Cargo.toml ] && command -v cargo >/dev/null 2>&1; then
+  if cargo fmt --all -- --check >/tmp/zgraph-fmt.log 2>&1; then
+    ok "cargo fmt --check 通过"
+  else
+    bad "cargo fmt 未通过（见 /tmp/zgraph-fmt.log；运行 cargo fmt --all 修复）"
+  fi
+else
+  ok "未检测到 Rust 工程或 cargo，跳过 fmt"
 fi
+
+# 9) 空白/冲突标记检查
+if git diff --check >/dev/null 2>&1; then ok "git diff --check 通过"; else bad "存在空白错误或冲突标记"; fi
 
 echo "---"
 [ "${fail}" = 0 ] && { echo "CHECK PASSED"; exit 0; } || { echo "CHECK FAILED" >&2; exit 1; }

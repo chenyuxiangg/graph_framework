@@ -71,6 +71,16 @@ if ! git merge-base --is-ancestor origin/main "${BRANCH}"; then
   git -C "${branch_wt}" rebase origin/main || die "rebase 冲突，请人工解决后重试"
 fi
 
+# 6) 测试：Rust 全绿 + Python 不得新增失败（对照 main 的 doc/test-baseline.txt）
+if [ -f "${branch_wt}/Cargo.toml" ]; then
+  command -v cargo >/dev/null 2>&1 || die "未找到 cargo（Rust 工程必须可测试）"
+  info "执行 cargo test --workspace"
+  ( cd "${branch_wt}" && cargo test --workspace --quiet ) || die "cargo test 失败"
+  info "cargo test 通过"
+else
+  info "分支无 Cargo.toml（legacy 期），跳过 cargo test"
+fi
+
 # 6) 测试：不得新增失败（对照 main 的 doc/test-baseline.txt）
 if [ -n "${PYTHON_BIN:-}" ] && "${PYTHON_BIN}" -c "import pytest" >/dev/null 2>&1; then
   PY=("${PYTHON_BIN}")

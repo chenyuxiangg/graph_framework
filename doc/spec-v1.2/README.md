@@ -20,7 +20,7 @@
 
 | # | 文件 | 行数 | 内容 | 关键裁定 |
 |---|---|---|---|---|
-| 00 | [00-总纲](00-总纲.md) | 263 | 命名/类型/枚举/**错误码**/**默认值**/**不变式**/术语消歧 | 权威锚点；I1–I9；17 个 DSL 码；18 个新默认常量；TraceEvent/RunMetrics |
+| 00 | [00-总纲](00-总纲.md) | 264 | 命名/类型/枚举/**错误码**/**默认值**/**不变式**/术语消歧 | 权威锚点；I1–I9；17 个 DSL 码；18 个新默认常量；TraceEvent/RunMetrics |
 | 01 | [01-领域模型与状态机](01-领域模型与状态机.md) | 301 | CompiledGraph/EdgeIndex、实例模型、**迁移矩阵**、**实例寻址**、Delivery/Publish、RunState | `EdgeRef(EdgeIndex)` 取代自引用；`Delivery.to_instance` 必填；单实例语义；两阶段 publish |
 | 02 | [02-DSL与校验](02-DSL与校验.md) | 905 | DSL schema 最终版、修正示例、**R1–R14 校验**、错误对象、符号命名、`graph_hash` | end 必须有输入；两级唯一性；子图加载通过/运行拒绝；`created_at` 可选；自环不豁免环检测 |
 | 03 | [03-调度器与生命周期](03-调度器与生命周期.md) | 365 | 执行拓扑、**所有权模型**、主循环、投递应用、**冷峻失败**、暂停/恢复/取消、超时/看门狗、终止判定 | RunState 单任务独占 + channel 回传；gate off-loop；Skipped 级联；双通道 trace |
@@ -44,7 +44,7 @@
 
 | 主题 | v1.1 | v1.2 |
 |---|---|---|
-| 执行模型 | `tokio::spawn` 直接跑节点 | 事件循环仅调度；Python 一律 `spawn_blocking` + 独立并发上限（实测依据） |
+| 执行模型 | `tokio::spawn` 直接跑节点 | 事件循环仅调度；Python 一律 `spawn_blocking` + 独立并发上限（v1.2 历史；**v2 改为 worker 子进程，见 §8**） |
 | 门控求值 | 事件循环内 | 执行任务内 off-loop，结果随 `NodeCompleted` 回传 |
 | 实例寻址 | `Delivery` 无目标实例字段 | `to_instance` 必填；单实例 + 自环新 attempt |
 | 数据路由 | 未定义 | 整包广播；`outputs/from_output_port` 保留到 v2 |

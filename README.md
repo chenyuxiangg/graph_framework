@@ -1,50 +1,56 @@
-# 任务流图模型框架（graph_base）
+# zgraph · 图模型驱动工作流框架
 
-用有向（有环 / 无环）图描述一个任务的带状态 SOP，通过调度、状态管理与监控实现任务自动闭环的框架。
+用有向图描述可复用的工作流（SOP / Agent 工作流）：用户自定义图与节点，平台负责调度、状态、门控与可复现执行。
+流程里可以跑 Agent，也可以只跑普通 Python 节点；**结果可复现是产品承诺**（L1 调度可重放 / L2 结果可重放）。
 
-- 语言：Python 3.10+；测试：pytest；依赖管理：`uv`（见 `CLAUDE.md`）
-- 设计文档：[`doc/graph_base_design.md`](doc/graph_base_design.md)
-- 文档索引：[`doc/index.md`](doc/index.md)
+**技术形态（DR-001）**：**Rust 内核 + Python 子进程 worker**（单二进制内核；用户代码在子进程隔离执行）。
+
+- 决策：[`doc/decisions/DR-001-runtime-route.md`](doc/decisions/DR-001-runtime-route.md)
+- 架构：[`doc/architecture-v2.md`](doc/architecture-v2.md)（协议 v1 / 偏差表 D1–D12 / M0–M5 里程碑）
+- 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
+- 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
+
+## 当前状态：M0 骨架
+
+已有：Cargo workspace（6 个 crate）、worker 协议 v1（Rust 客户端 + Python SDK）、echo/slow 示例 worker、
+双栈测试（`cargo test` + `pytest`）、CI、legacy Python 实现归档只读。
+
+尚未实现（M1–M5）：DSL loader/校验、图内核与调度、trace/SQLite、Agent Harness、CLI 业务命令、replay。
 
 ## 快速开始
 
 ```bash
-# 1) 安装 uv（一次性；禁止用 pip 直接安装项目依赖）
-brew install uv            # 或见 https://docs.astral.sh/uv/
+# Rust（1.99+）
+cargo test --workspace
+cargo run -p zgraph-cli -- --version
 
-# 2) 创建 venv 并安装开发依赖
+# Python worker SDK（3.10+；依赖管理用 uv，见 CLAUDE.md）
 uv sync --extra dev
-
-# 3) 跑测试
 uv run pytest -q
+
+# 本地无 uv 时（仅临时验证）：python3 -m venv .venv && .venv/bin/pip install pytest
 ```
 
-> 当前测试并非全绿：已知失败 25 项（4 单测 + 21 e2e），根因是 `scripts/zlog/` 资产缺失与
-> `config/software_team_graph.json` 的 gate 引用不一致。基线见
-> [`doc/test-baseline.txt`](doc/test-baseline.txt)，问题见 [`doc/issues.md`](doc/issues.md)，
-> 现状评估见 [`doc/repo-status.md`](doc/repo-status.md)。
+> 本机若 crates.io 直连不稳定，可参考 `.cargo/config.toml` 注释配置代理；沙箱环境需把 `CARGO_HOME` 指到可写目录。
 
-## 目录结构
+## 目录
 
 | 路径 | 说明 |
 |---|---|
-| `src/kernel/` | 图模型内核：图/节点/边/门/端口/注册表/状态/装载/校验/遍历 |
-| `src/components/scheduler/` | 调度器：tick、就绪判定、派发 |
-| `src/components/state_manager/` | 状态管理：schema、端口、终态判定、post-handle |
-| `src/components/dispatcher/` | 派发器：进程派发与子进程管理 |
-| `src/components/monitor/` | 监控：事件、日志（依赖缺失的 `scripts/zlog/`）、进程回收 |
-| `src/components/orchestrator.py` | 顶层组装：create / tick / run |
-| `src/worker/` | 各图配置对应的 worker（按 `config/{name}_graph.json` 约定） |
-| `config/` | 图配置与索引（文件名 / `name` 字段 / worker 包三者同名） |
-| `scripts/graph_base_cli.py` | CLI：tick / create / list / show / trigger-edge / rollback / validate |
-| `tests/` | 端到端测试 |
+| `crates/zgraph-dsl/` | DSL 类型、loader、R1–R14、graph_hash（M1） |
+| `crates/zgraph-kernel/` | 状态机、事件循环、Delivery、门控、run 生命周期（M2） |
+| `crates/zgraph-trace/` | TraceEvent、SQLite、回放（M2） |
+| `crates/zgraph-worker/` | worker 协议客户端、子进程生命周期（M0 已实现） |
+| `crates/zgraph-harness/` | Agent Harness（M4） |
+| `crates/zgraph-cli/` | `zgraph` 命令（M0 仅 `--version`） |
+| `python/zgraph_worker/` | worker SDK：握手、ctx、运行时、示例 worker |
+| `schemas/` | DSL schema（M1）、worker 协议 v1 |
+| `tests/` | 新 e2e 与 fixture |
+| `doc/` | 决策/架构/规格/评审/进度/台账 |
+| `legacy/` | 旧 Python 实现（冻结只读，见 `legacy/README.md`） |
 
 ## 开发流程（强制）
 
-本仓库按模块分工、worktree 并行开发、评审后合并。**开始开发前必须先读 [`AGENTS.md`](AGENTS.md)**
-（agent 强制约束）与 [`doc/development-workflow.md`](doc/development-workflow.md)（流程细则）。
-
-- 并行开发：每个 agent 一个独立 worktree（`.worktrees/<module>-<agent>`），禁止多人共用工作区
-- 评审：四维度（功能正确性 / 结构合理性 / 逻辑性 / 可读性），评审结论留痕 `doc/reviews/`
-- 合并：仅允许通过 `scripts/dev/merge.sh` 合回 `main`，合并后自动清理 worktree
-- 进度：`doc/progress.md`（保持简洁）；遗留问题：`doc/issues.md`
+按模块分工、worktree 并行、独立评审后合并；详见 [`AGENTS.md`](AGENTS.md) 与
+[`doc/development-workflow.md`](doc/development-workflow.md)。进度见 [`doc/progress.md`](doc/progress.md)，
+遗留问题见 [`doc/issues.md`](doc/issues.md)。

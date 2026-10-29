@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}"
 
-MODULES="kernel scheduler state-manager dispatcher monitor orchestrator workers cli config e2e docs process"
+MODULES="dsl kernel trace worker harness cli py-worker e2e docs process legacy"
 TYPES="feat fix test docs chore"
 
 die() { echo "ERROR: $*" >&2; exit 1; }

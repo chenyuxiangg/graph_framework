@@ -17,15 +17,16 @@
 | ISSUE-010 | P3 | cli | `scripts/graph_base_cli.py` 未作为 pyproject 入口点，只能 `python scripts/...` 调用 | 使用不便、难以在 PATH 中分发 | 增加 `[project.scripts] graph-base = ...`（需把 CLI 移入包或提供 shim） | open | 2026-10-28 |
 | ISSUE-011 | P3 | config/workers | `config/index.md` 自述：除 planer/archer 外各节点 `proc` 为空（走 `proc_bypass`），software_team 产物需用户自建 worker，尚未内置 | software_team 图只能跑框架、不能产出真实业务结果 | 明确 worker 交付范围；按模块补充 worker 与单测 | open | 2026-10-28 |
 | ISSUE-012 | P1 | process | `merge.sh --dry-run` 会删除作者的 worktree（自验证发现） | 误执行 dry-run 会丢失未合并工作区（可恢复但危险） | 已修复：dry-run 只检查不清理；REV-002 | fixed | 2026-10-28 |
-| ISSUE-013 | P1 | process | legacy Python 实现与新 Rust 代码尚未物理隔离 | 目录/CI 混淆，误改风险 | M0：`legacy/` 归档、排除 CI、README 标注只读 | open | 2026-10-29 |
+| ISSUE-013 | P1 | process | legacy Python 实现与新 Rust 代码尚未物理隔离 | 目录/CI 混淆，误改风险 | **已修**：M0 迁入 `legacy/`（src/config/tests/cli/设计文档），`legacy/README.md` 标只读，pytest testpaths 仅 `python/` | fixed | 2026-10-29 |
 | ISSUE-014 | P1 | kernel | 自定义 Python 门控方案未定（Rust 内置 op vs 常驻 gate worker） | 影响 DSL 门控能力与性能 | **v1 默认内置 op**（check_output/compare/manual）；Python 门控 M1 前定稿（DR-001 O-1） | open | 2026-10-29 |
 | ISSUE-015 | P1 | worker | worker 协议 v1 仅有草案，无兼容测试 | 协议演进导致内核/worker 不兼容 | M0 冻结协议文档 + 双方版本校验 + 兼容用例 | open | 2026-10-29 |
 | ISSUE-016 | P1 | trace | 可复现 L2 的记录粒度未定 | 影响结果重算能力与存储量 | **已定**：`--record` 默认 `hash`；L2 需运行期 `--record=full`（architecture §5.2/§5.3） | fixed | 2026-10-29 |
 | ISSUE-017 | P2 | worker | worker 每节点冷启动约 50–100ms，未实测、未池化 | 高频小节点吞吐受限 | M3 基准后决定是否池化（O-2） | open | 2026-10-29 |
-| ISSUE-018 | P2 | process | 双语言工具链（cargo/rustfmt/clippy + uv/pytest）尚无 CI | 质量门禁不可自动化 | M0 建 CI 并同步 AGENTS 模块表 | open | 2026-10-29 |
-| ISSUE-019 | P1 | process | `CLAUDE.md` 冻结且写明 Python 技术栈，与 Rust 宿主冲突（文件禁止修改） | 规范适用边界不清，Rust 代码可能被误按 Python 规范检查 | 解释为 Python 规范；Rust 用 rustfmt/clippy 等价约束；M0 CI 分别检查；需用户在 M0 确认该解释 | open | 2026-10-29 |
-| ISSUE-020 | P1 | docs | spec v1.2 与 v2 的 D1–D12 偏差、以及 4 个新错误码（`NODE_WORKER_HANDSHAKE/PROTOCOL/IMPORT`、`REPLAY_RECORD_MISSING`）尚未回写 spec 正文（当前由 architecture §8/§8.2 覆盖） | 后续实现者可能误读 spec 原文 | M0–M2 逐条回写 spec 00/03/04/05/06，并更新 PROVENANCE hash | open | 2026-10-29 |
-| ISSUE-021 | P2 | process | legacy 测试/`doc/test-baseline.txt` 与新的 Rust 双栈门禁如何退役未定义 | 合并门禁语义混乱 | M0 定义双基线；M5 归档 legacy 基线 | open | 2026-10-29 |
+| ISSUE-018 | P2 | process | 双语言工具链（cargo/rustfmt/clippy + uv/pytest）尚无 CI | 质量门禁不可自动化 | **已修**：`.github/workflows/ci.yml`（rust fmt/clippy/test + uv/pytest）；AGENTS/worktree 模块表同步 | fixed | 2026-10-29 |
+| ISSUE-019 | P1 | process | `CLAUDE.md` 冻结且写明 Python 技术栈，与 Rust 宿主冲突（文件禁止修改） | 规范适用边界不清，Rust 代码可能被误按 Python 规范检查 | **已确认**（用户 2026-10-29「直接开工」授权）：解释为 Python 代码规范（`python/**`、`legacy/**`）；Rust 用 rustfmt/clippy + 等价约束；CI 双栈检查 | fixed | 2026-10-29 |
+| ISSUE-020 | P1 | docs | spec v1.2 与 v2 的 D1–D12 偏差、以及 5 个新错误码（`NODE_WORKER_HANDSHAKE/PROTOCOL/IMPORT/CRASH`、`REPLAY_RECORD_MISSING`）尚未回写 spec 正文（当前由 architecture §8/§8.2 覆盖） | 后续实现者可能误读 spec 原文 | M0–M2 逐条回写 spec 00/03/04/05/06，并更新 PROVENANCE hash | open | 2026-10-29 |
+| ISSUE-021 | P2 | process | legacy 测试/`doc/test-baseline.txt` 与新的 Rust 双栈门禁如何退役未定义 | 合并门禁语义混乱 | **已修**：pytest 只跑 `python/`；基线清零；merge.sh 增加 cargo test（有 Cargo.toml 时必跑）；legacy 测试随目录归档 | fixed | 2026-10-29 |
 | ISSUE-022 | P2 | worker | worker 幂等/外部副作用声明尚未写入节点契约与验收 | 影响 L3 诚实性 | M3 前写入 worker SDK 契约与 AC | open | 2026-10-29 |
 | ISSUE-023 | P1 | process | `merge.sh` 用 `git branch -d` 删除分支，在 push 前会因 upstream 未更新而误报“未完全合并”，导致合并门禁在最后一步失败 | 每次合并需手工收尾，门禁不可靠 | **修复待合并**：ff 合并后校验 HEAD 祖先并用 `-D`；顺序改为 worktree→push→删分支；新增 `scripts/dev/selftest-merge.sh` 自测。**自举两阶段**：本分支修改了 merge.sh，合并它时 main 上仍是旧脚本 → 首次会停在“删分支”步骤（main 已合并、分支/worktree 已清理），重跑新脚本即完成（幂等）。REV-003 复审 | in-progress | 2026-10-29 |
-| ISSUE-024 | P3 | docs | REV-001 #22：spec README 00 行数 263→264、执行模型历史行、PROVENANCE banner 范围（01 无 banner）、ISSUE-020 错误码计数、architecture §8.1/§8.2 顺序等 5 处文字问题 | 不影响语义，影响可读性 | M0 前随 docs 提交修正（或并入 ISSUE-020 回写） | open | 2026-10-29 |
+| ISSUE-024 | P3 | docs | REV-001 #22：5 处文字问题 | 不影响语义，影响可读性 | **已修**：00 行数 264、执行模型行加 v2 限定、PROVENANCE banner 范围、ISSUE-020 计数 5、architecture §8.1/§8.2 顺序 | fixed | 2026-10-29 |
+| ISSUE-025 | P1 | worker | M0 协议检查单未全覆盖：hello 版本不匹配客户端分支、exit0 无 result/重复 result、8MiB 运行期、进程组 kill、全局/每 run 并发上限 | 协议分支可能在 M3 才暴露 | M3 补齐并纳入 CI；M0 已覆盖 echo/超时/导入/取消/print/stderr/input | open | 2026-10-29 |

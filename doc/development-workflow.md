@@ -73,6 +73,8 @@ git add -A && git commit -m "<type>(<module>): <摘要>"
 bash scripts/dev/merge.sh <branch>            # 合并到本地 main
 bash scripts/dev/merge.sh <branch> --push     # 合并并推送 origin/main
 bash scripts/dev/merge.sh <branch> --dry-run  # 只做检查，不合并
+# 本机无 uv/pytest 时：PYTHON_BIN=/path/to/python bash scripts/dev/merge.sh <branch>
+# 沙箱/受限环境：export CARGO_HOME=$PWD/.cargo-home（需可写）并配置代理
 ```
 
 脚本强制顺序：评审记录（结论=通过）→ worktree 干净 → 与 `origin/main` 同步（必要时 rebase）→ 测试无新增失败 → `--ff-only` 合并 → 删除 worktree → 删除分支 →（可选 push）。
@@ -120,3 +122,5 @@ git commit -m "docs(process): 更新进度与问题台账"
 
 这不是故障，是自举顺序的固有限制；第一次失败需在评审记录与台账中注明。`merge.sh` 的改动必须附
 `bash scripts/dev/selftest-merge.sh` 的自测结果（在临时 clone 中验证 dry-run/真实合并/清理）。
+
+本机运行示例：`PYTHON_BIN=/path/to/python bash scripts/dev/selftest-merge.sh`（需 pytest；沙箱需可写 `CARGO_HOME`）。

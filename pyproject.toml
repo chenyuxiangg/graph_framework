@@ -1,16 +1,16 @@
 [project]
-name = "graph-base"
+name = "zgraph"
 version = "0.1.0"
-description = "任务流图模型框架（graph_base）：用有向图描述带状态的 SOP，并提供调度与状态管理"
+description = "图模型驱动工作流框架：Rust 内核 + Python 子进程 worker（M0 骨架）"
 requires-python = ">=3.10"
 authors = [{ name = "chenyuxiangg", email = "1007423165@qq.com" }]
-# 当前运行时无第三方依赖；monitor 依赖的 scripts/zlog 是缺失的仓库内资产（见 doc/issues.md ISSUE-001）
+# 运行时无第三方依赖（worker SDK 只用标准库）；legacy/ 为历史 Python 实现，不参与安装/测试
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["src", "tests"]
+pythonpath = ["python"]
+testpaths = ["python"]
 addopts = "-q"

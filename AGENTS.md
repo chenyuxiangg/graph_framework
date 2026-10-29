@@ -28,18 +28,20 @@
 
 | 模块 id | 负责路径（互不重叠） |
 |---|---|
-| `kernel` | `src/kernel/**` |
-| `scheduler` | `src/components/scheduler/**` |
-| `state-manager` | `src/components/state_manager/**` |
-| `dispatcher` | `src/components/dispatcher/**` |
-| `monitor` | `src/components/monitor/**`（`scripts/zlog/**` 缺失，见 ISSUE-001） |
-| `orchestrator` | `src/components/orchestrator.py` |
-| `workers` | `src/worker/**` |
-| `cli` | `scripts/graph_base_cli.py` |
-| `config` | `config/**` |
-| `e2e` | `tests/**` |
+| `dsl` | `crates/zgraph-dsl/**`、`schemas/graph.schema.json` |
+| `kernel` | `crates/zgraph-kernel/**` |
+| `trace` | `crates/zgraph-trace/**` |
+| `worker` | `crates/zgraph-worker/**`、`schemas/worker-protocol-v1.md` |
+| `harness` | `crates/zgraph-harness/**` |
+| `cli` | `crates/zgraph-cli/**` |
+| `py-worker` | `python/zgraph_worker/**`、`python/workers/**`、`tests/fixtures/workers/**` |
+| `e2e` | `tests/e2e/**`、`tests/fixtures/graphs/**` |
 | `docs` | `doc/**`（不含 `doc/progress.md`、`doc/issues.md` 的并发写） |
-| `process` | `AGENTS.md`、`README.md`、`pyproject.toml`、`scripts/dev/**` |
+| `process` | `Cargo.toml`、`Cargo.lock`、`.cargo/**`、`.github/**`、`pyproject.toml`、`scripts/dev/**`、`AGENTS.md`、`README.md` |
+| `legacy` | `legacy/**`（冻结只读；只允许整体归档，禁止新代码） |
+
+> **旧模块 id 退役（M0 起）**：`scheduler`、`state-manager`、`dispatcher`、`monitor`、`orchestrator`、`workers`、`config`
+> 已随 legacy 冻结；`kernel`、`cli`、`e2e`、`docs`、`process` 保留 id 但路径改到新目录。旧 id 禁止再建 worktree。
 
 - worktree 路径 **MUST** 为 `.worktrees/<module>-<agent>`（已在 `.gitignore` 中忽略）。
 - 分支名 **MUST** 为 `<type>/<module>-<slug>`（slug 为小写短横线）。

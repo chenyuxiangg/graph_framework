@@ -253,6 +253,15 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | D11 | 07 AC-07 | 依赖 `_spike/src/bin/t2_gil.rs`（不在仓库） | spike 源与报告已入库 `doc/analysis/spike/`；AC-07 路径改为 `doc/analysis/spike/src/bin/t2_gil.rs`；断言保留（事件循环 ticker） | 溯源可核验 |
 | D12 | 08 §8.6、各分册引用 | 引用 `决策记录-01`、`_spike`、`_research`、`_audit` 等仓库外材料 | 决策记录/可行性评估/spike/两份调研已入库 `doc/analysis/`；映射见 `doc/spec-v1.2/REFERENCES.md`；PROVENANCE 记录冻结与回填 | 可核验性 |
 
+### 8.1 偏差的代码落点
+
+- D1/D8：`zgraph-kernel` 超时与 run 生命周期、`zgraph-worker` 进程组 kill；测试 `tests/e2e/timeout_kill.rs`。
+- D2/D5：`python/zgraph_worker/ctx.py`、协议 `run` 载荷；测试 `python/tests/test_ctx.py`。
+- D3：`zgraph-harness` 的 ToolRunner 调 `zgraph-worker`；测试 `tests/e2e/tool_worker.rs`。
+- D4：全局/每 run 信号量；测试 `tests/e2e/concurrency.rs`。
+- D6/D7：`zgraph-dsl` 校验 + `zgraph-kernel` 内置 op 注册表；测试 `tests/dsl/*`。
+- D9：`zgraph-trace` schema 增量 + `zgraph-cli replay`；测试 `tests/e2e/replay.rs`。
+
 ### 8.2 v2 新增错误码与事件（回写 spec 00 §0.3/§0.4 — ISSUE-020）
 
 | 码 / 事件 | 域 | 触发 | 映射 |
@@ -266,15 +275,6 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `RunMetrics.killed_workers` | 指标 | 因超时/取消被 kill 的 worker 数 | 替代 `abandoned_tasks`（后者恒 0） |
 
 > 上述错误码/事件必须在 M0–M2 回写 spec 00 §0.3/§0.4，并更新 PROVENANCE hash（ISSUE-020）。
-
-### 8.1 偏差的代码落点
-
-- D1/D8：`zgraph-kernel` 超时与 run 生命周期、`zgraph-worker` 进程组 kill；测试 `tests/e2e/timeout_kill.rs`。
-- D2/D5：`python/zgraph_worker/ctx.py`、协议 `run` 载荷；测试 `python/tests/test_ctx.py`。
-- D3：`zgraph-harness` 的 ToolRunner 调 `zgraph-worker`；测试 `tests/e2e/tool_worker.rs`。
-- D4：全局/每 run 信号量；测试 `tests/e2e/concurrency.rs`。
-- D6/D7：`zgraph-dsl` 校验 + `zgraph-kernel` 内置 op 注册表；测试 `tests/dsl/*`。
-- D9：`zgraph-trace` schema 增量 + `zgraph-cli replay`；测试 `tests/e2e/replay.rs`。
 
 ## 9. 溯源
 

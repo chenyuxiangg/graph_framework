@@ -1,0 +1,6 @@
+# 本机 crates.io 直连不稳定时，可取消注释以下代理（参考技术 spike 的环境结论）
+# [source.crates-io]
+# replace-with = "vendored-sources"
+#
+# [http]
+# proxy = "http://127.0.0.1:7890"

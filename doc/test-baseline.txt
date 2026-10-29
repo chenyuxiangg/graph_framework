@@ -1,29 +1,3 @@
 # 测试基线（已知失败清单）
-# 生成：2026-10-28，快照 bcf8621；Python 3.13 + pytest 9.2.0
+# 生成：2026-10-29（M0）。legacy 已冻结、不再由 pytest 运行；python/ 新测试应全绿。
 # 规则：merge.sh 只允许“不新增失败”；修复失败项后必须缩小本文件（禁止扩大）。
-# 根因：ISSUE-001（scripts/zlog 缺失）、ISSUE-002（software_team_graph gate 引用错）。
-src/components/scheduler/tests/test_scheduler.py::test_tick_no_dispatcher_when_next_node_iport_missing
-src/components/scheduler/tests/test_scheduler.py::test_tick_returns_state_not_found_when_missing
-src/components/scheduler/tests/test_scheduler.py::test_trigger_edge_writes_to_state
-src/kernel/tests/test_loader.py::test_load_software_team
-tests/test_e2e_advanced.py::test_cmd_exception_yields_alarm
-tests/test_e2e_advanced.py::test_dispatch_failure_does_not_corrupt_state
-tests/test_e2e_advanced.py::test_manual_edge_blocks_until_trigger
-tests/test_e2e_advanced.py::test_manual_edge_does_not_run_cmd_without_trigger
-tests/test_e2e_advanced.py::test_orchestrator_run_blocks_until_sink
-tests/test_e2e_advanced.py::test_orchestrator_run_stops_when_iport_missing
-tests/test_e2e_advanced.py::test_stale_age_even_when_pid_alive
-tests/test_e2e_advanced.py::test_stale_claim_is_reaped_by_monitor
-tests/test_e2e_advanced.py::test_unknown_gate_op_yields_alarm
-tests/test_e2e_complex.py::test_harvester_self_loop_threshold_to_qa
-tests/test_e2e_complex.py::test_multi_instance_independent_complex_graph
-tests/test_e2e_complex.py::test_qa_to_publisher_requires_manual_trigger
-tests/test_e2e_complex_tick.py::test_complex_sop_runner_reaches_sink_within_bounded_time
-tests/test_e2e_complex_tick.py::test_full_parallel_fanout_complex_sop
-tests/test_e2e_software_team.py::test_create_then_tick_awaits_iport
-tests/test_e2e_software_team.py::test_full_tick_dispatches_planer
-tests/test_e2e_software_team.py::test_list_shows_instance
-tests/test_e2e_software_team.py::test_rollback_clears_triggered_and_advances_to_prev
-tests/test_e2e_software_team.py::test_show_displays_state
-tests/test_e2e_software_team.py::test_sop_continues_past_archer_midchain
-tests/test_e2e_software_team.py::test_trigger_edge_writes_approver
