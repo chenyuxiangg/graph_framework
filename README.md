@@ -10,12 +10,15 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：M0 骨架
+## 当前状态：M3 worker 完成
 
-已有：Cargo workspace（6 个 crate）、worker 协议 v1（Rust 客户端 + Python SDK）、echo/slow 示例 worker、
-双栈测试（`cargo test` + `pytest`）、CI、legacy Python 实现归档只读。
+**已完成 M0–M3**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
+图内核与事件循环、trace/SQLite（L1 回放）、**worker supervisor + `WorkerExecutor`**（进程组 kill、
+取消升级、帧超时、并发上限）、`python/workers` 示例、spec v1.2 的 M0–M2 回写、
+`tests/e2e/**` 真子进程验收（AC-06/07/09/10 + 故障注入）；双栈测试与 CI 全绿。
 
-尚未实现（M1–M5）：DSL loader/校验、图内核与调度、trace/SQLite、Agent Harness、CLI 业务命令、replay。
+**尚未实现（M4–M5）**：Agent Harness（LLM 流式/tool/预算）、CLI `run`/`replay`、多 run 隔离（AC-12）、
+legacy 退役决策；M3 遗留 P2 见 [`doc/issues.md`](doc/issues.md)（ISSUE-061/063/066 等）。
 
 ## 快速开始
 
@@ -40,12 +43,14 @@ uv run pytest -q
 | `crates/zgraph-dsl/` | DSL 类型、loader、R1–R14、graph_hash（M1） |
 | `crates/zgraph-kernel/` | 状态机、事件循环、Delivery、门控、run 生命周期（M2） |
 | `crates/zgraph-trace/` | TraceEvent、SQLite、回放（M2） |
-| `crates/zgraph-worker/` | worker 协议客户端、子进程生命周期（M0 已实现） |
+| `crates/zgraph-worker/` | worker 协议、supervisor（进程组/取消/帧超时）、`WorkerExecutor`（M3） |
 | `crates/zgraph-harness/` | Agent Harness（M4） |
 | `crates/zgraph-cli/` | `zgraph` 命令（M1：`validate`；M2：`trace`；`run`/`replay` 见 M5） |
-| `python/zgraph_worker/` | worker SDK：握手、ctx、运行时、示例 worker |
-| `schemas/` | DSL schema（M1）、worker 协议 v1 |
-| `tests/` | 新 e2e 与 fixture |
+| `python/zgraph_worker/` | worker SDK：握手、ctx、运行时 |
+| `python/workers/` | 示例 worker：echo/slow/parallel/cycle/software_team（M3） |
+| `schemas/` | DSL schema（M1）、worker 协议 v1（M0 冻结，M3 检查单闭环） |
+| `tests/e2e/` | 真子进程验收：AC-06/07/09/10 + 故障注入 + 并发上限（M3） |
+| `tests/fixtures/` | 图与 worker fixture |
 | `doc/` | 决策/架构/规格/评审/进度/台账 |
 | `legacy/` | 旧 Python 实现（冻结只读，见 `legacy/README.md`） |
 

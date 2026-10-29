@@ -1,3 +1,4 @@
 # 测试基线（已知失败清单）
 # 生成：2026-10-29（M0）。legacy 已冻结、不再由 pytest 运行；python/ 新测试应全绿。
 # 规则：merge.sh 只允许“不新增失败”；修复失败项后必须缩小本文件（禁止扩大）。
+# 2026-10-30（M3 收尾）：cargo test --workspace 313+ passed、pytest 44 passed；基线名额为 0（全绿）。

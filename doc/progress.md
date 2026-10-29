@@ -2,22 +2,25 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：M2（内核 + trace + cli trace/验收）全部合并（main=4a15271）；下一步 M3 worker
+**当前阶段**：M3（worker / 示例 / spec 回写 / e2e 验收）全部合并；下一里程碑 M4 Harness
 
 | 模块 | 状态 | 当前任务 | 负责 | 分支 / worktree | 更新 |
 |---|---|---|---|---|---|
-| process | done | M0 骨架；M2 依赖预热（REV-006，002071d） | lead | — | 2026-10-29 |
-| dsl | done | M1 DSL 类型/loader/R1–R14/graph_hash/validate（REV-005，9aa0b9e） | dsl-spec-writer | — | 2026-10-29 |
-| kernel | done | M2 状态机/事件循环/Delivery/门控/Skipped/冷峻失败/超时/控制/死锁（REV-007，4570a53） | kernel-dev | — | 2026-10-29 |
-| trace | done | M2 SQLite v2/写线程/L1 reader/L2 记录表（REV-008，8815370） | trace-dev | — | 2026-10-29 |
-| cli | done | M2 `zgraph trace` L1 + kernel→trace 桥 + AC-01/02/03/05/06/07/10/11 验收（REV-009，4a15271） | cli-dev | — | 2026-10-29 |
-| worker | next | M3：真 worker/进程组 kill/并发上限/协议异常分支（ISSUE-025/047） | 待定 | — | 2026-10-29 |
-| harness | next | M4：LLM 流式 + tool（经 worker）+ 预算 | 待定 | — | 2026-10-29 |
-| e2e | next | M3–M5：AC-01..AC-12 真 worker/LLM/多 run 场景（REV-009 后迁移 `tests/e2e`） | 待定 | — | 2026-10-29 |
+| process | done | M0 骨架；M2/M3 依赖与合并门禁（REV-006/012/015） | lead | — | 2026-10-30 |
+| dsl | done | M1 DSL 类型/loader/R1–R14/graph_hash/validate（REV-005） | dsl-spec-writer | — | 2026-10-29 |
+| kernel | done | M2 状态机/事件循环/Delivery/门控/超时/控制/死锁（REV-007） | kernel-dev | — | 2026-10-29 |
+| trace | done | M2 SQLite v2/写线程/L1 reader/L2 记录表（REV-008） | trace-dev | — | 2026-10-29 |
+| cli | done | M2 `zgraph trace` + kernel→trace 桥 + AC 验收（REV-009）；M5 补 run/replay | cli-dev | — | 2026-10-29 |
+| worker | done | M3 supervisor/进程组 kill/WorkerExecutor/协议检查单闭环（REV-012） | worker-dev | — | 2026-10-30 |
+| py-worker | done | M3 python/workers 5 示例 + L3 幂等/副作用契约（REV-013） | py-worker-dev | — | 2026-10-30 |
+| docs | done | M3 spec v1.2 M0–M2 回写 + PROVENANCE（REV-014） | docs-writer | — | 2026-10-30 |
+| e2e | done | M3 `tests/e2e/**` 真 worker AC-06/07/09/10 + 故障注入 + 并发（REV-015） | e2e-dev | — | 2026-10-30 |
+| harness | next | M4：LLM 流式 + tool（经 worker）+ 上下文预算 + fake provider | 待定 | — | 2026-10-30 |
 
 **下一步**
-1. M3 worker：真子进程 + 进程组 kill + 并发上限 + 协议异常分支；回归 AC-06/07 真进程断言（ISSUE-047）。
-2. M3 建立 `tests/e2e/**` 并迁移 M2 验收用例；M4 Harness / M5 CLI run·replay（ISSUE-052）。
+1. M4 Harness：LLM 流式/tool 循环/上下文预算/错误映射/fake provider（architecture §6.1）。
+2. M3 遗留 P2：gated self-loop 幻影 attempt（ISSUE-061）、NODE_WORKER_CRASH 记录 signal/exit（ISSUE-066）、AC-07 字面 ticker（ISSUE-063）。
+3. spec 05/08 与 04 §4.2 新增 API 回写（ISSUE-067/070）；M5 CLI run/replay 与 L2 重放。
 
 **阻塞**
-- 无硬阻塞；ISSUE-014/015/020/033–041/043–059 按里程碑推进（spec 回写 = ISSUE-020 的 ISSUE-050 子项）。
+- 无硬阻塞；M0–M3 测试全绿（cargo workspace 313+ tests、pytest 44 passed）；遗留项按 ISSUE-020/047/061–072 推进。
