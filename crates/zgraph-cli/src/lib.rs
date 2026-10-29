@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bridge;
 pub mod trace_cmd;
 pub mod validate;
 
