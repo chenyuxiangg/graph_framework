@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use zgraph_dsl::{NodeType, Trigger};
 
 use crate::context::{NodeContext, NodeContextInit};
-use crate::executor::NodeExecutor;
+use crate::executor::{CatchPanic, NodeExecutor};
 use crate::gate::{evaluate_gate_for, GateEvaluation};
 use crate::graph::{CompiledGraph, CompiledNode};
 use crate::trace::{
@@ -583,14 +583,27 @@ impl RunLoop {
     }
 
     /// Resume：重新扫描 Pending 实例做就绪判定（03 §3.8）。
+    ///
+    /// 确定性：只扫描节点的**当前**实例（`node_current`），并按 `node_order`
+    /// 排序后入队 —— 避免 HashMap 迭代顺序导致 Resume 后的派发顺序抖动。
     fn resume_pending(&mut self) {
-        let pending: Vec<InstanceId> = self
+        let mut pending: Vec<(usize, InstanceId)> = self
             .instances
             .values()
             .filter(|record| record.status == InstanceStatus::Pending)
-            .map(|record| record.instance_id.clone())
+            .filter(|record| self.node_current.get(&record.node_id) == Some(&record.instance_id))
+            .map(|record| {
+                let order = self
+                    .graph
+                    .node_order
+                    .iter()
+                    .position(|node_id| node_id == &record.node_id)
+                    .unwrap_or(usize::MAX);
+                (order, record.instance_id.clone())
+            })
             .collect();
-        for instance_id in pending {
+        pending.sort_by_key(|(order, _)| *order);
+        for (_, instance_id) in pending {
             self.maybe_make_ready(&instance_id);
         }
     }
@@ -730,10 +743,15 @@ impl RunLoop {
         inputs: HashMap<PortName, Value>,
         deadline: Instant,
     ) {
+        let attempt = self
+            .instances
+            .get(instance_id)
+            .map_or(0, |record| record.attempt);
         let ctx = NodeContext::new(NodeContextInit {
             run_id: self.run_id.clone(),
             instance_id: instance_id.to_string(),
             node_id: node.id.clone(),
+            attempt,
             user_id: self.user_id.clone(),
             global_vars: self.global_vars.clone(),
             cancel: self.cancel.clone(),
@@ -753,8 +771,10 @@ impl RunLoop {
                 inputs: &inputs,
                 ctx: &ctx,
             };
-            match executor.execute(execution).await {
-                Ok(output) => {
+            // 00 §0.7 / 04 §4.1.1：执行器 panic 必须归一化为 Internal（Crashed），
+            // 不能静默留到实例 deadline 才判 TimedOut。
+            match CatchPanic::new(executor.execute(execution)).await {
+                Ok(Ok(output)) => {
                     let evaluations = evaluate_outgoing(&graph, &node_id, &output);
                     let _ = tx.send(RuntimeEvent::Completed {
                         instance_id: instance_id_owned,
@@ -762,10 +782,18 @@ impl RunLoop {
                         evaluations,
                     });
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     let _ = tx.send(RuntimeEvent::Failed {
                         instance_id: instance_id_owned,
                         error,
+                    });
+                }
+                Err(message) => {
+                    let _ = tx.send(RuntimeEvent::Failed {
+                        instance_id: instance_id_owned,
+                        error: NodeError::Internal {
+                            message: format!("executor panicked: {message}"),
+                        },
                     });
                 }
             }
@@ -834,11 +862,34 @@ impl RunLoop {
         self.tasks.remove(&instance_id);
         match error {
             NodeError::Timeout { elapsed_ms } => {
-                self.fail_timeout(&instance_id, &node_id, elapsed_ms)
+                self.on_timeout_error(&instance_id, &node_id, elapsed_ms)
             }
             NodeError::Cancelled => self.on_cancelled_error(&instance_id, &node_id),
             other => self.fail_crashed(&instance_id, &node_id, other),
         }
+    }
+
+    /// 执行器返回 `Timeout` 的归一化（04 §4.1.4 规则 1）。
+    ///
+    /// 只有 `AgentCallHandler` 允许自报超时（M4 Harness 预检）→ `TimedOut`；
+    /// 其它 handler 返回 Timeout 属于契约违反：记 warning（内核无 logger，
+    /// 由错误 message 承载）并归一化为 `Internal` → 实例 `Crashed`。
+    fn on_timeout_error(&mut self, instance_id: &str, node_id: &str, elapsed_ms: u64) {
+        let node_type = self.graph.nodes.get(node_id).map(|node| node.node_type);
+        if node_type == Some(NodeType::AgentCall) {
+            self.fail_timeout(instance_id, node_id, elapsed_ms);
+            return;
+        }
+        let kind = node_type.map_or("unknown", NodeType::as_str);
+        self.fail_crashed(
+            instance_id,
+            node_id,
+            NodeError::Internal {
+                message: format!(
+                    "handler must not produce Timeout (node '{node_id}' type {kind} returned Timeout after {elapsed_ms} ms)"
+                ),
+            },
+        );
     }
 
     /// 执行器自报超时（仅 AgentCallHandler 预检合法）→ TimedOut → run Failed。

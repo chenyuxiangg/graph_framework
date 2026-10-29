@@ -2,12 +2,15 @@
 
 mod common;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{json, Value};
 use zgraph_kernel::{
-    FakeExecutor, HarnessErrorKind, InstanceStatus, NodeError, RunStatus, WorkerErrorKind,
+    FakeExecutor, HarnessErrorKind, InstanceStatus, NodeError, NodeExecution, NodeExecutor,
+    RunStatus, WorkerErrorKind,
 };
 
 const FAIL_JSON: &str = r#"{
@@ -280,4 +283,133 @@ fn node_error_codes_match_spec() {
     for (error, expected) in cases {
         assert_eq!(error.code(), expected, "code for {error:?}");
     }
+}
+
+/// 执行器直接 panic（模拟 handler 内部 bug）。
+struct PanicExecutor;
+
+impl NodeExecutor for PanicExecutor {
+    fn execute<'a>(
+        &'a self,
+        _execution: NodeExecution<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, NodeError>> + Send + 'a>> {
+        Box::pin(async move {
+            panic!("executor boom");
+        })
+    }
+}
+
+#[tokio::test]
+async fn executor_panic_normalizes_to_internal_and_fails_fast() {
+    let started = Instant::now();
+    let (outcome, sink) =
+        common::run_with_sink(common::linear_spec(), Arc::new(PanicExecutor)).await;
+    let elapsed = started.elapsed();
+
+    // 关键点：不得等到默认 180s deadline 才判 TimedOut。
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "panic must fail the run immediately (took {elapsed:?})"
+    );
+    assert_eq!(outcome.status, RunStatus::Failed);
+    let error = outcome.error.expect("run error");
+    assert_eq!(error.code, "NODE_INTERNAL");
+    assert!(
+        error.message.contains("executor boom"),
+        "panic payload should be surfaced: {}",
+        error.message
+    );
+    let snapshots = common::snapshots_of(&sink, "work");
+    let crashed = snapshots
+        .iter()
+        .find(|snapshot| snapshot.status == InstanceStatus::Crashed)
+        .expect("crashed snapshot");
+    assert_eq!(crashed.error_code.as_deref(), Some("NODE_INTERNAL"));
+    assert!(matches!(crashed.error, Some(NodeError::Internal { .. })));
+    assert!(
+        sink.timed_out().is_empty(),
+        "panic must not be reported as NodeTimedOut"
+    );
+    common::assert_lifecycle_once(&sink);
+}
+
+const AGENT_JSON: &str = r#"{
+  "version": "1.0",
+  "metadata": {"name": "agent-timeout"},
+  "entry_points": ["start"],
+  "nodes": [
+    {"id": "start", "type": "start", "inputs": [], "config": {}},
+    {"id": "agent", "type": "agent_call",
+     "inputs": [{"name": "i", "type": "any", "required": true}],
+     "config": {"agent_id": "agent-a"}},
+    {"id": "done", "type": "end",
+     "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+  ],
+  "edges": [
+    {"from": "start", "to_node": "agent", "to_input_port": "i"},
+    {"from": "agent", "to_node": "done", "to_input_port": "r"}
+  ]
+}"#;
+
+#[tokio::test]
+async fn agent_handler_timeout_is_timed_out() {
+    // 04 §4.1.4 规则 1：仅 AgentCallHandler 允许自报 Timeout → TimedOut + NODE_TIMEOUT。
+    let graph = common::compile_text(AGENT_JSON);
+    let executor =
+        Arc::new(FakeExecutor::new().fail("agent", NodeError::Timeout { elapsed_ms: 12 }));
+    let (outcome, sink) =
+        common::run_with_sink(common::spec(graph, common::entry_inputs(&[])), executor).await;
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(outcome.error.expect("run error").code, "NODE_TIMEOUT");
+    assert_eq!(
+        common::last_status(&sink, "agent"),
+        Some(InstanceStatus::TimedOut)
+    );
+    assert_eq!(sink.timed_out().len(), 1);
+}
+
+#[tokio::test]
+async fn python_handler_timeout_is_normalized_to_internal() {
+    // 04 §4.1.4 规则 1：非 Agent handler 返回 Timeout → warning + Internal → Crashed。
+    let executor =
+        Arc::new(FakeExecutor::new().fail("work", NodeError::Timeout { elapsed_ms: 12 }));
+    let (outcome, sink) = common::run_with_sink(common::linear_spec(), executor).await;
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    let error = outcome.error.expect("run error");
+    assert_eq!(error.code, "NODE_INTERNAL");
+    assert!(
+        error.message.contains("must not produce Timeout"),
+        "normalization message: {}",
+        error.message
+    );
+    assert_eq!(
+        common::last_status(&sink, "work"),
+        Some(InstanceStatus::Crashed)
+    );
+    assert!(
+        sink.timed_out().is_empty(),
+        "normalized timeout must not emit NodeTimedOut"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_without_flag_is_normalized_to_internal() {
+    // 04 §4.1.4 规则 2：Err(Cancelled) 但 cancel_requested()==false → Internal → Crashed。
+    let executor = Arc::new(FakeExecutor::new().fail("work", NodeError::Cancelled));
+    let (outcome, sink) = common::run_with_sink(common::linear_spec(), executor).await;
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    let error = outcome.error.expect("run error");
+    assert_eq!(error.code, "NODE_INTERNAL");
+    assert!(
+        error.message.contains("Cancelled without cancel flag"),
+        "normalization message: {}",
+        error.message
+    );
+    assert_eq!(
+        common::last_status(&sink, "work"),
+        Some(InstanceStatus::Crashed)
+    );
 }

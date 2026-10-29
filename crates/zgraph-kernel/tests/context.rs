@@ -11,6 +11,10 @@ use zgraph_kernel::{NodeError, NodeExecution, NodeExecutor, RunOptions, RunSpec,
 
 #[derive(Debug, Default)]
 struct Probe {
+    run_id: String,
+    instance_id: String,
+    node_id: String,
+    attempt: u32,
     user_id: String,
     var: Option<Value>,
     var_missing_is_none: bool,
@@ -31,6 +35,10 @@ impl NodeExecutor for ProbeExecutor {
     ) -> Pin<Box<dyn Future<Output = Result<Value, NodeError>> + Send + 'a>> {
         Box::pin(async move {
             if let Ok(mut probe) = self.probe.lock() {
+                probe.run_id = execution.ctx.run_id().to_string();
+                probe.instance_id = execution.ctx.instance_id().to_string();
+                probe.node_id = execution.ctx.node_id().to_string();
+                probe.attempt = execution.ctx.attempt();
                 probe.user_id = execution.ctx.user_id().to_string();
                 probe.var = execution.ctx.get_var("greeting").cloned();
                 probe.var_missing_is_none = execution.ctx.get_var("absent").is_none();
@@ -64,6 +72,10 @@ async fn node_context_exposes_readonly_snapshot() {
     assert_eq!(outcome.status, RunStatus::Completed);
 
     let probe = probe.lock().expect("probe mutex");
+    assert_eq!(probe.run_id, outcome.run_id);
+    assert_eq!(probe.node_id, "work");
+    assert!(!probe.instance_id.is_empty());
+    assert_eq!(probe.attempt, 0);
     assert_eq!(probe.user_id, "user-42");
     assert_eq!(probe.var, Some(json!({"hello": "world"})));
     assert!(probe.var_missing_is_none);

@@ -133,8 +133,8 @@ async fn ticker_interval_stays_small_while_executor_runs() {
     common::wait_for_run_status(&mut status_rx, RunStatus::Paused).await;
     let pause_latency = pause_started.elapsed();
     assert!(
-        pause_latency < Duration::from_millis(500),
-        "pause must be handled promptly (took {pause_latency:?})"
+        pause_latency < Duration::from_millis(100),
+        "AC-07: pause must take effect within 100ms (took {pause_latency:?})"
     );
     assert!(handle.resume());
     let outcome = handle.wait().await;

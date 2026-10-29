@@ -23,6 +23,7 @@ pub(crate) struct NodeContextInit {
     pub(crate) run_id: RunId,
     pub(crate) instance_id: String,
     pub(crate) node_id: NodeId,
+    pub(crate) attempt: crate::types::Attempt,
     pub(crate) user_id: String,
     pub(crate) global_vars: Arc<HashMap<String, Value>>,
     pub(crate) cancel: Arc<AtomicBool>,
@@ -37,6 +38,7 @@ pub struct NodeContext {
     run_id: RunId,
     instance_id: String,
     node_id: NodeId,
+    attempt: crate::types::Attempt,
     user_id: String,
     global_vars: Arc<HashMap<String, Value>>,
     cancel: Arc<AtomicBool>,
@@ -52,6 +54,7 @@ impl NodeContext {
             run_id: init.run_id,
             instance_id: init.instance_id,
             node_id: init.node_id,
+            attempt: init.attempt,
             user_id: init.user_id,
             global_vars: init.global_vars,
             cancel: init.cancel,
@@ -59,6 +62,26 @@ impl NodeContext {
             emitter: init.emitter,
             deadline: init.deadline,
         }
+    }
+
+    /// 所属 run ID（只读身份；Python 代理不暴露，见 04 §4.2.2）。
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// 本次执行实例 ID（只读身份）。
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// 编译图节点 ID（只读身份）。
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    /// 尝试序号（0 起；自环/重试新实例 +1）。
+    pub fn attempt(&self) -> crate::types::Attempt {
+        self.attempt
     }
 
     /// 投递一个**可丢** streaming 事件（不阻塞、不 panic、无返回值）。

@@ -10,9 +10,11 @@
 //! （`start` 输出 = 入口注入；`end` 输出 = inputs 且不 publish；`subgraph`
 //! 在派发前被拒绝）。
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -36,13 +38,62 @@ pub struct NodeExecution<'a> {
 /// 实现要求：
 /// - 不得修改 `RunState`/buffer；只通过返回值与 `ctx.emit` 与内核交互。
 /// - 每个 `InstanceId` 至多执行一次（I1；自环/重试是新实例）。
-/// - 超时由内核 deadline 判定（D1），执行器不得自行返回 `NodeError::Timeout`。
+/// - 超时由内核 deadline 判定（D1），执行器不得自行返回 `NodeError::Timeout`
+///   （仅 AgentCallHandler 预检例外，见 04 §4.1.4）。
+/// - 执行中的 panic 由内核 [`CatchPanic`] 捕获并归一化为
+///   `NodeError::Internal` → 实例 Crashed → run Failed（00 §0.7），不会拖到超时。
 pub trait NodeExecutor: Send + Sync {
     /// 执行节点逻辑并返回整包 output（v1 整包广播，04 §4.5）。
     fn execute<'a>(
         &'a self,
         execution: NodeExecution<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Value, NodeError>> + Send + 'a>>;
+}
+
+/// 捕获执行 future 内部 panic 的包装器（00 §0.7 / 04 §4.1.1 / 03 §3.15）。
+///
+/// 为什么不用「内层 `tokio::spawn` + `JoinHandle`」：外层任务在超时/取消时会被
+/// abort，内层任务会变成 detached 遗留任务；本包装器在**同一个任务**内用
+/// `catch_unwind` 把 panic 收敛为 `Err(message)`，不改变取消/超时语义。
+/// `Pin<Box<F>>` 恒为 `Unpin`，因此投影无需 `unsafe`（crate `forbid(unsafe_code)`）。
+pub(crate) struct CatchPanic<F: Future> {
+    inner: Pin<Box<F>>,
+}
+
+impl<F: Future> CatchPanic<F> {
+    /// 包装一个执行 future。
+    pub(crate) fn new(future: F) -> Self {
+        Self {
+            inner: Box::pin(future),
+        }
+    }
+}
+
+impl<F: Future> Future for CatchPanic<F> {
+    type Output = Result<F::Output, String>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.inner.as_mut().poll(cx)
+        }));
+        match polled {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+            Err(payload) => Poll::Ready(Err(panic_message(payload.as_ref()))),
+        }
+    }
+}
+
+/// 从 panic payload 提取可读消息（`panic!("...")` 的 `&str`/`String`）。
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return (*text).to_string();
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    "non-string panic payload".to_string()
 }
 
 /// `FakeExecutor` 的节点行为。
