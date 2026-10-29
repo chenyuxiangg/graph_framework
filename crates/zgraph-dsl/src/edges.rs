@@ -188,15 +188,7 @@ pub(crate) fn check_edge_ports(edges: &[GraphEdge], nodes: &[GraphNode]) -> Vec<
             }
         }
         if let Some(actual) = &edge.from_output_port {
-            errors.push(
-                DslError::new(
-                    DslErrorCode::UnsupportedField,
-                    "reserved field 'from_output_port' is not supported by schema 1.0 (planned for v2)",
-                )
-                .at_edge(index)
-                .expected("<absent>")
-                .actual(actual.clone()),
-            );
+            errors.push(msg::unsupported_field("from_output_port", actual).at_edge(index));
         }
     }
     errors

@@ -293,13 +293,14 @@ pub(crate) mod msg {
         .actual(serde_json::json!(key))
     }
 
-    pub(crate) fn unsupported_field(field: &str) -> DslError {
+    /// 保留字段错误：`actual` = 字段名 + 原始值（02 §2.2.4；两个保留字段形状一致）。
+    pub(crate) fn unsupported_field(field: &str, value: &Value) -> DslError {
         DslError::new(
             DslErrorCode::UnsupportedField,
             format!("reserved field '{field}' is not supported by schema 1.0 (planned for v2)"),
         )
         .expected(json!("<absent>"))
-        .actual(json!(field))
+        .actual(json!({"field": field, "value": value}))
     }
 
     pub(crate) fn wrong_type(field: &str, expected: &str, scope: &str, actual: &Value) -> DslError {

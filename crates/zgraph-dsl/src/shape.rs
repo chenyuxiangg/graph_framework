@@ -124,12 +124,16 @@ pub(crate) fn is_identifier(text: &str) -> bool {
     }
 }
 
-/// UTC RFC3339 时间戳（02 §2.2.1：`YYYY-MM-DDTHH:MM:SS[.fff]Z`，仅 `Z` 后缀）。
+/// UTC RFC3339 时间戳（02 §2.2.1 / 00 §0.1：`YYYY-MM-DDTHH:MM:SS[.fff](Z|+00:00)`）。
 ///
 /// 校验真实日历范围（月 1–12、日按时长与闰年、时 0–23、分 0–59、秒 0–60 以
 /// 允许 RFC3339 闰秒），REV-005 #6。
 pub(crate) fn is_rfc3339_utc(text: &str) -> bool {
-    let Some(rest) = text.strip_suffix('Z') else {
+    // RFC3339 的 `Z` 与 `+00:00` 都表示 UTC（非零 offset 拒绝）。
+    let Some(rest) = text
+        .strip_suffix('Z')
+        .or_else(|| text.strip_suffix("+00:00"))
+    else {
         return false;
     };
     if rest.len() < 19 || !rest.is_char_boundary(19) {

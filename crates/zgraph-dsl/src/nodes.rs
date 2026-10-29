@@ -316,7 +316,8 @@ fn check_node_keys(
 ) {
     for key in map.keys() {
         let mut error = if key == "on_error" {
-            msg::unsupported_field("on_error")
+            let value = map.get("on_error").cloned().unwrap_or(Value::Null);
+            msg::unsupported_field("on_error", &value)
         } else if NODE_KEYS.contains(&key.as_str()) {
             continue;
         } else {
@@ -1000,25 +1001,29 @@ fn parse_subgraph(
         errors.push(msg::wrong_type(&fallback, "object", "subgraphs", value));
         return None;
     };
-    check_keys(map, &SUBGRAPH_KEYS, &fallback, errors);
-    for key in ["nodes", "edges", "input_mapping", "output_mapping"] {
-        if !map.contains_key(key) {
-            errors.push(msg::missing_field(key, &fallback));
-        }
-    }
+    // 先解析 id：无有效 SubgraphId 时只能文档级（ISSUE-031）；有效 id 的头错误
+    // 统一 location.node_id = SubgraphId（REV-005 复审 #1）。
     let subgraph_id = parse_subgraph_id(map, index, errors);
-    let scope = subgraph_id
-        .as_ref()
-        .map_or(fallback, |id| format!("subgraph '{id}'"));
-    let input_mapping = parse_string_map(map.get("input_mapping"), "input_mapping", &scope, errors);
-    let output_mapping =
-        parse_string_map(map.get("output_mapping"), "output_mapping", &scope, errors);
     if errors.len() > start {
         return None;
     }
     let subgraph_id = subgraph_id?;
     if !ids.insert(subgraph_id.clone()) {
         errors.push(subgraph_invalid(&subgraph_id, "duplicate subgraph id"));
+        return None;
+    }
+    let scope = format!("subgraph '{subgraph_id}'");
+    check_keys(map, &SUBGRAPH_KEYS, &scope, errors);
+    for key in ["nodes", "edges", "input_mapping", "output_mapping"] {
+        if !map.contains_key(key) {
+            errors.push(msg::missing_field(key, &scope));
+        }
+    }
+    let input_mapping = parse_string_map(map.get("input_mapping"), "input_mapping", &scope, errors);
+    let output_mapping =
+        parse_string_map(map.get("output_mapping"), "output_mapping", &scope, errors);
+    attach_node_location(errors, start, Some(&subgraph_id));
+    if errors.len() > start {
         return None;
     }
     let body = build_subgraph_body(&subgraph_id, map.get("nodes"), map.get("edges"), errors)?;

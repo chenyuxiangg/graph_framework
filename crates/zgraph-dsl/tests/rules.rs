@@ -3,7 +3,7 @@
 //! 通过公开 API（`load_graph_value` / `load_graph_with_options`）驱动，
 //! 断言错误码、定位与 expected/actual；fixtures 在 `fixtures.rs` 中逐文件覆盖。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use zgraph_dsl::{
@@ -981,7 +981,10 @@ fn rev005_from_output_port_is_unsupported_regardless_of_value() {
         let errors = expect_code(graph, DslErrorCode::UnsupportedField);
         assert_eq!(errors.first().location.edge_index, Some(0));
         assert!(errors.first().location.port.is_none());
-        assert_eq!(errors.first().actual, Some(raw));
+        assert_eq!(
+            errors.first().actual,
+            Some(json!({"field": "from_output_port", "value": raw}))
+        );
     }
 }
 
@@ -1099,7 +1102,8 @@ fn rev005_created_at_requires_valid_utc_rfc3339() {
         "2026-10-29T23:60:00Z",
         "2026-10-29T23:59:61Z",
         "2026-10-29T10:00:00+08:00",
-        "2026-10-29T10:00:00+00:00",
+        "2026-10-29T10:00:00-00:00",
+        "2026-10-29T10:00:00.123+08:00",
         "2026-10-29T10:00:00",
     ] {
         let errors = expect_code(with_created_at(json!(invalid)), DslErrorCode::ParseError);
@@ -1113,7 +1117,167 @@ fn rev005_created_at_requires_valid_utc_rfc3339() {
         "2026-10-29T10:00:00Z",
         "2028-02-29T00:00:00Z",
         "2026-10-29T10:00:00.123Z",
+        "2026-10-29T10:00:00+00:00",
+        "2026-10-29T10:00:00.123+00:00",
     ] {
         load(with_created_at(json!(valid))).unwrap_or_else(|errors| panic!("{valid}: {errors}"));
     }
+}
+
+// ---------------------------------------------------------------- REV-005 复审
+
+fn subgraph_body(extra_key: Option<(&str, Value)>) -> Value {
+    let mut subgraph = json!({
+        "id": "inner",
+        "nodes": [
+            python_node("pin", json!([input_port("p", true)])),
+            end_node("inner_end", "o")
+        ],
+        "edges": [edge("pin", "inner_end", "o")],
+        "input_mapping": {"q": "pin.p"},
+        "output_mapping": {"r": "inner_end.o"}
+    });
+    if let Some((key, value)) = extra_key {
+        subgraph[key] = value;
+    }
+    subgraph
+}
+
+fn graph_referencing_inner(subgraph: Value) -> Value {
+    let mut graph = graph_with(
+        json!([
+            start_node("start"),
+            node(
+                "sub",
+                "subgraph",
+                json!([input_port("q", true)]),
+                json!({"subgraph_id": "inner"})
+            )
+        ]),
+        json!([edge("start", "sub", "q")]),
+    );
+    graph["subgraphs"] = json!([subgraph]);
+    graph
+}
+
+#[test]
+fn rev005_2_valid_subgraph_header_errors_locate_subgraph_id_without_cascade() {
+    for extra in [
+        ("bogus", json!(true)),
+        ("on_error", json!({"route": "fallback"})),
+    ] {
+        let graph = graph_referencing_inner(subgraph_body(Some(extra)));
+        let errors = expect_error(graph);
+        assert_eq!(errors.error_count, 1, "{errors}");
+        assert_eq!(errors.first().code, DslErrorCode::ParseError);
+        assert_eq!(
+            errors.first().location.node_id.as_deref(),
+            Some("inner"),
+            "{errors}"
+        );
+        assert!(
+            !errors.first().message.contains("not defined"),
+            "must not cascade undefined-reference error: {errors}"
+        );
+    }
+}
+
+#[test]
+fn rev005_2_node_on_error_actual_contains_field_and_value() {
+    let mut start = start_node("start");
+    start["on_error"] = json!({"route": "fallback"});
+    let errors = expect_code(
+        graph_with(json!([start]), json!([])),
+        DslErrorCode::UnsupportedField,
+    );
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("start"));
+    assert_eq!(errors.first().expected, Some(json!("<absent>")));
+    assert_eq!(
+        errors.first().actual,
+        Some(json!({"field": "on_error", "value": {"route": "fallback"}}))
+    );
+}
+
+fn temp_assets_dir(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("zgraph-dsl-test-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("agents")).expect("create temp agents dir");
+    for (name, content) in files {
+        std::fs::write(dir.join("agents").join(name), content).expect("write asset file");
+    }
+    dir
+}
+
+fn load_with_assets(graph: Value, assets_dir: &Path) -> Result<LoadedGraph, DslErrors> {
+    load_graph_value(graph, &LoadOptions::new().with_assets_dir(assets_dir))
+}
+
+fn agent_graph(agent_id: &str) -> Value {
+    graph_with(
+        json!([
+            start_node("start"),
+            node(
+                "a1",
+                "agent_call",
+                json!([input_port("x", true)]),
+                json!({"agent_id": agent_id})
+            )
+        ]),
+        json!([edge("start", "a1", "x")]),
+    )
+}
+
+#[test]
+fn rev005_2_asset_index_errors_are_document_level_with_index_path() {
+    let duplicate_dir = temp_assets_dir(
+        "dup",
+        &[("a.json", r#"{"id":"dup"}"#), ("b.json", r#"{"id":"dup"}"#)],
+    );
+    let errors = load_with_assets(agent_graph("dup"), &duplicate_dir).expect_err("duplicate index");
+    assert_eq!(errors.first().code, DslErrorCode::AgentNotFound);
+    assert!(errors.first().location.is_empty(), "{errors}");
+    assert!(
+        errors.first().message.contains("assets.agents[1]"),
+        "{errors}"
+    );
+
+    let invalid_dir = temp_assets_dir("invalid", &[("broken.json", "not-json")]);
+    let errors = load_with_assets(minimal_graph(), &invalid_dir).expect_err("invalid asset");
+    assert_eq!(errors.first().code, DslErrorCode::AgentNotFound);
+    assert!(errors.first().location.is_empty(), "{errors}");
+    assert!(
+        errors.first().message.contains("assets.agents[0]"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn rev005_2_missing_agent_reports_first_referencing_node_once() {
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            node(
+                "first",
+                "agent_call",
+                json!([input_port("x", true)]),
+                json!({"agent_id": "ghost_agent"})
+            ),
+            node(
+                "second",
+                "agent_call",
+                json!([input_port("x", true)]),
+                json!({"agent_id": "ghost_agent"})
+            )
+        ]),
+        json!([edge("start", "first", "x"), edge("start", "second", "x")]),
+    );
+    let assets = repo_root().join("tests/fixtures/assets");
+    let errors = load_with_assets(graph, &assets).expect_err("missing agent");
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(errors.first().code, DslErrorCode::AgentNotFound);
+    assert_eq!(
+        errors.first().location.node_id.as_deref(),
+        Some("first"),
+        "{errors}"
+    );
 }

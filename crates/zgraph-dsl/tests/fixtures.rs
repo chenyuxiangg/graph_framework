@@ -66,7 +66,7 @@ const fn edge(index: usize) -> Loc {
 }
 
 /// 坏图 fixture → 期望错误码 + 期望定位（REV-005 后为强断言）。
-const BAD_CASES: [(&str, DslErrorCode, Loc); 28] = [
+const BAD_CASES: [(&str, DslErrorCode, Loc); 31] = [
     // R1/R2/R3 文档级
     ("bad_parse_error.json", DslErrorCode::ParseError, DOC_LEVEL),
     (
@@ -77,6 +77,11 @@ const BAD_CASES: [(&str, DslErrorCode, Loc); 28] = [
     ("bad_version.json", DslErrorCode::ParseError, DOC_LEVEL),
     (
         "bad_created_at_invalid.json",
+        DslErrorCode::ParseError,
+        DOC_LEVEL,
+    ),
+    (
+        "bad_created_at_offset.json",
         DslErrorCode::ParseError,
         DOC_LEVEL,
     ),
@@ -202,6 +207,17 @@ const BAD_CASES: [(&str, DslErrorCode, Loc); 28] = [
         DslErrorCode::UnsupportedField,
         edge(0),
     ),
+    // REV-005 复审：有效 SubgraphId 的子图头错误 → node_id = SubgraphId（且不级联）
+    (
+        "bad_subgraph_header_unknown.json",
+        DslErrorCode::ParseError,
+        node("inner"),
+    ),
+    (
+        "bad_subgraph_header_on_error.json",
+        DslErrorCode::ParseError,
+        node("inner"),
+    ),
     // REV-005 回归：子图 id 必须是非空 string
     (
         "bad_subgraph_id_empty.json",
@@ -216,11 +232,12 @@ const BAD_CASES: [(&str, DslErrorCode, Loc); 28] = [
 ];
 
 /// 合法 fixture 名单（全部必须通过 R1–R14）。
-const VALID_CASES: [&str; 4] = [
+const VALID_CASES: [&str; 5] = [
     "customer_ticket.json",
     "valid_parallel.json",
     "valid_cycle.json",
     "valid_subgraph.json",
+    "valid_created_at_offset.json",
 ];
 
 fn fixture_needs_assets(name: &str) -> bool {
