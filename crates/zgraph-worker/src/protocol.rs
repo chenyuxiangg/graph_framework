@@ -18,8 +18,27 @@ pub const CODE_HANDSHAKE: &str = "NODE_WORKER_HANDSHAKE";
 pub const CODE_PROTOCOL: &str = "NODE_WORKER_PROTOCOL";
 /// 协议层错误码：worker 导入失败。
 pub const CODE_IMPORT: &str = "NODE_WORKER_IMPORT";
-/// 协议层错误码：超时。
+/// 协议层错误码：worker 被信号杀死 / 非约定退出码（§8.2）。
+pub const CODE_CRASH: &str = "NODE_WORKER_CRASH";
+/// 协议层错误码：超时（只由内核 deadline 产生；worker 不应自报）。
 pub const CODE_TIMEOUT: &str = "NODE_TIMEOUT";
+/// worker 错误帧码：Python 未捕获异常（§8.2）。
+pub const CODE_PYTHON_EXCEPTION: &str = "NODE_PYTHON_EXCEPTION";
+/// worker 错误帧码：业务错误（也用于 `BIZ_*` 与 `NODE_RETURN_*` 自定义码）。
+pub const CODE_BUSINESS_ERROR: &str = "NODE_BUSINESS_ERROR";
+/// worker 错误帧码：协作取消（§8.2）。
+pub const CODE_CANCELLED: &str = "NODE_CANCELLED";
+/// worker 错误帧码：返回值不是 JSON 对象（04 §4.3.2）。
+pub const CODE_RETURN_NOT_DICT: &str = "NODE_RETURN_NOT_DICT";
+
+/// emit 单帧内 `payload.type` 的封闭取值（协议 §2）。
+pub const EMIT_TYPES: [&str; 5] = [
+    "token",
+    "reasoning",
+    "tool_call_start",
+    "tool_call_end",
+    "progress",
+];
 
 /// 一帧 NDJSON 消息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

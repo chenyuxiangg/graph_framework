@@ -11,6 +11,12 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+zgraph-kernel = { path = "../zgraph-kernel" }
+
+# 进程组信号的安全封装（crate 级 `#![forbid(unsafe_code)]`）；nix 只提供 Unix API。
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+zgraph-dsl = { path = "../zgraph-dsl" }
