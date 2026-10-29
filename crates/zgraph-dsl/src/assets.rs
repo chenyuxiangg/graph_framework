@@ -109,7 +109,6 @@ fn duplicate_agent(agent_id: &str, agents_dir: &Path, path: &Path) -> DslError {
             path.display()
         ),
     )
-    .at_field("agents.id")
     .expected("unique agent asset id")
     .actual(agent_id)
 }
@@ -119,7 +118,6 @@ fn invalid_asset_file(path: &Path, detail: &str) -> DslError {
         DslErrorCode::AgentNotFound,
         format!("invalid agent asset file '{}': {detail}", path.display()),
     )
-    .at_field("agents")
     .expected("readable agent asset JSON with a non-empty 'id'")
     .actual(path.display().to_string())
 }

@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "on-error-gate" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "n1",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "module": "m", "function": "f" }
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "n1",
+      "to_input_port": "x",
+      "gate": { "function": "manual", "on_error": { "route": "fallback" } }
+    }
+  ]
+}

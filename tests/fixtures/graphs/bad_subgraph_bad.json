@@ -1,9 +1,18 @@
 {
   "version": "1.0",
-  "metadata": { "name": "subgraph-bad" },
-  "entry_points": ["start"],
+  "metadata": {
+    "name": "subgraph-bad"
+  },
+  "entry_points": [
+    "start"
+  ],
   "nodes": [
-    { "id": "start", "type": "start", "inputs": [], "config": {} }
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [],
+      "config": {}
+    }
   ],
   "edges": [],
   "subgraphs": [
@@ -13,12 +22,23 @@
         {
           "id": "pin",
           "type": "python_node",
-          "inputs": [{ "name": "p", "type": "string", "required": true }],
-          "config": { "module": "m", "function": "f" }
+          "inputs": [
+            {
+              "name": "p",
+              "type": "string",
+              "required": true
+            }
+          ],
+          "config": {
+            "module": "m",
+            "function": "f"
+          }
         }
       ],
       "edges": [],
-      "input_mapping": {},
+      "input_mapping": {
+        "q": "pin.p"
+      },
       "output_mapping": {}
     }
   ]

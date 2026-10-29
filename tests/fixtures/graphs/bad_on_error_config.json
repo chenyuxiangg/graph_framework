@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "on-error-config" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "a",
+      "type": "agent_call",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "agent_id": "message_parser", "on_error": { "route": "fallback" } }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "a", "to_input_port": "x" }
+  ]
+}

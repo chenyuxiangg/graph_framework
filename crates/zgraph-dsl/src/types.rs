@@ -301,8 +301,8 @@ pub struct GraphEdge {
     pub to_input_port: String,
     /// 可选门控。
     pub gate: Option<GateDefinition>,
-    /// v1 保留字段：必须缺省（出现即 `DSL_UNSUPPORTED_FIELD`）。
-    pub from_output_port: Option<String>,
+    /// v1 保留字段：必须缺省；出现即 `DSL_UNSUPPORTED_FIELD`（不看取值，保留原始值）。
+    pub from_output_port: Option<Value>,
 }
 
 /// 子图定义（02 §2.2.2 `SubgraphDefinition`；v1 只校验不执行）。

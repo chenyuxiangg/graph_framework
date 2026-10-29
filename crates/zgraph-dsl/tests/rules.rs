@@ -136,11 +136,16 @@ fn r1_top_level_must_be_object() {
 // ---------------------------------------------------------------- R2
 
 #[test]
-fn r2_missing_top_level_field() {
+fn r2_missing_top_level_field_is_document_level() {
     let mut graph = minimal_graph();
     graph.as_object_mut().expect("object").remove("edges");
     let errors = expect_code(graph, DslErrorCode::MissingField);
-    assert_eq!(errors.first().location.field.as_deref(), Some("edges"));
+    assert!(
+        errors.first().location.is_empty(),
+        "R2 文档级 location 必须为空: {:?}",
+        errors.first().location
+    );
+    assert!(errors.first().message.contains("edges"));
 }
 
 #[test]
@@ -864,4 +869,251 @@ fn error_object_serializes_stable_shape() {
     assert_eq!(value["location"]["port"], json!("zzz"));
     assert!(value["expected"].is_array());
     assert_eq!(value["actual"], json!("zzz"));
+}
+
+// ---------------------------------------------------------------- REV-005 回归
+
+fn with_root(mut graph: Value, key: &str, value: Value) -> Value {
+    graph
+        .as_object_mut()
+        .expect("object")
+        .insert(key.to_string(), value);
+    graph
+}
+
+#[test]
+fn rev005_on_error_only_node_level_is_unsupported_field() {
+    // 节点级：保留字段。
+    let mut start = start_node("start");
+    start["on_error"] = json!({"route": "fallback"});
+    let errors = expect_code(
+        graph_with(json!([start]), json!([])),
+        DslErrorCode::UnsupportedField,
+    );
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("start"));
+
+    // 顶层：未知字段（文档级）。
+    let graph = with_root(minimal_graph(), "on_error", json!({"route": "fallback"}));
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert!(errors.first().location.is_empty());
+    assert!(errors.first().message.contains("on_error"));
+
+    // 节点 config：未知字段（节点级）。
+    let mut agent = node(
+        "a",
+        "agent_call",
+        json!([input_port("x", true)]),
+        json!({"agent_id": "message_parser", "on_error": {}}),
+    );
+    agent["on_error"] = Value::Null;
+    if let Value::Object(map) = &mut agent {
+        map.remove("on_error");
+    }
+    let graph = graph_with(
+        json!([start_node("start"), agent]),
+        json!([edge("start", "a", "x")]),
+    );
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("a"));
+
+    // 边：未知字段（边级）。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("n1", json!([input_port("x", true)]))
+        ]),
+        json!([{
+            "from": "start",
+            "to_node": "n1",
+            "to_input_port": "x",
+            "on_error": {"route": "fallback"}
+        }]),
+    );
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.first().location.edge_index, Some(0));
+
+    // 输入端口：未知字段（节点级）。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node(
+                "n1",
+                json!([{"name": "x", "type": "string", "required": true, "on_error": true}])
+            )
+        ]),
+        json!([edge("start", "n1", "x")]),
+    );
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("n1"));
+
+    // gate：未知字段（边级）。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("n1", json!([input_port("x", true)]))
+        ]),
+        json!([gated_edge(
+            "start",
+            "n1",
+            "x",
+            json!({"function": "manual", "on_error": {"route": "fallback"}})
+        )]),
+    );
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.first().location.edge_index, Some(0));
+}
+
+#[test]
+fn rev005_from_output_port_is_unsupported_regardless_of_value() {
+    for raw in [json!("out"), json!(123), json!(null), json!({"p": 1})] {
+        let graph = graph_with(
+            json!([
+                start_node("start"),
+                python_node("n1", json!([input_port("x", true)]))
+            ]),
+            json!([{
+                "from": "start",
+                "to_node": "n1",
+                "to_input_port": "x",
+                "from_output_port": raw
+            }]),
+        );
+        let errors = expect_code(graph, DslErrorCode::UnsupportedField);
+        assert_eq!(errors.first().location.edge_index, Some(0));
+        assert!(errors.first().location.port.is_none());
+        assert_eq!(errors.first().actual, Some(raw));
+    }
+}
+
+#[test]
+fn rev005_subgraph_id_must_be_non_empty_string() {
+    let subgraph_body = |id: Value| {
+        json!([{
+            "id": id,
+            "nodes": [
+                python_node("pin", json!([input_port("p", true)])),
+                end_node("inner_end", "o")
+            ],
+            "edges": [edge("pin", "inner_end", "o")],
+            "input_mapping": {"q": "pin.p"},
+            "output_mapping": {"r": "inner_end.o"}
+        }])
+    };
+
+    let mut graph = minimal_graph();
+    graph["subgraphs"] = subgraph_body(json!(""));
+    let errors = expect_code(graph, DslErrorCode::MissingField);
+    assert!(errors.first().location.is_empty());
+    assert!(errors.first().message.contains("subgraphs[0]"));
+
+    let mut graph = minimal_graph();
+    graph["subgraphs"] = subgraph_body(json!(7));
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert!(errors.first().location.is_empty());
+    assert!(errors.first().message.contains("subgraphs[0]"));
+
+    let mut graph = minimal_graph();
+    graph["subgraphs"] = json!([{
+        "nodes": [],
+        "edges": [],
+        "input_mapping": {},
+        "output_mapping": {}
+    }]);
+    let errors = expect_code(graph, DslErrorCode::MissingField);
+    assert!(errors.first().message.contains("subgraphs[0]"));
+}
+
+#[test]
+fn rev005_location_contract_for_node_and_edge_errors() {
+    // 节点未知字段 → node_id。
+    let mut start = start_node("start");
+    start["bogus"] = json!(true);
+    let errors = expect_code(
+        graph_with(json!([start]), json!([])),
+        DslErrorCode::ParseError,
+    );
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("start"));
+    assert!(errors.first().location.edge_index.is_none());
+
+    // 边未知字段 → edge_index。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("n1", json!([input_port("x", true)]))
+        ]),
+        json!([{
+            "from": "start",
+            "to_node": "n1",
+            "to_input_port": "x",
+            "bogus": 1
+        }]),
+    );
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.first().location.edge_index, Some(0));
+    assert!(errors.first().location.node_id.is_none());
+
+    // 序列化后 location 只含契约键。
+    let value = serde_json::to_value(errors.first()).expect("serialize");
+    let keys: std::collections::BTreeSet<&str> = value["location"]
+        .as_object()
+        .expect("location")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let allowed: std::collections::BTreeSet<&str> =
+        ["node_id", "edge_index", "port"].into_iter().collect();
+    assert!(keys.is_subset(&allowed));
+}
+
+#[test]
+fn rev005_missing_edge_field_is_reported_once() {
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("n1", json!([input_port("x", true)]))
+        ]),
+        json!([{"to_node": "n1", "to_input_port": "x"}]),
+    );
+    let errors = expect_error(graph);
+    assert_eq!(errors.error_count, 1, "{errors:?}");
+    assert_eq!(errors.first().code, DslErrorCode::MissingField);
+    assert_eq!(errors.first().location.edge_index, Some(0));
+    assert!(errors.first().message.contains("'from'"));
+}
+
+#[test]
+fn rev005_created_at_requires_valid_utc_rfc3339() {
+    let with_created_at = |value: Value| {
+        let mut graph = minimal_graph();
+        graph["metadata"] = json!({"name": "timestamp", "created_at": value});
+        graph
+    };
+    for invalid in [
+        "2026-99-99T99:99:99Z",
+        "2026-13-01T00:00:00Z",
+        "2026-00-10T00:00:00Z",
+        "2026-02-30T00:00:00Z",
+        "2027-02-29T00:00:00Z",
+        "2026-10-32T00:00:00Z",
+        "2026-10-29T24:00:00Z",
+        "2026-10-29T23:60:00Z",
+        "2026-10-29T23:59:61Z",
+        "2026-10-29T10:00:00+08:00",
+        "2026-10-29T10:00:00+00:00",
+        "2026-10-29T10:00:00",
+    ] {
+        let errors = expect_code(with_created_at(json!(invalid)), DslErrorCode::ParseError);
+        assert!(
+            errors.first().message.contains("created_at"),
+            "{invalid}: {errors}"
+        );
+        assert!(errors.first().location.is_empty());
+    }
+    for valid in [
+        "2026-10-29T10:00:00Z",
+        "2028-02-29T00:00:00Z",
+        "2026-10-29T10:00:00.123Z",
+    ] {
+        load(with_created_at(json!(valid))).unwrap_or_else(|errors| panic!("{valid}: {errors}"));
+    }
 }

@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "subgraph-id-type" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} }
+  ],
+  "edges": [],
+  "subgraphs": [
+    {
+      "id": 7,
+      "nodes": [
+        {
+          "id": "pin",
+          "type": "python_node",
+          "inputs": [{ "name": "p", "type": "string", "required": true }],
+          "config": { "module": "m", "function": "f" }
+        },
+        {
+          "id": "inner_end",
+          "type": "end",
+          "inputs": [{ "name": "o", "type": "any", "required": true }],
+          "config": {}
+        }
+      ],
+      "edges": [
+        { "from": "pin", "to_node": "inner_end", "to_input_port": "o" }
+      ],
+      "input_mapping": { "q": "pin.p" },
+      "output_mapping": { "r": "inner_end.o" }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "on-error-port" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "n1",
+      "type": "python_node",
+      "inputs": [
+        { "name": "x", "type": "string", "required": true, "on_error": true }
+      ],
+      "config": { "module": "m", "function": "f" }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "n1", "to_input_port": "x" }
+  ]
+}

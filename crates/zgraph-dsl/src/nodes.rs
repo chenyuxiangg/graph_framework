@@ -148,7 +148,6 @@ pub(crate) fn check_version_and_metadata(raw: &Value) -> Result<GraphMetadata, V
                 DslErrorCode::ParseError,
                 format!("unsupported DSL version '{version}': expected '1.0'"),
             )
-            .at_field("version")
             .expected(DSL_SCHEMA_VERSION)
             .actual(version),
         );
@@ -251,7 +250,10 @@ fn parse_node(value: &Value, index: usize, errors: &mut Vec<DslError>) -> Option
         .as_ref()
         .map_or(fallback_scope, |id| format!("node '{id}'"));
     check_node_keys(map, node_id.as_deref(), &scope, errors);
-    let node_type = parse_node_type(map, node_id.as_deref(), &scope, errors)?;
+    let Some(node_type) = parse_node_type(map, node_id.as_deref(), &scope, errors) else {
+        attach_node_location(errors, start, node_id.as_deref());
+        return None;
+    };
     let inputs = parse_inputs(map, node_id.as_deref(), &scope, errors);
     let trigger = parse_trigger(map, node_type, &scope, errors);
     check_end_constraints(
@@ -263,6 +265,7 @@ fn parse_node(value: &Value, index: usize, errors: &mut Vec<DslError>) -> Option
     );
     let outputs = parse_outputs(map, node_id.as_deref(), &scope, errors);
     let config = parse_node_config(map, node_type, &scope, errors);
+    attach_node_location(errors, start, node_id.as_deref());
     if errors.len() > start {
         return None;
     }
@@ -303,20 +306,27 @@ fn parse_node_id(
     }
 }
 
+/// 节点级键白名单：`on_error` 是唯一保留键（→ `DSL_UNSUPPORTED_FIELD`），
+/// 其余未知键 → `DSL_PARSE_ERROR`（02 §2.2.4，REV-005 #1）。
 fn check_node_keys(
     map: &Map<String, Value>,
     node_id: Option<&str>,
     scope: &str,
     errors: &mut Vec<DslError>,
 ) {
-    if map.contains_key("on_error") {
-        let mut error = msg::unsupported_field("on_error");
+    for key in map.keys() {
+        let mut error = if key == "on_error" {
+            msg::unsupported_field("on_error")
+        } else if NODE_KEYS.contains(&key.as_str()) {
+            continue;
+        } else {
+            msg::unknown_field(key, scope)
+        };
         if let Some(node_id) = node_id {
             error = error.at_node(node_id.to_string());
         }
         errors.push(error);
     }
-    check_keys(map, &NODE_KEYS, scope, errors);
 }
 
 fn parse_node_type(
@@ -458,7 +468,7 @@ fn parse_input_port(
         return None;
     };
     check_keys(map, &INPUT_PORT_KEYS, &fallback, errors);
-    let name = parse_port_name(map, &fallback, node_id, "inputs", names, errors);
+    let name = parse_port_name(map, &fallback, node_id, true, names, errors);
     let port_type = parse_port_type(map, &fallback, errors);
     let required = parse_required(map, &fallback, errors);
     let description = optional_str(map, "description", &fallback, errors).map(str::to_string);
@@ -496,7 +506,7 @@ fn parse_outputs(
             continue;
         };
         check_keys(raw, &OUTPUT_PORT_KEYS, &fallback, errors);
-        let name = parse_port_name(raw, &fallback, node_id, "outputs", &mut names, errors);
+        let name = parse_port_name(raw, &fallback, node_id, false, &mut names, errors);
         let port_type = parse_port_type(raw, &fallback, errors);
         let description = optional_str(raw, "description", &fallback, errors).map(str::to_string);
         if let (Some(name), Some(port_type)) = (name, port_type) {
@@ -518,7 +528,7 @@ fn parse_port_name(
     map: &Map<String, Value>,
     fallback: &str,
     node_id: Option<&str>,
-    field: &str,
+    record_port: bool,
     names: &mut HashSet<String>,
     errors: &mut Vec<DslError>,
 ) -> Option<String> {
@@ -529,20 +539,21 @@ fn parse_port_name(
                 "port name '{name}' must be a Python identifier (1-64 chars)"
             ))
             .expected("a Python identifier of 1-64 chars")
-            .actual(name)
-            .at_field(field),
+            .actual(name),
         );
         return None;
     }
     if !names.insert(name.to_string()) {
         let mut error = invalid_port(format!("duplicate port name '{name}' in node"))
             .expected("a unique port name within the node")
-            .actual(name)
-            .at_field(field);
+            .actual(name);
         if let Some(node_id) = node_id {
             error = error.at_node(node_id.to_string());
         }
-        errors.push(error.at_port(name.to_string()));
+        if record_port {
+            error = error.at_port(name.to_string());
+        }
+        errors.push(error);
         return None;
     }
     Some(name.to_string())
@@ -812,6 +823,20 @@ fn parse_string_map(
     }
 }
 
+/// 把节点作用域内收集的错误补上 `node_id`（02 §2.7.3：节点级错误至少一个定位）。
+///
+/// 已带 `node_id`/`edge_index` 的错误保持不变；未知节点 id 时保持文档级。
+fn attach_node_location(errors: &mut [DslError], start: usize, node_id: Option<&str>) {
+    let Some(node_id) = node_id else {
+        return;
+    };
+    for error in &mut errors[start..] {
+        if error.location.node_id.is_none() && error.location.edge_index.is_none() {
+            error.location.node_id = Some(node_id.to_string());
+        }
+    }
+}
+
 /// R5：节点 ID 唯一（命名空间内）。
 pub(crate) fn check_node_id_unique(nodes: &[GraphNode]) -> Vec<DslError> {
     let mut errors = Vec::new();
@@ -936,6 +961,33 @@ fn check_subgraph_references(
     }
 }
 
+/// R6：子图 `id` 必须是非空 `string`（REV-005 #3）。
+///
+/// 缺失/空 → `DSL_MISSING_FIELD`，非 string → `DSL_PARSE_ERROR`；错误为文档级
+/// （location = {}），message 携带 `subgraphs[i]` 路径（02 §2.7.3）。
+fn parse_subgraph_id(
+    map: &Map<String, Value>,
+    index: usize,
+    errors: &mut Vec<DslError>,
+) -> Option<String> {
+    let scope = format!("subgraphs[{index}]");
+    match map.get("id") {
+        None => {
+            errors.push(msg::missing_field("id", &scope));
+            None
+        }
+        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
+        Some(Value::String(_)) => {
+            errors.push(msg::missing_field("id", &scope));
+            None
+        }
+        Some(other) => {
+            errors.push(msg::wrong_type("id", "string", &scope, other));
+            None
+        }
+    }
+}
+
 fn parse_subgraph(
     value: &Value,
     index: usize,
@@ -949,16 +1001,12 @@ fn parse_subgraph(
         return None;
     };
     check_keys(map, &SUBGRAPH_KEYS, &fallback, errors);
-    for key in ["id", "nodes", "edges", "input_mapping", "output_mapping"] {
+    for key in ["nodes", "edges", "input_mapping", "output_mapping"] {
         if !map.contains_key(key) {
             errors.push(msg::missing_field(key, &fallback));
         }
     }
-    let subgraph_id = map
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string);
+    let subgraph_id = parse_subgraph_id(map, index, errors);
     let scope = subgraph_id
         .as_ref()
         .map_or(fallback, |id| format!("subgraph '{id}'"));

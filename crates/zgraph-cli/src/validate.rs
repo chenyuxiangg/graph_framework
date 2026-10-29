@@ -105,12 +105,12 @@ fn print_json(report: &ValidationReport) {
 
 fn print_errors(file: &str, report: &ValidationReport) {
     for error in &report.errors {
-        eprintln!(
-            "error[{}] {}: {}",
-            error.code,
-            file,
-            locator(&error.location)
-        );
+        let locator = locator(&error.location);
+        if locator.is_empty() {
+            eprintln!("error[{}] {file}", error.code);
+        } else {
+            eprintln!("error[{}] {}: {}", error.code, file, locator);
+        }
         eprintln!("  {}", error.message);
         if let Some(expected) = &error.expected {
             eprintln!("  expected: {}", format_value(expected));
@@ -131,23 +131,22 @@ fn print_errors(file: &str, report: &ValidationReport) {
 }
 
 /// 定位串（02 §2.7.4）：文档级/节点级/边级/端口级。
+///
+/// `location` 仅含 `node_id`/`edge_index`/`port`（02 §2.7.3）；文档级返回空串。
 fn locator(location: &Location) -> String {
     if let Some(edge_index) = location.edge_index {
-        return match (&location.field, &location.port) {
-            (Some(field), _) => format!("edges[{edge_index}].{field}"),
-            (None, Some(_)) => format!("edges[{edge_index}].to_input_port"),
-            (None, None) => format!("edges[{edge_index}]"),
+        return match &location.port {
+            Some(_) => format!("edges[{edge_index}].to_input_port"),
+            None => format!("edges[{edge_index}]"),
         };
     }
     if let Some(node_id) = &location.node_id {
-        return match (&location.field, &location.port) {
-            (Some(field), Some(port)) => format!("node '{node_id}'.{field}['{port}']"),
-            (None, Some(port)) => format!("node '{node_id}'.inputs['{port}']"),
-            (Some(field), None) => format!("node '{node_id}'.{field}"),
-            (None, None) => format!("node '{node_id}'"),
+        return match &location.port {
+            Some(port) => format!("node '{node_id}'.inputs['{port}']"),
+            None => format!("node '{node_id}'"),
         };
     }
-    location.field.clone().unwrap_or_default()
+    String::new()
 }
 
 fn format_value(value: &Value) -> String {
@@ -199,13 +198,6 @@ mod tests {
         assert_eq!(locator(&Location::default()), "");
         assert_eq!(
             locator(&Location {
-                field: Some("edges".to_string()),
-                ..Location::default()
-            }),
-            "edges"
-        );
-        assert_eq!(
-            locator(&Location {
                 node_id: Some("n1".to_string()),
                 ..Location::default()
             }),
@@ -222,10 +214,9 @@ mod tests {
         assert_eq!(
             locator(&Location {
                 edge_index: Some(1),
-                field: Some("from_output_port".to_string()),
                 ..Location::default()
             }),
-            "edges[1].from_output_port"
+            "edges[1]"
         );
         assert_eq!(
             locator(&Location {

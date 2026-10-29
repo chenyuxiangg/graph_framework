@@ -1,0 +1,10 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "on-error-top-level" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} }
+  ],
+  "edges": [],
+  "on_error": { "route": "fallback" }
+}

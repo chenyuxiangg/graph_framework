@@ -111,7 +111,7 @@ impl Serialize for DslErrorCode {
     }
 }
 
-/// 错误定位（02 §2.7.3 + 任务扩展的 `field`）。
+/// 错误定位（02 §2.7.3：仅 `node_id` / `edge_index` / `port`）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Location {
     /// 出错节点 ID（子图级错误填子图 ID）。
@@ -123,18 +123,12 @@ pub struct Location {
     /// 端口名。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
-    /// 出错的 JSON 字段名（字段级错误）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub field: Option<String>,
 }
 
 impl Location {
     /// 是否没有定位信息（文档级错误）。
     pub fn is_empty(&self) -> bool {
-        self.node_id.is_none()
-            && self.edge_index.is_none()
-            && self.port.is_none()
-            && self.field.is_none()
+        self.node_id.is_none() && self.edge_index.is_none() && self.port.is_none()
     }
 }
 
@@ -182,12 +176,6 @@ impl DslError {
     /// 设置 `port`。
     pub fn at_port(mut self, port: impl Into<String>) -> Self {
         self.location.port = Some(port.into());
-        self
-    }
-
-    /// 设置 `field`。
-    pub fn at_field(mut self, field: impl Into<String>) -> Self {
-        self.location.field = Some(field.into());
         self
     }
 
@@ -292,7 +280,6 @@ pub(crate) mod msg {
             DslErrorCode::MissingField,
             format!("missing required field '{field}' in {scope}"),
         )
-        .at_field(field)
         .expected(serde_json::json!(field))
         .actual(serde_json::json!("<absent>"))
     }
@@ -302,7 +289,6 @@ pub(crate) mod msg {
             DslErrorCode::ParseError,
             format!("unknown field '{key}' in {scope}"),
         )
-        .at_field(key)
         .expected(serde_json::json!("a field allowed by schema 1.0"))
         .actual(serde_json::json!(key))
     }
@@ -312,7 +298,6 @@ pub(crate) mod msg {
             DslErrorCode::UnsupportedField,
             format!("reserved field '{field}' is not supported by schema 1.0 (planned for v2)"),
         )
-        .at_field(field)
         .expected(json!("<absent>"))
         .actual(json!(field))
     }
@@ -325,7 +310,6 @@ pub(crate) mod msg {
                 type_name(actual)
             ),
         )
-        .at_field(field)
         .expected(json!(expected))
         .actual(actual.clone())
     }
@@ -343,7 +327,6 @@ pub(crate) mod msg {
                 actual
             ),
         )
-        .at_field(field)
         .expected(json!(constraint))
         .actual(actual.clone())
     }
@@ -353,7 +336,6 @@ pub(crate) mod msg {
             DslErrorCode::ParseError,
             format!("field '{field}' in {scope} must not be empty"),
         )
-        .at_field(field)
         .expected(json!("at least 1 item"))
         .actual(json!([]))
     }

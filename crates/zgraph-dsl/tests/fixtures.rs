@@ -1,12 +1,15 @@
-//! Fixtures 全覆盖测试：每个文件都被引用，坏图命中期望错误码。
+//! Fixtures 全覆盖测试：每个文件都被引用，坏图命中期望错误码**与定位**。
 //!
-//! 对应 02 §2.4 / 07 AC-04（M1 口径）：17 个 DSL 码各一个反例 + R3 版本反例 +
-//! 4 个合法图。fixture 目录：`tests/fixtures/graphs/`；资产：`tests/fixtures/assets/`。
+//! 对应 02 §2.4 / §2.7.1 / §2.7.3 与 07 AC-04（M1 口径）：17 个 DSL 码反例、
+//! R3 版本/时间戳反例、REV-005 回归反例。fixture 目录为 `tests/fixtures/graphs/`，
+//! 资产目录为 `tests/fixtures/assets/`。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use zgraph_dsl::{load_graph, load_graph_with_options, DslErrorCode, LoadOptions, LoadedGraph};
+use zgraph_dsl::{
+    load_graph, load_graph_with_options, DslErrorCode, DslErrors, LoadOptions, LoadedGraph,
+};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -23,7 +26,7 @@ fn assets_dir() -> PathBuf {
     repo_root().join("tests/fixtures/assets")
 }
 
-fn load(name: &str, with_assets: bool) -> Result<LoadedGraph, zgraph_dsl::DslErrors> {
+fn load(name: &str, with_assets: bool) -> Result<LoadedGraph, DslErrors> {
     let bytes = std::fs::read(fixtures_dir().join(name)).expect("fixture readable");
     if with_assets {
         load_graph_with_options(&bytes, &LoadOptions::new().with_assets_dir(assets_dir()))
@@ -32,32 +35,184 @@ fn load(name: &str, with_assets: bool) -> Result<LoadedGraph, zgraph_dsl::DslErr
     }
 }
 
-/// 坏图 fixture → 期望错误码（17 码 + `bad_version` 的 R3 反例）。
-const BAD_CASES: [(&str, DslErrorCode); 18] = [
-    ("bad_parse_error.json", DslErrorCode::ParseError),
-    ("bad_missing_version.json", DslErrorCode::MissingField),
-    ("bad_version.json", DslErrorCode::ParseError),
-    ("bad_dup_node_id.json", DslErrorCode::DuplicateNodeId),
-    ("bad_entry.json", DslErrorCode::InvalidEntry),
-    ("bad_edge_ref.json", DslErrorCode::InvalidEdgeRef),
-    ("bad_port.json", DslErrorCode::InvalidPort),
-    ("bad_dup_edge.json", DslErrorCode::DuplicateEdge),
+/// 期望的 `location`（02 §2.7.3：仅 `node_id`/`edge_index`/`port`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Loc {
+    node: Option<&'static str>,
+    edge: Option<usize>,
+    port: Option<&'static str>,
+}
+
+const DOC_LEVEL: Loc = Loc {
+    node: None,
+    edge: None,
+    port: None,
+};
+
+const fn node(id: &'static str) -> Loc {
+    Loc {
+        node: Some(id),
+        edge: None,
+        port: None,
+    }
+}
+
+const fn edge(index: usize) -> Loc {
+    Loc {
+        node: None,
+        edge: Some(index),
+        port: None,
+    }
+}
+
+/// 坏图 fixture → 期望错误码 + 期望定位（REV-005 后为强断言）。
+const BAD_CASES: [(&str, DslErrorCode, Loc); 28] = [
+    // R1/R2/R3 文档级
+    ("bad_parse_error.json", DslErrorCode::ParseError, DOC_LEVEL),
+    (
+        "bad_missing_version.json",
+        DslErrorCode::MissingField,
+        DOC_LEVEL,
+    ),
+    ("bad_version.json", DslErrorCode::ParseError, DOC_LEVEL),
+    (
+        "bad_created_at_invalid.json",
+        DslErrorCode::ParseError,
+        DOC_LEVEL,
+    ),
+    // R4–R13
+    (
+        "bad_dup_node_id.json",
+        DslErrorCode::DuplicateNodeId,
+        node("start"),
+    ),
+    ("bad_entry.json", DslErrorCode::InvalidEntry, node("ghost")),
+    (
+        "bad_edge_ref.json",
+        DslErrorCode::InvalidEdgeRef,
+        Loc {
+            node: Some("ghost"),
+            edge: Some(0),
+            port: None,
+        },
+    ),
+    (
+        "bad_port.json",
+        DslErrorCode::InvalidPort,
+        Loc {
+            node: Some("n1"),
+            edge: Some(0),
+            port: Some("zzz"),
+        },
+    ),
+    (
+        "bad_dup_edge.json",
+        DslErrorCode::DuplicateEdge,
+        Loc {
+            node: Some("start"),
+            edge: Some(1),
+            port: None,
+        },
+    ),
     (
         "bad_dup_port_source.json",
         DslErrorCode::DuplicatePortSource,
+        Loc {
+            node: Some("n1"),
+            edge: Some(1),
+            port: Some("x"),
+        },
     ),
-    ("bad_unconnected_input.json", DslErrorCode::UnconnectedInput),
-    ("bad_subgraph_bad.json", DslErrorCode::SubgraphInvalid),
-    ("bad_cycle.json", DslErrorCode::CycleDetected),
-    ("bad_symbol.json", DslErrorCode::SymbolNotFound),
-    ("bad_signature.json", DslErrorCode::SignatureMismatch),
-    ("bad_symbol_conflict.json", DslErrorCode::SymbolConflict),
+    (
+        "bad_unconnected_input.json",
+        DslErrorCode::UnconnectedInput,
+        Loc {
+            node: Some("n1"),
+            port: Some("y"),
+            edge: None,
+        },
+    ),
+    (
+        "bad_subgraph_bad.json",
+        DslErrorCode::SubgraphInvalid,
+        node("inner"),
+    ),
+    (
+        "bad_cycle.json",
+        DslErrorCode::CycleDetected,
+        Loc {
+            node: Some("a"),
+            edge: Some(1),
+            port: None,
+        },
+    ),
+    (
+        "bad_missing_edge_field.json",
+        DslErrorCode::MissingField,
+        edge(0),
+    ),
+    // R14
+    ("bad_symbol.json", DslErrorCode::SymbolNotFound, edge(0)),
+    (
+        "bad_signature.json",
+        DslErrorCode::SignatureMismatch,
+        edge(0),
+    ),
+    (
+        "bad_symbol_conflict.json",
+        DslErrorCode::SymbolConflict,
+        edge(1),
+    ),
     (
         "bad_unknown_node_type.json",
         DslErrorCode::UnsupportedNodeType,
+        node("start"),
     ),
-    ("bad_reserved_field.json", DslErrorCode::UnsupportedField),
-    ("bad_agent_not_found.json", DslErrorCode::AgentNotFound),
+    (
+        "bad_reserved_field.json",
+        DslErrorCode::UnsupportedField,
+        node("start"),
+    ),
+    (
+        "bad_agent_not_found.json",
+        DslErrorCode::AgentNotFound,
+        node("agent_node"),
+    ),
+    // REV-005 回归：on_error 只在节点级是保留字段
+    (
+        "bad_on_error_top_level.json",
+        DslErrorCode::ParseError,
+        DOC_LEVEL,
+    ),
+    (
+        "bad_on_error_config.json",
+        DslErrorCode::ParseError,
+        node("a"),
+    ),
+    ("bad_on_error_edge.json", DslErrorCode::ParseError, edge(0)),
+    (
+        "bad_on_error_port.json",
+        DslErrorCode::ParseError,
+        node("n1"),
+    ),
+    ("bad_on_error_gate.json", DslErrorCode::ParseError, edge(0)),
+    // REV-005 回归：from_output_port 出现即报错，不看取值
+    (
+        "bad_from_output_port_nonstring.json",
+        DslErrorCode::UnsupportedField,
+        edge(0),
+    ),
+    // REV-005 回归：子图 id 必须是非空 string
+    (
+        "bad_subgraph_id_empty.json",
+        DslErrorCode::MissingField,
+        DOC_LEVEL,
+    ),
+    (
+        "bad_subgraph_id_type.json",
+        DslErrorCode::ParseError,
+        DOC_LEVEL,
+    ),
 ];
 
 /// 合法 fixture 名单（全部必须通过 R1–R14）。
@@ -72,13 +227,33 @@ fn fixture_needs_assets(name: &str) -> bool {
     matches!(name, "customer_ticket.json" | "bad_agent_not_found.json")
 }
 
+fn assert_location(name: &str, expected: Loc, first: &zgraph_dsl::DslError) {
+    assert_eq!(
+        first.location.node_id.as_deref(),
+        expected.node,
+        "fixture {name}: node_id mismatch ({first:?})"
+    );
+    assert_eq!(
+        first.location.edge_index, expected.edge,
+        "fixture {name}: edge_index mismatch ({first:?})"
+    );
+    assert_eq!(
+        first.location.port.as_deref(),
+        expected.port,
+        "fixture {name}: port mismatch ({first:?})"
+    );
+}
+
 #[test]
-fn every_fixture_is_referenced_and_matches_expected_code() {
-    let mut referenced: BTreeSet<String> = BTreeSet::new();
-    for (name, expected) in BAD_CASES {
+fn every_fixture_is_referenced_and_matches_expected_code_and_location() {
+    let mut referenced = BTreeSet::new();
+    for (name, expected, location) in BAD_CASES {
         referenced.insert(name.to_string());
         let errors = load(name, fixture_needs_assets(name)).expect_err(name);
         assert_eq!(errors.first().code, expected, "fixture {name}: {errors}");
+        // 每个坏图恰好一个错误（除显式聚合用例），错误序列稳定。
+        assert_eq!(errors.error_count, 1, "fixture {name}: {errors}");
+        assert_location(name, location, errors.first());
     }
     for name in VALID_CASES {
         referenced.insert(name.to_string());
@@ -97,27 +272,58 @@ fn every_fixture_is_referenced_and_matches_expected_code() {
 }
 
 #[test]
-fn bad_fixtures_carry_structured_location() {
-    for (name, _) in BAD_CASES {
+fn bad_fixtures_carry_expected_or_actual_and_document_level_are_empty() {
+    for (name, code, location) in BAD_CASES {
         let errors = load(name, fixture_needs_assets(name)).expect_err(name);
         let first = errors.first();
-        // R1（JSON 解析）与文档级错误允许 location 为空；其余必须有定位。
-        let document_level =
-            matches!(first.code, DslErrorCode::ParseError) && name == "bad_parse_error.json";
-        if !document_level {
+        assert_eq!(first.code, code, "fixture {name}: {errors}");
+        if location == DOC_LEVEL {
+            // R1/R2/R3 与子图头定义错误：02 §2.7.3 文档级 location = {}。
             assert!(
-                !first.location.is_empty(),
-                "fixture {name} must carry node/edge/port/field location: {first:?}"
+                first.location.node_id.is_none()
+                    && first.location.edge_index.is_none()
+                    && first.location.port.is_none(),
+                "fixture {name} must be document-level: {first:?}"
             );
         }
-        if document_level {
-            continue;
+        if code != DslErrorCode::ParseError || location != DOC_LEVEL {
+            assert!(
+                first.expected.is_some() || first.actual.is_some(),
+                "fixture {name} must carry expected/actual: {first:?}"
+            );
         }
-        // 错误对象必须带 expected 或 actual 之一（02 §2.7.1）。
+        // 子图 id 反例必须把路径写进 message（location 无 field 键）。
+        if name.starts_with("bad_subgraph_id") {
+            assert!(
+                first.message.contains("subgraphs[0]"),
+                "fixture {name}: {first:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn location_serializes_only_contract_keys() {
+    let allowed: BTreeSet<&str> = ["node_id", "edge_index", "port"].into_iter().collect();
+    for (name, _, location) in BAD_CASES {
+        let errors = load(name, fixture_needs_assets(name)).expect_err(name);
+        let value = serde_json::to_value(errors.first()).expect("serialize error");
+        let keys: BTreeSet<&str> = value["location"]
+            .as_object()
+            .expect("location object")
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert!(
-            first.expected.is_some() || first.actual.is_some(),
-            "fixture {name} must carry expected/actual: {first:?}"
+            keys.is_subset(&allowed),
+            "fixture {name}: location keys {keys:?} (expected) {location:?}"
         );
+        if location != DOC_LEVEL {
+            assert!(
+                !keys.is_empty(),
+                "fixture {name}: location must not be empty"
+            );
+        }
     }
 }
 

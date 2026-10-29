@@ -32,23 +32,19 @@ pub(crate) fn parse_edges(value: &Value) -> Result<Vec<GraphEdge>, Vec<DslError>
         let start = errors.len();
         let scope = format!("edges[{index}]");
         let Some(map) = item.as_object() else {
-            errors.push(msg::wrong_type(&scope, "object", "edges", item));
+            errors.push(msg::wrong_type(&scope, "object", "edges", item).at_edge(index));
             continue;
         };
         check_keys(map, &EDGE_KEYS, &scope, &mut errors);
-        for key in ["from", "to_node", "to_input_port"] {
-            if !map.contains_key(key) {
-                errors.push(msg::missing_field(key, &scope));
-            }
-        }
         let from = required_nonempty_str(map, "from", &scope, &mut errors).map(str::to_string);
         let to_node =
             required_nonempty_str(map, "to_node", &scope, &mut errors).map(str::to_string);
         let to_input_port =
             required_nonempty_str(map, "to_input_port", &scope, &mut errors).map(str::to_string);
         let gate = parse_gate(map.get("gate"), &scope, &mut errors);
-        let from_output_port =
-            parse_from_output_port(map.get("from_output_port"), &scope, &mut errors);
+        // v1 保留字段：出现即报错，不看取值（02 §2.2.4 / REV-005 #2）。
+        let from_output_port = map.get("from_output_port").cloned();
+        attach_edge_location(&mut errors, start, index);
         if errors.len() == start {
             edges.push(GraphEdge {
                 from: from.unwrap_or_default(),
@@ -103,17 +99,11 @@ fn parse_gate(
     Some(GateDefinition { function, params })
 }
 
-fn parse_from_output_port(
-    value: Option<&Value>,
-    scope: &str,
-    errors: &mut Vec<DslError>,
-) -> Option<String> {
-    let value = value?;
-    match value.as_str() {
-        Some(port) => Some(port.to_string()),
-        None => {
-            errors.push(msg::wrong_type("from_output_port", "string", scope, value));
-            None
+/// 把边作用域内收集的错误补上 `edge_index`（02 §2.7.3：边级错误至少一个定位）。
+fn attach_edge_location(errors: &mut [DslError], start: usize, edge_index: usize) {
+    for error in &mut errors[start..] {
+        if error.location.edge_index.is_none() && error.location.node_id.is_none() {
+            error.location.edge_index = Some(edge_index);
         }
     }
 }
@@ -149,13 +139,21 @@ pub(crate) fn check_edge_endpoints(
     errors
 }
 
+fn endpoint_node(edge: &GraphEdge, reason: &str) -> String {
+    if reason == "unknown_from" {
+        edge.from.clone()
+    } else {
+        edge.to_node.clone()
+    }
+}
+
 fn invalid_endpoint(edge_index: usize, reason: &str, edge: &GraphEdge) -> DslError {
     DslError::new(
         DslErrorCode::InvalidEdgeRef,
         format!("edge[{edge_index}] invalid endpoint: {reason}"),
     )
     .at_edge(edge_index)
-    .at_node(edge.to_node.clone())
+    .at_node(endpoint_node(edge, reason))
     .expected("existing node ids with a legal edge direction")
     .actual(serde_json::json!({"from": edge.from, "to_node": edge.to_node}))
 }
@@ -189,16 +187,15 @@ pub(crate) fn check_edge_ports(edges: &[GraphEdge], nodes: &[GraphNode]) -> Vec<
                 );
             }
         }
-        if edge.from_output_port.is_some() {
+        if let Some(actual) = &edge.from_output_port {
             errors.push(
                 DslError::new(
                     DslErrorCode::UnsupportedField,
                     "reserved field 'from_output_port' is not supported by schema 1.0 (planned for v2)",
                 )
                 .at_edge(index)
-                .at_field("from_output_port")
                 .expected("<absent>")
-                .actual("from_output_port"),
+                .actual(actual.clone()),
             );
         }
     }

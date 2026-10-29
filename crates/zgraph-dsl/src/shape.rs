@@ -8,7 +8,11 @@ use serde_json::{Map, Value};
 
 use crate::error::{msg, DslError, DslErrorCode};
 
-/// 键白名单检查：未列出的键 → `DSL_PARSE_ERROR`（`on_error` 例外由调用方处理）。
+/// 键白名单检查：未列出的键 → `DSL_PARSE_ERROR`。
+///
+/// 02 §2.2.4：只有**节点级** `on_error` 是保留字段（由 `nodes::check_node_keys`
+/// 显式报 `DSL_UNSUPPORTED_FIELD`）；其它作用域（顶层/config/端口/边/gate/子图）
+/// 出现 `on_error` 一律按未知字段报 `DSL_PARSE_ERROR`。
 pub(crate) fn check_keys(
     map: &Map<String, Value>,
     allowed: &[&str],
@@ -16,9 +20,6 @@ pub(crate) fn check_keys(
     errors: &mut Vec<DslError>,
 ) {
     for key in map.keys() {
-        if key == "on_error" {
-            continue;
-        }
         if !allowed.contains(&key.as_str()) {
             errors.push(msg::unknown_field(key, scope));
         }
@@ -123,40 +124,84 @@ pub(crate) fn is_identifier(text: &str) -> bool {
     }
 }
 
-/// UTC RFC3339 时间戳（`YYYY-MM-DDTHH:MM:SS[.fff]Z` 或 `+00:00` 后缀）。
+/// UTC RFC3339 时间戳（02 §2.2.1：`YYYY-MM-DDTHH:MM:SS[.fff]Z`，仅 `Z` 后缀）。
+///
+/// 校验真实日历范围（月 1–12、日按时长与闰年、时 0–23、分 0–59、秒 0–60 以
+/// 允许 RFC3339 闰秒），REV-005 #6。
 pub(crate) fn is_rfc3339_utc(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
-    }
-    if bytes[10] != b'T' || bytes[13] != b':' || bytes[16] != b':' {
-        return false;
-    }
-    let digits_ok =
-        |mut range: std::ops::Range<usize>| range.all(|index| bytes[index].is_ascii_digit());
-    if !digits_ok(0..4)
-        || !digits_ok(5..7)
-        || !digits_ok(8..10)
-        || !digits_ok(11..13)
-        || !digits_ok(14..16)
-        || !digits_ok(17..19)
-    {
-        return false;
-    }
-    let rest = &text[19..];
-    if rest == "Z" || rest == "+00:00" {
-        return true;
-    }
-    let Some(fraction) = rest.strip_prefix('.') else {
+    let Some(rest) = text.strip_suffix('Z') else {
         return false;
     };
-    let Some(zone) = fraction
-        .strip_suffix('Z')
-        .or_else(|| fraction.strip_suffix("+00:00"))
+    if rest.len() < 19 || !rest.is_char_boundary(19) {
+        return false;
+    }
+    let (date_time, fraction) = rest.split_at(19);
+    if !fraction.is_empty() {
+        let Some(digits) = fraction.strip_prefix('.') else {
+            return false;
+        };
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+    let bytes = date_time.as_bytes();
+    let digits_ok =
+        |range: std::ops::Range<usize>| range.clone().all(|i| bytes[i].is_ascii_digit());
+    if !digits_ok(0..4) || !digits_ok(5..7) || !digits_ok(8..10) {
+        return false;
+    }
+    if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
+        return false;
+    }
+    if bytes[13] != b':' || bytes[16] != b':' {
+        return false;
+    }
+    if !digits_ok(11..13) || !digits_ok(14..16) || !digits_ok(17..19) {
+        return false;
+    }
+    let year = parse_number(&bytes[0..4]);
+    let month = parse_number(&bytes[5..7]);
+    let day = parse_number(&bytes[8..10]);
+    let hour = parse_number(&bytes[11..13]);
+    let minute = parse_number(&bytes[14..16]);
+    let second = parse_number(&bytes[17..19]);
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) =
+        (year, month, day, hour, minute, second)
     else {
         return false;
     };
-    !zone.is_empty() && zone.chars().all(|ch| ch.is_ascii_digit())
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return false;
+    }
+    if day > days_in_month(year, month) {
+        return false;
+    }
+    hour < 24 && minute < 60 && second <= 60
+}
+
+fn parse_number(bytes: &[u8]) -> Option<u32> {
+    let mut value = 0_u32;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + u32::from(*byte - b'0');
+    }
+    Some(value)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// 构造 `DSL_PARSE_ERROR` 便捷方法（字段取值非法）。
