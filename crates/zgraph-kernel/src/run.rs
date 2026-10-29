@@ -69,6 +69,11 @@ pub struct TestHooks {
 }
 
 /// run 选项（03 §3.2）。
+///
+/// **构造建议**：用 `RunOptions::default()` 再逐字段赋值（或先构造再调整）；
+/// 不要写"穷举 5 个字段"的 struct literal —— `feature = "test-hooks"` 构建下本结构
+/// 多一个 [`TestHooks`] 字段（spec 03 §3.2），而 `cargo test --workspace` 会因
+/// dev-dependency 的特性合并把该 feature 打开。
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     /// 静默判定宽限（毫秒）：超过后仍有 Pending → `RUN_DEADLOCK`。
@@ -81,9 +86,12 @@ pub struct RunOptions {
     pub seed: u64,
     /// 记录模式。
     pub record_mode: RecordMode,
-    /// 仅 `feature = "test-hooks"` 存在的测试钩子（私有；用 `with_test_hooks` 设置）。
+    /// 仅 `feature = "test-hooks"` 存在的测试钩子（spec 03 §3.2）。
+    ///
+    /// 通常用 [`RunOptions::with_test_hooks`] 设置；字段公开是为了允许
+    /// 需要时直接按 spec 结构构造。
     #[cfg(feature = "test-hooks")]
-    test_hooks: TestHooks,
+    pub test_hooks: TestHooks,
 }
 
 impl Default for RunOptions {
