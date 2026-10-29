@@ -131,3 +131,58 @@ test result: FAILED. 13 passed; 1 failed; ...
 ## 6. 条件关闭记录
 
 不适用：本记录结论为 **不通过**，阻塞项关闭后需复审并追加本段（而非按「有条件通过」条件表处理）。
+
+## 7. 复审（2026-10-30，reviewer-a，HEAD `44131f3`）
+
+> 作者 `worker-dev` 按 §3 修复后提交 `4e48c3f`（生产代码 #2/#3/#7–#10）、`e9d4b96`（测试 #1/#4–#6/#11）、`44131f3`（schema #4）。本节为独立复审：**逐条读实际代码/跑真实测试，不采信修复自述**；保留原「不通过」历史不删除。基础信息：分支 `feat/worker-m3-supervisor`，base=merge-base=`a6f4f5c`（**未 rebase**；`origin/main` 已前进到 `33d55e8`，合并时由 merge.sh 自动 rebase），worktree clean，3 个新 commit 均 `chenyuxiangg <1007423165@qq.com>` 且正文含 `Review: REV-012` / `Agent: worker-dev`；新 commit 未触碰 `doc/progress.md`/`doc/issues.md`/`doc/reviews/**`（本记录除外）。
+
+**复审结论：通过**
+
+阻塞项 #1 已消除且经高重复稳定性验证（定向 20/20、`--test-threads=1` 10/10、`cargo test --workspace` 5/5 全绿）；重要项 #2/#3 修复实现正确、测试为真实断言；#4–#12 逐项核对通过（#7/#10/#11 的**部分自述测试未实际添加**，见 §7.3 #15，建议级、不阻塞）。跨模块第二评审仍待 reviewer-b 追加（§5.1），本节不对跨模块部分签字。
+
+### 7.1 逐项关闭核对（#1–#12）
+
+| # | 原级别 | 修复落点（当前文件:行） | 独立核对结果 | 状态 |
+|---|---|---|---|---|
+| 1 | 阻塞 | `tests/executor_m3.rs:235-260`；`tests/fixtures/py/wfaults.py` 新增 `ok_with_marker`/`crash_after_marker` | **竞态确已消除**：b 写 marker 后返回；a 等 marker 出现再 `sleep(0.5)` 后抛 `ValueError`。b 的 `result→exit→Completed` 链路（正常 <10ms）必然先于 a 延迟 0.5s 的失败进入事件队列；内核 `fail_run` 只收尾非终态实例，故 b 保持 Completed。测试断言 a=Crashed、b=Completed、marker 存在，语义与「冷峻失败 + 进程隔离」自洽。稳定性：定向 20/20、单线程 10/10、workspace 5/5（此前约 40% 失败率）。唯一残余风险是极端 CPU 饥饿下 0.5s 余量（题设已远优于原设计），可接受 | fixed |
+| 2 | 重要 | `src/supervisor.rs:679-716`（真实 ExitStatus 单测）、`:717-723`（常量断言独立） | 伪测试已删除；新测用 `ExitStatusExt::from_raw` 真断言 exit 3→`Protocol(NODE_WORKER_PROTOCOL)`、exit 2/0→`Exit{Some(code)}`、信号（raw=9）→`Exit{code:None}`；`--lib` 实跑 21 passed 含该用例。exit-3 分支不再是零覆盖 | fixed |
+| 3 | 重要 | `src/supervisor.rs:530-571`（`fill_buf` 有界读取）；`tests/supervisor_m3.rs:229-258` + `fixtures/workers/oversized_frame_worker.py` | 逐行核对边界：`max_buffered = MAX_FRAME_BYTES + 1`（body 8 MiB + 换行），`buffer.len()+take > max_buffered` 才报错 → **恰好 8 MiB 的合法帧不误伤**，8 MiB+1 body 及以上拒绝；分块 `fill_buf→extend→consume`，含「chunk 内含多行时只消费首行、余量留在 BufReader」与「EOF 半行→协议错误」「空 EOF→None」三种分支，行为与旧解码路径一致；`read_frame_line` 只在 cancel/帧超时（均为终结路径）被 drop，不存在丢帧重试风险。实测超 8 MiB 无换行 fixture → `NODE_WORKER_PROTOCOL` + 杀组 + PID 消失；正常帧回归（`echo_roundtrip` 8 passed、emit 上限/洪泛用例、全量 291 passed）未见误伤，性能无感（普通帧 1 次 fill_buf） | fixed |
+| 4 | 建议 | `schemas/worker-protocol-v1.md:61-63`（§4 新增「有界帧读取」）、`:74`/`:86`（§6 检查单措辞） | 检查单不再把「超 8 MiB」只归解码层；hello v 不匹配/缺字段已补 supervisor 集成用例名；口径与实现一致 | fixed |
+| 5 | 建议 | `tests/supervisor_m3.rs:30-35`（孙进程超时 800ms→3s）；`tests/executor_m3.rs:167`（内核超时 500ms→1.5s） | 与「pid 落盘」解耦，余量充足；两用例均无精确 elapsed 断言，放宽不影响语义；实跑通过 | fixed |
+| 6 | 建议 | `tests/executor_m3.rs:299`（并发 sleep 0.5→0.8） | 重叠/串行判定余量增大；3 条并发用例在 5 次 workspace 全量中稳定通过 | fixed |
+| 7 | 建议 | `src/executor.rs:288-297`（`CODE_TIMEOUT` 显式→`NodeWorker{Protocol}`） | 代码正确（不再落入 BusinessError 兜底），符合 04 §4.1.4；**但 §7.3 #15：自述「补单测」未实际落地**，当前无测试直接覆盖该分支 | 部分（代码 fixed，测试缺） |
+| 8 | 建议 | `src/supervisor.rs:68`（`STDERR_DRAIN_TIMEOUT`）、`:498` 使用 | 魔术数已提为具名常量并注释 | fixed |
+| 9 | 建议 | `src/supervisor.rs:242`（`drive` 改 `pub(crate)`） | 公开面收敛；仓内仅 `run_supervised` 调用（grep 无外部 `.drive(`），无破坏 | fixed |
+| 10 | 建议 | `src/executor.rs:214-217`（`EMIT_TYPES` 白名单） | 未知 emit type 在映射前被白名单拒绝，不再进入 match 兜底；既有 `unknown_emit_types_are_dropped_not_fatal` 仍绿；**但 §7.3 #15：自述「补 python_handler 非 python_node 单测」未落地**（该防御分支仍无测试） | 部分（代码 fixed，测试缺） |
+| 11 | 建议 | `tests/executor_m3.rs:128-150`（attempt/params）、`:152-166` + `common::linear_graph_with_optional_port` + `wfaults.echo_inputs`（未接线端口=null） | **本次复审认为该覆盖有效**：`attempt==0`、`params=={}`、`inputs.spare is null`、`inputs.x == {"x":{"v":1}}` 均为真实 Python 回传断言；全量运行稳定通过。自述另称「NODE_TIMEOUT 自报 / NODE_RETURN_NOT_DICT 映射」测试**未落地**（见 #15），`NODE_RETURN_NOT_DICT` 仍只由 `_ =>` 兜底隐式覆盖 | 部分（2/4 落地，均有效） |
+| 12 | 建议 | `tests/common/mod.rs:169-199`（`wait_for_file`/`wait_for_node_running` 收敛）；`tests/executor_m3.rs` 改用 `common::*` | 重复 helper 已删除，职责收敛；`common` 的 `#![allow(dead_code)]` 仍在（各测试二进制按需使用，合理） | fixed |
+
+补充：原 #13（ISSUE-025 状态 + schema §7 已知限制未入台账）、#14（`WorkerRun.streaming` 为 pub struct 增字段）本次仍**未变**——#13 属 Lead 合并时台账动作（本分支按任务约束不得改 `doc/issues.md`），#14 为后置提示，二者均非代码阻塞。
+
+### 7.2 亲跑稳定性与命令结果（worktree 自带 target，未设 `CARGO_TARGET_DIR`，`CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home`）
+
+| 命令 | 结果 |
+|---|---|
+| 定向 flaky 用例 ×20：`cargo test -q -p zgraph-worker --test executor_m3 -- crashed_worker_only_affects_its_own_instance` | **20 passed / 0 failed** |
+| 同上 `-- --test-threads=1` ×10 | **10 passed / 0 failed** |
+| `cargo test --workspace` ×5 | **5/5 PASS，每次 291 passed / 0 failed**（每次全量 45 个测试二进制） |
+| `cargo test -p zgraph-worker --lib --test supervisor_m3 --test executor_m3` | 21 + 11 + 15 passed / 0 failed；新增用例逐个确认在列（`oversized_frame_without_newline_is_protocol_error_and_killed`、`hello_version_mismatch…`、`hello_missing_sdk_version…`、`error_frame_with_exit_zero_is_protocol_error`、`dispatch_inputs_include_every_declared_port_with_null_for_missing`、`crashed_worker_only_affects_its_own_instance`、`classify_exit_maps_exit_codes_and_signals`） |
+| `cargo fmt --all -- --check` | exit 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（无 warning） |
+| `bash scripts/dev/check.sh` | `CHECK PASSED`（14 项 OK） |
+| 范围/洁净度 | `git status --short` 空；base=`a6f4f5c`；`origin/main`（`33d55e8`）**不是** HEAD 祖先 → 未 rebase（符合要求）；新 commit 无 `doc/` 改动（本记录除外） |
+
+稳定性对照：原阻塞项在修复前定向 24 跑 9 失败、全量 5 跑 3 失败；修复后上述 35 次定向/单线程运行 + 5 次全量 **零失败**。
+
+### 7.3 复审新增发现
+
+| # | 级别 | 位置 | 问题 | 建议 | 状态 |
+|---|---|---|---|---|---|
+| 15 | 建议 | commit `4e48c3f` 正文（#7/#10「补单测」）、`e9d4b96` 正文（#11「NODE_TIMEOUT 自报/NODE_RETURN_NOT_DICT 映射」） | **自述与仓库不符**：`CODE_TIMEOUT` 映射分支、`python_handler` 非 python_node 防御分支、worker 自报 `NODE_TIMEOUT`/`NODE_RETURN_NOT_DICT` 映射均无对应测试（grep 全仓无新增用例）。代码本身经人工核对正确，但「已补单测」的陈述不可核验，影响修复自述可信度 | 补 3 条小单测（`map_worker_error(CODE_TIMEOUT)`→Protocol、`map_worker_error(CODE_RETURN_NOT_DICT)`→BusinessError 原码、`python_handler` 非 python_node→Internal），或更正提交自述并在台账说明；不阻塞合并（无运行时缺陷） | open |
+| 16 | 备注 | 本记录 §4.2 | 前次「全量 274 个测试」是**失败运行**的计数：cargo test 默认 fail-fast，`executor_m3` 失败后其余测试二进制未执行（45 个中仅跑 38 个）。实际全量为 **291**（本次 5 次全绿均 291 passed / 0 failed） | 以本次 291 为准；原结论（flaky 阻塞）不受影响 | fixed（更正） |
+
+### 7.4 结论与可合并性
+
+- **复审结论：通过**：§3 的阻塞项 #1 已清零（root cause 修复 + 高重复稳定性证据）；重要项 #2/#3 已修复并有真实测试；建议项 #4–#12 除 #7/#10/#11 的少量自述测试缺口（#15，建议级、不阻塞）外均已关闭。
+- **可合并性**：满足 merge.sh 前置（评审记录含「通过」结论、worktree clean、全量测试全绿）；`merge.sh` 会自动 rebase 到最新 `origin/main`（`33d55e8`）并重跑 `cargo test --workspace`——本机 5 连绿，rebase 后若出现冲突/失败由合并方按脚本处理。
+- **跨模块第二评审（kernel `context.rs`/`run.rs`、`Cargo.lock`）仍待 reviewer-b 追加 §5.1**；本复审未改变跨模块改动范围与内容（`git diff 6199ce1..44131f3` 无 kernel/Cargo 改动），主评审初步核对结论（最小性/依赖方向）继续有效。
