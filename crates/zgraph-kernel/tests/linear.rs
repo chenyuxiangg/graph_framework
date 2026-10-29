@@ -5,7 +5,7 @@ mod common;
 use std::sync::Arc;
 
 use serde_json::json;
-use zgraph_kernel::{FakeExecutor, InstanceStatus, RunStatus};
+use zgraph_kernel::{FakeBehavior, FakeExecutor, InstanceStatus, RunStatus};
 
 #[tokio::test]
 async fn linear_graph_completes_with_run_output() {
@@ -231,5 +231,49 @@ async fn start_node_output_is_injected_input_object() {
         work_snapshot.output,
         Some(json!({"echo": {"x": {"x": {"v": 1}}}})),
         "FakeExecutor 默认 echo 全部 inputs"
+    );
+}
+
+#[tokio::test]
+async fn null_trace_sink_runs_without_events() {
+    let outcome = zgraph_kernel::run_to_completion(
+        None,
+        common::linear_spec(),
+        Arc::new(FakeExecutor::new()),
+        Arc::new(zgraph_kernel::NullTraceSink),
+    )
+    .await
+    .expect("run starts");
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(outcome.metrics.streaming_dropped, 0);
+}
+
+#[tokio::test]
+async fn fake_executor_default_behavior_and_delay_error() {
+    // default_behavior 覆盖未配置节点；delay_error 在延迟后返回错误。
+    let executor = Arc::new(FakeExecutor::with_default(FakeBehavior::Output(
+        json!({"default": true}),
+    )));
+    let (outcome, sink) = common::run_with_sink(common::linear_spec(), executor).await;
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(outcome.output, Some(json!({"r": {"default": true}})));
+    assert_eq!(
+        common::last_status(&sink, "work"),
+        Some(InstanceStatus::Completed)
+    );
+
+    let executor = Arc::new(FakeExecutor::new().delay_error(
+        "work",
+        std::time::Duration::from_millis(10),
+        zgraph_kernel::NodeError::Config {
+            message: "missing asset".to_string(),
+        },
+    ));
+    let (outcome, sink) = common::run_with_sink(common::linear_spec(), executor).await;
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(outcome.error.expect("run error").code, "NODE_CONFIG_ERROR");
+    assert_eq!(
+        common::last_status(&sink, "work"),
+        Some(InstanceStatus::Crashed)
     );
 }
