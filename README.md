@@ -15,7 +15,7 @@
 **已完成 M0–M3**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
 图内核与事件循环、trace/SQLite（L1 回放）、**worker supervisor + `WorkerExecutor`**（进程组 kill、
 取消升级、帧超时、并发上限）、`python/workers` 示例、spec v1.2 的 M0–M2 回写、
-`tests/e2e/**` 真子进程验收（AC-06/07/09/10 + 故障注入）；双栈测试与 CI 全绿。
+`tests/e2e/**` 真子进程验收（AC-06/07/09/10 + 故障注入）；本地双栈测试全绿（`cargo test --workspace` / `pytest`），CI 已配置（`.github/workflows/ci.yml`）。
 
 **尚未实现（M4–M5）**：Agent Harness（LLM 流式/tool/预算）、CLI `run`/`replay`、多 run 隔离（AC-12）、
 legacy 退役决策；M3 遗留 P2 见 [`doc/issues.md`](doc/issues.md)（ISSUE-061/063/066 等）。
@@ -48,7 +48,7 @@ uv run pytest -q
 | `crates/zgraph-cli/` | `zgraph` 命令（M1：`validate`；M2：`trace`；`run`/`replay` 见 M5） |
 | `python/zgraph_worker/` | worker SDK：握手、ctx、运行时 |
 | `python/workers/` | 示例 worker：echo/slow/parallel/cycle/software_team（M3） |
-| `schemas/` | DSL schema（M1）、worker 协议 v1（M0 冻结，M3 检查单闭环） |
+| `schemas/` | worker 协议 v1（M0 冻结，M3 检查单闭环）；DSL JSON Schema 未实现（ISSUE-029） |
 | `tests/e2e/` | 真子进程验收：AC-06/07/09/10 + 故障注入 + 并发上限（M3） |
 | `tests/fixtures/` | 图与 worker fixture |
 | `doc/` | 决策/架构/规格/评审/进度/台账 |

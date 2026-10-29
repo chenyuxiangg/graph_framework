@@ -19,7 +19,7 @@
 
 **下一步**
 1. M4 Harness：LLM 流式/tool 循环/上下文预算/错误映射/fake provider（architecture §6.1）。
-2. M3 遗留 P2：gated self-loop 幻影 attempt（ISSUE-061）、NODE_WORKER_CRASH 记录 signal/exit（ISSUE-066）、AC-07 字面 ticker（ISSUE-063）。
+2. M3 遗留：gated self-loop 幻影 attempt（ISSUE-061，P2）、NODE_WORKER_CRASH 记录 signal/exit（ISSUE-066，P2）、AC-07 字面 ticker（ISSUE-063，P3）。
 3. spec 05/08 与 04 §4.2 新增 API 回写（ISSUE-067/070）；M5 CLI run/replay 与 L2 重放。
 
 **阻塞**
