@@ -134,3 +134,17 @@ bash scripts/dev/check.sh                                    # 13 项 OK → CHE
 ## 6. 条件关闭记录（仅“有条件通过”填写）
 
 不适用：本记录结论为 **通过**，无前置条件。
+
+## 7. 修订复审（2026-10-29，`2443d65`，trace 增量）
+
+> 触发：首轮通过（`aeeeaec`）后，作者 `trace-dev` 追加 `2443d65` 关闭首轮建议 #7（reader 版本校验）与 #8（graphs 访问器/stats db_runs）。本轮只复审增量，不重开已通过范围。
+
+- **增量范围**：`aeeeaec..2443d65`，5 files, +206/−25，仅 `crates/zgraph-trace/**`（`src/lib.rs`、`src/reader.rs`、`src/schema.rs` + `tests/migration.rs`、`tests/reader.rs`）；无跨模块改动。
+- **复核项与证据**：
+  1. **`TraceReader::graph()` + `GraphRow`**（`src/reader.rs`）：存在时返回 `graph_hash/graph_name/dsl_version/dsl_json/created_at` 全字段；缺失返回 `None` 不报错（`tests/reader.rs::graph_row_and_run_graph_name_are_available` 实测 6 个字段 + `graph("fedcba…")=None`）。
+  2. **`RunRow.graph_name`**（`LEFT JOIN graphs`）：正常 run → `Some("demo_graph")`；**孤儿 run**（`graphs` 行缺失，测试用 `PRAGMA foreign_keys=OFF` 直插 `runs`）→ `graph_name=None` 且查询不报错、`graph_hash/status/record_mode` 正常（`run_without_graph_row_reports_none_graph_name`）。
+  3. **`RunStats.db_runs`**：stats 测试插入 2 个 run 并断言 `db_runs=2`（`stats_reports_counts_duration_and_db_info`）。
+  4. **只读 reader 的 `user_version` 校验**（`src/schema.rs::ensure_readonly_version`，在 `open_readonly_connection` 中、`ensure_trace_schema` 之前调用）：`==2` 正常；`>2` → `TraceError::SchemaTooNew{found=3,supported=2}` 且**不改库**（拒绝后 `user_version` 仍 3）；`<2`（v1 库）→ `TraceError::Storage("unsupported schema version=1, expected 2")` 且**不迁移**（拒绝后 `user_version` 仍 1）；缺失库/空文件仍报错且不创建文件/不写库（原有测试保留）。
+  5. 新增测试数：2 个 migration 用例（v3 拒绝、v1 拒绝）+ 2 个 reader 用例（graph 存在/缺失、孤儿 run）+ stats 断言扩展；覆盖要求中的“存在/缺失/孤儿 run/v3 拒绝/v1 拒绝”全部真实断言，非只查行数。
+- **复跑结果**：`cargo fmt --all -- --check` exit 0；`cargo clippy --workspace --all-targets -- -D warnings` exit 0；`cargo test -p zgraph-trace` = **34 passed / 0 failed**（api 5 + migration 7 + reader 6 + roundtrip 6 + streaming 9 + doctest 1）；`cargo test --workspace` = **133 passed / 0 failed**；`bash scripts/dev/check.sh` = CHECK PASSED；pytest = 20 passed。
+- **结论：维持通过**。首轮 §3 #7/#8 已闭环（状态视为 `fixed(2443d65)`）；本轮未引入新阻塞/重要项；首轮其余建议项（#1–#6、#9–#14）处置不变（待 Lead 确认登记 ISSUE / M3-M5 跟踪）。合并门禁以本段更新后的记录为准。
