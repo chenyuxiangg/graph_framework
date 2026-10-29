@@ -54,10 +54,10 @@
 
 ## 6. M0 验收检查单（状态：`[x]` 已实现/有测试；`[M3]` 延后并登记 ISSUE-025）
 
-- `[x]` `hello` 超时（5s）/ `v` 不匹配 / 缺字段 → 拒绝并 kill
+- `[x]` `hello` 超时（5s，测试用 300ms）/ `v` 不匹配 / 缺字段 → 拒绝并 kill
 - `[x]` `hello_ack` 前不执行用户代码
 - `[x]` `run` 载荷含 `seed` / `deadline_ms` / `global_vars`
-- `[x]` 重复 `result` 检测；`[M3]` exit 0 无 result、result 后不退出（supervisor 层）
+- `[x]` 重复 `result` 检测（进程退出后读残余帧）；`[x]` exit 0 无 result（fixture 测试）；`[M3]` result 后不退出（supervisor 层）
 - `[x]` stderr 持续排空 + 8 KiB 尾部截断（压力用例）
 - `[x]` 用户 `print()` 不污染协议；`input()` 抛错
 - `[x]` 同步用户函数执行中收到 `cancel` → 标志置位、协作退出（Python 侧）
@@ -71,4 +71,4 @@
 
 ## 7. 未覆盖项（M3，见 `doc/issues.md` ISSUE-025）
 
-supervisor 侧 cancel/信号升级、帧空闲超时、流式读取上限、exit-0-无-result 分支、进程组 kill、并发上限。
+supervisor 侧 cancel/信号升级、帧空闲超时、流式读取上限、result 后不退出分支、进程组 kill、并发上限。

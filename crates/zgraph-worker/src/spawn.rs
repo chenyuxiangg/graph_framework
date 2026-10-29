@@ -163,9 +163,6 @@ pub async fn run_worker(
 fn attach_stderr(err: WorkerFailure, stderr: String) -> WorkerFailure {
     match err {
         WorkerFailure::Exit { code, .. } => WorkerFailure::Exit { code, stderr },
-        WorkerFailure::Timeout(_) if !stderr.is_empty() => {
-            WorkerFailure::Exit { code: None, stderr }
-        }
         other => other,
     }
 }
@@ -222,8 +219,8 @@ async fn drive(
                     .get("output")
                     .cloned()
                     .ok_or_else(|| protocol_error("result without output"))?;
-                ensure_no_extra_frame(&mut reader).await?;
                 ensure_exit(child, config.exit_grace).await?;
+                ensure_no_trailing_frame(&mut reader).await?;
                 return Ok(WorkerRun {
                     output,
                     events,
@@ -258,10 +255,14 @@ async fn read_frame_line(
         .map_err(WorkerFailure::from)
 }
 
-async fn ensure_no_extra_frame(reader: &mut BufReader<ChildStdout>) -> Result<(), WorkerFailure> {
-    match tokio::time::timeout(Duration::from_millis(100), read_frame_line(reader)).await {
-        Ok(Ok(Some(_))) => Err(protocol_error("duplicate result/frame after result")),
-        _ => Ok(()),
+async fn ensure_no_trailing_frame(
+    reader: &mut BufReader<ChildStdout>,
+) -> Result<(), WorkerFailure> {
+    // 进程已退出（ensure_exit 已 wait），管道中若还有帧必为 result 之后的非法帧。
+    match tokio::time::timeout(Duration::from_millis(50), read_frame_line(reader)).await {
+        Ok(Ok(Some(_))) => Err(protocol_error("duplicate/trailing frame after result")),
+        Ok(Ok(None)) | Err(_) => Ok(()),
+        Ok(Err(err)) => Err(err),
     }
 }
 

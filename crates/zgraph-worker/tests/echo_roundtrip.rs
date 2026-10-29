@@ -1,7 +1,7 @@
-//! M0 验收：Rust supervisor ↔ Python worker 的 NDJSON 往返。
+//! M0 验收：Rust supervisor ↔ Python worker 的协议与生命周期。
 //!
-//! 依赖 `python/` 下的 worker SDK；解释器可用 `ZGRAPH_PYTHON` 覆盖，默认 `python3`。
-//! 在 CI 中通过 `uv run` 提供环境；本地无 uv 时直接使用系统 python3（需标准库即可）。
+//! 依赖 `python/` 下的 worker SDK 与 `tests/fixtures/workers/` 的协议 fixture；
+//! 解释器可用 `ZGRAPH_PYTHON` 覆盖，默认 `python3`（只用标准库，CI 无需 uv）。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,10 +15,14 @@ fn repo_root() -> PathBuf {
         .expect("repo root")
 }
 
+fn python_program() -> String {
+    std::env::var("ZGRAPH_PYTHON").unwrap_or_else(|_| "python3".to_string())
+}
+
 fn worker_config(timeout: Duration) -> WorkerConfig {
     let root = repo_root();
     WorkerConfig {
-        program: std::env::var("ZGRAPH_PYTHON").unwrap_or_else(|_| "python3".to_string()),
+        program: python_program(),
         args: vec!["-m".to_string(), "zgraph_worker.runtime".to_string()],
         env: vec![(
             "PYTHONPATH".to_string(),
@@ -30,6 +34,19 @@ fn worker_config(timeout: Duration) -> WorkerConfig {
         exit_grace: Duration::from_secs(2),
         max_stderr_bytes: 8 * 1024,
     }
+}
+
+/// 协议 fixture：直接以 `python <script>` 启动，绕过 SDK runtime。
+fn fixture_config(script: &str, hello_timeout: Duration) -> WorkerConfig {
+    let root = repo_root();
+    let mut config = worker_config(Duration::from_secs(10));
+    config.args = vec![root
+        .join("tests/fixtures/workers")
+        .join(script)
+        .display()
+        .to_string()];
+    config.hello_timeout = hello_timeout;
+    config
 }
 
 #[tokio::test]
@@ -50,13 +67,14 @@ async fn echo_worker_roundtrip() {
 }
 
 #[tokio::test]
-async fn worker_timeout_kills_process() {
-    let mut config = worker_config(Duration::from_millis(600));
-    config.args = vec!["-m".to_string(), "zgraph_worker.runtime".to_string()];
+async fn worker_timeout_kills_and_reaps_process() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pid_file = temp.path().join("worker.pid");
+    let config = worker_config(Duration::from_millis(600));
     let request = sample_request(
         "zgraph_worker.slow",
         "run",
-        serde_json::json!({"seconds": 5}),
+        serde_json::json!({"seconds": 5, "pid_file": pid_file.display().to_string()}),
     );
     let err = run_worker(&config, &request)
         .await
@@ -65,6 +83,23 @@ async fn worker_timeout_kills_process() {
         matches!(err, WorkerFailure::Timeout(_)),
         "expected timeout, got {err:?}"
     );
+
+    let pid: String = std::fs::read_to_string(&pid_file)
+        .expect("worker must write pid before sleeping")
+        .trim()
+        .to_string();
+    for _ in 0..40 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return; // 已被 kill 且 wait/reap 完成
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("worker pid {pid} still alive after timeout (zombie/not reaped)");
 }
 
 #[tokio::test]
@@ -78,4 +113,68 @@ async fn import_failure_is_reported() {
         WorkerFailure::Worker(w) => assert_eq!(w.code, "NODE_WORKER_IMPORT"),
         other => panic!("expected worker import error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn hello_timeout_is_reported() {
+    let mut config = worker_config(Duration::from_secs(5));
+    config.program = python_program();
+    config.args = vec!["-c".to_string(), "import time; time.sleep(5)".to_string()];
+    config.hello_timeout = Duration::from_millis(300);
+    let request = sample_request("unused", "run", serde_json::json!({}));
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("must fail handshake");
+    match err {
+        WorkerFailure::Protocol(protocol) => assert_eq!(protocol.code, "NODE_WORKER_HANDSHAKE"),
+        other => panic!("expected handshake error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn duplicate_result_is_rejected() {
+    let config = fixture_config("dup_result_worker.py", Duration::from_secs(5));
+    let request = sample_request("unused", "run", serde_json::json!({}));
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("must reject duplicate result");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert!(
+                protocol.message.contains("duplicate") || protocol.message.contains("trailing"),
+                "unexpected message: {}",
+                protocol.message
+            );
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exit_without_result_is_rejected() {
+    let config = fixture_config("no_result_worker.py", Duration::from_secs(5));
+    let request = sample_request("unused", "run", serde_json::json!({}));
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("must reject missing result");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert!(protocol.message.contains("closed stdout before result"));
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn noisy_worker_stderr_is_captured() {
+    let config = worker_config(Duration::from_secs(30));
+    let request = sample_request("zgraph_worker.noisy", "run", serde_json::json!({}));
+    let run = run_worker(&config, &request).await.expect("worker run");
+    assert_eq!(run.output["ok"], true);
+    assert!(
+        run.stderr.contains("user print must not pollute protocol"),
+        "stderr tail should contain user print, got {} bytes",
+        run.stderr.len()
+    );
+    assert!(run.stderr.len() <= 8 * 1024);
 }
