@@ -27,7 +27,7 @@ use zgraph_kernel::{
 
 use crate::protocol::{
     Frame, RunRequest, WorkerError, CODE_CANCELLED, CODE_CRASH, CODE_HANDSHAKE, CODE_IMPORT,
-    CODE_PROTOCOL, CODE_PYTHON_EXCEPTION,
+    CODE_PROTOCOL, CODE_PYTHON_EXCEPTION, CODE_TIMEOUT, EMIT_TYPES,
 };
 use crate::spawn::WorkerFailure;
 use crate::supervisor::{no_cancel, SupervisorConfig};
@@ -211,6 +211,10 @@ pub fn streaming_event(frame: &Frame) -> Option<StreamingEvent> {
     }
     let payload = &frame.payload;
     let event_type = payload.get("type")?.as_str()?;
+    // 协议 §2 的 emit type 封闭表；白名单外一律丢弃（不把未知事件映射进内核）。
+    if !EMIT_TYPES.contains(&event_type) {
+        return None;
+    }
     let text = || {
         payload
             .get("text")
@@ -281,6 +285,12 @@ pub fn map_worker_error(error: &WorkerError) -> NodeError {
             traceback: error.traceback.clone().unwrap_or_default(),
         },
         CODE_CANCELLED => NodeError::Cancelled,
+        // worker 自报 `NODE_TIMEOUT` 属协议违例：04 §4.1.4 规定 Timeout 只由内核
+        // deadline 或 AgentCallHandler 预检产生，因此按协议错误处理（不映射 Timeout，
+        // 否则会被内核归一化成 Internal，掩盖真实问题）。
+        CODE_TIMEOUT => NodeError::NodeWorker {
+            kind: WorkerErrorKind::Protocol,
+        },
         // `NODE_BUSINESS_ERROR` / `NODE_RETURN_NOT_DICT` / `BIZ_*` 及自定义业务码：
         // Python `BusinessError.code` 是载荷值，必须原样保留（04 §4.3.4）。
         _ => NodeError::BusinessError {

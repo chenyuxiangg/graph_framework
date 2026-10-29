@@ -25,7 +25,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWrit
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::task::JoinHandle;
 
-use crate::protocol::{decode_frame_line, Frame, Hello, WorkerError, PROTOCOL_VERSION};
+use crate::protocol::{
+    decode_frame_line, Frame, Hello, WorkerError, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+};
 use crate::spawn::{handshake_failure, protocol_failure, WorkerConfig, WorkerFailure, WorkerRun};
 
 /// 外部取消信号：future 完成即表示调用方请求取消（supervisor 按协议 §4.3 升级）。
@@ -62,6 +64,8 @@ pub const DEFAULT_TERM_GRACE: Duration = Duration::from_secs(1);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 /// result 后检测残余帧/EOF 的上限（孙进程可能仍持有 stdout，不能无限等）。
 const TRAILING_READ_TIMEOUT: Duration = Duration::from_millis(200);
+/// 进程退出后等待 stderr 排空任务收尾的上限（管道已 EOF，正常远小于此值）。
+const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl Default for StreamingLimits {
     fn default() -> Self {
@@ -235,7 +239,7 @@ impl Supervisor {
     /// 完整生命周期：握手 → 发送 run → 收集 emit/result/error → reap。
     ///
     /// `cancel` 在任一等待点优先被轮询（`biased`）：一旦完成立即走协议 §4.3 的升级链。
-    pub async fn drive(
+    pub(crate) async fn drive(
         &mut self,
         request: &crate::protocol::RunRequest,
         on_frame: FrameSink<'_>,
@@ -491,7 +495,7 @@ impl Supervisor {
         let Some(task) = self.stderr_task.take() else {
             return String::new();
         };
-        match tokio::time::timeout(Duration::from_secs(1), task).await {
+        match tokio::time::timeout(STDERR_DRAIN_TIMEOUT, task).await {
             Ok(Ok(text)) => text,
             _ => String::new(),
         }
@@ -523,21 +527,47 @@ async fn read_frame_bounded(
     }
 }
 
-/// 读取一行完整帧；EOF（无残余半行）→ `Ok(None)`，半行/非法 UTF-8 → 协议错误。
+/// 读取一行完整帧；**有界**（> [`MAX_FRAME_BYTES`] 立即协议错误，防不可信 worker OOM）。
+///
+/// 为什么不用 `read_until`：它先把整行读进内存、之后才在解码层判 8 MiB；
+/// 用户 Python 写一条超大无换行行即可让 supervisor/内核进程 OOM（M3「禁止 OOM、
+/// 崩溃隔离」）。这里用 `fill_buf` 分块累积，超限立刻返回 `NODE_WORKER_PROTOCOL`，
+/// 由调用方 kill 进程组。
 async fn read_frame_line(
     reader: &mut BufReader<ChildStdout>,
 ) -> Result<Option<Frame>, WorkerFailure> {
+    // 上限含结尾换行（解码层按 body 长度判定，二者相差 1 字节）。
+    let max_buffered = MAX_FRAME_BYTES.saturating_add(1);
     let mut buffer: Vec<u8> = Vec::new();
-    let read = reader
-        .read_until(b'\n', &mut buffer)
-        .await
-        .map_err(|err| protocol_failure(format!("read frame: {err}")))?;
-    if read == 0 {
-        return Ok(None);
+    loop {
+        let chunk = reader
+            .fill_buf()
+            .await
+            .map_err(|err| protocol_failure(format!("read frame: {err}")))?;
+        if chunk.is_empty() {
+            return if buffer.is_empty() {
+                Ok(None)
+            } else {
+                Err(protocol_failure(
+                    "partial frame at EOF (missing trailing newline)",
+                ))
+            };
+        }
+        let newline = chunk.iter().position(|&byte| byte == b'\n');
+        let take = newline.map_or(chunk.len(), |index| index + 1);
+        if buffer.len().saturating_add(take) > max_buffered {
+            return Err(protocol_failure(format!(
+                "frame too large: > {MAX_FRAME_BYTES} bytes"
+            )));
+        }
+        buffer.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            return decode_frame_line(&buffer)
+                .map(Some)
+                .map_err(WorkerFailure::from);
+        }
     }
-    decode_frame_line(&buffer)
-        .map(Some)
-        .map_err(WorkerFailure::from)
 }
 
 /// 持续排空 stderr，环形保留末尾 `max_bytes`（§4.2：不读会阻塞 worker）。
@@ -606,7 +636,7 @@ pub fn emit_payload(frame: &Frame) -> Option<&Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::RunRequest;
+    use crate::protocol::{RunRequest, MAX_FRAME_BYTES};
 
     fn request(deadline_ms: u64) -> RunRequest {
         RunRequest {
@@ -649,12 +679,44 @@ mod tests {
         assert_eq!(config.streaming.max_bytes, DEFAULT_MAX_EMIT_BYTES);
     }
 
+    /// 协议 §3 封闭表的退出码分支：exit 3 = SDK 自检失败（协议错误），其余非 0/信号 = 崩溃。
+    #[cfg(unix)]
     #[test]
-    fn classify_exit_maps_sdk_self_check_to_protocol() {
-        // 仅验证分支选择逻辑的可读性：真实 ExitStatus 由测试 fixture 覆盖。
+    fn classify_exit_maps_exit_codes_and_signals() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exit_three = ExitStatus::from_raw(3 << 8);
+        match Supervisor::classify_exit(exit_three) {
+            WorkerFailure::Protocol(error) => {
+                assert_eq!(error.code, crate::protocol::CODE_PROTOCOL);
+                assert!(
+                    error.message.contains("code 3"),
+                    "unexpected message: {}",
+                    error.message
+                );
+            }
+            other => panic!("exit 3 must be a protocol error, got {other:?}"),
+        }
+
+        match Supervisor::classify_exit(ExitStatus::from_raw(2 << 8)) {
+            WorkerFailure::Exit { code: Some(2), .. } => {}
+            other => panic!("exit 2 must be a crash, got {other:?}"),
+        }
+        match Supervisor::classify_exit(ExitStatus::from_raw(0)) {
+            WorkerFailure::Exit { code: Some(0), .. } => {}
+            other => panic!("exit 0 must map to Exit(0), got {other:?}"),
+        }
+        // 信号杀死：raw 低 7 位为信号，code() = None → 崩溃。
+        match Supervisor::classify_exit(ExitStatus::from_raw(9)) {
+            WorkerFailure::Exit { code: None, .. } => {}
+            other => panic!("signal death must map to crash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streaming_limits_stay_within_single_frame_bound() {
         assert_eq!(
-            DEFAULT_MAX_EMIT_BYTES,
-            crate::protocol::MAX_FRAME_BYTES,
+            DEFAULT_MAX_EMIT_BYTES, MAX_FRAME_BYTES,
             "流式字节上限与单帧上限同量级，避免无界聚合"
         );
     }
