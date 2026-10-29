@@ -159,3 +159,49 @@ git status --porcelain                  # 空
 > legacy 退役决策；M3 遗留项见 [`doc/issues.md`](doc/issues.md)（ISSUE-061 P2 / ISSUE-063 P3 / ISSUE-066 P2 等）。
 
 修正后（索引 REV-016 行的「通过」即成为最终状态）请回我复审；我追加 §6.2 并将本记录结论转「通过」。
+
+### 6.2 最终复审（2026-10-30，reviewer-b，HEAD `35df83d`；base=`542a911`）
+
+**复审范围**：`a79c6e3..HEAD` = `35df83d`（`docs(docs): 修正 README M3 遗留级别标注（REV-016 C1 收尾）`，**1 file, +1/−1，仅 README**）；独立看文件 + 亲跑测试，不采信自述。
+
+**C1 关闭证据（最终）**
+
+| 位置 | 当前内容 | 与台账一致 |
+|---|---|---|
+| `README.md:21` | 「legacy 退役决策；M3 遗留项见 [`doc/issues.md`](doc/issues.md)（ISSUE-061 P2 / ISSUE-063 **P3** / ISSUE-066 P2 等）。」 | ✅ |
+| `doc/progress.md:22` | 「M3 遗留：gated self-loop 幻影 attempt（ISSUE-061，P2）、NODE_WORKER_CRASH 记录 signal/exit（ISSUE-066，P2）、AC-07 字面 ticker（ISSUE-063，**P3**）」 | ✅ |
+| `doc/issues.md:71`（ISSUE-063） | 级别 **P3** | ✅（基准） |
+
+- 全仓 grep「M3 遗留 P2」→ **0 命中**（仅本记录 §6.1 的历史文字保留旧表述，非线上文档）；不再有把 ISSUE-063 归入 P2 的标注。
+- **C1 关闭。**
+
+**C2–C5 维持关闭（复核确认，本提交仅 README 一行，未回退）**
+
+| 条件 | 复核结果 |
+|---|---|
+| C2 | `README.md:51` 仍为「worker 协议 v1…；DSL JSON Schema 未实现（ISSUE-029）」✅ |
+| C3 | `doc/issues.md:79` ISSUE-071 含 REV-013 #3；`:70` ISSUE-062 含 workers.cycle docstring 前置条件 ✅ |
+| C4 | `doc/issues.md:22` ISSUE-014 = `in-progress`（与 spec 02/04 + architecture 10 处引用一致）✅ |
+| C5 | base=`origin/main`=`542a911`（已 rebase，可 ff）；`tests/e2e/` 5 个 test 文件到位；`doc/reviews/README.md` **17 行（000–016）**与 `doc/reviews/` 实际文件逐一对应（REV-000..016 均存在）；`doc/progress.md` **26 行**（≤30，四块齐全）；`doc/issues.md` **72 行、ID 1–72 无重号/缺号、每行 8 列** ✅ |
+
+**最终复审验证命令与结果**
+
+```bash
+cd /Users/zyzs/lczyzs/code/zgraph/.worktrees/docs-lead
+git rev-parse HEAD                      # 35df83d8a32ec90ff2907bf6445fc9f095d3fc7f
+git diff --stat a79c6e3..HEAD           # 1 file changed, 1 insertion(+), 1 deletion(-)（仅 README.md）
+cargo test --workspace                  # 313 passed / 0 failed
+PYTHONPATH=python .venv/bin/python -m pytest   # 44 passed
+wc -l doc/progress.md                   # 26
+bash scripts/dev/check.sh               # CHECK PASSED
+git status --porcelain                  # 空
+```
+
+- 提交元数据：`35df83d` author/committer=`chenyuxiangg <1007423165@qq.com>`，正文含 `Review: REV-016` / `Agent: lead`；README 属 process 跨模块改动仍在 Lead 提交正文的授权声明范围内。
+- 范围：`542a911..HEAD` = 6 files（5 个收尾文件 + 本评审记录），无其它改动。
+
+**复审结论：通过**
+
+- 原 §1「有条件通过」及 §6/§6.1 历史保留；C1–C5 **全部关闭**，索引 REV-016 行「通过」成为最终状态。
+- 本记录满足 `merge.sh` 门禁：`分支: docs/docs-m3-wrapup` + 「结论：通过」，分支已基于最新 `origin/main`（`542a911`）可 ff；`merge.sh` 会重跑 `cargo test --workspace`（本轮独立 313 passed / 0 failed）。
+- 本评审未修改任何正文/台账/README/代码；未 merge/push。
