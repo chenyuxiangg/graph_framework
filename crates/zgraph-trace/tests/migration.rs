@@ -169,6 +169,54 @@ fn readonly_open_of_missing_database_errors_and_creates_no_file() {
 }
 
 #[test]
+fn readonly_reader_rejects_newer_schema_without_migrating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("trace.db");
+    let writer = TraceWriter::open(&path).expect("create v2 db");
+    writer.close().expect("close writer");
+    {
+        let conn = Connection::open(&path).expect("inspect");
+        conn.execute_batch("PRAGMA user_version = 3;")
+            .expect("set newer version");
+    }
+    match TraceReader::open_readonly(&path) {
+        Ok(_) => panic!("readonly reader must reject newer schema"),
+        Err(TraceError::SchemaTooNew { found, supported }) => {
+            assert_eq!(found, 3);
+            assert_eq!(supported, TRACE_SCHEMA_VERSION);
+        }
+        Err(other) => panic!("expected SchemaTooNew, got {other:?}"),
+    }
+    let conn = Connection::open(&path).expect("inspect after rejection");
+    assert_eq!(
+        user_version(&conn),
+        3,
+        "readonly reader must not migrate the database"
+    );
+}
+
+#[test]
+fn readonly_reader_rejects_v1_schema_without_migrating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v1.db");
+    create_v1_database(&path);
+    match TraceReader::open_readonly(&path) {
+        Ok(_) => panic!("readonly reader must reject older schema"),
+        Err(TraceError::Storage(message)) => assert!(
+            message.contains("unsupported schema version=1, expected 2"),
+            "unexpected message: {message}"
+        ),
+        Err(other) => panic!("expected Storage, got {other:?}"),
+    }
+    let conn = Connection::open(&path).expect("inspect after rejection");
+    assert_eq!(
+        user_version(&conn),
+        1,
+        "readonly reader must not migrate the database"
+    );
+}
+
+#[test]
 fn readonly_open_of_file_without_trace_schema_errors_and_writes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("empty.db");

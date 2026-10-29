@@ -2,6 +2,7 @@
 
 mod common;
 
+use rusqlite::Connection;
 use serde_json::json;
 use zgraph_trace::{
     EventQuery, InstanceStatus, RunFinishedInfo, RunMetrics, RunStatus, TraceError, TraceInput,
@@ -140,6 +141,7 @@ fn stats_reports_counts_duration_and_db_info() {
     let fx = common::Fixture::new();
     let handle = &fx.handle;
     handle.send(common::started("run-stats"));
+    handle.send(common::started("run-other"));
     for (from, to) in [
         (InstanceStatus::Pending, InstanceStatus::Ready),
         (InstanceStatus::Ready, InstanceStatus::Running),
@@ -218,6 +220,7 @@ fn stats_reports_counts_duration_and_db_info() {
     assert_eq!(stats.trace_backpressure, 5);
     assert!(stats.db_path.ends_with("trace.db"));
     assert!(stats.db_size_bytes > 0);
+    assert_eq!(stats.db_runs, 2, "db_runs counts all runs in the database");
     fx.close().expect("close");
 }
 
@@ -257,6 +260,64 @@ fn missing_run_is_reported_predictably() {
         Err(TraceError::NotFound(message)) => assert!(message.contains("run-absent")),
         other => panic!("expected NotFound, got {other:?}"),
     }
+    fx.close().expect("close");
+}
+
+#[test]
+fn graph_row_and_run_graph_name_are_available() {
+    let fx = common::Fixture::new();
+    fx.handle.send(common::started("run-graph"));
+    fx.flush();
+    let reader = fx.reader();
+    let graph = reader
+        .graph("0123456789abcdef")
+        .expect("graph query")
+        .expect("graph row exists");
+    assert_eq!(graph.graph_hash, "0123456789abcdef");
+    assert_eq!(graph.graph_name.as_deref(), Some("demo_graph"));
+    assert_eq!(graph.dsl_version, "1.0");
+    assert_eq!(graph.dsl_json, r#"{"version":"1.0"}"#);
+    assert_eq!(graph.created_at, common::STARTED_AT);
+    assert_eq!(
+        reader.graph("fedcba9876543210").expect("graph query"),
+        None,
+        "missing graph is not an error"
+    );
+    let run = reader
+        .run("run-graph")
+        .expect("run query")
+        .expect("run exists");
+    assert_eq!(
+        run.graph_name.as_deref(),
+        Some("demo_graph"),
+        "run() joins graphs for graph_name"
+    );
+    fx.close().expect("close");
+}
+
+#[test]
+fn run_without_graph_row_reports_none_graph_name() {
+    let fx = common::Fixture::new();
+    fx.handle.send(common::started("run-present"));
+    fx.flush();
+    // graph 行缺失的 run：关闭 FK 直接插入，验证 LEFT JOIN 容错（不报错）。
+    let conn = Connection::open(&fx.path).expect("inspect connection");
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;\
+         INSERT INTO runs (run_id, graph_hash, status, started_at) \
+         VALUES ('run-orphan', 'deadbeefdeadbeef', 'Running', '2026-10-28T09:12:03.104Z');",
+    )
+    .expect("insert orphan run");
+    drop(conn);
+    let reader = fx.reader();
+    let run = reader
+        .run("run-orphan")
+        .expect("run query")
+        .expect("orphan run exists");
+    assert_eq!(run.graph_name, None, "missing graphs row yields None");
+    assert_eq!(run.graph_hash, "deadbeefdeadbeef");
+    assert_eq!(run.status, RunStatus::Running);
+    assert_eq!(run.record_mode, None);
     fx.close().expect("close");
 }
 

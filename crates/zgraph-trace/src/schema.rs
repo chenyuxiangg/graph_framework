@@ -298,6 +298,7 @@ pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection, TraceE
         .map_err(db_err)?;
     conn.execute_batch("PRAGMA query_only = ON; PRAGMA temp_store = MEMORY;")
         .map_err(db_err)?;
+    ensure_readonly_version(&conn)?;
     ensure_trace_schema(&conn, path)?;
     Ok(conn)
 }
@@ -376,6 +377,23 @@ fn apply_writer_pragmas(conn: &Connection) -> Result<(), TraceError> {
          PRAGMA temp_store = MEMORY;",
     )
     .map_err(db_err)?;
+    Ok(())
+}
+
+/// 只读连接只接受当前版本：超前拒绝（06 §6.7），落后明确报错且**不迁移**。
+fn ensure_readonly_version(conn: &Connection) -> Result<(), TraceError> {
+    let found = user_version(conn)?;
+    if found > TRACE_SCHEMA_VERSION {
+        return Err(TraceError::SchemaTooNew {
+            found,
+            supported: TRACE_SCHEMA_VERSION,
+        });
+    }
+    if found < TRACE_SCHEMA_VERSION {
+        return Err(TraceError::Storage(format!(
+            "unsupported schema version={found}, expected {TRACE_SCHEMA_VERSION}"
+        )));
+    }
     Ok(())
 }
 

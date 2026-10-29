@@ -84,8 +84,8 @@ pub use model::{
     TraceInput, TransitionRecord,
 };
 pub use reader::{
-    EventQuery, EventRow, GateResultRow, InstanceRow, LlmCallRow, RecordedOutputRow, RunRow,
-    RunStats, StreamingRow, TraceReader, TransitionRow,
+    EventQuery, EventRow, GateResultRow, GraphRow, InstanceRow, LlmCallRow, RecordedOutputRow,
+    RunRow, RunStats, StreamingRow, TraceReader, TransitionRow,
 };
 pub use schema::{
     DB_BUSY_TIMEOUT_MS, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, HEARTBEAT_INTERVAL_MS,

@@ -66,6 +66,21 @@ pub struct EventRow {
     pub payload: serde_json::Value,
 }
 
+/// 图定义行（06 §6.2.3；内容寻址，供 trace 头部展示与 L1 回放校验）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphRow {
+    /// 图内容哈希（blake3 前 16 hex）。
+    pub graph_hash: String,
+    /// 图名（`metadata.name`；DB 允许 NULL）。
+    pub graph_name: Option<String>,
+    /// DSL 版本（当前恒 `1.0`）。
+    pub dsl_version: String,
+    /// 规范化 DSL JSON 原文。
+    pub dsl_json: String,
+    /// 首次写入时刻（RFC3339 毫秒 Z）。
+    pub created_at: String,
+}
+
 /// run 行（含 v2 可复现列；06 §6.2.4 + architecture §5.2）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunRow {
@@ -73,6 +88,8 @@ pub struct RunRow {
     pub run_id: String,
     /// 图内容哈希。
     pub graph_hash: String,
+    /// 图名（LEFT JOIN `graphs`；graph 行缺失时为 `None`，不报错）。
+    pub graph_name: Option<String>,
     /// run 状态。
     pub status: RunStatus,
     /// 用户 id（DB NULL 读作空串）。
@@ -314,6 +331,8 @@ pub struct RunStats {
     pub db_path: String,
     /// DB 主文件字节数。
     pub db_size_bytes: u64,
+    /// 同一 DB 内的 runs 总数（`trace --stats` 的 `db ... runs N`）。
+    pub db_runs: u64,
 }
 
 /// 只读 trace 连接。
@@ -343,15 +362,29 @@ impl TraceReader {
 
     /// 查询单 run；不存在返回 `None`。
     pub fn run(&self, run_id: &str) -> Result<Option<RunRow>, TraceError> {
-        let sql = "SELECT run_id, graph_hash, status, user_id, started_at, finished_at, \
-                   entry_inputs, output_json, error_code, error_message, interrupted, \
-                   recovered_at, last_seq, event_count, streaming_dropped, abandoned_tasks, \
-                   trace_backpressure, killed_workers, seed, record_mode \
-                   FROM runs WHERE run_id = ?1";
+        let sql = "SELECT r.run_id, r.graph_hash, g.graph_name, r.status, r.user_id, \
+                   r.started_at, r.finished_at, r.entry_inputs, r.output_json, r.error_code, \
+                   r.error_message, r.interrupted, r.recovered_at, r.last_seq, r.event_count, \
+                   r.streaming_dropped, r.abandoned_tasks, r.trace_backpressure, \
+                   r.killed_workers, r.seed, r.record_mode \
+                   FROM runs r LEFT JOIN graphs g ON g.graph_hash = r.graph_hash \
+                   WHERE r.run_id = ?1";
         let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
         let mut rows = stmt.query([run_id]).map_err(db_err)?;
         match rows.next().map_err(db_err)? {
             Some(row) => Ok(Some(map_run_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 按 `graph_hash` 查询图定义；不存在返回 `None`（不报错）。
+    pub fn graph(&self, graph_hash: &str) -> Result<Option<GraphRow>, TraceError> {
+        let sql = "SELECT graph_hash, graph_name, dsl_version, dsl_json, created_at \
+                   FROM graphs WHERE graph_hash = ?1";
+        let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
+        let mut rows = stmt.query([graph_hash]).map_err(db_err)?;
+        match rows.next().map_err(db_err)? {
+            Some(row) => Ok(Some(map_graph_row(row)?)),
             None => Ok(None),
         }
     }
@@ -469,6 +502,7 @@ impl TraceReader {
         let db_size_bytes = std::fs::metadata(&self.db_path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
+        let db_runs = self.all_runs_count()?;
         Ok(RunStats {
             run_id: run.run_id,
             status: run.status,
@@ -483,6 +517,7 @@ impl TraceReader {
             trace_backpressure: run.trace_backpressure,
             db_path: self.db_path.display().to_string(),
             db_size_bytes,
+            db_runs,
         })
     }
 
@@ -517,6 +552,14 @@ impl TraceReader {
         let value: i64 = self
             .conn
             .query_row(sql, [run_id], |row| row.get(0))
+            .map_err(db_err)?;
+        Ok(to_u64(value))
+    }
+
+    fn all_runs_count(&self) -> Result<u64, TraceError> {
+        let value: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
             .map_err(db_err)?;
         Ok(to_u64(value))
     }
@@ -582,30 +625,41 @@ fn parse_run_status(text: &str) -> Result<RunStatus, TraceError> {
 }
 
 fn map_run_row(row: &rusqlite::Row<'_>) -> Result<RunRow, TraceError> {
-    let status: String = row.get(2).map_err(db_err)?;
-    let user_id: Option<String> = row.get(3).map_err(db_err)?;
-    let interrupted: i64 = row.get(10).map_err(db_err)?;
+    let status: String = row.get(3).map_err(db_err)?;
+    let user_id: Option<String> = row.get(4).map_err(db_err)?;
+    let interrupted: i64 = row.get(11).map_err(db_err)?;
     Ok(RunRow {
         run_id: row.get(0).map_err(db_err)?,
         graph_hash: row.get(1).map_err(db_err)?,
+        graph_name: row.get(2).map_err(db_err)?,
         status: parse_run_status(&status)?,
         user_id: user_id.unwrap_or_default(),
-        started_at: row.get(4).map_err(db_err)?,
-        finished_at: row.get(5).map_err(db_err)?,
-        entry_inputs: parse_json_opt(row.get(6).map_err(db_err)?)?,
-        output_json: parse_json_opt(row.get(7).map_err(db_err)?)?,
-        error_code: row.get(8).map_err(db_err)?,
-        error_message: row.get(9).map_err(db_err)?,
+        started_at: row.get(5).map_err(db_err)?,
+        finished_at: row.get(6).map_err(db_err)?,
+        entry_inputs: parse_json_opt(row.get(7).map_err(db_err)?)?,
+        output_json: parse_json_opt(row.get(8).map_err(db_err)?)?,
+        error_code: row.get(9).map_err(db_err)?,
+        error_message: row.get(10).map_err(db_err)?,
         interrupted: interrupted != 0,
-        recovered_at: row.get(11).map_err(db_err)?,
-        last_seq: row.get(12).map_err(db_err)?,
-        event_count: row.get(13).map_err(db_err)?,
-        streaming_dropped: to_u64(row.get(14).map_err(db_err)?),
-        abandoned_tasks: to_u64(row.get(15).map_err(db_err)?),
-        trace_backpressure: to_u64(row.get(16).map_err(db_err)?),
-        killed_workers: to_u64(row.get(17).map_err(db_err)?),
-        seed: to_u64(row.get(18).map_err(db_err)?),
-        record_mode: row.get(19).map_err(db_err)?,
+        recovered_at: row.get(12).map_err(db_err)?,
+        last_seq: row.get(13).map_err(db_err)?,
+        event_count: row.get(14).map_err(db_err)?,
+        streaming_dropped: to_u64(row.get(15).map_err(db_err)?),
+        abandoned_tasks: to_u64(row.get(16).map_err(db_err)?),
+        trace_backpressure: to_u64(row.get(17).map_err(db_err)?),
+        killed_workers: to_u64(row.get(18).map_err(db_err)?),
+        seed: to_u64(row.get(19).map_err(db_err)?),
+        record_mode: row.get(20).map_err(db_err)?,
+    })
+}
+
+fn map_graph_row(row: &rusqlite::Row<'_>) -> Result<GraphRow, TraceError> {
+    Ok(GraphRow {
+        graph_hash: row.get(0).map_err(db_err)?,
+        graph_name: row.get(1).map_err(db_err)?,
+        dsl_version: row.get(2).map_err(db_err)?,
+        dsl_json: row.get(3).map_err(db_err)?,
+        created_at: row.get(4).map_err(db_err)?,
     })
 }
 
