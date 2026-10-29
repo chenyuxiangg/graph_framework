@@ -143,3 +143,49 @@ cd doc/spec-v1.2 && shasum -a 256 0*.md && wc -l 0*.md
 | C2 | 待作者修正 02 §2.5.4/§2.4.2 与 07:32 的 `DSL_SYMBOL_*` 表述（覆盖 python_node 格式非法） | — |
 | C3 | 待作者同步 04 §4.9 A2/A7/A17 与节首结论 | — |
 | C4 | 待作者对齐 04 §4.3.3/§4.3.4 的 `zgraph_worker.*` 异常名与 `ProtocolError` 基类口径 | — |
+
+### 6.1 复审（2026-10-30，reviewer-b；HEAD `d4c0f5b`）
+
+**复审范围**：作者条件修正提交 `d4c0f5b`（`66af480..HEAD` = 10 files, +82/−72，仅 docs）+ 重跑 hash/行数/check。独立核对文件与实现，不采信作者自述。
+
+#### 6.1.1 条件逐条关闭核对
+
+| 条件 | 结果 | 关闭证据（文件:行） |
+|---|---|---|
+| C1 | ✅ 已关闭 | 10 处引用已统一为「PROVENANCE §2 第 4 条」：`00:2`、`02:3`、`03:3`、`04:3`、`06:3`、`07:3`、`README:10,61`、`architecture-v2:239,278`；全仓 grep 无 `PROVENANCE §2.5` 悬空引用残留（仅 `PROVENANCE.md:34` 复盘文本提及旧写法，属有意记录）；回写批次确为 `PROVENANCE.md:24`（§2 第 4 条）。 |
+| C2 | ⚠️ 部分关闭（残留 1 处，见 R1） | 已按 `crates/zgraph-dsl/src/symbols.rs` 实际行为修正：`02 §2.4.2(:426)`、`02 §2.5.3(:518)`、`02 §2.5.4(:531)`、`00 §0.4(:161)`、`04 §4.3.5(:404)`、`07 AC-04(:32)`、`architecture D7(:250)` 均明确「python_node 格式非法在加载期报 `DSL_SYMBOL_NOT_FOUND`（`node_id`），import/签名后移 `NODE_WORKER_IMPORT`」。**残留**：`04 §4.7.4(:773)` 汇总行仍只写「内置 gate op 名不存在/格式非法」、定位仅 `symbol`/`edge_index`，未覆盖 python_node 格式非法的 `node_id`，与 `04:404`/`02:531` 冲突。 |
+| C3 | ✅ 已关闭 | `04 §4.9` 节首结论、`A2(:820)`（`NodeError` 8 变体含 `NodeWorker`/D10）、`A7(:825)`（`STREAMING_CHANNEL_CAP` 仅规范容量 / `stream_tx`→`emitter` / `PYTHON_CONCURRENCY_*` v2 忽略 / `MAX_WORKERS`*）、`A17(:835)`（M2 单通道 8192，ISSUE-033）均已更新；与 00 §0.3/§0.5、04 §4.2.1/§4.3.6 一致。 |
+| C4 | ⚠️ 部分关闭（残留 2 处，见 R2/R3） | `04 §4.3.3` 标题/成员表、`§4.3.4` 映射表、`§4.5.3` 示例、`§4.6.1/§4.6.3` `GateCtx` 已改为 `zgraph_worker.*`；`ProtocolError` 已标注 `Exception` 子类（**不是** `ValueError`），未捕获 → `NODE_WORKER_PROTOCOL`/`NodeWorker{Protocol}`（与 `python/zgraph_worker/protocol.py:23`、`runtime.py` 的 `except ProtocolError` 一致）；`ctx` 成员已改「公有属性 + 约定只读」。**残留**：`04:272`（§4.3.1 示例仍 `from zgraph import NodeError`）、`04:287`（“Python 包 `zgraph` 由框架随 CLI/bin 提供”），与 `04:361`「v2 SDK：`zgraph_worker`；**不提供** zgraph 兼容包」直接矛盾；另 `04:324`（§4.3.3 `log` 失败列）新增「非 `str` message → `ProtocolError`」与实现不符（`python/zgraph_worker/ctx.py:68-70` 的 `log` 不做类型校验/不抛该异常），见 R4。 |
+
+#### 6.1.2 复审验证命令与结果
+
+```bash
+cd doc/spec-v1.2 && shasum -a 256 0*.md && wc -l 0*.md
+# 9 个分册 SHA-256 与行数逐项与 PROVENANCE §3 一致；00–08 合计 5530
+# （287+302+913+388+876+1172+985+195+412 = 5530）；README 分册表 04=876、其余一致
+bash scripts/dev/check.sh                 # 12 项 OK → CHECK PASSED，exit 0
+PYTHONPATH=python .venv/bin/python -m pytest   # 20 passed（base 仍早于 REV-013；rebase 后 44）
+git status --porcelain                    # 空（复审提交前）
+git diff --name-only 2863490..HEAD        # 11 文件全部在 doc/（10 作者修正 + 本评审记录）
+git diff --name-only 66af480..HEAD        # 10 文件，仅 doc/spec-v1.2/** + doc/architecture-v2.md
+```
+
+- `PROVENANCE §2 第 5 条（REV-014 条件修正批次）` 存在（`PROVENANCE.md:33`），并已按实测更新 §3 hash/行数与 README 行数表。
+- 依赖实现侧复核：`crates/zgraph-dsl/src/symbols.rs:106-116,166-172,239-252`（python_node 格式非法 → `DSL_SYMBOL_NOT_FOUND`）、`python/zgraph_worker/protocol.py:23`（`ProtocolError(Exception)`）、`python/zgraph_worker/ctx.py:68-70`（`log` 无类型校验）。
+- 新矛盾检查：C2 主口径、C3 计数、D7 在 00/02/04/07/architecture 已一致；未发现其他新增语义冲突。
+
+#### 6.1.3 复审结论
+
+**复审结论：仍有条件（本轮不通过；C1/C3 已关闭，C2/C4 各留少量文本残留）**
+
+剩余条件（R1–R3 关闭后即可复审转通过；R4/R5 为建议级）：
+
+| 编号 | 位置 | 需修 |
+|---|---|---|
+| R1（C2 残留） | `04-节点接口与扩展点.md:773`（§4.7.4 汇总表） | `DSL_SYMBOL_NOT_FOUND` 行补「python_node 的 `module/function` 格式非法（加载期，定位 `node_id`）」，与 `04:404`/`02:531` 一致 |
+| R2（C4 残留） | `04-节点接口与扩展点.md:272`（§4.3.1 示例） | `from zgraph import NodeError` → `from zgraph_worker import BusinessError`（与 §4.3.4 `:361` 示例一致） |
+| R3（C4 残留） | `04-节点接口与扩展点.md:287` | “Python 包 `zgraph` 由框架随 CLI/bin 提供”与 `:361`“不提供 zgraph 兼容包”矛盾；改为 `zgraph_worker` 的准确说明（或删除该句） |
+| R4（建议） | `04-节点接口与扩展点.md:324`（§4.3.3 `log` 行） | “非 `str` message → `ProtocolError`”与实现不符：`ctx.log` 不做类型校验；建议改为“SDK 不校验；非 JSON 可序列化值在写 log 帧时异常”或明确协议层要求 |
+| R5（建议） | `02-DSL与校验.md:531`（§2.5.4 expected/actual） | `{"symbol","kind","format_or_op"}` 为自造键；实现为 python_node `{"symbol","kind":"python_node","format"}` / gate `{"symbol","kind":"gate","allowed"}`，建议写精确形状 |
+
+> 说明：C1（PROVENANCE 引用）、C3（04 §4.9）已完全关闭；C2 主口径、C4 主体已关闭，仅余 R1–R3 三处文本残留。作者修正 R1–R3（建议同轮 R4/R5）后，复审即可以「通过」结论追加 §6.2，合并门禁随之开放。本评审未改任何文档正文/台账/进度/README，未 merge/push。
