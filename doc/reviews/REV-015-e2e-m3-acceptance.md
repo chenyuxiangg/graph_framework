@@ -142,4 +142,55 @@ PROBE serial run#2 elapsed=488.244291ms status=Completed
 
 | 条件 | 关闭证据 | 关闭日期 |
 |---|---|---|
-| C1 | 待 e2e-dev 修复后复审追加（`cargo test -p zgraph-e2e --test parallel` ×3、`cargo test --workspace` ×1） | — |
+| C1 | **已关闭**：`5ed6fa9`（skew 250ms→50ms；总耗时 1.0s→实测重标定 600ms；新增同用例真 worker 串行对照 + `parallel < serial × 0.8` 断言）；复审实跑 `parallel` ×3 全绿（详见 §7） | 2026-10-30 |
+
+## 7. 复审（2026-10-30，reviewer-a，HEAD `5ed6fa9`）
+
+> e2e-dev 按 §6 C1 + 建议项提交 `5ed6fa9`（父 `c5c9cd5`；base=`origin/main`=`23123cf`，未 rebase；`git diff --shortstat` = 5 files, +444/−267，仅 `tests/e2e/**`；author/committer `chenyuxiangg <1007423165@qq.com>`，正文含 `Review: REV-015` / `Agent: e2e-dev`；worktree clean）。本节为独立复审：读 diff + 亲跑 + **反向验证断言活性**，保留原「有条件通过」历史不删除。
+
+**复审结论：通过**
+
+C1 已以**真实对照断言**关闭（不是换个常量继续弱断言）：skew 收紧到 **50ms**（实测 0–1ms）；`PARALLEL_TOTAL_BUDGET` 1.0s 占位→ **600ms** 实测重标定；并在同一用例内新增**真 worker 串行对照图**（`start→a→b→done`）断言 `parallel < serial × 0.8`（实测并行 268–290ms / 串行 490–506ms，比值 **0.55–0.57**）。反向验证：临时把三条断言分别改坏（ratio 80→10、skew 50ms→0ms、budget 600→50ms）均**立即 FAILED**，证明均为活断言（不是摆设）；随后还原，`git status` 空。建议项 #5/#6/#8/#9/#10 全部落实；#11/#12 按 Lead 决定仅登记未改（diff 无对应改动）。范围/元数据合规：未改 `crates/**`/`python/**`/`doc/**`/`.github/**`，仅 `tests/e2e/fixtures/py/e2e_fixtures/concurrency.py` 的日志格式/默认 sleep 语义增强（非弱化）。
+
+### 7.1 C1 与建议项逐项关闭核对
+
+| 项 | 结果 | 证据（文件 / 命令） |
+|---|---|---|
+| C1-1 skew 50ms | ✅ | `parallel.rs` `BRANCH_START_SKEW_LIMIT=50ms`；实测 a/b Running 时间差 **0–1ms**；反向改 0ms→用例 FAILED |
+| C1-2 总耗时重标定 | ✅ | `parallel.rs` `PARALLEL_TOTAL_BUDGET=600ms`（实测 268–290ms，≥2x 余量）；反向改 50ms→FAILED |
+| C1-3 串行对照 | ✅ | `parallel.rs` 新增 `serial_parallel_graph()`/`run_serial_baseline()`，同一用例内真 worker 跑 `start→a→b→done`，断言 `parallel.as_micros()*100 < serial.as_micros()*80`；实测 268/490–290/506（0.55–0.57）；反向改 10%→FAILED |
+| #5 孙进程超时 1.5s | ✅ | `timeout_kill.rs` `GRANDCHILD_TIMEOUT_MS=1_500`（主用例仍 1_000 按 07 原文）；`timeout_kill` ×2 绿 |
+| #6 并发窗口 0.6s | ✅ | `concurrency.rs` `BRANCH_SLEEP_SECONDS=0.6` + fixture 默认 0.6；`concurrency` ×3（峰值 2 / ≤2且≥2 / 3 断言）绿 |
+| #8 函数 ≤60 行 | ✅ | 脚本扫描 `tests/e2e/{*.rs,common/mod.rs}` 无 >60 行函数；原 3 个超长测试已拆为 `run_xx`/`assert_xx` helper |
+| #9 删除恒真断言 | ✅ | `cancel.rs` 已删 `at >= paused_at-50ms`，保留 `!second_pid.exists()` + `at >= resumed_at-50ms`；`cancel` ×2 绿 |
+| #10 run_tag 配对 | ✅ | fixture 日志 `<run_tag> <tag> <pid> <wall-clock> start|end`；`read_intervals` 5 字段、配对键 `(run_tag,tag,pid)`；`concurrency` 全绿 |
+| #11/#12 仅登记 | ✅ 符合决定 | diff 未改 raw fixture helper、未提升 `nix` 到 workspace.dependencies（`tests/e2e/Cargo.toml` 不在改动列表）；待 Lead 登记 ISSUE |
+
+### 7.2 亲跑命令与结果（worktree 自带 target，未设 `CARGO_TARGET_DIR`；`CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home`）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test -p zgraph-e2e --test parallel` ×3 | **4/4 passed ×3**（1.32–1.43s/次） |
+| `cargo test -p zgraph-e2e` ×1 | **19/19 passed**（2+4+7+4+2；8s 含编译） |
+| `cargo test --workspace` ×1 | **313 passed / 0 failed**（21s，50 个测试二进制） |
+| 附加稳定性 | `concurrency` ×3（4/4）、`timeout_kill` ×2（2/2）、`cancel` ×2（2/2）全绿 |
+| `cargo fmt --all -- --check` | exit 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（无 warning） |
+| `bash scripts/dev/check.sh` | `CHECK PASSED` |
+| 进程残留 | 运行前后 `pgrep zgraph_worker.runtime` / `time.sleep(60)` 均空（无 worker/孙进程残留） |
+| 洁净度 | `git status --short` 空；三次临时改动均 `git checkout -- tests/e2e/parallel.rs` 还原，未入库 |
+
+### 7.3 反向验证（证明 AC-09 三条断言均为活断言，非“换常量弱断言”）
+
+| 探针 | 临时改动 | 实际结果 |
+|---|---|---|
+| P1 ratio 活性 | `SERIAL_RATIO_PERCENT` 80→10 | **FAILED**：`D8: 并行总耗时 290.036875ms 应显著小于串行对照 506.237625ms（<80%）` |
+| P2 skew 活性 | `BRANCH_START_SKEW_LIMIT` 50ms→0ms | **FAILED**：`a/b 进入 Running 的时间差 1ms 应 < 0ns`（实测 0–1ms） |
+| P3 budget 活性 | `PARALLEL_TOTAL_BUDGET` 600ms→50ms | **FAILED**：`并行总耗时 268.60175ms 应 < 50ms` |
+| 基线 | 未改动 | `1 passed`（4 filtered）|
+
+### 7.4 结论与可合并性
+
+- **复审结论：通过**：C1 关闭（真实串行对照 + 实测阈值 + 50ms skew，且三条断言经反向验证有活性）；#5/#6/#8/#9/#10 落实；#11/#12 按决定仅登记；范围/元数据合规。
+- **可合并**：满足 merge.sh 前置（记录含「复审结论：通过」、worktree clean、全量测试全绿）；分支基于 `23123cf` 可 ff，merge.sh 会自动 rebase 到最新 `origin/main` 并重跑 `cargo test --workspace`。
+- **残余非阻塞项**：① 600ms 绝对阈值在 2 核 CI + 同二进制测试并行下余量偏紧（本机 268–290ms；若 CI 首跑抖动可调 800ms 或以 ratio 断言为主，不阻塞本分支）；② #2 AC-07 真 worker ticker / #3 kernel 幻影 attempt / #4 `valid_cycle.json` / #7 AC-09 覆盖语义口径仍待 Lead 登记 ISSUE（原 §5.3）；③ process 边界第二评审待 `reviewer-b` 追加 §5.2（本次未改变其内容）。
