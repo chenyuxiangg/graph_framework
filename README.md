@@ -42,7 +42,7 @@ uv run pytest -q
 | `crates/zgraph-trace/` | TraceEvent、SQLite、回放（M2） |
 | `crates/zgraph-worker/` | worker 协议客户端、子进程生命周期（M0 已实现） |
 | `crates/zgraph-harness/` | Agent Harness（M4） |
-| `crates/zgraph-cli/` | `zgraph` 命令（M0 仅 `--version`） |
+| `crates/zgraph-cli/` | `zgraph` 命令（M2：`validate` / `trace`；`run`/`replay` 见 M3–M5） |
 | `python/zgraph_worker/` | worker SDK：握手、ctx、运行时、示例 worker |
 | `schemas/` | DSL schema（M1）、worker 协议 v1 |
 | `tests/` | 新 e2e 与 fixture |
