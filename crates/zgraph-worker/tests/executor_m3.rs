@@ -141,12 +141,34 @@ async fn run_payload_carries_seed_user_global_vars_and_deadline() {
     assert_eq!(probe["greeting"], "hello-seed");
     assert_eq!(probe["has_deadline"], true);
     assert_eq!(probe["node_id"], "work");
+    assert_eq!(
+        probe["attempt"], 0,
+        "attempt must be carried into the run payload"
+    );
+    assert_eq!(probe["params"], json!({}), "v1 参数走 params 空对象");
+}
+
+#[tokio::test]
+async fn dispatch_inputs_include_every_declared_port_with_null_for_missing() {
+    let graph = common::linear_graph_with_optional_port("wfaults", "echo_inputs");
+    let spec = common::linear_spec(graph, json!({"v": 1}));
+    let (outcome, _sink) = common::run_graph(spec, common::executor(RUN_TIMEOUT)).await;
+    assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
+    let inputs = &outcome.output.as_ref().expect("run output")["r"]["inputs"];
+    // 整包广播：x 端口收到 start 输出 {"x": {"v": 1}}；未接线的 spare 端口必须是 null。
+    assert_eq!(inputs["x"], json!({"x": {"v": 1}}));
+    assert!(
+        inputs["spare"].is_null(),
+        "missing port must be null: {inputs}"
+    );
 }
 
 #[tokio::test]
 async fn kernel_timeout_kills_worker_process_group_including_grandchild() {
     let paths = common::PidPaths::new();
-    let graph = common::linear_graph("wfaults", "sleep_forever", Some(500));
+    // 超时 1.5s：给 Python 冷启动 + 派孙进程 + pid 落盘留足余量（慢机下 500ms 会
+    // 在孙进程 pid 落盘前就被 kill，导致断言证据缺失而误报，REV-012 #5）。
+    let graph = common::linear_graph("wfaults", "sleep_forever", Some(1500));
     let input = json!({
         "pid_file": paths.worker.display().to_string(),
         "child_pid_file": paths.child.display().to_string()
@@ -191,11 +213,11 @@ async fn kernel_cancel_kills_worker_process_group() {
     let sink = Arc::new(MemoryTraceSink::new());
     let handle = start_run(None, spec, common::executor(RUN_TIMEOUT), sink.clone())
         .expect("run should start");
-    wait_for_node_running(&sink, "work").await;
+    common::wait_for_node_running(&sink, "work").await;
     // 等 fixture 真正开始执行（自身与孙进程的 pid 都落盘）再取消，
     // 否则可能在写 pid 前就被 abort，后续「孙进程无残留」断言失去意义。
-    wait_for_file(&paths.worker).await;
-    wait_for_file(&paths.child).await;
+    common::wait_for_file(&paths.worker).await;
+    common::wait_for_file(&paths.child).await;
     assert!(
         handle.control(RunControl::Cancel),
         "cancel command accepted"
@@ -212,11 +234,16 @@ async fn kernel_cancel_kills_worker_process_group() {
 
 #[tokio::test]
 async fn crashed_worker_only_affects_its_own_instance() {
-    let graph = common::parallel_graph("wfaults", "business_error", "ok");
-    let spec = common::linear_spec(graph, json!({}));
+    // 确定性设计（REV-012 #1）：崩溃分支等健康分支写出 marker 后再延迟 0.5s 抛错，
+    // 保证 b 的 Completed 事件先于 a 的 Failed 进入内核事件队列；否则内核冷峻失败
+    // 的 fail-fast 会把仍在飞行的 b 迁 Cancelled（这是正常收尾，不是隔离失败）。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("healthy.marker");
+    let graph = common::parallel_graph("wfaults", "crash_after_marker", "ok_with_marker");
+    let spec = common::linear_spec(graph, json!({"marker": marker.display().to_string()}));
     let (outcome, sink) = common::run_graph(spec, common::executor(RUN_TIMEOUT)).await;
-    // 冷峻语义：run 失败；但 b 分支的子进程独立完成（进程隔离，崩溃不扩散）。
-    assert_failed_with(&outcome, "NODE_BUSINESS_ERROR");
+    // 冷峻语义：run 失败；健康分支的子进程独立完成（进程隔离，崩溃不扩散）。
+    assert_failed_with(&outcome, "NODE_PYTHON_EXCEPTION");
     let status = |node: &str| {
         sink.snapshots()
             .into_iter()
@@ -226,6 +253,10 @@ async fn crashed_worker_only_affects_its_own_instance() {
     };
     assert_eq!(status("a"), Some(InstanceStatus::Crashed));
     assert_eq!(status("b"), Some(InstanceStatus::Completed));
+    assert!(
+        marker.exists(),
+        "healthy branch must finish before the crash"
+    );
 }
 
 #[tokio::test]
@@ -265,7 +296,7 @@ async fn run_parallel(
 ) -> Vec<(f64, f64)> {
     let paths = common::PidPaths::new();
     let graph = common::parallel_graph("wparallel", "a", "b");
-    let input = json!({"log_file": paths.log.display().to_string(), "sleep": 0.5});
+    let input = json!({"log_file": paths.log.display().to_string(), "sleep": 0.8});
     let spec = common::linear_spec(graph, input);
     let executor = Arc::new(WorkerExecutor::with_limits(
         common::supervisor_config(timeout),
@@ -275,35 +306,6 @@ async fn run_parallel(
     let (outcome, _sink) = common::run_graph(spec, executor).await;
     assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
     read_intervals(&paths.log)
-}
-
-/// 轮询等待 fixture 写出 pid 文件（最多 5s）。
-async fn wait_for_file(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("{} not created in time", path.display());
-}
-
-async fn wait_for_node_running(sink: &MemoryTraceSink, node_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let running = sink.snapshots().iter().any(|snapshot| {
-            snapshot.node_id == node_id && snapshot.status == InstanceStatus::Running
-        });
-        if running {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "node {node_id} never reached Running"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 /// 读并发日志为 `(start, end)` 区间（秒，wall clock 同主机可比）。

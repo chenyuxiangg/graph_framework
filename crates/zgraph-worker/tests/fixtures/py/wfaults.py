@@ -32,6 +32,27 @@ def ok(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
     return {"ok": True}
 
 
+def ok_with_marker(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
+    """健康分支：写 marker 后立即返回（崩溃分支据此确定先完成）。"""
+    payload = _broadcast_payload(inputs)
+    with open(str(payload["marker"]), "w", encoding="utf-8") as handle:
+        handle.write("healthy-branch-finished")
+    return {"ok": True}
+
+
+def crash_after_marker(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
+    """崩溃分支：等健康分支写出 marker，再延迟 0.5s 抛错（消除冷峻失败竞速）。"""
+    payload = _broadcast_payload(inputs)
+    marker = str(payload["marker"])
+    deadline = time.monotonic() + 10.0
+    while not os.path.exists(marker):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"marker never appeared: {marker}")
+        time.sleep(0.01)
+    time.sleep(0.5)
+    raise ValueError("boom after healthy branch completed")
+
+
 def business_error(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
     """SDK 业务异常 → NODE_BUSINESS_ERROR。"""
     raise BusinessError("order not found")
@@ -82,7 +103,14 @@ def context_probe(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
         "greeting": ctx.get_var("greeting"),
         "has_deadline": ctx.deadline_remaining_ms() > 0,
         "node_id": ctx.node_id,
+        "attempt": ctx.attempt,
+        "params": dict(ctx.params),
     }
+
+
+def echo_inputs(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
+    """回传全部派发端口（验证「未到端口为 null」）。"""
+    return {"inputs": inputs}
 
 
 

@@ -11,7 +11,7 @@ use serde_json::json;
 
 use zgraph_worker::{
     no_cancel, run_supervised, run_worker, sample_request, CancelSignal, Frame, RunRequest,
-    StreamingLimits, SupervisorConfig, WorkerFailure, WorkerRun, CODE_PROTOCOL,
+    StreamingLimits, SupervisorConfig, WorkerFailure, WorkerRun, CODE_HANDSHAKE, CODE_PROTOCOL,
 };
 
 fn noop_sink() -> impl FnMut(&Frame) {
@@ -29,11 +29,9 @@ async fn run_with_supervisor(
 #[tokio::test]
 async fn timeout_kills_process_group_including_grandchild() {
     let paths = common::PidPaths::new();
-    let config = common::script_config(
-        "grandchild_worker.py",
-        paths.env(),
-        Duration::from_millis(800),
-    );
+    // 总超时放宽到 3s：与「孙进程 pid 落盘」解耦（慢机上 Python 冷启动可能 >1s），
+    // 本用例断言的是超时后进程组被 kill，不依赖精确耗时。
+    let config = common::script_config("grandchild_worker.py", paths.env(), Duration::from_secs(3));
     let request = sample_request("unused", "run", json!({}));
 
     let err = run_worker(&config, &request)
@@ -226,4 +224,120 @@ async fn emit_byte_limit_drops_frames_and_keeps_counting() {
     assert!(run.streaming.bytes <= 1200);
     assert_eq!(run.events.len() as u64, run.streaming.delivered);
     assert_eq!(run.streaming.delivered + run.streaming.dropped, 20);
+}
+
+#[tokio::test]
+async fn oversized_frame_without_newline_is_protocol_error_and_killed() {
+    // REV-012 #3：不可信 worker 写 >8 MiB 无换行行时，supervisor 必须有界读取，
+    // 立即判协议错误并 kill 进程组，而不是先分配整行（OOM）。
+    let paths = common::PidPaths::new();
+    let config = common::script_config(
+        "oversized_frame_worker.py",
+        paths.env(),
+        Duration::from_secs(10),
+    );
+    let request = sample_request("unused", "run", json!({}));
+
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("oversized frame must be rejected");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert_eq!(protocol.code, CODE_PROTOCOL);
+            assert!(
+                protocol.message.contains("frame too large"),
+                "unexpected message: {}",
+                protocol.message
+            );
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+
+    let worker_pid = common::read_pid(&paths.worker);
+    common::assert_pid_gone(&worker_pid, common::PID_GONE_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn hello_version_mismatch_is_rejected_and_process_group_killed() {
+    let paths = common::PidPaths::new();
+    let config = common::script_config(
+        "bad_version_worker.py",
+        paths.env(),
+        Duration::from_secs(10),
+    );
+    let request = sample_request("unused", "run", json!({}));
+
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("version mismatch must be rejected");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert_eq!(protocol.code, CODE_HANDSHAKE);
+            assert!(
+                protocol.message.contains("protocol"),
+                "unexpected message: {}",
+                protocol.message
+            );
+        }
+        other => panic!("expected handshake error, got {other:?}"),
+    }
+
+    let worker_pid = common::read_pid(&paths.worker);
+    common::assert_pid_gone(&worker_pid, common::PID_GONE_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn hello_missing_sdk_version_is_rejected_and_process_group_killed() {
+    let paths = common::PidPaths::new();
+    let config = common::script_config(
+        "missing_field_hello_worker.py",
+        paths.env(),
+        Duration::from_secs(10),
+    );
+    let request = sample_request("unused", "run", json!({}));
+
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("missing sdk_version must be rejected");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert_eq!(protocol.code, CODE_HANDSHAKE);
+            assert!(
+                protocol.message.contains("bad hello payload"),
+                "unexpected message: {}",
+                protocol.message
+            );
+        }
+        other => panic!("expected handshake error, got {other:?}"),
+    }
+
+    let worker_pid = common::read_pid(&paths.worker);
+    common::assert_pid_gone(&worker_pid, common::PID_GONE_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn error_frame_with_exit_zero_is_protocol_error() {
+    // 协议 §3 封闭表：只有「exit 2 + 结构化 error」是业务失败；error + exit 0 = 协议错误。
+    let paths = common::PidPaths::new();
+    let config = common::script_config(
+        "error_exit_zero_worker.py",
+        paths.env(),
+        Duration::from_secs(10),
+    );
+    let request = sample_request("unused", "run", json!({}));
+
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("error frame with exit 0 must be rejected");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert_eq!(protocol.code, CODE_PROTOCOL);
+            assert!(
+                protocol.message.contains("exited with code 0"),
+                "unexpected message: {}",
+                protocol.message
+            );
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
 }

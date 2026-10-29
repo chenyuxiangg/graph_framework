@@ -10,8 +10,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use zgraph_dsl::load_graph;
 use zgraph_kernel::{
-    run_to_completion, CompiledGraph, MemoryTraceSink, NodeExecutor, NodeId, PortName, RunOptions,
-    RunOutcome, RunSpec,
+    run_to_completion, CompiledGraph, InstanceStatus, MemoryTraceSink, NodeExecutor, NodeId,
+    PortName, RunOptions, RunOutcome, RunSpec,
 };
 use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
@@ -166,6 +166,36 @@ pub async fn assert_pid_gone(pid: &str, timeout: Duration) {
     panic!("pid {pid} still alive after {timeout:?} (zombie or leaked child)");
 }
 
+/// 轮询等待文件出现（fixture 同步用；最多 5s）。
+pub async fn wait_for_file(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} not created in time", path.display());
+}
+
+/// 轮询等待某节点进入 Running（最多 5s）。
+pub async fn wait_for_node_running(sink: &MemoryTraceSink, node_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let running = sink.snapshots().iter().any(|snapshot| {
+            snapshot.node_id == node_id && snapshot.status == InstanceStatus::Running
+        });
+        if running {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "node {node_id} never reached Running"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// 构造线性图 `start(x) -> work(x) -> done(r)`。
 pub fn linear_graph(module: &str, function: &str, timeout_ms: Option<u64>) -> Arc<CompiledGraph> {
     let mut config = json!({"module": module, "function": function});
@@ -224,6 +254,37 @@ pub fn parallel_graph(module: &str, function_a: &str, function_b: &str) -> Arc<C
             {"from": "start", "to_node": "b", "to_input_port": "x"},
             {"from": "a", "to_node": "done", "to_input_port": "ra"},
             {"from": "b", "to_node": "done", "to_input_port": "rb"}
+        ]
+    })
+    .to_string();
+    compile_text(&text)
+}
+
+/// 线性图 + 一个**未接线**的可选端口：`start(x) -> work(x, spare?) -> done(r)`。
+///
+/// 验证派发 inputs 覆盖全部声明端口、未到端口为 `null`（00 §0.7）。
+pub fn linear_graph_with_optional_port(module: &str, function: &str) -> Arc<CompiledGraph> {
+    let text = json!({
+        "version": "1.0",
+        "metadata": {"name": "worker_optional_port"},
+        "entry_points": ["start"],
+        "nodes": [
+            {"id": "start", "type": "start",
+             "inputs": [{"name": "x", "type": "any", "required": true}],
+             "config": {}},
+            {"id": "work", "type": "python_node",
+             "inputs": [
+                 {"name": "x", "type": "any", "required": true},
+                 {"name": "spare", "type": "any", "required": false}
+             ],
+             "config": {"module": module, "function": function}},
+            {"id": "done", "type": "end",
+             "inputs": [{"name": "r", "type": "any", "required": true}],
+             "config": {}}
+        ],
+        "edges": [
+            {"from": "start", "to_node": "work", "to_input_port": "x"},
+            {"from": "work", "to_node": "done", "to_input_port": "r"}
         ]
     })
     .to_string();
