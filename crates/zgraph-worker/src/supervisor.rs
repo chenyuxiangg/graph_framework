@@ -392,7 +392,7 @@ impl Supervisor {
         let error: WorkerError = serde_json::from_value(frame.payload)
             .map_err(|err| protocol_failure(format!("bad error payload: {err}")))?;
         match self.wait_exit(self.config.worker.exit_grace).await {
-            Some(status) if status.code() == Some(2) => Err(WorkerFailure::Worker(error)),
+            Some(status) if status.code() == Some(2) => Err(WorkerFailure::Worker(Box::new(error))),
             Some(status) if status.success() => Err(protocol_failure(
                 "error frame but worker exited with code 0",
             )),

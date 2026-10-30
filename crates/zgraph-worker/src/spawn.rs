@@ -58,8 +58,13 @@ pub enum WorkerFailure {
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
     /// worker 返回结构化错误。
+    ///
+    /// 装箱：`genai` 无条件给 `serde_json` 打开 `preserve_order`（feature 统一），
+    /// 使 `serde_json::Value` 变大、`WorkerError` 增至 144B；直接内联会让
+    /// `Result<_, WorkerFailure>` 触发 workspace clippy `result_large_err`
+    /// （M4 引入 genai 后的 CI 回归，见 ISSUE-073）。装箱只改内存布局，不改协议。
     #[error("worker error {0}")]
-    Worker(WorkerError),
+    Worker(Box<WorkerError>),
     /// 超时（进程组已被 kill 并 reap）。
     #[error("worker timed out after {0:?}")]
     Timeout(Duration),
