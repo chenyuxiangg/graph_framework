@@ -3,6 +3,8 @@
 > **模块声明（跨模块）**：本分支改 `doc/**`（`docs` 模块：DR-003、progress、issues、index、reviews/README、test-baseline）与根 `README.md`（`process` 模块，作者 `lead` 为 process 负责人），按 AGENTS §2 属**跨模块**改动；由**非作者**评审人 `reviewer-a` 在本记录作独立第二评审并声明。评审人**未修改任何被评审内容**，只新增本记录；未 merge / 未 push / 未改 main。
 >
 > **评审对象**：`docs/docs-m6-wave1` @ `c234e35`（作者 `lead`，1 commit；base = `origin/main` = `67bc49b`，即 W1 七分支合并后的 main）。
+>
+> **增量复审**：`018332a..8de20a7`（作者 `lead`，1 commit：关闭 C1 + 处理 #2–#6；`Review: REV-046` / `Agent: lead`）。C1 已关闭，#2–#6 已落实或转后续，另记 1 条非阻塞格式 Nit（#7）；结论更新为「通过」，关闭证据见 §4.6/§6。
 
 - **分支**：`docs/docs-m6-wave1`
 - **作者**：`lead`
@@ -13,11 +15,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（增量复审：首轮为「有条件通过」，C1 已由 `8de20a7` 关闭、证据见 §4.6/§6；首轮条件原文保留，不删除）
 
 W1 七分支（REV-039–045）的收口事实**基本正确**：9 个 W1 ISSUE 的 `fixed`/`wontfix` 状态与 REV 映射（033→041、059→043、068/073/078→045、075/077→042、086→040、089→044）与已合并 main 的对应分支/评审记录**一致**；新增 ISSUE-090..093 编号无重复（001–093 连续无缺号）、8 列表格列数正确，且 090/092/093 均能在 REV-041/042 记录或 M6 合并实操中找到出处；REV-039..045 索引行与 `doc/reviews/` 文件一一对应、结论/评审人与记录一致；DR-003 §2 的 REV-039–058 **连续无重号/无缺号**，§1↔§2 波次映射一致（抽查 036/082/087/086/088 全部对应新编号）；progress 23 行（非空 18）≤30、四块齐全；README/index/baseline 链接全部有效；`check.sh` PASS、worktree clean。
 
-但**REV 编号顺延有 4 处残留**（同一 commit 内新旧编号并存），会让 W2/W3 派工指向错误分支，必须修正后才可合并：
+**首轮**发现 REV 编号顺延后有 4 处残留旧编号（C1），现已由 `8de20a7` **全部修正**（逐项证据见 §4.6/§6）；#2–#6 建议亦已落实（删除不可达短哈希、追加旧编号注记、ISSUE-030 注记、索引日期、ISSUE-093 最小复现）。首轮条件原文（历史保留）：
 
 - **C1（重要，编号一致性）**：
   1. `doc/issues.md:83`（ISSUE-075）：spec 05 §5.8.5 回写「随 **REV-056**」→ 应为 **REV-057**（DR-003 §2 `docs/docs-m6-writeback`）。
@@ -26,29 +28,30 @@ W1 七分支（REV-039–045）的收口事实**基本正确**：9 个 W1 ISSUE 
   4. `doc/index.md:18`：「M6 计划至 **REV-057**」→ 应为 **REV-058**（DR-003 §2 末行 `docs/process-m6-wrapup` = REV-058；`doc/reviews/README.md:62` 与 progress 均已写 058）。
   **关闭要求**：改上述 4 处文本；建议同时在 `doc/reviews/README.md` M6 段落加一行「REV-040–044 记录内对 W2/W3 的 REV 引用（如 REV-054/056）为编号顺延前口径，以 DR-003 为准」（记录本身不可改，见 #3）。
 
-其余为**建议/备注**（§3 #2–#6），不阻塞：main 不可达的 commit 短哈希（#2）、记录内旧编号注记（#3）、ISSUE-030 可顺势收口（#4）、索引日期口径（#5）、ISSUE-093 证据来源（#6）。
+其余为**建议/备注**（§3 #2–#6），首轮不阻塞、现均已落实：main 不可达的 commit 短哈希（#2，已删除改为 REV 引用）、记录内旧编号注记（#3，已在 reviews README 追加）、ISSUE-030 可顺势收口（#4，已加「部分修」注记并转 in-progress）、索引日期口径（#5，已改 2026-10-30）、ISSUE-093 证据来源（#6，已补最小复现）。增量复审另记 1 条非阻塞格式 Nit（#7）。
 
 ## 2. 四维评审
 
 | 维度 | 结论 | 依据（文件/行/命令） |
 |---|---|---|
-| 功能正确性 | ⚠️ | ① 9 个 W1 ISSUE 状态/REV 映射与 main 合并事实一致（§4.2/§4.3）：`git merge-base --is-ancestor` 证实 7 个 W1 分支均已在 `67bc49b`；对应 REV-040–045 记录结论均为「通过」。② 但台账/索引 4 处残留旧 REV 编号（C1），会使后续 W2/W3 工作指向错误评审编号——收口任务的核心目标是编号顺延，故扣分。 |
-| 代码结构合理性 | ✅ | 纯文档收口：7 个文件各改其位（台账/进度/索引/评审索引/README/baseline/DR-003 编号顺延），未夹带代码/测试/配置/spec 正文；REV-046 记录按流程落在本分支 `doc/reviews/`；跨模块（doc + 根 README）已在本记录声明并由非作者第二评审，符合 AGENTS §2。 |
-| 逻辑性 | ✅ | ① DR-003 §2 的 REV-039–058 经脚本核对：**连续 20 个、无重号、无缺号**，wrapup 插入为 REV-046 后 W2/W3 整体 +1，§1 各 ISSUE 的波次/REV 与 §2 分支表逐项一致（036→047、082→048、087→049、086→040+e2e 055、088→056、073/075/077/078 等）。② progress 的 W2/W3 编号与 DR-003 一致；W1 done、W2/W3 next、阻塞含 ISSUE-091/093 环境口径。③ 残留旧编号属内容一致性问题（C1），非模型/逻辑错误。 |
-| 可读性 | ✅ | 收口文档结构清晰：progress 四块 23 行（非空 18）≤30；台账行均为 8 列、状态域合法（open/in-progress/fixed/wontfix）、无重复 ID；REV 索引行按编号升序、链接全部可达；baseline 注记格式与 M3–M5 一致。Nit：索引 M6 行日期口径（#5）。 |
+| 功能正确性 | ✅ | ① 9 个 W1 ISSUE 状态/REV 映射与 main 合并事实一致（§4.2/§4.3）：`git merge-base --is-ancestor` 证实 7 个 W1 分支均已在 `67bc49b`；对应 REV-040–045 记录结论均为「通过」。② 首轮 C1 的 4 处残留旧编号已由 `8de20a7` 全部修正（§4.6），台账/index 与 DR-003 §2/progress 一致。 |
+| 代码结构合理性 | ✅ | 纯文档收口：7 个文件各改其位（台账/进度/索引/评审索引/README/baseline/DR-003 编号顺延），未夹带代码/测试/配置/spec 正文；增量 `018332a..8de20a7` 仅 3 个 doc 文件、+16/−15，仍为纯文档修订；跨模块（doc + 根 README）已在本记录声明并由非作者第二评审，符合 AGENTS §2。 |
+| 逻辑性 | ✅ | ① DR-003 §2 的 REV-039–058 经脚本核对：**连续 20 个、无重号、无缺号**，wrapup 插入为 REV-046 后 W2/W3 整体 +1，§1 各 ISSUE 的波次/REV 与 §2 分支表逐项一致（036→047、082→048、087→049、086→040+e2e 055、088→056、073/075/077/078 等）。② progress 的 W2/W3 编号与 DR-003 一致；W1 done、W2/W3 next、阻塞含 ISSUE-091/093 环境口径。③ 首轮 C1 编号残留已关闭；全局再无 REV-054/056 旧口径（issues/index）。 |
+| 可读性 | ✅ | 收口文档结构清晰：progress 四块 23 行（非空 18）≤30；台账行均为 8 列、状态域合法、无重复 ID；REV 索引行按编号升序、链接全部可达；baseline 注记格式与 M3–M5 一致；索引日期口径已统一（#5 关闭）。残留 Nit：删除短哈希时 8 处行文少了 REV 编号后的空格、reviews README M6 段落出现双句号/REV-037 句并入注记 bullet（#7，仅格式、不影响事实，可随 REV-058 修）。 |
 
 ## 3. 发现清单
 
 | # | 级别 | 位置 | 问题 | 建议 | 状态 |
 |---|---|---|---|---|---|
-| 1 | **重要（C1）** | `doc/issues.md:83,94,100`；`doc/index.md:18`（对照 `doc/decisions/DR-003-m6-scope-and-waves.md:55,56,57,58,59`、`doc/progress.md:18-20`、`doc/reviews/README.md:62`） | REV 编号顺延（W1 收口=REV-046，W2/W3=REV-047–058）后仍有 4 处旧编号：ISSUE-075「回写随 REV-056」、ISSUE-086「e2e 断言转 REV-054」、ISSUE-092「REV-056 回写 06 §6.4.1」、index「M6 计划至 REV-057」；与 DR-003 §2（writeback=057、e2e-final=055、wrapup=058）矛盾 | 4 处分别改为 **REV-057 / REV-055 / REV-057 / REV-058**；并在 reviews README M6 段落加一行注记「记录内 REV-054/056 为顺延前口径，以 DR-003 为准」（见 #3） | open（条件） |
-| 2 | 建议（可核验性） | `doc/issues.md:41,67,76,83,85,86,94,97`（8 处 W1 ISSUE 提交短哈希；ISSUE-073 行未引哈希） | 台账引用的 `e7b144d`（033）、`a995fb3`（059）、`4096853`（068/078）、`c2958f6`（075/077）、`e9426bd`（086）、`75c4f70`（089）**不是 main 历史祖先**（`git merge-base --is-ancestor <hash> 67bc49b` 全为 false）；main 上实际合并提交为 `0934714`/`eb59983`/`c48e878`/`b64d61e`/`cecd015`/`8886dfd`（merge.sh rebase 导致哈希改写）。台账在 main 上无法直接 `git show` 这些哈希 | 将 6 个短哈希替换为 main 可达提交（或统一改为「分支 + subject」引用）；该问题会反复出现，建议在 REV-058 wrapup 固定口径（或 merge.sh 注明 rebase 后哈希映射） | open（不阻塞） |
-| 3 | 建议（记录口径） | `doc/reviews/REV-040..044`（记录内建议栏） | 已合并的 REV-040–044 记录中「由 docs 回写（REV-056）」「转 REV-056」等引用为编号顺延**前**口径（现为 REV-057）；记录不可删改，但后续读者可能误读 | 按 C1 建议在 `doc/reviews/README.md` M6 段落加一行「REV-046 起编号顺延，记录内旧编号以 DR-003 为准」；不改动既有记录正文 | open（不阻塞） |
-| 4 | 建议（台账完整性） | `doc/issues.md:38`（ISSUE-030） | ISSUE-030 的建议动作「如需收敛由 process 统一提升到 `workspace.dependencies`」已由 REV-045 实际完成（`blake3`/`nix` 均已提升，见 ISSUE-068/078 fixed），但 ISSUE-030 仍 `open` 且未加注记；与本分支对 ISSUE-072 的「**已由 REV-045 提升 workspace.dependencies 处理**」注记口径不一致 | 为 ISSUE-030 加「blake3 提升已由 REV-045 完成」注记（置 `fixed` 或保持 open + 注记均可，需与 DR-003 D12「030 留 v0.2」口径一致并注明取舍） | open（不阻塞） |
-| 5 | Nit（日期口径） | `doc/reviews/README.md:45,51` | REV-039/REV-045 索引行日期写 `2026-10-31`，而两条记录内「评审时间」为 `2026-10-30`（REV-040–044 两者一致为 10-31）；索引「日期」列口径不统一 | 统一为评审日（改 039/045 为 2026-10-30）或在索引表头注明「合并日」口径；不阻塞 | open（不阻塞） |
-| 6 | 备注（证据来源） | `doc/issues.md:101`（ISSUE-093） | 「共享 `CARGO_TARGET_DIR` 跨 worktree 串产物」为 M6 合并实操观察（REV-041 记录 §5 提到「由 Lead 在 M6 wrapup 记录」），仓库内无独立证据/复现脚本；描述具体且已写处置（私有 target/clean/串行） | 可接受为环境问题登记；建议 REV-058 wrapup 附最小复现或引用本次 merge 日志，便于后续复核关闭 | open（不阻塞） |
+| 1 | **重要（C1）** | `doc/issues.md:83,94,100`；`doc/index.md:18`（对照 `doc/decisions/DR-003-m6-scope-and-waves.md:55,56,57,58,59`、`doc/progress.md:18-20`、`doc/reviews/README.md:62`） | REV 编号顺延（W1 收口=REV-046，W2/W3=REV-047–058）后仍有 4 处旧编号：ISSUE-075「回写随 REV-056」、ISSUE-086「e2e 断言转 REV-054」、ISSUE-092「REV-056 回写 06 §6.4.1」、index「M6 计划至 REV-057」；与 DR-003 §2（writeback=057、e2e-final=055、wrapup=058）矛盾 | 4 处分别改为 **REV-057 / REV-055 / REV-057 / REV-058**；并在 reviews README M6 段落加一行注记「记录内 REV-054/056 为顺延前口径，以 DR-003 为准」（见 #3） | fixed（`8de20a7`：4 处已改，见 §4.6/§6） |
+| 2 | 建议（可核验性） | `doc/issues.md:41,67,76,83,85,86,94,97`（8 处 W1 ISSUE 提交短哈希；ISSUE-073 行未引哈希） | 台账引用的 `e7b144d`（033）、`a995fb3`（059）、`4096853`（068/078）、`c2958f6`（075/077）、`e9426bd`（086）、`75c4f70`（089）**不是 main 历史祖先**（`git merge-base --is-ancestor <hash> 67bc49b` 全为 false）；main 上实际合并提交为 `0934714`/`eb59983`/`c48e878`/`b64d61e`/`cecd015`/`8886dfd`（merge.sh rebase 导致哈希改写）。台账在 main 上无法直接 `git show` 这些哈希 | 将 6 个短哈希替换为 main 可达提交（或统一改为「分支 + subject」引用）；该问题会反复出现，建议在 REV-058 wrapup 固定口径（或 merge.sh 注明 rebase 后哈希映射） | fixed（`8de20a7` 已落实） |
+| 3 | 建议（记录口径） | `doc/reviews/REV-040..044`（记录内建议栏） | 已合并的 REV-040–044 记录中「由 docs 回写（REV-056）」「转 REV-056」等引用为编号顺延**前**口径（现为 REV-057）；记录不可删改，但后续读者可能误读 | 按 C1 建议在 `doc/reviews/README.md` M6 段落加一行「REV-046 起编号顺延，记录内旧编号以 DR-003 为准」；不改动既有记录正文 | fixed（`8de20a7` 已落实） |
+| 4 | 建议（台账完整性） | `doc/issues.md:38`（ISSUE-030） | ISSUE-030 的建议动作「如需收敛由 process 统一提升到 `workspace.dependencies`」已由 REV-045 实际完成（`blake3`/`nix` 均已提升，见 ISSUE-068/078 fixed），但 ISSUE-030 仍 `open` 且未加注记；与本分支对 ISSUE-072 的「**已由 REV-045 提升 workspace.dependencies 处理**」注记口径不一致 | 为 ISSUE-030 加「blake3 提升已由 REV-045 完成」注记（置 `fixed` 或保持 open + 注记均可，需与 DR-003 D12「030 留 v0.2」口径一致并注明取舍） | fixed（`8de20a7` 已落实） |
+| 5 | Nit（日期口径） | `doc/reviews/README.md:45,51` | REV-039/REV-045 索引行日期写 `2026-10-31`，而两条记录内「评审时间」为 `2026-10-30`（REV-040–044 两者一致为 10-31）；索引「日期」列口径不统一 | 统一为评审日（改 039/045 为 2026-10-30）或在索引表头注明「合并日」口径；不阻塞 | fixed（`8de20a7` 已落实） |
+| 6 | 备注（证据来源） | `doc/issues.md:101`（ISSUE-093） | 「共享 `CARGO_TARGET_DIR` 跨 worktree 串产物」为 M6 合并实操观察（REV-041 记录 §5 提到「由 Lead 在 M6 wrapup 记录」），仓库内无独立证据/复现脚本；描述具体且已写处置（私有 target/clean/串行） | 可接受为环境问题登记；建议 REV-058 wrapup 附最小复现或引用本次 merge 日志，便于后续复核关闭 | fixed（`8de20a7` 已落实） |
+| 7 | Nit（格式，增量复审新增） | `doc/issues.md:41,67,76,83,85,86,94,97`；`doc/reviews/README.md:62-63` | 删除不可达短哈希后 8 处行文在 REV 编号与后文之间缺空格（如「REV-041拆回」「REV-045把」「REV-042preview」「REV-044快照」）；reviews README M6 段落：M6 bullet 末尾缺句号、新增注记 bullet 出现「。。」且「REV-037 未创建…」句被并入注记 bullet | 纯格式整理：8 处补一个空格；M6 bullet 补句号并把「REV-037 未创建（顺延 M6，由 REV-045 承接）。」移回 M6 bullet，注记 bullet 保留单句号；不影响事实/编号，可随 REV-058 或合并前一并修 | open（非阻塞 Nit） |
 
-> **条件**：C1（4 处 REV 编号）关闭后由 reviewer-a 增量复审（本记录 §6 追加关闭证据）即可转「通过」。建议项 #2–#6 可修复或留 REV-058 处理，不阻塞。
+> **条件/状态（增量复审后）**：C1 已由 `8de20a7` **关闭**（逐项证据见 §4.6/§6），#2–#6 已落实；#7 为新增非阻塞格式 Nit，不改变「通过」结论。
 
 ## 4. 验证证据
 
@@ -118,14 +121,45 @@ doc/index.md、README.md、doc/progress.md、doc/issues.md、doc/test-baseline.t
 - ISSUE-089（REV-044）：`tests/e2e/Cargo.toml:9` description 已更新为「M6 e2e 验收包…」；`tests/e2e/cli_support/mod.rs:142-151` 注入 `PYTHONDONTWRITEBYTECODE=1` —— 与台账描述一致。✅
 - ISSUE-086（REV-040）：台账称 `fail_timeout()` 迁移前补 `set_instance_error(NodeError::Timeout{elapsed_ms})` 且补 kernel 单测；REV-040 记录结论通过、范围 2 文件（run.rs + timeout.rs）。✅
 
+### 4.6 增量复审（`8de20a7`，2026-10-31）
+
+```bash
+$ git log --oneline -3
+# 8de20a7 docs(process): 关闭 REV-046 C1——残留旧 REV 编号、撤销 rebase 后不可达短哈希、索引日期与 ISSUE-030/093 注记
+# 018332a docs(review): REV-046 M6 W1 收口评审
+# c234e35 docs(process): M6 W1 收口——台账/进度/评审索引/README/baseline 与 REV 编号顺延
+$ git diff 018332a..8de20a7 --stat
+# doc/index.md          |  2 +-
+# doc/issues.md         | 22 +++++++++++-----------
+# doc/reviews/README.md |  7 ++++---
+# 3 files changed, 16 insertions(+), 15 deletions(-)（纯文档）
+$ git status --porcelain       # 空
+$ bash scripts/dev/check.sh    # CHECK PASSED（progress 非空 18 ≤30、fmt/diff 均通过）
+$ git log -1 --format='%B' 8de20a7
+# 正文：Review: REV-046 / Agent: lead（符合 AGENTS §1）
+```
+
+| 条件/建议 | 复查点（`8de20a7` 后） | 结果 |
+|---|---|---|
+| C1 | `doc/issues.md:83` = REV-057、`:94` = REV-055、`:100` = REV-057；`doc/index.md:18` = REV-058 | ✅ 4 处全部改对；`grep` 确认 issues/index 已无 REV-054/REV-056 旧口径残留 |
+| #2 | 台账不可达短哈希 | ✅ 已删除；剩余短哈希仅 `9137fd6`/`f89ddaa`（均 main 可达），W1 行改为纯 REV 引用 |
+| #3 | reviews README 旧编号注记 | ✅ 追加「REV-040–044 记录正文中的 `REV-054`/`REV-056` 为顺延前口径，以 DR-003 §2 的 REV-055/REV-057 为准（记录不可改，仅追加注记）」 |
+| #4 | ISSUE-030 | ✅ 加「**部分修**：REV-045 已把 blake3/nix/futures-util 提升 workspace.dependencies；依赖引入流程固化见 ISSUE-093」，状态 open→in-progress |
+| #5 | 索引日期 | ✅ REV-039/REV-045 行日期改为 2026-10-30，与记录一致 |
+| #6 | ISSUE-093 证据 | ✅ 追加最小复现：「main 工作区 `cargo test -p zgraph-kernel --test timeout -- --list` 会列出仅 kernel 分支存在的测试」 |
+| 回归 | 台账完整性/链接 | ✅ 93 行、8 列、ID 001–093 连续；issues/index/reviews README 链接扫描全可达；progress 23 行（非空 18）≤30 |
+| 新增 #7 | 格式 | ⚠️ 8 处 REV 编号后缺空格；reviews README M6 段落双句号 + REV-037 句并入注记 bullet（仅格式，非阻塞 Nit） |
+
 ## 5. 遗留问题
 
-- **未关闭条件**：C1（4 处 REV 编号残留，见 §1/§3 #1）；关闭后由 reviewer-a 在 §6 追加关闭记录并改结论为「通过」。
-- **建议项**：#2 main 不可达 commit 哈希（可核验性）、#3 记录内旧编号注记、#4 ISSUE-030 注记、#5 索引日期口径、#6 ISSUE-093 证据来源——均不阻塞；建议 #2/#3 在 REV-058 wrapup 固定口径。
-- 本记录只新增评审文件；未修改 DR-003/台账/进度/索引/README/baseline，未 merge/push。
+- **条件已关闭**：C1 已由 `8de20a7` 关闭（证据见 §4.6/§6），#2–#6 已落实；无剩余阻塞项，本记录结论已更新为「通过」。
+- **非阻塞 Nit**：#7 纯格式——8 处 REV 编号后补空格；reviews README M6 段落补句号、把「REV-037 未创建…」句移回 M6 bullet 并去掉双句号。不影响事实/编号/门禁，可随 REV-058 或合并前顺手修。
+- 本记录只改评审文件（`018332a` + 本次增量复审提交）；未修改 DR-003/台账/进度/索引/README/baseline，未 merge/push。合并按 `scripts/dev/merge.sh docs/docs-m6-wave1 --push`（门禁会复跑全量测试）。
 
-## 6. 条件关闭记录（仅“有条件通过”填写）
+## 6. 条件关闭记录（已关闭；追加修订，首轮条件原文保留未删）
 
 | 条件 | 关闭要求（可执行） | 关闭证据（commit/行） | 关闭日期 |
 |---|---|---|---|
-| C1 | `doc/issues.md:83` → REV-057；`:94` → REV-055；`:100` → REV-057；`doc/index.md:18` → REV-058（并在 reviews README M6 段落加旧编号注记一行） | 待补 | 待补 |
+| C1 | `doc/issues.md:83` → REV-057；`:94` → REV-055；`:100` → REV-057；`doc/index.md:18` → REV-058（并在 reviews README M6 段落加旧编号注记一行） | `8de20a7`：4 处全部修正（`issues.md:83` REV-057、`:94` REV-055、`:100` REV-057、`index.md:18` REV-058）；`doc/reviews/README.md` M6 段落追加旧编号注记 | 2026-10-31 |
+
+> 增量复审由 reviewer-a 于 2026-10-31 执行；本段为追加修订，首轮条件原文与发现清单保留未删。
