@@ -23,7 +23,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -515,6 +515,82 @@ pub async fn wait_for_file(path: &Path) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("{} not created in time", path.display());
+}
+
+// ---------------------------------------------------------------------------
+// 进程区间并发度量（AC-09/AC-12；fixture 追加 `<run_tag> <tag> <pid> <wall> start|end`）
+// ---------------------------------------------------------------------------
+
+/// 解析区间日志为 `(run_tag, start, end)`（秒，同主机墙钟）。
+///
+/// 每行 `<run_tag> <tag> <pid> <wall-clock> start|end`；配对键
+/// `(run_tag, tag, pid)`——一个节点实例一个进程、只写一次 start/end；带 `run_tag`
+/// 后即使跨 run PID 复用也不会错配（REV-015 #10）。非 5 字段行忽略。
+fn parse_interval_lines(path: &Path) -> Vec<(String, f64, f64)> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("interval log {}: {error}", path.display()));
+    let mut starts: HashMap<String, f64> = HashMap::new();
+    let mut intervals = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 5 {
+            continue;
+        }
+        let run_tag = parts[0].to_string();
+        let key = format!("{}/{}/{}", parts[0], parts[1], parts[2]);
+        let timestamp: f64 = parts[3].parse().expect("interval timestamp");
+        match parts[4] {
+            "start" => {
+                starts.insert(key, timestamp);
+            }
+            "end" => {
+                if let Some(started) = starts.remove(&key) {
+                    intervals.push((run_tag, started, timestamp));
+                }
+            }
+            other => panic!("unexpected interval log field {other}"),
+        }
+    }
+    intervals
+}
+
+/// 从共享区间日志读出全部执行区间 `(start, end)`。
+pub fn read_intervals(path: &Path) -> Vec<(f64, f64)> {
+    parse_interval_lines(path)
+        .into_iter()
+        .map(|(_, start, end)| (start, end))
+        .collect()
+}
+
+/// 按 `run_tag` 分组的执行区间（多 run 隔离/每 run 上限度量）。
+pub fn read_intervals_by_run(path: &Path) -> BTreeMap<String, Vec<(f64, f64)>> {
+    let mut grouped: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+    for (run_tag, start, end) in parse_interval_lines(path) {
+        grouped.entry(run_tag).or_default().push((start, end));
+    }
+    grouped
+}
+
+/// 区间列表的峰值并发数（同一时刻先结算 end 再算 start）。
+pub fn peak_concurrency(intervals: &[(f64, f64)]) -> usize {
+    let mut events: Vec<(f64, i32)> = Vec::with_capacity(intervals.len() * 2);
+    for (start, end) in intervals {
+        events.push((*start, 1));
+        events.push((*end, -1));
+    }
+    events.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .expect("finite timestamps")
+            .then(left.1.cmp(&right.1))
+    });
+    let mut current = 0i32;
+    let mut peak = 0i32;
+    for (_, delta) in events {
+        current += delta;
+        peak = peak.max(current);
+    }
+    usize::try_from(peak).expect("non-negative concurrency")
 }
 
 // ---------------------------------------------------------------------------

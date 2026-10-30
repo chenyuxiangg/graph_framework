@@ -52,3 +52,7 @@ path = "concurrency.rs"
 [[test]]
 name = "harness_ac08"
 path = "harness_ac08.rs"
+
+[[test]]
+name = "ac12"
+path = "ac12.rs"

@@ -15,7 +15,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -123,60 +123,6 @@ async fn run_two_concurrent(
     )
 }
 
-/// 从共享日志读出执行区间 `(start, end)`（秒，同主机墙钟）。
-///
-/// 每行 `<run_tag> <tag> <pid> <wall-clock> start|end`；配对键
-/// `(run_tag, tag, pid)`——一个节点实例一个进程、只写一次 start/end；带 `run_tag`
-/// 后即使跨 run PID 复用也不会错配（REV-015 #10）。
-fn read_intervals(path: &Path) -> Vec<(f64, f64)> {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("interval log {}: {error}", path.display()));
-    let mut starts: HashMap<String, f64> = HashMap::new();
-    let mut intervals = Vec::new();
-    for line in text.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 5 {
-            continue;
-        }
-        let key = format!("{}/{}/{}", parts[0], parts[1], parts[2]);
-        let timestamp: f64 = parts[3].parse().expect("interval timestamp");
-        match parts[4] {
-            "start" => {
-                starts.insert(key, timestamp);
-            }
-            "end" => {
-                if let Some(started) = starts.remove(&key) {
-                    intervals.push((started, timestamp));
-                }
-            }
-            other => panic!("unexpected interval log field {other}"),
-        }
-    }
-    intervals
-}
-
-/// 区间列表的峰值并发数（同一时刻先结算 end 再算 start）。
-fn peak_concurrency(intervals: &[(f64, f64)]) -> usize {
-    let mut events: Vec<(f64, i32)> = Vec::with_capacity(intervals.len() * 2);
-    for (start, end) in intervals {
-        events.push((*start, 1));
-        events.push((*end, -1));
-    }
-    events.sort_by(|left, right| {
-        left.0
-            .partial_cmp(&right.0)
-            .expect("finite timestamps")
-            .then(left.1.cmp(&right.1))
-    });
-    let mut current = 0i32;
-    let mut peak = 0i32;
-    for (_, delta) in events {
-        current += delta;
-        peak = peak.max(current);
-    }
-    usize::try_from(peak).expect("non-negative concurrency")
-}
-
 /// 跑一次三并发分支图（真实 worker + 指定并发上限），返回 outcome 与峰值并发。
 async fn run_branches(
     dir: &tempfile::TempDir,
@@ -192,13 +138,13 @@ async fn run_branches(
     )
     .await
     .expect("branch run must finish");
-    let intervals = read_intervals(log_file);
+    let intervals = common::read_intervals(log_file);
     assert_eq!(
         intervals.len(),
         3,
         "三个分支都应记录执行区间（真实进程证据）"
     );
-    (bridge, peak_concurrency(&intervals))
+    (bridge, common::peak_concurrency(&intervals))
 }
 
 /// outcome 级隔离：两端各自 Completed，end 输出带自己的 `run_tag`。
@@ -295,9 +241,9 @@ async fn global_limit_caps_concurrency_across_two_concurrent_runs() {
     assert_eq!(one.outcome.status, RunStatus::Completed);
     assert_eq!(two.outcome.status, RunStatus::Completed);
 
-    let intervals = read_intervals(&log);
+    let intervals = common::read_intervals(&log);
     assert_eq!(intervals.len(), 6, "两个 run 各 3 个分支区间");
-    let peak = peak_concurrency(&intervals);
+    let peak = common::peak_concurrency(&intervals);
     assert!(
         peak <= 2,
         "全局 max_workers=2 时跨 run 峰值并发应 <= 2，实际 {peak}"
@@ -355,6 +301,6 @@ async fn concurrent_runs_are_isolated_in_outcome_instances_and_trace() {
     assert_traces_isolated(&one, &two);
 
     // 每个 run 只有自己的 3 个分支区间（日志文件不串）。
-    assert_eq!(read_intervals(&log_one).len(), 3);
-    assert_eq!(read_intervals(&log_two).len(), 3);
+    assert_eq!(common::read_intervals(&log_one).len(), 3);
+    assert_eq!(common::read_intervals(&log_two).len(), 3);
 }
