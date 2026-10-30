@@ -39,7 +39,7 @@ use zgraph_dsl::{NodeType, Trigger, DEFAULT_NODE_TIMEOUT_MS};
 use crate::context::{NodeContext, NodeContextInit};
 use crate::executor::{CatchPanic, NodeExecutor};
 use crate::gate::{evaluate_gate_for, GateEvaluation};
-use crate::graph::{CompiledGraph, CompiledNode};
+use crate::graph::{CompiledEdge, CompiledGraph, CompiledNode};
 use crate::trace::{
     Emitter, GateResultRecord, InstanceSnapshot, RunFinishedInfo, RunStartedInfo, TraceSink,
     TransitionRecord,
@@ -961,7 +961,16 @@ impl RunLoop {
 
     // -- 投递应用（两阶段的后半段；01 §1.4 / 03 §3.4.2）--------------------
 
-    /// 应用已求值的出边 gate 结果：寻址 → 门控记录 → 写 buffer/结算 → 就绪或 Skipped。
+    /// 应用已求值的出边 gate 结果：门控记录 → 寻址 → 写 buffer/结算 → 就绪或 Skipped。
+    ///
+    /// **gate 拦截的投递不寻址**（ISSUE-061 / REV-026）：`GateResultRecord` 只依赖
+    /// edge/from/求值结果，不依赖目标实例；先判 `passed` 再 `resolve_target`，
+    /// 被拦截的投递就不会创建自环 attempt+1 的幻影实例，也不会因"投递到终态"
+    /// 或"自环超过 max_attempts"而 fail run（01 §1.4 的 `BlockedDelivery.to_instance`
+    /// 本就是 `Option`；03 §3.4.2 的 blocked 分支只结算入边 + Skipped 级联）。
+    ///
+    /// 放行分支仍保持 01 §1.4 的「先寻址再写 GateResult」顺序：寻址失败
+    /// （`RUN_DELIVERY_TO_TERMINAL` 等）不产生 GateResult，与既有测试/语义一致。
     fn apply_publish(
         &mut self,
         from_instance: &str,
@@ -985,34 +994,47 @@ impl RunLoop {
                 ));
                 return;
             };
+            if !evaluation.passed {
+                self.emit_gate_result(from_instance, from_node, &edge, evaluation);
+                self.settle_edge(&edge.to_node, edge.index);
+                self.maybe_skip_after_settle(&edge.to_node);
+                continue;
+            }
             let target = match self.resolve_target(from_instance, &edge.to_node, edge.index) {
                 Some(target) => target,
                 None => return,
             };
-            self.emitter.gate_result(GateResultRecord {
-                run_id: self.run_id.clone(),
-                instance_id: from_instance.to_string(),
-                node_id: from_node.to_string(),
-                edge_index: edge.index,
-                to_node: edge.to_node.clone(),
-                to_port: edge.to_port.clone(),
-                gate_fn: edge.gate.as_ref().map(|gate| gate.function.clone()),
-                passed: evaluation.passed,
-                error: evaluation.error.clone(),
-                ts: now_rfc3339(),
-            });
-            self.last_event_at = Instant::now();
-            if evaluation.passed {
-                self.buffer_write(&target, &edge.to_port, output.clone());
-            }
+            self.emit_gate_result(from_instance, from_node, &edge, evaluation);
+            self.buffer_write(&target, &edge.to_port, output.clone());
             self.settle_edge(&edge.to_node, edge.index);
-            if evaluation.passed {
-                self.maybe_make_ready(&target);
-            }
+            self.maybe_make_ready(&target);
             // 结算后统一复核：即便本条边是"放行"边，目标节点也可能因其它入边被
             // 拦截而永远无法就绪；若此时全部入边已结算 → 必须转 Skipped（01 §1.2.3）。
             self.maybe_skip_after_settle(&edge.to_node);
         }
+    }
+
+    /// 记录一条 GateResult（不可丢 trace；只依赖 edge/from/求值结果，不依赖目标实例）。
+    fn emit_gate_result(
+        &mut self,
+        from_instance: &str,
+        from_node: &str,
+        edge: &CompiledEdge,
+        evaluation: &GateEvaluation,
+    ) {
+        self.emitter.gate_result(GateResultRecord {
+            run_id: self.run_id.clone(),
+            instance_id: from_instance.to_string(),
+            node_id: from_node.to_string(),
+            edge_index: edge.index,
+            to_node: edge.to_node.clone(),
+            to_port: edge.to_port.clone(),
+            gate_fn: edge.gate.as_ref().map(|gate| gate.function.clone()),
+            passed: evaluation.passed,
+            error: evaluation.error.clone(),
+            ts: now_rfc3339(),
+        });
+        self.last_event_at = Instant::now();
     }
 
     /// 解析投递目标实例（自环新建 attempt+1；其它惰性创建/校验终态）。
