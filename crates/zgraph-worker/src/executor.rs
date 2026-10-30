@@ -10,7 +10,9 @@
 //! - **emit 流式**：supervisor 每接纳一帧 emit 就回调，本执行器立即 `ctx.emit`，
 //!   不攒到 result 后批量投递。
 //! - **并发上限**：每 run 信号量（默认 8）先于全局信号量（默认 CPU×2）获取，
-//!   固定加锁顺序避免死锁；崩溃只影响本节点（子进程隔离）。
+//!   固定加锁顺序避免死锁；崩溃只影响本节点（子进程隔离）。上限句柄
+//!   [`WorkerLimits`] 可被 CLI 注入给 Harness 共享（ISSUE-079：工具调用与节点执行
+//!   共用同一实例，合计不超上限）。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -48,36 +50,43 @@ pub fn default_max_workers() -> usize {
         .saturating_mul(2)
 }
 
-/// 基于 Python worker 子进程的节点执行器。
-pub struct WorkerExecutor {
-    config: SupervisorConfig,
+/// 全局 / 每 run 并发上限的**共享句柄**（D4；ISSUE-079）。
+///
+/// 两个信号量都在内部持有，只暴露只读上限与获取许可的方法。当 [`WorkerExecutor`]
+/// 与工具调用（Harness）使用**同一个实例**时，节点执行与工具调用合计不超过
+/// 全局 / 每 run 上限（CLI 组合根负责创建并注入）。
+pub struct WorkerLimits {
     global: Arc<Semaphore>,
     per_run: Mutex<HashMap<String, Arc<Semaphore>>>,
     max_workers: usize,
     max_workers_per_run: usize,
 }
 
-impl WorkerExecutor {
-    /// 用默认并发上限（全局 CPU×2、每 run 8）构造执行器。
-    pub fn new(config: SupervisorConfig) -> Self {
-        Self::with_limits(config, default_max_workers(), DEFAULT_MAX_WORKERS_PER_RUN)
+impl std::fmt::Debug for WorkerLimits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerLimits")
+            .field("max_workers", &self.max_workers)
+            .field("max_workers_per_run", &self.max_workers_per_run)
+            .finish_non_exhaustive()
     }
+}
 
-    /// 显式指定全局/每 run 并发上限（测试与调优用；0 会被提升为 1）。
-    pub fn with_limits(
-        config: SupervisorConfig,
-        max_workers: usize,
-        max_workers_per_run: usize,
-    ) -> Self {
+impl WorkerLimits {
+    /// 显式指定全局 / 每 run 容量（0 会被提升为 1）。
+    pub fn new(max_workers: usize, max_workers_per_run: usize) -> Self {
         let max_workers = max_workers.max(1);
         let max_workers_per_run = max_workers_per_run.max(1);
         Self {
-            config,
             global: Arc::new(Semaphore::new(max_workers)),
             per_run: Mutex::new(HashMap::new()),
             max_workers,
             max_workers_per_run,
         }
+    }
+
+    /// 默认容量：全局 CPU×2、每 run 8（架构 §4 / D4）。
+    pub fn default_limits() -> Self {
+        Self::new(default_max_workers(), DEFAULT_MAX_WORKERS_PER_RUN)
     }
 
     /// 全局并发上限（配置值，不是当前剩余许可）。
@@ -90,7 +99,7 @@ impl WorkerExecutor {
         self.max_workers_per_run
     }
 
-    /// 取当前 run 的信号量（懒创建；run 结束不主动清理，见模块文档与评审风险）。
+    /// 取指定 run 的信号量（懒创建；run 结束不主动清理，见 ISSUE-065 ②）。
     fn run_semaphore(&self, run_id: &str) -> Arc<Semaphore> {
         let mut map = match self.per_run.lock() {
             Ok(guard) => guard,
@@ -99,6 +108,61 @@ impl WorkerExecutor {
         map.entry(run_id.to_string())
             .or_insert_with(|| Arc::new(Semaphore::new(self.max_workers_per_run)))
             .clone()
+    }
+
+    /// 获取每 run 许可；信号量意外关闭（框架不变量违反）→ `None`。
+    pub async fn acquire_run(&self, run_id: &str) -> Option<OwnedSemaphorePermit> {
+        self.run_semaphore(run_id).acquire_owned().await.ok()
+    }
+
+    /// 获取全局许可；信号量意外关闭（框架不变量违反）→ `None`。
+    pub async fn acquire_global(&self) -> Option<OwnedSemaphorePermit> {
+        self.global.clone().acquire_owned().await.ok()
+    }
+}
+
+/// 基于 Python worker 子进程的节点执行器。
+pub struct WorkerExecutor {
+    config: SupervisorConfig,
+    limits: Arc<WorkerLimits>,
+}
+
+impl WorkerExecutor {
+    /// 用默认并发上限（全局 CPU×2、每 run 8）构造执行器。
+    pub fn new(config: SupervisorConfig) -> Self {
+        Self::with_shared_limits(config, Arc::new(WorkerLimits::default_limits()))
+    }
+
+    /// 显式指定全局/每 run 并发上限（测试与调优用；0 会被提升为 1）。
+    pub fn with_limits(
+        config: SupervisorConfig,
+        max_workers: usize,
+        max_workers_per_run: usize,
+    ) -> Self {
+        Self::with_shared_limits(
+            config,
+            Arc::new(WorkerLimits::new(max_workers, max_workers_per_run)),
+        )
+    }
+
+    /// 使用调用方提供的共享上限句柄（ISSUE-079：可与 Harness 工具调用共享同一实例）。
+    pub fn with_shared_limits(config: SupervisorConfig, limits: Arc<WorkerLimits>) -> Self {
+        Self { config, limits }
+    }
+
+    /// 全局并发上限（配置值，不是当前剩余许可）。
+    pub fn max_workers(&self) -> usize {
+        self.limits.max_workers()
+    }
+
+    /// 每 run 并发上限。
+    pub fn max_workers_per_run(&self) -> usize {
+        self.limits.max_workers_per_run()
+    }
+
+    /// 共享上限句柄（只读克隆；CLI 组合根可注入给 Harness，见 ISSUE-079）。
+    pub fn limits(&self) -> Arc<WorkerLimits> {
+        self.limits.clone()
     }
 
     /// 为本节点派生 supervisor 配置：总超时 = 内核剩余 deadline + 兜底余量。
@@ -113,19 +177,18 @@ impl WorkerExecutor {
 
     /// 获取每 run 信号量许可（先于全局，固定顺序）。
     async fn acquire_run(&self, run_id: &str) -> Result<OwnedSemaphorePermit, NodeError> {
-        self.run_semaphore(run_id)
-            .acquire_owned()
+        self.limits
+            .acquire_run(run_id)
             .await
-            .map_err(|_| internal("worker run semaphore closed"))
+            .ok_or_else(|| internal("worker run semaphore closed"))
     }
 
     /// 获取全局信号量许可。
     async fn acquire_global(&self) -> Result<OwnedSemaphorePermit, NodeError> {
-        self.global
-            .clone()
-            .acquire_owned()
+        self.limits
+            .acquire_global()
             .await
-            .map_err(|_| internal("worker global semaphore closed"))
+            .ok_or_else(|| internal("worker global semaphore closed"))
     }
 }
 
@@ -620,5 +683,69 @@ mod tests {
         );
         assert_eq!(streaming_event(&emit(json!({"text": "no-type"}))), None);
         assert_eq!(streaming_event(&Frame::new("log", json!({}))), None);
+    }
+
+    /// ISSUE-079：共享上限句柄的默认容量 = CPU×2 / 每 run 8；0 提升为 1。
+    #[test]
+    fn worker_limits_defaults_match_architecture() {
+        let limits = WorkerLimits::default_limits();
+        assert_eq!(limits.max_workers(), default_max_workers());
+        assert_eq!(limits.max_workers_per_run(), DEFAULT_MAX_WORKERS_PER_RUN);
+        let zero = WorkerLimits::new(0, 0);
+        assert_eq!(zero.max_workers(), 1);
+        assert_eq!(zero.max_workers_per_run(), 1);
+    }
+
+    /// ISSUE-079：CLI 注入的同一实例既被执行器持有、也可被外部消费者获取许可。
+    #[tokio::test]
+    async fn shared_limits_are_one_instance_and_enforce_global_cap() {
+        let limits = Arc::new(WorkerLimits::new(1, 1));
+        let executor = WorkerExecutor::with_shared_limits(
+            SupervisorConfig::from_worker(crate::spawn::WorkerConfig::default()),
+            limits.clone(),
+        );
+        assert!(Arc::ptr_eq(&executor.limits(), &limits));
+        assert_eq!(executor.max_workers(), 1);
+        assert_eq!(executor.max_workers_per_run(), 1);
+
+        let held = limits.acquire_global().await.expect("global permit");
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(50), limits.acquire_global()).await;
+        assert!(
+            blocked.is_err(),
+            "global cap must block the second consumer"
+        );
+        drop(held);
+        assert!(limits.acquire_global().await.is_some());
+    }
+
+    /// ISSUE-079：每 run 上限按 run 隔离；同一 run 超限阻塞，不同 run 不受影响。
+    #[tokio::test]
+    async fn shared_limits_isolate_per_run_caps() {
+        let limits = WorkerLimits::new(8, 1);
+        let run_a = limits.acquire_run("run-a").await.expect("run-a permit");
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(50), limits.acquire_run("run-a")).await;
+        assert!(blocked.is_err(), "same-run cap must block");
+        let run_b = limits.acquire_run("run-b").await.expect("run-b permit");
+        drop(run_a);
+        drop(run_b);
+        assert!(limits.acquire_run("run-a").await.is_some());
+    }
+
+    /// ISSUE-079：每 run 峰值上限 = 8（默认）且 run 间隔离。
+    #[tokio::test]
+    async fn per_run_cap_is_eight_and_isolated() {
+        let limits = WorkerLimits::new(16, DEFAULT_MAX_WORKERS_PER_RUN);
+        let mut held = Vec::new();
+        for _ in 0..DEFAULT_MAX_WORKERS_PER_RUN {
+            held.push(limits.acquire_run("run-a").await.expect("run-a permit"));
+        }
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(50), limits.acquire_run("run-a")).await;
+        assert!(blocked.is_err(), "run-a must be capped at 8");
+        let other = limits.acquire_run("run-b").await.expect("run-b unaffected");
+        drop(other);
+        drop(held);
     }
 }

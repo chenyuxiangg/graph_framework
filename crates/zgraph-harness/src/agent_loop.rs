@@ -40,8 +40,9 @@ use crate::record::{
     LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK,
 };
 use crate::tools::{
-    serialize_tool_result, summarize_args, summarize_result, tool_error_content,
-    validate_tool_arguments, ToolCallRequest, ToolDef, ToolFailure, ToolRunner, ToolSchema,
+    acquire_tool_permits, serialize_tool_result, summarize_args, summarize_result,
+    tool_error_content, validate_tool_arguments, ToolCallRequest, ToolDef, ToolFailure, ToolRunner,
+    ToolSchema,
 };
 
 /// `agent_call` 节点的输出契约（05 §5.9.1 / §5.9.2）。
@@ -638,8 +639,15 @@ async fn execute_tool(
         });
     }
     let timeout_ms = tool_call_timeout_ms(tool, remaining);
+    // ISSUE-079：工具调用与节点执行共享全局/每 run 上限（先每 run、后全局，与
+    // `WorkerExecutor` 同序）；许可持有到本次工具 worker 调用结束。
+    let permits = match acquire_tool_permits(&run.ctx).await {
+        Ok(permits) => permits,
+        Err(failure) => return Ok((false, tool_error_content(&failure))),
+    };
     let request = tool_call_request(tool, call, run.tools_dir, timeout_ms);
     let outcome = run_tool_call(run, request, timeout_ms).await?;
+    drop(permits);
     finish_tool_call(tool, timeout_ms, outcome)
 }
 
@@ -1601,6 +1609,39 @@ mod tests {
                 .len(),
             4
         );
+    }
+
+    /// ISSUE-079：工具执行等待共享全局许可；许可释放后才继续（execute_tool 路径）。
+    #[tokio::test]
+    async fn tool_exec_waits_for_shared_global_limiter() {
+        let limits = Arc::new(zgraph_worker::WorkerLimits::new(1, 8));
+        let ctx = TestCtx::with_limits("run-agent", limits.clone());
+        // 模拟同一 limiter 上正在执行的节点（占住唯一全局许可）。
+        let held = limits.acquire_global().await.expect("node-like permit");
+        let fake = script(json!({
+            "chunk_chars": 64,
+            "calls": [
+                tool_calls(json!([{"call_id": "c1", "name": "now", "args": {}}])),
+                text("done")
+            ]
+        }));
+        let runner = Arc::new(
+            FakeToolRunner::new().behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let agent = loaded_agent(vec![no_args_tool("now")], 5, 1, "role");
+        let run = execute_with_recorder(&agent, &fake, &runner, &ctx, None);
+        tokio::pin!(run);
+        let blocked = tokio::time::timeout(Duration::from_millis(50), &mut run).await;
+        assert!(
+            blocked.is_err(),
+            "tool execution must wait for the shared limiter"
+        );
+        drop(held);
+        let output = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("run completes after permit released")
+            .expect("tool loop");
+        assert_eq!(output.iterations, 2);
     }
 
     #[tokio::test]

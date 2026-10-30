@@ -9,15 +9,23 @@ use std::time::Duration;
 
 use serde_json::Value;
 use zgraph_kernel::{NodeContext, StreamingEvent};
+use zgraph_worker::WorkerLimits;
 
 use crate::constants::CANCEL_POLL_INTERVAL_MS;
 use crate::llm::{LlmDelta, LlmStreamSink};
+
+/// `HarnessCtx::run_id()` 的默认值（未覆写实现的只读身份；仅作每 run 上限的兜底桶）。
+const UNKNOWN_RUN_ID: &str = "unknown";
 
 /// Harness 可见的节点上下文（05 §5.1.1 H1 的**最窄**接口面）。
 ///
 /// v2 偏差（D2）：跨进程 Python SDK 只暴露 `emit/log/get_var/user_id/
 /// cancel_requested/check_cancelled/deadline_remaining_ms`；Rust 侧 Harness 也只用
 /// 这一份子集——没有 `CancellationToken`（用轮询），没有 `RunContext`。
+///
+/// ISSUE-079（DR-003 D7）：新增 `run_id` 与可选共享并发上限 `tool_limits`——
+/// 工具调用与 `WorkerExecutor` 节点执行使用同一 [`WorkerLimits`] 实例，合计不超
+/// 全局 / 每 run 上限。两者均有默认实现，既有 impl 不受影响。
 pub trait HarnessCtx: Send + Sync {
     /// 投递一个**可丢** streaming 事件（不阻塞、不 panic）。
     fn emit(&self, event: StreamingEvent);
@@ -33,6 +41,14 @@ pub trait HarnessCtx: Send + Sync {
     fn seed(&self) -> u64;
     /// 本次执行实例 ID（只读身份）。
     fn instance_id(&self) -> &str;
+    /// 所属 run ID（ISSUE-079：每 run 并发上限的键；默认 `"unknown"`）。
+    fn run_id(&self) -> &str {
+        UNKNOWN_RUN_ID
+    }
+    /// CLI 组合根注入的共享并发上限；`None` = 使用 Harness 进程级默认上限。
+    fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
+        None
+    }
 }
 
 impl HarnessCtx for NodeContext {
@@ -62,6 +78,10 @@ impl HarnessCtx for NodeContext {
 
     fn instance_id(&self) -> &str {
         NodeContext::instance_id(self)
+    }
+
+    fn run_id(&self) -> &str {
+        NodeContext::run_id(self)
     }
 }
 

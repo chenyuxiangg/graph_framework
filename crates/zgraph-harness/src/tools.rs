@@ -11,9 +11,12 @@
 //!
 //! D3 落地：`WorkerToolRunner` 每次 `call` 都 spawn 一个全新 worker 子进程，module 固定
 //! [`TOOL_RUNNER_MODULE`]、function 为 `discover`/`call`；工具模块无跨调用缓存。工具发现
-//! 结果由 executor 按 `tools_dir` 缓存一次。并发上限用全局
-//! `tokio::sync::Semaphore`（CPU×2，与 `WorkerExecutor::default_max_workers` 一致）；
-//! v2 不共享 `WorkerExecutor` 的每 run 信号量（工具调用不携带 run 级执行上下文）。
+//! 结果由 executor 按 `tools_dir` 缓存一次。
+//!
+//! 并发（ISSUE-079 / DR-003 D7）：工具调用的许可来自 [`HarnessCtx::tool_limits`]
+//! （CLI 组合根注入的共享 [`WorkerLimits`]，与 `WorkerExecutor` 节点执行合计不超
+//! 全局 CPU×2 / 每 run 8）；未注入时回退 Harness 进程级默认上限（私有实例，
+//! 容量相同）。加锁顺序固定为**先每 run、后全局**（与 `WorkerExecutor` 一致，防死锁）。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,10 +26,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use zgraph_worker::{
-    default_max_workers, run_worker_controlled, RunRequest, WorkerConfig, WorkerFailure,
-};
+use tokio::sync::OwnedSemaphorePermit;
+use zgraph_worker::{run_worker_controlled, RunRequest, WorkerConfig, WorkerFailure, WorkerLimits};
 
 use crate::budget::estimate_tokens;
 use crate::constants::{
@@ -1109,10 +1110,52 @@ fn config_schema_error(tool_name: &str, json_path: &str, message: &str) -> Harne
 // WorkerToolRunner（D3：每次工具调用一个 worker 子进程）
 // ---------------------------------------------------------------------------
 
-/// 全进程工具并发上限（CPU×2，与架构 §4/D4 的全局 worker 上限一致）。
-fn tool_semaphore() -> &'static Arc<Semaphore> {
-    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(default_max_workers())))
+/// Harness 进程级默认并发上限（未注入共享 limiter 时的回退；CPU×2 / 每 run 8）。
+///
+/// 与生产注入路径容量一致（DR-003 D7）：内部是**私有实例**，不与 `WorkerExecutor`
+/// 共享；CLI 组合根通过 [`HarnessCtx::tool_limits`] 注入共享实例后走共享路径。
+pub(crate) fn default_tool_limits() -> Arc<WorkerLimits> {
+    static LIMITS: OnceLock<Arc<WorkerLimits>> = OnceLock::new();
+    LIMITS
+        .get_or_init(|| Arc::new(WorkerLimits::default_limits()))
+        .clone()
+}
+
+/// 工具调用的并发许可（先每 run、后全局；与 `WorkerExecutor::execute` 同序）。
+///
+/// 持有到工具 worker 调用结束（drop 即归还）。因为 `agent_call` 节点执行本身
+/// **不占** `WorkerExecutor` 许可（Harness 执行器不是 `WorkerExecutor`），工具调用
+/// 不会嵌套持有节点执行许可，不存在"持 A 等 B、持 B 等 A"的死锁环。
+pub(crate) struct ToolPermits {
+    _run: OwnedSemaphorePermit,
+    _global: OwnedSemaphorePermit,
+}
+
+/// 获取工具调用许可：优先用上下文注入的共享 [`WorkerLimits`]，否则回退进程级默认。
+///
+/// 获取顺序固定（每 run → 全局），与节点执行器一致；信号量意外关闭 → `runner_unavailable`
+/// （与旧实现的错误语义一致，由 loop 作为工具错误喂回 LLM）。
+pub(crate) async fn acquire_tool_permits(
+    ctx: &Arc<dyn HarnessCtx>,
+) -> Result<ToolPermits, ToolFailure> {
+    let limits = ctx.tool_limits().unwrap_or_else(default_tool_limits);
+    let run = limits
+        .acquire_run(ctx.run_id())
+        .await
+        .ok_or_else(tool_limiter_closed)?;
+    let global = limits
+        .acquire_global()
+        .await
+        .ok_or_else(tool_limiter_closed)?;
+    Ok(ToolPermits {
+        _run: run,
+        _global: global,
+    })
+}
+
+/// 并发许可意外关闭（框架不变量违反）。
+fn tool_limiter_closed() -> ToolFailure {
+    ToolFailure::new("runner_unavailable", "tool concurrency limiter closed")
 }
 
 /// 生产 ToolRunner：每次 `discover`/`call` 都 spawn 一个新 worker（D3）。
@@ -1120,7 +1163,8 @@ fn tool_semaphore() -> &'static Arc<Semaphore> {
 /// - 无跨调用模块缓存（进程即缓存边界）；
 /// - 超时对**进程组** kill → `ToolFailure { reason: "timeout" }`；
 /// - 取消 → `ToolFailure { reason: "cancelled" }`（loop 再映射为 `NodeError::Cancelled`）；
-/// - 并发受全局信号量约束（[`default_max_workers`] = CPU×2）。
+/// - 并发许可由调用方（`execute_tool` / executor `registry`）通过
+///   [`acquire_tool_permits`] 统一获取（ISSUE-079），本类型不自持信号量。
 ///
 /// 构造必须注入 [`WorkerConfig`]（e2e/CLI 需要设置 `PYTHONPATH`、cwd 等）；每次工具
 /// 调用在基线上覆盖 `timeout` 为生效值（[`DEFAULT_TOOL_TIMEOUT_MS`] 上界由 loop 截断），
@@ -1152,15 +1196,6 @@ impl WorkerToolRunner {
         let mut config = self.config.clone();
         config.timeout = Duration::from_millis(timeout_ms.saturating_add(1_000));
         config
-    }
-
-    /// 获取全局并发许可。
-    async fn permit() -> Result<OwnedSemaphorePermit, ToolFailure> {
-        tool_semaphore()
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| ToolFailure::new("runner_unavailable", "tool semaphore closed"))
     }
 
     /// 调用一次 worker 的 `zgraph_worker.tool_runner.<function>`。
@@ -1214,16 +1249,6 @@ impl ToolRunner for WorkerToolRunner {
         tools_dir: &Path,
         ctx: Arc<dyn HarnessCtx>,
     ) -> Result<Vec<ToolDef>, HarnessError> {
-        let _permit = WorkerToolRunner::permit().await.map_err(|failure| {
-            HarnessError::config_load(
-                &failure.reason,
-                Some(&tools_dir.display().to_string()),
-                Some("$.tools"),
-                None,
-                None,
-                failure.message,
-            )
-        })?;
         let inputs = json!({ "tools_dir": tools_dir.display().to_string() });
         let timeout_ms = DEFAULT_TOOL_TIMEOUT_MS;
         match self.run_worker("discover", inputs, &ctx, timeout_ms).await {
@@ -1237,7 +1262,6 @@ impl ToolRunner for WorkerToolRunner {
         request: ToolCallRequest,
         ctx: Arc<dyn HarnessCtx>,
     ) -> Result<Value, ToolFailure> {
-        let _permit = WorkerToolRunner::permit().await?;
         let inputs = json!({
             "tools_dir": request.tools_dir.display().to_string(),
             "module": request.module,
@@ -2187,6 +2211,97 @@ mod tests {
         assert_eq!(effective.timeout, Duration::from_millis(1_300));
         assert_eq!(effective.program, "python-custom");
         assert_eq!(effective.hello_timeout, Duration::from_secs(5));
+    }
+
+    /// ISSUE-079：注入的共享 limiter 与「节点执行」占位者合计受全局上限约束。
+    #[tokio::test]
+    async fn tool_permits_share_injected_global_limiter() {
+        let limits = Arc::new(WorkerLimits::new(1, 2));
+        let ctx = TestCtx::with_limits("run-a", limits.clone()).into_dyn();
+        // 模拟一个正在执行的节点（占住同一 limiter 的唯一全局许可）。
+        let held = limits.acquire_global().await.expect("node-like permit");
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(50), acquire_tool_permits(&ctx)).await;
+        assert!(
+            blocked.is_err(),
+            "tool permit must wait for the shared global cap"
+        );
+        drop(held);
+        let permits = acquire_tool_permits(&ctx)
+            .await
+            .expect("permits after node released");
+        drop(permits);
+    }
+
+    /// ISSUE-079：每 run 上限按 `run_id` 隔离；两个 run 共享 limiter 时互不串。
+    #[tokio::test]
+    async fn tool_permits_are_isolated_per_run() {
+        let limits = Arc::new(WorkerLimits::new(8, 1));
+        let run_a = TestCtx::with_limits("run-a", limits.clone()).into_dyn();
+        let run_b = TestCtx::with_limits("run-b", limits.clone()).into_dyn();
+        let permits_a = acquire_tool_permits(&run_a).await.expect("run-a permit");
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(50), acquire_tool_permits(&run_a)).await;
+        assert!(blocked.is_err(), "same run must be capped at 1");
+        let permits_b = acquire_tool_permits(&run_b)
+            .await
+            .expect("run-b admitted independently");
+        drop(permits_a);
+        drop(permits_b);
+    }
+
+    /// ISSUE-079：未注入上下文回退进程级默认上限（CPU×2 / 每 run 8，私有实例）。
+    #[tokio::test]
+    async fn uninjected_context_falls_back_to_default_limits() {
+        let ctx = TestCtx::new().into_dyn();
+        assert!(ctx.tool_limits().is_none());
+        let limits = default_tool_limits();
+        assert_eq!(limits.max_workers(), zgraph_worker::default_max_workers());
+        assert_eq!(
+            limits.max_workers_per_run(),
+            zgraph_worker::DEFAULT_MAX_WORKERS_PER_RUN
+        );
+        let permits = acquire_tool_permits(&ctx).await.expect("fallback permits");
+        drop(permits);
+    }
+
+    /// ISSUE-079：工具许可与节点占位许可叠加时，全局峰值不超过上限。
+    #[tokio::test]
+    async fn stacked_tool_and_node_permits_stay_within_global_cap() {
+        let limits = Arc::new(WorkerLimits::new(2, 8));
+        let current = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for index in 0..6 {
+            let limits = limits.clone();
+            let current = current.clone();
+            let peak = peak.clone();
+            tasks.push(tokio::spawn(async move {
+                let _tool_permits: Option<ToolPermits>;
+                let _node_permits: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>;
+                if index % 2 == 0 {
+                    let ctx = TestCtx::with_limits("run-a", limits.clone()).into_dyn();
+                    _tool_permits = Some(acquire_tool_permits(&ctx).await.expect("tool permits"));
+                    _node_permits = None;
+                } else {
+                    _tool_permits = None;
+                    _node_permits = Some((
+                        limits.acquire_run("run-a").await.expect("run permit"),
+                        limits.acquire_global().await.expect("global permit"),
+                    ));
+                }
+                let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                current.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for task in tasks {
+            task.await.expect("task");
+        }
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= 2, "peak {peak} exceeds global cap 2");
+        assert_eq!(current.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

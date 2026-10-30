@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use zgraph_kernel::StreamingEvent;
+use zgraph_worker::WorkerLimits;
 
 use crate::ctx::HarnessCtx;
 use crate::record::{LlmCallRecorder, LlmCallSnapshot};
@@ -108,6 +109,8 @@ pub struct TestCtx {
     instance_id: String,
     seed: u64,
     vars: HashMap<String, Value>,
+    run_id: String,
+    tool_limits: Option<Arc<WorkerLimits>>,
 }
 
 impl Default for TestCtx {
@@ -120,6 +123,8 @@ impl Default for TestCtx {
             instance_id: "test-instance".to_string(),
             seed: 42,
             vars: HashMap::new(),
+            run_id: "test-run".to_string(),
+            tool_limits: None,
         }
     }
 }
@@ -128,6 +133,23 @@ impl TestCtx {
     /// 默认上下文（剩余 deadline 180s，未取消）。
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// ISSUE-079：指定 run ID（每 run 并发上限的键）。
+    pub fn with_run_id(run_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            run_id: run_id.to_string(),
+            ..Self::default()
+        })
+    }
+
+    /// ISSUE-079：注入共享并发上限（应与 `WorkerExecutor` 使用同一实例）。
+    pub fn with_limits(run_id: &str, limits: Arc<WorkerLimits>) -> Arc<Self> {
+        Arc::new(Self {
+            run_id: run_id.to_string(),
+            tool_limits: Some(limits),
+            ..Self::default()
+        })
     }
 
     /// 指定剩余 deadline（毫秒）。
@@ -210,5 +232,13 @@ impl HarnessCtx for TestCtx {
 
     fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
+        self.tool_limits.clone()
     }
 }

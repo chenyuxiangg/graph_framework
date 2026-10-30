@@ -26,7 +26,8 @@
 //!   [`CancelToken`] 只是对 `HarnessCtx` 的只读包装（每 ≤50ms 轮询一次），不伪造
 //!   `cancelled().await` 语义。
 //! - **`HarnessCtx` seam**：生产路径只由 `NodeContext` 适配而来（H1：不触碰
-//!   `RunContext`/调度器）；测试可注入自己的实现。
+//!   `RunContext`/调度器）；测试可注入自己的实现。M6 追加（ISSUE-079）：注入共享
+//!   并发上限时用内部包装类型携带 `Arc<WorkerLimits>`，其余情况仍直接适配 `NodeContext`。
 //! - **重试编排位置**：重试在 Harness 内部（§5.3.5 规则），不在 adapter 内；这与
 //!   05 §5.5.4 伪代码“provider 内部”的措辞不同，但语义等价且更可测。
 //!
@@ -38,6 +39,10 @@
 //!
 //! M5 追加（ISSUE-082，只增不破）：[`LlmCallRecorder`]/[`LlmCallSnapshot`] 与
 //! `HarnessExecutor::with_llm_recorder`；[`HarnessSettings`] 字段集合**不变**。
+//!
+//! M6 追加（ISSUE-079，只增不破）：`HarnessExecutor::with_tool_limits` /
+//! `with_llm_recorder_and_tool_limits` 与 [`HarnessCtx::tool_limits`]（默认 `None`）；
+//! [`HarnessSettings`] 字段集合**不变**（未注入路径行为不变）。
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

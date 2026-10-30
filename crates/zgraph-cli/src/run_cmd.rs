@@ -67,7 +67,7 @@ use zgraph_trace::{
     LlmCallRecord, RecordMode, RecordedOutput, TraceError, TraceHandle, TraceInput, TraceReader,
     TraceWriter,
 };
-use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
+use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor, WorkerLimits};
 
 use crate::bridge::{
     self, BridgeError, BridgeObservers, LifecycleObserver, StreamingObserver, TracedRun,
@@ -909,9 +909,13 @@ fn build_executor(
     recorder: Option<Arc<dyn LlmCallRecorder>>,
 ) -> Arc<dyn NodeExecutor> {
     let config = worker_config(args);
-    let worker = Arc::new(WorkerExecutor::new(SupervisorConfig::from_worker(
-        config.clone(),
-    )));
+    // ISSUE-079（DR-003 D7）：工具调用与节点执行共享**同一**并发上限实例
+    // （全局 CPU×2 / 每 run 8），避免两者叠加超过 D4 上限。
+    let limits = Arc::new(WorkerLimits::default_limits());
+    let worker = Arc::new(WorkerExecutor::with_shared_limits(
+        SupervisorConfig::from_worker(config.clone()),
+        limits.clone(),
+    ));
     let settings = HarnessSettings {
         assets_dir: assets_dir.to_path_buf(),
         tools_dir: tools_dir.to_path_buf(),
@@ -920,8 +924,10 @@ fn build_executor(
         tool_runner: Arc::new(WorkerToolRunner::new(config)),
     };
     let harness = match recorder {
-        Some(recorder) => Arc::new(HarnessExecutor::with_llm_recorder(settings, recorder)),
-        None => Arc::new(HarnessExecutor::new(settings)),
+        Some(recorder) => Arc::new(HarnessExecutor::with_llm_recorder_and_tool_limits(
+            settings, recorder, limits,
+        )),
+        None => Arc::new(HarnessExecutor::with_tool_limits(settings, limits)),
     };
     let routing: Arc<dyn NodeExecutor> = Arc::new(RoutingExecutor { harness, worker });
     Arc::new(RecordingExecutor::new(

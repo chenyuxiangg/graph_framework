@@ -16,8 +16,10 @@ use std::sync::Arc;
 use serde_json::Value;
 use zgraph_dsl::InputPort;
 use zgraph_kernel::{
-    CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor, PortName,
+    CompiledHandler, CompiledNode, NodeContext, NodeError, NodeExecution, NodeExecutor, PortName,
+    StreamingEvent,
 };
+use zgraph_worker::WorkerLimits;
 
 use crate::agent_loop::{run_agent, AgentRun, RunFailure};
 use crate::config::{load_agent, peek_agent_node_timeout};
@@ -26,7 +28,7 @@ use crate::ctx::{CancelToken, HarnessCtx};
 use crate::error::HarnessError;
 use crate::llm::LlmProvider;
 use crate::record::LlmCallRecorder;
-use crate::tools::{ToolRegistry, ToolRunner};
+use crate::tools::{acquire_tool_permits, ToolRegistry, ToolRunner};
 
 /// Harness 执行器配置（e2e/M5 依赖的冻结面）。
 pub struct HarnessSettings {
@@ -60,15 +62,18 @@ pub struct HarnessExecutor {
     tools_cache: tokio::sync::Mutex<HashMap<PathBuf, Arc<ToolRegistry>>>,
     /// LLM 调用记录器（ISSUE-082；可选观察者，H3：Harness 不写 SQLite）。
     recorder: Option<Arc<dyn LlmCallRecorder>>,
+    /// CLI 组合根注入的共享并发上限（ISSUE-079；`None` = 进程级默认回退）。
+    tool_limits: Option<Arc<WorkerLimits>>,
 }
 
 impl HarnessExecutor {
-    /// 构造执行器（不记录 LLM 调用）。
+    /// 构造执行器（不记录 LLM 调用；使用进程级默认并发上限）。
     pub fn new(settings: HarnessSettings) -> Self {
         Self {
             settings,
             tools_cache: tokio::sync::Mutex::new(HashMap::new()),
             recorder: None,
+            tool_limits: None,
         }
     }
 
@@ -84,6 +89,35 @@ impl HarnessExecutor {
             settings,
             tools_cache: tokio::sync::Mutex::new(HashMap::new()),
             recorder: Some(recorder),
+            tool_limits: None,
+        }
+    }
+
+    /// 构造执行器并注入共享并发上限（ISSUE-079 / DR-003 D7）。
+    ///
+    /// 传入的 [`WorkerLimits`] 应与 [`zgraph_worker::WorkerExecutor`] 使用**同一实例**
+    /// （CLI 组合根创建后分别注入），使工具调用与节点执行合计不超过全局 CPU×2 /
+    /// 每 run 8 上限。**只增不破**：[`HarnessSettings`] 字段集合与既有构造器不变。
+    pub fn with_tool_limits(settings: HarnessSettings, limits: Arc<WorkerLimits>) -> Self {
+        Self {
+            settings,
+            tools_cache: tokio::sync::Mutex::new(HashMap::new()),
+            recorder: None,
+            tool_limits: Some(limits),
+        }
+    }
+
+    /// 记录器 + 共享并发上限（CLI `--record=full` 生产路径）。
+    pub fn with_llm_recorder_and_tool_limits(
+        settings: HarnessSettings,
+        recorder: Arc<dyn LlmCallRecorder>,
+        limits: Arc<WorkerLimits>,
+    ) -> Self {
+        Self {
+            settings,
+            tools_cache: tokio::sync::Mutex::new(HashMap::new()),
+            recorder: Some(recorder),
+            tool_limits: Some(limits),
         }
     }
 
@@ -99,14 +133,37 @@ impl HarnessExecutor {
         if let Some(registry) = cache.get(&tools_dir) {
             return Ok(registry.clone());
         }
+        // ISSUE-079：`discover` 也 spawn worker 子进程，计入同一并发上限。
+        let permits = acquire_tool_permits(ctx).await.map_err(|failure| {
+            HarnessError::config_load(
+                &failure.reason,
+                Some(&tools_dir.display().to_string()),
+                Some("$.tools"),
+                None,
+                None,
+                failure.message,
+            )
+        })?;
         let defs = self
             .settings
             .tool_runner
             .discover(&tools_dir, ctx.clone())
-            .await?;
-        let registry = Arc::new(ToolRegistry::new(defs)?);
+            .await;
+        drop(permits);
+        let registry = Arc::new(ToolRegistry::new(defs?)?);
         cache.insert(tools_dir, registry.clone());
         Ok(registry)
+    }
+
+    /// 按注入配置构造执行上下文：注入共享上限时用 [`HarnessNodeCtx`] 包装内核上下文。
+    fn context_for(&self, ctx: &NodeContext) -> Arc<dyn HarnessCtx> {
+        match &self.tool_limits {
+            Some(limits) => Arc::new(HarnessNodeCtx {
+                inner: ctx.clone(),
+                limits: limits.clone(),
+            }),
+            None => Arc::new(ctx.clone()),
+        }
     }
 }
 
@@ -137,7 +194,7 @@ impl NodeExecutor for HarnessExecutor {
             agent_id,
             node_mapping,
             node_max_iterations,
-            ctx: Arc::new(execution.ctx.clone()),
+            ctx: self.context_for(execution.ctx),
             inputs: execution.inputs.clone(),
             declared_ports: execution.node.inputs.clone(),
             declared_timeout_ms,
@@ -157,6 +214,55 @@ impl NodeExecutor for HarnessExecutor {
             return None;
         };
         peek_agent_node_timeout(&self.settings.assets_dir, agent_id)
+    }
+}
+
+/// 生产上下文适配（ISSUE-079 / DR-003 D7；D15「生产唯一实现 = `NodeContext`、
+/// 无独立包装类型」的**局部修订**）。
+///
+/// 仅当 CLI 组合根注入共享并发上限时出现：内核 [`NodeContext`] 仍是唯一状态来源，
+/// 本类型只额外携带 `Arc<WorkerLimits>`，使工具调用与节点执行共享同一限额。未注入
+/// 路径继续直接使用 `impl HarnessCtx for NodeContext`（D15 原样）。
+struct HarnessNodeCtx {
+    inner: NodeContext,
+    limits: Arc<WorkerLimits>,
+}
+
+impl HarnessCtx for HarnessNodeCtx {
+    fn emit(&self, event: StreamingEvent) {
+        NodeContext::emit(&self.inner, event);
+    }
+
+    fn cancel_requested(&self) -> bool {
+        NodeContext::cancel_requested(&self.inner)
+    }
+
+    fn node_deadline_remaining_ms(&self) -> u64 {
+        NodeContext::node_deadline_remaining_ms(&self.inner)
+    }
+
+    fn user_id(&self) -> &str {
+        NodeContext::user_id(&self.inner)
+    }
+
+    fn get_var(&self, key: &str) -> Option<&Value> {
+        NodeContext::get_var(&self.inner, key)
+    }
+
+    fn seed(&self) -> u64 {
+        NodeContext::seed(&self.inner)
+    }
+
+    fn instance_id(&self) -> &str {
+        NodeContext::instance_id(&self.inner)
+    }
+
+    fn run_id(&self) -> &str {
+        NodeContext::run_id(&self.inner)
+    }
+
+    fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
+        Some(self.limits.clone())
     }
 }
 
@@ -541,6 +647,44 @@ mod tests {
             .count();
         assert_eq!(tool_started, 1);
         assert_eq!(tool_ended, 1);
+    }
+
+    /// ISSUE-079：`with_tool_limits` 注入的共享上限对工具调用生效（经内核端到端）。
+    #[tokio::test]
+    async fn injected_limits_gate_tool_calls_through_kernel() {
+        let dir = assets(agent_config("parser", &["now"]), "你是解析器。");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null,
+                 "tool_calls": [{"call_id": "c1", "name": "now", "args": {}}]},
+                {"kind": "text", "content": "done", "stop_reason": "EndTurn"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(
+            FakeToolRunner::with_tools(vec![tool_def("now")])
+                .behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let limits = Arc::new(WorkerLimits::new(1, 8));
+        let executor = Arc::new(HarnessExecutor::with_tool_limits(
+            settings(dir.path(), &fake, &runner),
+            limits.clone(),
+        ));
+        // 模拟同一 limiter 上正在执行的节点（占住唯一全局许可）。
+        let held = limits.acquire_global().await.expect("node-like permit");
+        let task = tokio::spawn(run_graph(AGENT_GRAPH, executor, json!("hi")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "discover/tool call must wait for the shared global limiter"
+        );
+        drop(held);
+        let (outcome, _sink) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("run completes after permit released")
+            .expect("join");
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(runner.calls().len(), 1);
     }
 
     #[tokio::test]
