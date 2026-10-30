@@ -176,6 +176,11 @@ impl WorkerExecutor {
     /// 数据源 = worker 握手 `hello` 的 `python_version`/`sdk_version`（协议 v1 不变）；
     /// 同一 run 内多个 worker 进程按 `(python, sdk)` 去重升序。`None` = 本 run
     /// 尚未成功握手任何 worker（CLI 按 `[]` 写入）。
+    ///
+    /// **范围（REV-048 C2）**：仅聚合**节点 worker**（经 [`NodeExecutor::execute`] →
+    /// [`run_supervised_observed`] 的 hello）；Harness 工具 worker 走
+    /// `run_worker_controlled`（无 hello 观测），因此「仅 agent + tool」的 run 会写
+    /// `[]`。该口径已随 REV-057 回写 06 §6.2.4。
     pub fn worker_versions(&self, run_id: &str) -> Option<Vec<Value>> {
         let guard = match self.worker_versions.lock() {
             Ok(guard) => guard,

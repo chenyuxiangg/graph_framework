@@ -158,8 +158,12 @@ impl TraceWriter {
     ///
     /// 单条 `UPDATE`，**不触碰** `status`/`instances`/`events`；与数据消息共用写线程
     /// 的同一 FIFO，因此调用前已入队的 `RunFinished` 必先落库（barrier 语义）。
-    /// 返回实际更新行数：`0` = run 不存在（幂等，不算错误）。CLI 在 run 结束
-    /// （Completed/**Failed** 均尽力）且关闭写端前调用。
+    /// 返回实际更新行数：`0` = run 不存在（幂等，不算错误）。
+    ///
+    /// **尽力写**（REV-048 C1）：SQL/IO 失败仅返回 `Err`，**不置 writer fatal**、
+    /// 不污染后续 `flush`/`close`；写线程继续服务，调用方（CLI）忽略该错误、不改变
+    /// run 退出码/结果输出。若存储真实损坏，后续 `flush`/`close` 仍按 fail-stop
+    /// （06 §6.4.5）→ CLI exit 4。
     pub fn update_run_columns(
         &self,
         run_id: &str,

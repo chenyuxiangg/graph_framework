@@ -977,8 +977,13 @@ fn build_executor(
 
 /// run 结束（Completed/Failed 尽力）补写 `runs` 两列（ISSUE-082；06 §6.2.4）。
 ///
-/// 无对应观测时写 `[]`（表示本 run 未使用 worker/agent）；失败不影响退出码
-/// （尽力写）。`:memory:` 库不调用本函数（跨进程不可读，文档注明）。
+/// **尽力写（REV-048 C1 方案 B）**：`update_run_columns` 的 `Err` 在此**显式忽略**——
+/// trace writer 对元数据列失败不置 fatal（写线程继续服务），因此本函数失败不改变
+/// run 退出码/结果输出、也不影响后续 flush/close；若存储真实损坏，flush/close 仍按
+/// fail-stop 06 §6.4.5 → exit 4（由 `close_writer` 统一映射）。
+///
+/// 无对应观测时写 `[]`（表示本 run 未使用 worker/agent）；`:memory:` 库不调用本函数
+/// （跨进程不可读，文档注明）。
 fn write_run_metadata(
     writer: &TraceWriter,
     run_id: &str,

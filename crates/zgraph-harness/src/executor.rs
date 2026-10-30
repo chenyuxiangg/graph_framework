@@ -153,11 +153,12 @@ impl HarnessExecutor {
 
     /// 记录一次 AgentConfig 模型参数摘要（ISSUE-082；canonical 去重）。
     fn record_model_params(&self, run_id: &str, model: &ModelConfig) {
-        // 显式枚举字段：**不包含** `api_key_env` 等密钥来源信息。
+        // 显式枚举字段：**不包含** `api_key_env` 等密钥来源信息；
+        // `base_url` 再做防御性脱敏（去掉 userinfo/query/fragment，REV-048 C5）。
         let summary = serde_json::json!({
             "provider": model.provider.as_str(),
             "name": model.name,
-            "base_url": model.base_url,
+            "base_url": model.base_url.as_deref().map(sanitize_base_url),
             "temperature": model.temperature,
             "max_tokens": model.max_tokens,
             "context_window_tokens": model.context_window_tokens,
@@ -386,6 +387,29 @@ impl HarnessExecutor {
             .map(|output| output.to_json())
             .map_err(RunFailure::into_node_error)
     }
+}
+
+/// 防御性脱敏 `base_url`：去掉 userinfo（`user:pass@`）与 query/fragment，
+/// 仅保留 `scheme://host[:port][/path]`；非 `scheme://` 形式原样返回（配置校验已拒绝
+/// 非法值，这里不引入解析风险）。用于 `model_params_json`（不含密钥，REV-048 C5）。
+fn sanitize_base_url(raw: &str) -> String {
+    let Some((scheme, rest)) = raw.split_once("://") else {
+        return raw.to_string();
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, Some(path)),
+        None => (rest, None),
+    };
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let mut sanitized = format!("{scheme}://{host}");
+    if let Some(path) = path {
+        sanitized.push('/');
+        sanitized.push_str(path);
+    }
+    sanitized
 }
 
 /// Phase Loading 预检（05 §5.7.3）：取消优先，其次实例 deadline。
@@ -693,6 +717,44 @@ mod tests {
         assert_eq!(executor.model_params("run-a").expect("run-a").len(), 2);
         assert_eq!(executor.model_params("run-b").expect("run-b").len(), 1);
         assert_eq!(executor.model_params("run-c"), None);
+    }
+
+    /// ISSUE-082 / REV-048 C5：`base_url` 摘要防御性脱敏（去 userinfo/query/fragment）。
+    #[test]
+    fn model_params_sanitize_base_url_userinfo_and_query() {
+        let executor = HarnessExecutor::new(HarnessSettings {
+            assets_dir: PathBuf::from("/tmp/assets"),
+            tools_dir: PathBuf::from("/tmp/tools"),
+            provider: Arc::new(
+                FakeLlmProvider::from_script(fake_script(json!([
+                    {"kind": "text", "content": "unused"}
+                ])))
+                .expect("script"),
+            ),
+            fake_mode: true,
+            tool_runner: Arc::new(FakeToolRunner::new()),
+        });
+        let model = ModelConfig {
+            provider: crate::llm::ProviderKind::OpenAiCompatible,
+            name: "gpt-4o-mini".to_string(),
+            base_url: Some(
+                "https://alice:secret@example.com:8443/v1/chat?api_key=sk-live#frag".to_string(),
+            ),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            temperature: 0.2,
+            max_tokens: 512,
+            context_window_tokens: 65_536,
+        };
+        executor.record_model_params("run-url", &model);
+        let params = executor.model_params("run-url").expect("recorded");
+        assert_eq!(
+            params[0]["base_url"],
+            json!("https://example.com:8443/v1/chat")
+        );
+        let text = params[0].to_string();
+        for leaked in ["alice", "secret", "sk-live", "api_key"] {
+            assert!(!text.contains(leaked), "base_url leaked {leaked}: {text}");
+        }
     }
 
     #[tokio::test]

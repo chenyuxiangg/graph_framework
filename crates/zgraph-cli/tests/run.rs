@@ -1746,3 +1746,49 @@ fn failed_run_also_writes_run_columns() {
     // 本 run 无 agent 节点：写空数组而非 NULL（「尽力写」口径）。
     assert_eq!(params, json!([]));
 }
+
+#[test]
+fn metadata_write_failure_is_best_effort_and_run_still_exits_0() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = write_text(dir.path(), "io_meta.json", &io_graph());
+    let db = dir.path().join("meta_fail.db");
+    // 先建 schema 并关闭，再对 `UPDATE runs` 两列注入确定性 ABORT。
+    TraceWriter::open(&db)
+        .expect("init schema")
+        .close()
+        .expect("close init writer");
+    let conn = rusqlite::Connection::open(&db).expect("open db");
+    conn.execute_batch(
+        "CREATE TRIGGER fail_run_columns BEFORE UPDATE OF worker_versions_json ON runs \
+         BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END;",
+    )
+    .expect("create trigger");
+    drop(conn);
+
+    let output = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            arg(&db),
+            "--inputs".to_string(),
+            r#"{"start":{"x":1}}"#.to_string(),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    // 尽力写：元数据列失败不改变 run 退出码/结果输出。
+    assert_exit(&output, 0, "metadata write failure is best-effort");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    assert_eq!(payload["run_output"], json!({"r": {"x": 1}}));
+    let stderr = stderr_text(&output);
+    assert!(
+        !stderr.contains("STORAGE_ERROR"),
+        "best-effort metadata failure must not surface STORAGE_ERROR: {stderr}"
+    );
+    // 列未写入（NULL），但 run 正常完成。
+    let (worker_versions, model_params) = run_columns(&db);
+    assert_eq!(worker_versions, None);
+    assert_eq!(model_params, None);
+}

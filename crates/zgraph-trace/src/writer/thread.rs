@@ -349,13 +349,16 @@ impl Writer {
 
     /// 仅更新 `runs` 的两列（ISSUE-082；不触碰 status/instances/events）。
     ///
-    /// SQL/IO 失败按不可恢复错误处理（06 §6.4.5）；`0` 行 = run 不存在，不是错误。
+    /// **尽力写**：SQL/IO 失败仅把 Err 返回调用方，**不置 writer fatal**（不污染后续
+    /// flush/close、不影响 run 退出码/结果输出）。单条 `UPDATE` 是自动提交语句，
+    /// 失败即整体回滚、不会留下半写状态；写线程继续服务。若存储真实损坏，后续
+    /// flush/close 仍按 fail-stop（06 §6.4.5）→ CLI exit 4。
+    /// `0` 行 = run 不存在，不是错误。
     fn update_run_columns(
         &mut self,
         request: &crate::writer::UpdateRunColumnsRequest,
     ) -> Result<u64, TraceError> {
-        let result = self
-            .conn
+        self.conn
             .execute(
                 "UPDATE runs SET worker_versions_json = ?1, model_params_json = ?2 \
                  WHERE run_id = ?3",
@@ -366,14 +369,7 @@ impl Writer {
                 ],
             )
             .map(|updated| u64::try_from(updated).unwrap_or(u64::MAX))
-            .map_err(db_err);
-        match result {
-            Ok(updated) => Ok(updated),
-            Err(err) => {
-                self.record_fatal(err.clone());
-                Err(err)
-            }
-        }
+            .map_err(db_err)
     }
 
     fn finalize(&mut self) -> Result<(), TraceError> {
