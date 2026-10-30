@@ -158,7 +158,7 @@ fn apply_verbosity(verbosity: u8) {
     let Some(level) = rust_log_for_verbosity(verbosity) else {
         return;
     };
-    if std::env::var_os("RUST_LOG").map_or(true, |value| value.is_empty()) {
+    if std::env::var_os("RUST_LOG").is_none_or(|value| value.is_empty()) {
         std::env::set_var("RUST_LOG", level);
     }
 }

@@ -78,6 +78,11 @@ if [ -f "${branch_wt}/Cargo.toml" ]; then
   info "执行 cargo test --workspace"
   ( cd "${branch_wt}" && cargo test --workspace --quiet ) || die "cargo test 失败"
   info "cargo test 通过"
+  # 6c) clippy -D warnings（与 CI `.github/workflows/ci.yml` 对齐；ISSUE-094）
+  info "执行 cargo clippy --workspace --all-targets --locked -- -D warnings"
+  ( cd "${branch_wt}" && cargo clippy --workspace --all-targets --locked -- -D warnings ) \
+    || die "cargo clippy 失败（-D warnings）"
+  info "cargo clippy 通过"
 else
   info "分支无 Cargo.toml（legacy 期），跳过 cargo test"
 fi

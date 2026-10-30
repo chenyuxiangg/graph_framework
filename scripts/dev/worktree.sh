@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 模块 worktree 管理：new / list / remove
 # 用法：
-#   bash scripts/dev/worktree.sh new <module> <agent> <slug> [--type feat|fix|test|docs|chore] [--base <ref>] [--dry-run]
+#   bash scripts/dev/worktree.sh new <module> <agent> <slug> [--type feat|fix|test|docs|chore|refactor] [--base <ref>] [--dry-run]
 #   bash scripts/dev/worktree.sh list
 #   bash scripts/dev/worktree.sh remove <module>-<agent> [--force]
 set -euo pipefail
@@ -10,7 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}"
 
 MODULES="dsl kernel trace worker harness cli py-worker e2e docs process legacy"
-TYPES="feat fix test docs chore"
+TYPES="feat fix test docs chore refactor"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "INFO: $*"; }

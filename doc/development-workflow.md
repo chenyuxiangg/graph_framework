@@ -18,7 +18,7 @@ uv run pytest -q          # 当前有 25 项已知失败，基线见 doc/test-ba
 ## 1. 任务开始：建 worktree（一 agent 一 worktree）
 
 ```bash
-bash scripts/dev/worktree.sh new <module> <agent> <slug> [--type feat|fix|test|docs|chore]
+bash scripts/dev/worktree.sh new <module> <agent> <slug> [--type feat|fix|test|docs|chore|refactor]
 # 等价产物：
 #   路径   .worktrees/<module>-<agent>
 #   分支   <type>/<module>-<slug>（基于 origin/main）
@@ -48,6 +48,8 @@ git add -A && git commit -m "<type>(<module>): <摘要>"
 - 提交信息格式 `<type>(<module>): <摘要>`；一个提交只做一件事。
 - 只改本模块文件；跨模块改动需 Lead 指派第二评审人并在评审记录注明。
 - 不确定被测函数意图时停下向用户举手，**禁止**猜（CLAUDE.md）。
+- **clippy 门禁**：CI 与 `merge.sh` 均执行 `cargo clippy --workspace --all-targets --locked -- -D warnings`；本地提交前应自跑。
+- **构建缓存**：多个 worktree **不得**共用同一个 `CARGO_TARGET_DIR` 并发构建（cargo 对 workspace 成员单元不区分 worktree，会串产物导致测试假绿/假红，ISSUE-093）；每个 worktree 用私有 target，或合并前 `cargo clean -p` 全部 workspace 成员。
 
 ## 3. 评审（四维度，评审人 ≠ 作者）
 
