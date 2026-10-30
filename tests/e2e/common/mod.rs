@@ -127,6 +127,10 @@ pub fn executor(timeout: Duration) -> Arc<WorkerExecutor> {
 }
 
 /// 指定全局/每 run 并发上限的真 worker 执行器（D4）。
+///
+/// ISSUE-079：要让 Harness 工具调用与节点执行共享同一份上限，调用方把本执行器的
+/// [`WorkerExecutor::limits`] 注入 [`zgraph_harness::HarnessExecutor::with_tool_limits`]
+/// （ac12 即如此）；不注入时 Harness 走未注入回退（私有默认限），e2e 应避免该路径。
 pub fn executor_with_limits(
     timeout: Duration,
     max_workers: usize,

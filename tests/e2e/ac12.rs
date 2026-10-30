@@ -21,8 +21,9 @@
 //!   → zgraph_cli::bridge::TraceBridge → zgraph-trace SQLite（**10 run 同库**）
 //!   → WorkerExecutor（真 python3 -m zgraph_worker.runtime 子进程）
 //!   → 含 agent_call 的 2 个 run 走 RoutingExecutor: HarnessExecutor（fake LLM）
-//!     + WorkerToolRunner（工具 = 真 Python worker 子进程；其并发走 harness 独立的
-//!       进程级 tool semaphore，不受下面 `with_limits` 约束——ISSUE-079，M6 统一）
+//!     + WorkerToolRunner（工具 = 真 Python worker 子进程）；Harness 注入与节点
+//!       执行**同一份** `WorkerLimits`（ISSUE-079 / REV-052），工具调用与节点
+//!       共享全局/每 run 上限
 //!   → TraceReader 逐 run 查询
 //! ```
 //!
@@ -31,30 +32,34 @@
 //! - 8 个纯 python run：同一条三并发分支图（`start → a/b/c → done`），真 worker +
 //!   真 SQLite trace；用于 user_id/global_vars 隔离与全局/每 run 峰值度量。
 //! - 2 个含 `agent_call` 的 run：`start → echo(python) → answer_writer(agent) → end`，
-//!   fake LLM（AC-08 fixture 脚本）+ 工具 `add` 走真 worker 子进程；覆盖「完整栈」
-//!   并发（kernel + Harness + worker + trace 同时多 run）。
+//!   fake LLM（AC-08 fixture 脚本）+ 工具 `add`（AC-12 本地副本，带进程区间日志）走真
+//!   worker 子进程；覆盖「完整栈」并发（kernel + Harness + worker + trace 同时多 run）。
 //! - **DB 形态**：10 个 run 全部写同一个 SQLite 文件（同 db 不同 run_id，AC 允许的
 //!   更强形态）；全部写端关闭后打开**最终共享 reader**，逐 run 查询验证 run 级隔离
 //!   （`stats.db_runs == 10` + 逐 run 行/实例/事件归属）。
 //! - **同图用例**：把上述 10 个 run 全部替换为同一条三并发分支图（`start → a/b/c →
 //!   done`，10× python），其余启动/收集/隔离/上限断言复用同一套 helper。
-//! - 全局/每 run 上限：`WorkerExecutor::with_limits(4, 2)`；峰值用**真实进程区间**
-//!   度量（fixture 把 start/end 墙钟追加到共享日志，按 run_tag 分组求峰值）。
-//!   **口径边界（ISSUE-079）**：本测试的峰值 = `WorkerExecutor` 的 python 节点子进程
-//!   （8×a/b/c 分支 + 2×echo）；agent 的工具 `add` 由 Harness 的 `WorkerToolRunner`
-//!   执行，使用独立进程级信号量，**不计入** `with_limits` 全局/每 run 统计（M6 统一）。
-//!   因此实测全局峰值是「节点进程并发」的下界，不代表全栈所有 worker 子进程。
+//! - 全局/每 run 上限：`WorkerExecutor::with_limits(4, 2)` +
+//!   `HarnessExecutor::with_tool_limits(settings, worker.limits())` → 工具调用与
+//!   python 节点共享同一份 `WorkerLimits`（ISSUE-079 / REV-052，不再有独立 tool
+//!   semaphore 的口径例外）。峰值用**真实进程区间**度量：节点（fixture）与工具
+//!   （AC-12 本地 `add` 副本）都把 start/end 墙钟追加到同一日志，按 run_tag 分组
+//!   求峰值 → 断言覆盖「工具 + 节点」合计并发。
 //!
 //! # 实测基线（本机 macOS / Rust 1.99.1 / Python 3.13）
 //!
-//! - 8+2 组合（2026-10-30 连跑 3 次）：区间总数 26（8×3 分支 + 2×1 echo）；全局峰值
-//!   **4**（= with_limits 全局上限）；每 run 峰值：8 个 python run 均 **2**（= 每 run
-//!   上限），2 个 agent run 为 1；单 run 基线 **0.79–0.85s**、10 run 并发总耗时
-//!   **2.46–2.54s**、比值 **2.9–3.1**（完全串行 ≈ 10x）。2026-10-31 私有 target
-//!   复跑 2 次：0.80–0.86s / 2.50–2.51s / 2.90–3.14，量级一致。
+//! - 8+2 组合（M5 2026-10-30 连跑 3 次，工具未纳入上限的旧口径）：区间总数 26
+//!   （8×3 分支 + 2×1 echo）；全局峰值 **4**；8 个 python run 每 run 峰值均 **2**、
+//!   2 个 agent run 为 1；单 run 基线 **0.79–0.85s**、10 run 总耗时 **2.46–2.54s**、
+//!   比值 **2.9–3.1**。
+//! - 8+2 组合（M6 REV-060，工具共享全局上限后；2026-10-31 私有 target 连跑 2 次）：
+//!   区间总数 **28**（8×3 节点 + 2×(echo 节点 + add 工具)）；全局峰值 **4**（节点 + 工具
+//!   合计）；每 run 峰值：8 个 python run 均 **2**，2 个 agent run 为 1（echo 与工具不
+//!   重叠）；单 run 基线 **0.80–0.86s**、10 run 总耗时 **2.79–2.98s**、比值 **3.27–3.55**
+//!   （工具调用窗口 0.2s 使总耗时较 M5 略增）。
 //! - 同图用例（2026-10-31 连跑 2 次，私有 target 干净构建）：区间总数 30（10×3 分支）；
-//!   全局峰值 **4**；10 个 run 的每 run 峰值均 **2**；单 run 基线 **0.79–0.81s**、
-//!   10 run 总耗时 **3.29s**、比值 **4.04–4.15**。
+//!   全局峰值 **4**；10 个 run 的每 run 峰值均 **2**；单 run 基线 **0.79–0.84s**、
+//!   10 run 总耗时 **3.21–3.37s**、比值 **3.99–4.21**。
 //! - 断言只保留宽松上界 10x，具体数值随机器波动只记录；两个用例各自独立 tempdir/DB。
 //! - **同库 10 并发写未触发 `SQLITE_BUSY`/写线程错误**（WAL + 5s `busy_timeout` +
 //!   写线程 busy 重试）：10 run 全部 Completed，逐 run reader 查询均成功。若未来在
@@ -97,8 +102,8 @@ const PYTHON_NODES: [&str; 5] = ["start", "a", "b", "c", "done"];
 const AGENT_NODES: [&str; 4] = ["start", "echo", "answer_writer", "end"];
 /// 每个纯 python run 的进程区间数（3 个分支）。
 const PYTHON_INTERVALS_PER_RUN: usize = 3;
-/// 每个 agent run 的进程区间数（1 个 echo 节点）。
-const AGENT_INTERVALS_PER_RUN: usize = 1;
+/// 每个 agent run 的进程区间数（1 个 `echo` 节点 + 1 次 `add` 工具调用；共享同一区间日志）。
+const AGENT_INTERVALS_PER_RUN: usize = 2;
 /// 每个纯 python run 的 gate_results 行数（6 条边投递）。
 const PYTHON_GATE_RESULTS_PER_RUN: usize = 6;
 /// 每个 agent run 的 gate_results 行数（3 条边投递）。
@@ -113,6 +118,10 @@ const BRANCH_SLEEP_SECONDS: f64 = 0.35;
 const AGENT_PROMPT: &str = "请计算 2 + 3 的结果，并用 JSON {\"answer\":\"<结果>\"} 回答。";
 /// 总耗时/单 run 耗时的宽松上界（只证伪「完全串行 ≈ 10x」；不脆断言绝对值）。
 const ELAPSED_RATIO_LIMIT: f64 = 10.0;
+/// 工具 worker 的共享区间日志路径 env（`tests/e2e/fixtures/ac12/tools/add.py` 读取）。
+const TOOL_LOG_ENV: &str = "ZGRAPH_AC12_TOOL_LOG";
+/// 工具 worker 的 run_tag env（工具区间按 run 分组，与节点区间同一日志）。
+const TOOL_RUN_TAG_ENV: &str = "ZGRAPH_AC12_RUN_TAG";
 
 /// 一个 run 的验收参数（tag/user_id/tenant 三者在 10 个 run 间互不相同）。
 #[derive(Clone, Debug)]
@@ -333,9 +342,18 @@ impl NodeExecutor for RoutingExecutor {
     }
 }
 
-/// AC-08 fixture 根目录（agent 资产 + tools + fake LLM 脚本）。
+/// AC-08 fixture 根目录（fake LLM 脚本所在；agent 资产改用 AC-12 本地资产）。
 fn harness_fixture_dir() -> std::path::PathBuf {
     common::graphs_root().join("harness_ac08")
+}
+
+/// AC-12 本地 fixture 根（`tests/e2e/fixtures/ac12`）：agent 资产 + 带区间日志的工具。
+///
+/// 为什么不用 AC-08 的 agent 资产：AC-12 需要给工具调用补进程区间日志（证明工具与
+/// 节点共享同一份全局上限，ISSUE-079），而 AC-08 agent 声明了 `add`/`explode`/`slow`
+/// 三个工具、会强制注册全部工具；本地资产只声明 `add`，范围最小且改动都在 e2e 内。
+fn ac12_fixture_dir() -> std::path::PathBuf {
+    common::fixtures_root().join("ac12")
 }
 
 /// 从 AC-08 fixture 脚本构造独立的 fake provider（每个 agent run 一个，请求日志不混）。
@@ -348,24 +366,34 @@ fn fake_provider() -> Arc<FakeLlmProvider> {
 }
 
 /// 构造「agent 走 Harness（fake LLM）+ 其余走共享真 worker」的执行器。
+///
+/// ISSUE-079 / REV-052：Harness 注入 `worker.limits()` —— 工具调用与 python 节点执行
+/// 共享同一份 `WorkerLimits`（先每 run、后全局）；工具 worker 通过 env 拿到本 run 的
+/// 区间日志路径与 run_tag，使其进程区间与节点区间进同一份日志参与峰值度量。
 fn routing_executor(
     worker: Arc<WorkerExecutor>,
     fake: Arc<FakeLlmProvider>,
+    plan: &RunPlan,
+    log_file: &Path,
 ) -> Arc<dyn NodeExecutor> {
-    let fixture = harness_fixture_dir();
-    let assets_dir = fixture.clone();
+    let fixture = ac12_fixture_dir();
+    let mut tool_config = common::worker_config(common::RUN_TIMEOUT);
+    tool_config
+        .env
+        .push((TOOL_LOG_ENV.to_string(), log_file.display().to_string()));
+    tool_config
+        .env
+        .push((TOOL_RUN_TAG_ENV.to_string(), plan.tag.clone()));
     let settings = HarnessSettings {
-        assets_dir,
+        assets_dir: fixture.clone(),
         tools_dir: fixture.join("tools"),
         provider: fake as Arc<dyn LlmProvider>,
         fake_mode: true,
         // 工具每次调用 = 真 Python worker 子进程（D3）。
-        tool_runner: Arc::new(WorkerToolRunner::new(common::worker_config(
-            common::RUN_TIMEOUT,
-        ))),
+        tool_runner: Arc::new(WorkerToolRunner::new(tool_config)),
     };
     Arc::new(RoutingExecutor {
-        harness: Arc::new(HarnessExecutor::new(settings)),
+        harness: Arc::new(HarnessExecutor::with_tool_limits(settings, worker.limits())),
         worker,
     })
 }
@@ -390,15 +418,16 @@ where
     (0..RUN_COUNT)
         .map(|index| {
             let plan = plan_for(index);
-            let (executor, fake): (Arc<dyn NodeExecutor>, Option<Arc<FakeLlmProvider>>) =
-                match plan.kind {
-                    RunKind::Python => (worker.clone(), None),
-                    RunKind::Agent => {
-                        let fake = fake_provider();
-                        let executor = routing_executor(worker.clone(), fake.clone());
-                        (executor, Some(fake))
-                    }
-                };
+            let (executor, fake): (Arc<dyn NodeExecutor>, Option<Arc<FakeLlmProvider>>) = match plan
+                .kind
+            {
+                RunKind::Python => (worker.clone(), None),
+                RunKind::Agent => {
+                    let fake = fake_provider();
+                    let executor = routing_executor(worker.clone(), fake.clone(), &plan, log_file);
+                    (executor, Some(fake))
+                }
+            };
             let traced = start_traced_run(spec_for(&plan, log_file), executor, db)
                 .unwrap_or_else(|error| panic!("start run {} failed: {error}", plan.tag));
             let run_id = traced.run_id().to_string();
@@ -850,11 +879,12 @@ fn assert_agent_outputs(runs: &[FinishedRun]) {
 // 并发上限度量 + 耗时基线
 // ---------------------------------------------------------------------------
 
-/// 真实进程区间峰值：全局 ≤ with_limits 全局上限；每 run ≤ 每 run 上限；记录耗时比。
+/// 真实进程区间峰值：全局 ≤ 共享 WorkerLimits 全局上限；每 run ≤ 每 run 上限；记录耗时比。
 ///
-/// 口径边界（ISSUE-079）：区间只覆盖 `WorkerExecutor` 的 python 节点子进程
-/// （分支/echo）；agent 工具子进程走 Harness 的 `WorkerToolRunner` 独立信号量，不在
-/// 此统计内（M6 统一后再扩展）。峰值是节点进程并发的下界，断言仍对配置上限有效。
+/// ISSUE-079 / REV-052：区间同时覆盖 **python 节点子进程**（a/b/c、echo）与 **agent 工具
+/// 子进程**（`add`，本地 fixture 带区间日志）——两者共享同一个 `WorkerLimits`，因此
+/// 这里的合计峰值断言对「工具 + 节点」同时生效；任一工具未参与共享上限或区间缺失，
+/// `expected_total` / 峰值断言都会失败。
 fn assert_worker_limits(
     log_file: &Path,
     runs: &[FinishedRun],
@@ -864,6 +894,7 @@ fn assert_worker_limits(
     let intervals = common::read_intervals_by_run(log_file);
     assert_eq!(intervals.len(), runs.len(), "每个 run 都应记录进程区间");
     let all: Vec<(f64, f64)> = intervals.values().flatten().copied().collect();
+    // 8+2 组合：8×3 节点区间 + 2×(echo 节点 + add 工具) = 28；同图用例：10×3 = 30。
     let expected_total: usize = runs
         .iter()
         .map(|run| match run.plan.kind {
@@ -871,7 +902,11 @@ fn assert_worker_limits(
             RunKind::Agent => AGENT_INTERVALS_PER_RUN,
         })
         .sum();
-    assert_eq!(all.len(), expected_total, "区间总数（真进程证据）");
+    assert_eq!(
+        all.len(),
+        expected_total,
+        "区间总数（真进程证据：节点 + 工具）"
+    );
     let global_peak = common::peak_concurrency(&all);
     assert!(
         global_peak <= GLOBAL_MAX_WORKERS,
@@ -894,16 +929,35 @@ fn assert_worker_limits(
         ratio < ELAPSED_RATIO_LIMIT,
         "10 run 总耗时/单 run = {ratio:.2} 超过宽松上限 {ELAPSED_RATIO_LIMIT}"
     );
-    // 基线记录（不参与断言）：本机实测 baseline≈0.79–0.85s、total≈2.46–2.54s、
-    // 比值≈2.9–3.1（与文件头「实测基线」一致；机器/负载不同会有波动）。
+    // 基线记录（不参与断言）：本机实测 8+2 baseline≈0.80–0.86s、total≈2.79–2.98s、
+    // 比值≈3.3–3.6；同图 baseline≈0.79–0.84s、total≈3.21–3.37s、比值≈4.0–4.2
+    //（与文件头「实测基线」一致；机器/负载不同会有波动）。
     eprintln!(
-        "[AC-12] 区间组={} 全局峰值={global_peak} 每run峰值={per_run_peaks:?} \
+        "[AC-12] 区间组={} 区间总={} 全局峰值={global_peak} 每run峰值={per_run_peaks:?} \
          单run基线={baseline:?} 10run总耗时={elapsed:?} 比值={ratio:.2}",
-        intervals.len()
+        intervals.len(),
+        all.len()
     );
 }
 
-/// 每个 run 的峰值并发（python run 应 3 区间、agent run 应 1 区间，且均 ≤ 每 run 上限）。
+/// 工具区间证据（ISSUE-079 / REV-052）：每个 agent run 的 `add` 工具都必须把区间
+/// 写入共享日志。没有这条证据，全局峰值就只能覆盖节点、「工具 + 节点」合计断言不成立；
+/// 工具未接入共享 limiter 或日志 env 未注入时这里会直接失败。
+fn assert_tool_intervals_logged(log_file: &Path, runs: &[FinishedRun]) {
+    let text = std::fs::read_to_string(log_file).expect("read interval log");
+    for run in runs.iter().filter(|run| run.plan.kind == RunKind::Agent) {
+        let prefix = format!("{} tool ", run.plan.tag);
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with(&prefix) && line.ends_with(" start")),
+            "{} 缺工具进程区间（add 未写入共享区间日志）",
+            run.plan.tag
+        );
+    }
+}
+
+/// 每个 run 的峰值并发（python run 应 3 个节点区间、agent run 应 2 区间[echo + add 工具]，
+/// 且均 ≤ 每 run 上限）。
 fn per_run_peaks(
     runs: &[FinishedRun],
     intervals: &BTreeMap<String, Vec<(f64, f64)>>,
@@ -959,6 +1013,7 @@ async fn ac12_ten_concurrent_runs_share_one_db_and_are_isolated() {
     assert_runs_isolated(&runs, &shared_db);
     assert_python_outputs(&runs);
     assert_agent_outputs(&runs);
+    assert_tool_intervals_logged(&log_file, &runs);
     assert_worker_limits(&log_file, &runs, baseline, elapsed);
 }
 

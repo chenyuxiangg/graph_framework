@@ -152,6 +152,9 @@ fn fake_provider_from_fixture() -> Arc<FakeLlmProvider> {
 }
 
 /// 构造「Harness 处理 agent_call + 真 worker 处理其余 handler」的组合执行器。
+///
+/// ISSUE-079：工具调用与节点执行共享同一份 `WorkerLimits`（`worker.limits()` 注入
+/// Harness），与生产 CLI 组合根同口径；AC-08 不度量峰值，但避免走未注入回退路径。
 fn routing_executor(provider: Arc<dyn LlmProvider>, fake_mode: bool) -> Arc<RoutingExecutor> {
     let settings = HarnessSettings {
         assets_dir: assets_dir(),
@@ -163,9 +166,10 @@ fn routing_executor(provider: Arc<dyn LlmProvider>, fake_mode: bool) -> Arc<Rout
             common::RUN_TIMEOUT,
         ))),
     };
+    let worker = common::executor(common::RUN_TIMEOUT);
     Arc::new(RoutingExecutor {
-        harness: Arc::new(HarnessExecutor::new(settings)),
-        worker: common::executor(common::RUN_TIMEOUT),
+        harness: Arc::new(HarnessExecutor::with_tool_limits(settings, worker.limits())),
+        worker,
     })
 }
 
@@ -690,6 +694,8 @@ fn timeout_hint_graph() -> Arc<CompiledGraph> {
 }
 
 /// ISSUE-076 用例的组合执行器（agent → Harness + 慢 fake；其余 → 真 worker）。
+///
+/// ISSUE-079：与 [`routing_executor`] 一致注入共享 `WorkerLimits`（工具 + 节点同上限）。
 fn timeout_hint_executor(dir: &Path) -> Arc<dyn NodeExecutor> {
     let assets = timeout_hint_assets(dir);
     let fake = Arc::new(FakeLlmProvider::from_script(slow_text_script()).expect("slow script"));
@@ -702,9 +708,10 @@ fn timeout_hint_executor(dir: &Path) -> Arc<dyn NodeExecutor> {
             common::RUN_TIMEOUT,
         ))),
     };
+    let worker = common::executor(common::RUN_TIMEOUT);
     Arc::new(RoutingExecutor {
-        harness: Arc::new(HarnessExecutor::new(settings)),
-        worker: common::executor(common::RUN_TIMEOUT),
+        harness: Arc::new(HarnessExecutor::with_tool_limits(settings, worker.limits())),
+        worker,
     })
 }
 
