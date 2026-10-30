@@ -23,12 +23,12 @@
 | 00 | [00-总纲](00-总纲.md) | 294 | 命名/类型/枚举/**错误码**/**默认值**/**不变式**/术语消歧 | 权威锚点；I1–I9；17 个 DSL 码 + 5 个 v2 码 + 3 个 M5 `REPLAY_*` 码；20 个新默认常量；TraceEvent/RunMetrics |
 | 01 | [01-领域模型与状态机](01-领域模型与状态机.md) | 302 | CompiledGraph/EdgeIndex、实例模型、**迁移矩阵**、**实例寻址**、Delivery/Publish、RunState | `EdgeRef(EdgeIdx)` 取代自引用（EdgeIndex=结构体，ISSUE-043）；`Delivery.to_instance` 必填；单实例语义；两阶段 publish |
 | 02 | [02-DSL与校验](02-DSL与校验.md) | 913 | DSL schema 最终版、修正示例、**R1–R14 校验**、错误对象、符号命名、`graph_hash` | end 必须有输入；两级唯一性；子图加载通过/运行拒绝；`created_at` 可选；自环不豁免环检测 |
-| 03 | [03-调度器与生命周期](03-调度器与生命周期.md) | 388 | 执行拓扑、**所有权模型**、主循环、投递应用、**冷峻失败**、暂停/恢复/取消、超时/看门狗、终止判定 | RunState 单任务独占 + channel 回传；gate off-loop；Skipped 级联；双通道 trace |
+| 03 | [03-调度器与生命周期](03-调度器与生命周期.md) | 390 | 执行拓扑、**所有权模型**、主循环、投递应用、**冷峻失败**、暂停/恢复/取消、超时/看门狗、终止判定 | RunState 单任务独占 + channel 回传；gate off-loop；Skipped 级联；双通道 trace |
 | 04 | [04-节点接口与扩展点](04-节点接口与扩展点.md) | 895 | NodeHandler、NodeContext、Python 契约、内置节点、GateContext、SymbolResolver | v1 无 resume；签名只硬校验 arity；严格 bool；整包广播；worker 子进程 + 全局并发上限（v2，见 §8） |
 | 05 | [05-AgentHarness](05-AgentHarness.md) | 1420 | AgentConfig、LlmProvider(genai)、六状态机、上下文预算、ToolDef、错误映射、流式、AgentProvider | 流式唯一接口；预算冷峻；重试仅建立阶段；iteration=LLM 轮次；output 固定四字段 |
-| 06 | [06-存储与可观测](06-存储与可观测.md) | 1066 | SQLite DDL v1（8 表 + v2 L2 记录表/列）、seq 语义、双通道写线程、Streaming 聚合、CLI 契约、崩溃标定 | 落聚合分段而非逐 token；`events.seq` 权威；崩溃标 `Failed+interrupted`；`NodeError` JSON canonical（§6.2.5.1）；不做断点续跑 |
+| 06 | [06-存储与可观测](06-存储与可观测.md) | 1068 | SQLite DDL v1（8 表 + v2 L2 记录表/列）、seq 语义、双通道写线程、Streaming 聚合、CLI 契约、崩溃标定 | 落聚合分段而非逐 token；`events.seq` 权威；崩溃标 `Failed+interrupted`；`NodeError` JSON canonical（§6.2.5.1）；不做断点续跑 |
 | 07 | [07-验收用例](07-验收用例.md) | 230 | AC-01..AC-12 + DoD 检查单 | 示例图/gate/Skipped/trace/坏图/冷峻/超时/不阻塞/真 LLM/并行/暂停取消/死锁/多 run |
-| 08 | [08-审计关闭矩阵](08-审计关闭矩阵.md) | 441 | 76 条逐条关闭状态 + 37 条一致性复核 + 可开工判定 + **§8.6 回填记录** | 60 已关闭 / 6 部分 / 7 延后 / 3 不适用；回填后 **10/10 可开工** |
+| 08 | [08-审计关闭矩阵](08-审计关闭矩阵.md) | 444 | 76 条逐条关闭状态 + 37 条一致性复核 + 可开工判定 + **§8.6 回填记录** | 60 已关闭 / 6 部分 / 7 延后 / 3 不适用；回填后 **10/10 可开工** |
 
 ## 建议阅读顺序
 

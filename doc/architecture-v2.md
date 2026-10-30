@@ -253,7 +253,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | D7 | 02 §2.5、04 §4.7、02 R14 | 图加载期 import Python 节点符号并做签名校验；`DSL_SYMBOL_NOT_FOUND`/`DSL_SIGNATURE_MISMATCH` 在加载期报 | 图加载期**不 import** 用户 Python；`python_node` 的 `module/function` **格式非法仍在加载期报 `DSL_SYMBOL_NOT_FOUND`**；存在性/签名在 **worker 启动时**校验，失败 `NODE_WORKER_IMPORT`（Crashed）；`DSL_SIGNATURE_MISMATCH`/`DSL_SYMBOL_CONFLICT` 只用于内置 gate op 与跨类同名 | 避免加载期执行用户代码；import/签名错误从加载期后移到运行期（已登记） |
 | D8 | 07 AC-09/AC-12 | 并行断言基于 in-process spike：a/b 同时 Running 且总耗时 <0.45s；Python 并发 CPU=1/IO=4 | 含进程冷启动（每个 ~50–100ms）：断言改为"a/b 的 Running 区间重叠，且总耗时显著小于串行（M3 实测后定阈值，初值 <1.0s）"；AC-12 改为"全局/每 run worker 上限生效、run 间隔离" | 子进程启动成本与并发模型变化 |
 | D9 | 06 §6.10、§6.2 | v1 不做图重放；`runs` 表无版本/seed/输出列；CLI 只有 validate/run/trace | 新增 L1/L2 重放：`runs` 增列 + `recorded_outputs`/`llm_calls` 表；CLI 增 `replay` 与 `--record`；`--dry-run` 不实现 | 产品"可复现"承诺需要账本与重放 |
-| D10 | 00 §0.3、§0.4、01 §1.4 | `NodeError`/`Delivery` 为 Rust 进程内类型；错误码表无跨进程错误 | 不变（仍为 Rust 类型）；`NodeError` 增 `NodeWorker { kind }` 变体；新增错误码见 §8.2 | 跨进程错误需要新变体与新码 |
+| D10 | 00 §0.3、§0.4、01 §1.4 | `NodeError`/`Delivery` 为 Rust 进程内类型；错误码表无跨进程错误 | 不变（仍为 Rust 类型）；`NodeError` 增 `NodeWorker { kind }` 变体；新增错误码见 §8.2。**M5 追加**：`NodeWorker` 只增 `signal`/`exit_code`/`stderr_tail`（ISSUE-066/REV-031） | 跨进程错误需要新变体与新码 |
 | D11 | 07 AC-07 | 依赖 `_spike/src/bin/t2_gil.rs`（不在仓库） | spike 源与报告已入库 `doc/analysis/spike/`；AC-07 路径改为 `doc/analysis/spike/src/bin/t2_gil.rs`；断言保留（事件循环 ticker） | 溯源可核验 |
 | D12 | 08 §8.6、各分册引用 | 引用 `决策记录-01`、`_spike`、`_research`、`_audit` 等仓库外材料 | 决策记录/可行性评估/spike/两份调研已入库 `doc/analysis/`；映射见 `doc/spec-v1.2/REFERENCES.md`；PROVENANCE 记录冻结与回填 | 可核验性 |
 
@@ -273,7 +273,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `NODE_WORKER_HANDSHAKE` | 运行期 | worker `hello` 超时 / 协议版本不匹配 / 缺 `sdk_version` | Crashed（`NodeError::NodeWorker`） |
 | `NODE_WORKER_PROTOCOL` | 运行期 | 非法帧、exit 0 无 result、result 后不退出、半行帧、超 8 MiB | Crashed |
 | `NODE_WORKER_IMPORT` | 运行期 | worker 启动时 `module/function` 导入失败或签名不符（D7） | Crashed |
-| `NODE_WORKER_CRASH` | 运行期 | worker 被信号杀死 / 非约定 exit code | Crashed（记录 signal/exit） |
+| `NODE_WORKER_CRASH` | 运行期 | worker 被信号杀死 / 非约定 exit code | Crashed（`NodeError::NodeWorker{kind:Crash, signal, exit_code, stderr_tail}`；三项仅 supervisor 观察到的进程退出路径有值，stderr_tail ≤1 KiB、不脱敏——ISSUE-066/REV-031） |
 | `REPLAY_RECORD_MISSING` | CLI | `replay --mode=outputs` 但运行期未 `--record=full`，或已执行非内置实例缺记录 | CLI 退出码 3（不写 `runs.error_code`；DR-002 §3.3） |
 | `REPLAY_RUN_NOT_COMPLETED` | CLI | `replay --mode=outputs` 但原始 run 非 `Completed` | CLI 退出码 3（不写 `runs.error_code`；REV-030） |
 | `REPLAY_RECORD_CORRUPT` | CLI | `recorded_outputs.output_json` 重算 hash ≠ `output_hash`（记录损坏） | CLI 退出码 3（不写 `runs.error_code`；REV-030） |
@@ -282,6 +282,8 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `RunMetrics.killed_workers` | 指标 | 因超时/取消被 kill 的 worker 数 | 替代 `abandoned_tasks`（后者恒 0） |
 
 > 上述错误码/事件已回写 spec 00 §0.3/§0.4（2026-10-30，PROVENANCE §2 第 4 条已更新 hash；ISSUE-020 子项 ISSUE-050）。
+>
+> **M5 追加（ISSUE-066）**：`NodeError::NodeWorker` 在 M5 **只增** `signal`/`exit_code`/`stderr_tail` 三个证据字段（REV-031；仅进程退出路径有值），JSON canonical 形状见 spec 06 §6.2.5.1；公开 variant 增字段 = 仓外 source-breaking，v0.1 已批准（发布说明备注）。
 
 ## 9. 溯源
 
