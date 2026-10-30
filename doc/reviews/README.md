@@ -29,6 +29,14 @@
 | [REV-022](REV-022-e2e-m4-ac08.md) | 2026-10-30 | e2e | `test/e2e-m4-ac08` | 通过 | reviewer-b |
 | [REV-023](REV-023-docs-m4-spec-writeback.md) | 2026-10-30 | docs | `docs/docs-m4-spec-writeback` | 通过 | reviewer-b |
 | [REV-024](REV-024-docs-m4-wrapup.md) | 2026-10-30 | docs/process | `docs/docs-m4-wrapup` | 通过 | reviewer-b |
+| [REV-025](REV-025-process-m5-kickoff.md) | 2026-10-30 | process/docs | `docs/process-m5-kickoff` | 通过（首轮有条件通过，C1/C2 关闭后增量复审通过） | reviewer-a |
+| [REV-026](REV-026-kernel-m5-p2.md) | 2026-10-30 | kernel | `fix/kernel-m5-p2` | 通过（ISSUE-061 / ISSUE-076 内核侧） | reviewer-a |
+| [REV-027](REV-027-harness-m5-record.md) | 2026-10-30 | harness | `feat/harness-m5-record` | 通过（LlmCallRecorder seam / ISSUE-074 / ISSUE-081 部分） | reviewer-b |
+| [REV-028](REV-028-cli-m5-run.md) | 2026-10-30 | cli | `feat/cli-m5-run` | 通过（首轮有条件通过，C1 关闭后增量复审通过） | reviewer-a |
+| [REV-029](REV-029-e2e-m5-ac12.md) | 2026-10-30 | e2e | `test/e2e-m5-ac12` | 通过（AC-12 多 run 并发隔离） | reviewer-b |
+| [REV-033](REV-033-harness-m5-timeout.md) | 2026-10-30 | harness | `fix/harness-m5-timeout` | 通过（ISSUE-076 timeout_hint） | reviewer-b |
+| [REV-034](REV-034-trace-m5-recovery.md) | 2026-10-30 | trace | `feat/trace-m5-recovery` | 通过（ISSUE-084 标定 API / ISSUE-048 判活列） | reviewer-a |
+| [REV-038](REV-038-process-m5-issue-reg.md) | 2026-10-30 | docs/process | `docs/process-m5-issue-reg` | 通过（M5 台账登记 + DR-002 wave2/回写修订） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
@@ -37,3 +45,4 @@
 - 评审记录不得删除；结论变更用追加「修订」段。
 - REV-012（worker 分支含 kernel 访问器与 Cargo.lock）与 REV-015（e2e 分支含根 Cargo.toml/Cargo.lock）属 Lead 批准的跨模块改动，均由 reviewer-b 追加第二评审小节。
 - M4：REV-017（process 依赖）、REV-018（kernel 错误码/ContextOverflow）、REV-021（worker 装箱）由 Lead 提交、reviewer-b 评审；REV-020/022/023 分别由 harness-dev/e2e-dev/docs-writer 提交、reviewer-b 评审；REV-024 由 Lead 提交、reviewer-b 评审。REV-020/022 含 Cargo.lock 跨模块变更，已在评审记录中声明。
+- M5（已合并到 main）：REV-025（process/docs kickoff+DR-002，lead/reviewer-a）、REV-026（kernel，kernel-dev/reviewer-a）、REV-027（harness，harness-dev/reviewer-b）、REV-028（cli，cli-dev/reviewer-a）、REV-029（e2e，e2e-dev/reviewer-b）、REV-033（harness，harness-dev/reviewer-b）、REV-034（trace，trace-dev/reviewer-a）、REV-038（process/docs 台账，lead/reviewer-a）。REV-028 含根 `Cargo.lock` 跨模块变更、REV-025 含根 `README.md`（process）跨模块变更，均已在评审记录中声明并作第二评审。**尚未合并**：REV-030（cli replay/L2）、REV-031（ISSUE-066）、REV-032（e2e CLI/L2）、REV-035（docs 本分支）、REV-036（收尾），合并后由 Lead 补入本索引。

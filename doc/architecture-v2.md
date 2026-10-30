@@ -172,6 +172,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 - 新表 `recorded_outputs(run_id, instance_id, node_id, attempt, output_hash, output_json NULL, recorded_at)`。
 - 新表 `llm_calls(run_id, instance_id, call_index, request_json, response_json, status, recorded_at)`。
 - `events`/`transitions`/`gate_results` 沿用 spec 06。
+- **M5 写入口径（REV-028/REV-030，回写 spec 06 §6.2.13）**：`recorded_outputs` 由 CLI 组合执行器的外层包装在节点成功执行后写，键 `(run_id, instance_id, attempt)`，`output_hash = blake3(canonical_json(output))` 全 64 hex；`--record=none` 不写、`hash` 只写 hash、`full` 写全文。`llm_calls` 由 CLI 实现 Harness `LlmCallRecorder` seam 写入，**仅 `--record=full`**；每轮一次、`status` 取 `ok`/`error`、请求快照脱敏。`runs.worker_versions_json`/`model_params_json` 随同一接线写入（REV-030）。
 
 ### 5.3 CLI 契约（与 spec 06 §6.10 对齐的增量）
 
@@ -183,6 +184,8 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `zgraph validate <graph>` | 与 spec 06 一致 |
 
 > `--dry-run` **不实现**（v1 明确不支持外部副作用预演）。
+>
+> **M5 replay 退出码（DR-002 §3.3，回写 spec 06 §6.10.5/§6.10.7）**：`--mode=events` 默认 L1，复用 `zgraph trace` 只读回放、不重跑不写库；`--mode=outputs` 仅支持原始 run `Completed` 且 `record_mode=full`，用 RecordedExecutor 重跑（不启动 worker/LLM），输出不一致 → `REPLAY_OUTPUT_MISMATCH` exit 1；记录缺失/原始 run 非 Completed/记录 hash 损坏（`REPLAY_RECORD_MISSING`/`REPLAY_RUN_NOT_COMPLETED`/`REPLAY_RECORD_CORRUPT`）→ exit 3；run 不存在/存储错误 → exit 4。全部 `REPLAY_*` 属 CLI 命名空间、不写 `runs.error_code`。
 
 ### 5.4 复现边界（诚实声明）
 
@@ -201,7 +204,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | **M2** 内核 + trace | 状态机/事件循环/Delivery/门控 op/Skipped/冷峻失败/暂停取消/超时（kill 语义）；trace SQLite；死锁检测（AC-11） | AC-01/02/03/05/06/07/10/11 通过（AC-06/07 按 §8 改写）；`zgraph trace` 可回放（L1） |
 | **M3** worker | 子进程协议完整实现、崩溃隔离、进程组 kill、emit 流式、stderr 截断、并发上限；3–5 个示例 worker 迁移 | AC-09（按 §8 重标定）通过；故障注入（异常/超时/协议错/信号）全过；AC-06 的 kill 断言通过 |
 | **M4** Harness | LLM 流式/tool 循环/上下文预算/错误映射/fake provider；tool 经 worker 子进程 | AC-08（fake 必过，真实模型手动）；token 流式入 trace；tool 超时/失败语义测试 |
-| **M5** 收尾 | CLI 完整、`replay` L1/L2、AC-12 多 run 隔离、e2e、legacy 退役决策、文档 | AC-12 通过；L2 重放测试通过；cargo test 全绿 + pytest 基线不扩大；legacy 归档 |
+| **M5** 收尾 | CLI 完整、`replay` L1/L2、AC-12 多 run 隔离、e2e、legacy 退役决策、文档 | AC-12 通过；L2 重放测试通过；cargo test 全绿 + pytest 基线不扩大；legacy **归档为冻结只读、不物理删除**（物理归档交用户，DR-002 §8） |
 
 ### 6.2 AC → 里程碑映射
 
@@ -271,7 +274,10 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `NODE_WORKER_PROTOCOL` | 运行期 | 非法帧、exit 0 无 result、result 后不退出、半行帧、超 8 MiB | Crashed |
 | `NODE_WORKER_IMPORT` | 运行期 | worker 启动时 `module/function` 导入失败或签名不符（D7） | Crashed |
 | `NODE_WORKER_CRASH` | 运行期 | worker 被信号杀死 / 非约定 exit code | Crashed（记录 signal/exit） |
-| `REPLAY_RECORD_MISSING` | CLI | `replay --mode=outputs` 但运行期未 `--record=full` | CLI 退出码 3（不写 `runs.error_code`） |
+| `REPLAY_RECORD_MISSING` | CLI | `replay --mode=outputs` 但运行期未 `--record=full`，或已执行非内置实例缺记录 | CLI 退出码 3（不写 `runs.error_code`；DR-002 §3.3） |
+| `REPLAY_RUN_NOT_COMPLETED` | CLI | `replay --mode=outputs` 但原始 run 非 `Completed` | CLI 退出码 3（不写 `runs.error_code`；REV-030） |
+| `REPLAY_RECORD_CORRUPT` | CLI | `recorded_outputs.output_json` 重算 hash ≠ `output_hash`（记录损坏） | CLI 退出码 3（不写 `runs.error_code`；REV-030） |
+| `REPLAY_OUTPUT_MISMATCH` | CLI | L2 重跑输出 ≠ 原始 `runs.output_json` | CLI 退出码 1（不写 `runs.error_code`；REV-030） |
 | `NodeAbandoned` | 事件 | **v2 不产生**（D1）；enum 保留兼容，文档标 deprecated | — |
 | `RunMetrics.killed_workers` | 指标 | 因超时/取消被 kill 的 worker 数 | 替代 `abandoned_tasks`（后者恒 0） |
 

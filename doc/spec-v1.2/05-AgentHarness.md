@@ -206,7 +206,7 @@ Memory 检索/写入（stub 返回空）、KB 检索（stub 返回空）、多�
 
 | 参数 | 优先级（高 → 低） | 常量 |
 |---|---|---|
-| 实例超时 | DSL 节点 `config.timeout_ms` > `AgentConfig.node_timeout_ms` > `DEFAULT_NODE_TIMEOUT_MS` | 00 §0.5 |
+| 实例超时 | test-hooks 强制值（仅测试构建）> DSL 节点 `config.timeout_ms` > 执行器 `timeout_hint`（Harness 实现 = `AgentConfig.node_timeout_ms`）> `DEFAULT_NODE_TIMEOUT_MS` | 00 §0.5；M5 口径见下 |
 | 单次 LLM 超时 | `AgentConfig.llm_timeout_ms` > `DEFAULT_LLM_TIMEOUT_MS` | 00 §0.5 |
 | LLM 重试次数 | `AgentConfig.llm_max_retries` > `DEFAULT_LLM_MAX_RETRIES` | 00 §0.5 |
 | 迭代上限 | DSL 节点 `config.max_iterations`（非空）> `AgentConfig.max_iterations` > `DEFAULT_MAX_ITERATIONS`；节点级值在执行器内 `clamp(1, 50)` | 00 §0.5；04 分册 |
@@ -214,7 +214,7 @@ Memory 检索/写入（stub 返回空）、KB 检索（stub 返回空）、多�
 
 > 节点级 `max_iterations`（DSL 可选字段）覆盖 AgentConfig 的规则由 02/04 分册定义；本分册只定义"被解析出的最终有效值"如何被 loop 使用。
 >
-> **⚠ M4 已知限制（§5.13.3 L1）**：`AgentConfig.node_timeout_ms` 已加载/校验，但内核当前不会回退读取该值（实例超时仍取 DSL `timeout_ms` 或 `DEFAULT_NODE_TIMEOUT_MS`），需 kernel 后续增量打通派发路径。
+> **M5 口径（ISSUE-076，REV-026/REV-033）**：内核 `CompiledNode` 记录 `declared_timeout_ms`（区分「未声明」与「显式默认值」，历史 `timeout_ms` 已折叠默认值、不能用于判定）；`NodeExecutor` 新增**对象安全**的默认方法 `timeout_hint(&CompiledNode) -> Option<u64>`（默认 `None`），派发超时链 = **test-hooks force > declared > executor hint > `DEFAULT_NODE_TIMEOUT_MS`（180s）**。Harness 的 `timeout_hint` **仅对 `agent_call`** 返回 `Some`，内部用同步轻量函数 `peek_agent_node_timeout` 只读 `<assets_dir>/agents/*.json`、按文件内 `id` 命中并校验 `node_timeout_ms` 值域（**不查工具表/密钥/prompt**；失败/缺失返回 `None`，权威加载仍由 Loading 报 `HARNESS_CONFIG_LOAD`），并复用同一解析顺序计算 elapsed。**CLI 组合执行器（`RoutingExecutor`/`RecordingExecutor`）转发 `timeout_hint` 随 REV-030 合并后端到端生效**；e2e `RoutingExecutor` 当前未覆写，AC-08/AC-12 的 agent 节点显式声明 `timeout_ms`（declared 优先）不受影响。ISSUE-076 在 REV-030 前为**部分修**。
 
 ### 5.2.7 `detail` 统一形态
 
@@ -971,9 +971,9 @@ Harness 不 import 用户工具代码；工具协议由固定的 worker 入口�
 | 工具子进程失败 | 子进程层：超时 → `timeout`；取消 → `cancelled`；spawn 失败 → `runner_spawn`；协议错误 → `worker_protocol`；异常退出 → `worker_crash`；`call` 返回的 `ok=false` 载荷 → `exception` / `result_not_dict`；均由 `ToolFailure` 归一为 `TOOL_ERROR` 喂回 LLM；**不**映射 `NodeError::NodeWorker`（工具失败是 LLM 可修正路径） |
 | 返回值 | 必须可 JSON 序列化为 object（`dict`）；非 dict → `TOOL_ERROR{reason:"result_not_dict",actual_type}` |
 | 序列化 | `serde_json::to_string`（紧凑）；≤ 8 KiB（`DEFAULT_TOOL_RESULT_MAX_BYTES`，00 §0.5） |
-| 截断 | 超 8 KiB → 按字符边界截断紧凑 JSON 文本并附 `…[truncated N bytes]`（预留 64 B 标记空间；原始结果 v1 不落盘，仅 trace 中 `result_summary` 记录长度）。**⚠ M4 已知限制**：纯文本截断后**不保证仍是合法 JSON**（REV-020 #4，见 §5.13.3 L4；M5 改结构感知截断） |
-| 异常 | Python 异常 → `TOOL_ERROR{reason:"exception", type, message, traceback(≤8 KiB)}`；子进程已退出，无解释器残留（D4） |
-| 结果摘要 | `ToolCallEnd.result_summary: Option<Value>`：成功放 `{"ok":true,"keys":[...],"bytes":N,"preview":"≤256 字符"}`；失败放 `{"ok":false,"error":{...}}`；无法生成摘要（如 worker 崩溃无输出）→ `None` |
+| 截断 | 超 8 KiB → **结构感知**截断：ASCII/CJK 字符串在 JSON **字符串值内部**按字符边界截断并追加 `…[truncated N bytes]`；对象/数组按合法 JSON 降级（保留前缀 + 唯一标记）。**截断后输出必定是合法 JSON 且总长 ≤ 8 KiB**；原始结果 v1 不落盘，仅 trace 中 `result_summary` 记录长度。**ISSUE-074 fixed（REV-027）**，取代 M4 的纯文本截断限制（§5.13.3 L4） |
+| 异常 | Python 异常 → `TOOL_ERROR{reason:"exception", type, message, traceback}`；`traceback` 单独按 **≤8 KiB** 截断（不切 UTF-8 码点）；子进程已退出，无解释器残留（D4） |
+| 结果摘要 | `ToolCallEnd.result_summary: Option<Value>`：成功放 `{"ok":true,"keys":[...],"bytes":N,"preview":"≤256 字符"}`；失败放 `{"ok":false,"error":{...}}`；`preview`/`last_content_summary` **严格上界 ≤256 / ≤512 字符（含省略号）**；无法生成摘要（如 worker 崩溃无输出）→ `None`（ISSUE-074 fixed，REV-027） |
 | 无进程内缓存 | 工具模块**不得**依赖跨调用缓存（每次新解释器）；发现结果只缓存在 Rust 侧（一次） |
 
 ### 5.6.6 工具错误语义（关闭 M-03/C-12 的一半）
@@ -1153,7 +1153,7 @@ pub struct HarnessError {
 |---|---|
 | `ToolCallStart.args_summary` | 参数对象的**结构摘要**：`{"keys":[...], "bytes":N, "preview":"≤256 字符"}`；`preview` 是参数**紧凑 JSON 前缀**（≤256 字符，M4 不做脱敏，见 §5.13.3 L5）。**MUST NOT** 记录 `api_key`、Authorization header、prompt 全文 |
 | `ToolCallEnd.result_summary` | **`Option<Value>`**（D13/00 §0.3）：成功 `Some({"ok":true,"keys":[...],"bytes":N,"preview":"≤256 字符"})`；失败 `Some({"ok":false,"error":{...≤1 KiB}})`；无法生成摘要时 `None`（落库为 `null`） |
-| 截断 | 一律按字符边界（不切 UTF-8 码点中间）；附 `…` |
+| 截断 | 一律按字符边界（不切 UTF-8 码点中间）；附 `…`。**严格上界**：`preview` ≤256 字符、`last_content_summary` ≤512 字符（省略号计入上限；ISSUE-074 fixed，REV-027） |
 | 敏感信息 | v1 不做脱敏（本地工具）；**MUST NOT** 记录 `api_key`、Authorization header、prompt 全文 |
 
 ---
@@ -1404,15 +1404,17 @@ pub trait AgentProvider: Send + Sync {
 
 | # | 限制 | 影响 | 建议 / ISSUE 归属 |
 |---|---|---|---|
-| L1 | `AgentConfig.node_timeout_ms` 已被加载/校验，但内核超时回退链未读取该值（仍用 DSL `timeout_ms` 或 `DEFAULT_NODE_TIMEOUT_MS`） | AgentConfig 建议值不生效；显式非默认配置时行为偏离 §5.2.6 | M5 前 kernel/调度侧支持 `agent_call` 的 AgentConfig 回退；**ISSUE-076**（REV-020 #6） |
+| L1 | **已修（部分）**：M4 时 `AgentConfig.node_timeout_ms` 未生效；M5 已由 kernel `declared_timeout_ms` + `NodeExecutor::timeout_hint`（REV-026）与 harness `timeout_hint`/`peek_agent_node_timeout`（REV-033）打通，优先级见 §5.2.6 | 剩余：CLI 组合执行器转发随 REV-030 合并后端到端生效 | **ISSUE-076（部分修）**；口径见 §5.2.6 |
 | L2 | prompt/constraints 路径安全为**词法归一化**（拒绝 `..`），未 `canonicalize` | 符号链接可绕过资产根白名单（本地资产场景风险低） | M5 加 `canonicalize` 后重新校验 + 测试；**ISSUE-077**（REV-020 #13） |
 | L3 | `futures-util` 为 harness 直接依赖（genai `ChatStream` 取流所需），未提升 workspace；genai 默认 features 带入重依赖 | 依赖治理分散、`Cargo.lock` 增大 | process 统一提升 `[workspace.dependencies]` 并评估 `default-features`；**ISSUE-078**（REV-020 #12） |
-| L4 | 8 KiB 工具结果截断为**纯文本截断**，不保证仍是合法 JSON；`ToolFailure::to_json` 的 traceback 上限误用 1 MiB；摘要截断字面 ±1（`truncate_chars` 返回上限 + `…`，§5.7.4/§5.8.5 写作 ≤512/≤256） | 极端超长结果/长 traceback 时喂回 LLM 的 JSON 不可解析；字面偏差 | M5 改结构感知截断（合法 JSON + `truncated` 标记）+ traceback 按 8 KiB 单独截断 + 严格上界；**ISSUE-074**（REV-020 #4/#10） |
+| L4 | **已修（REV-027）**：工具结果改**结构感知截断**（输出必定合法 JSON 且 ≤8 KiB）；`traceback` 单独 ≤8 KiB；`preview`/`last_content_summary` 严格上界 ≤256/≤512（含省略号） | 无（§5.6.5/§5.8.5 已同步） | **ISSUE-074 fixed**（REV-027，commit `9137fd6`） |
 | L5 | `args_summary.preview` 为参数紧凑 JSON 前缀（≤256 字符），**未脱敏**；短参数可能完整出现（测试已改名，语义未改） | 敏感参数可能进 trace | 二选一：预览改为 `key:type`/`***` 脱敏，或产品接受并明确文档语义；**ISSUE-075**（REV-020 #3） |
 | L6 | `genai` 引入 `serde_json/preserve_order` 全局 feature（D21）：所有 crate 的 `Value` 变大、JSON 键序改变；曾触发 `zgraph-worker` `clippy::result_large_err` | CI clippy 回归（已由 worker 提交 `94e1f8a` 装箱 `WorkerFailure::Worker` 缓解，非根因） | 长期评估更换 transport 或接受；根因**ISSUE-073**（REV-020 #1/#5、REV-021） |
 | L7 | 工具并发 = **独立**进程级 `Semaphore(CPU×2)`，未与 `WorkerExecutor` 全局 `max_workers` 共享 | 工具子进程 + Python 节点子进程可各自达到 CPU×2，超出 D4 全局上限语义 | M5 统一为共享全局上限；**ISSUE-079**（REV-020 #7） |
-| L8 | 5 个生产函数 >60 行（`run_agent` 139、`parse_model` 124、`parse_discover_output` 75、`parse_call` 66、`map_webc_error` 64），违反 architecture §2.2 等价约束 | 维护成本；纯重构不阻塞 | M4 收尾或 M5 前拆分；**ISSUE-081**（REV-020 #11） |
+| L8 | 5 个生产函数 >60 行（`run_agent` 139、`parse_model` 124、`parse_discover_output` 75、`parse_call` 66、`map_webc_error` 64），违反 architecture §2.2 等价约束 | 维护成本；纯重构不阻塞 | **部分修（REV-027）**：5 个目标函数已拆分（`run_agent` 21 / `parse_model` 31 / `parse_discover_output` 30 / `parse_call` 29 / `map_webc_error` 59，另 `invoke_with_retry`→50）；**剩余既有 >60 行随 M6**：`parse_agent_config` 113、`validate_schema_node` 105、`transport::chat_stream` 86、`fake::chat_stream` 75、`executor::execute` 71→78、`parse_base_url` 64、`execute_tool` 63、cli `parse` 79 / `run_in_runtime` 70、新增 74 行测试；**ISSUE-081**（REV-020 #11） |
 | L9 | discover/call 失败 `reason` 为**扩展超集**（§5.2.7 已文档化），超出 v1.2 闭集 | 跨模块 reason 表需同步（py-worker REV-019 §7.3） | 保留诊断价值，文档化即可；**ISSUE-080**（REV-020 #9） |
-| L10 | `llm_calls` / `worker_versions_json` 等 L2 记录表已在 06/architecture 定义，M4 未接线（Harness 未写 `llm_calls`） | L2（recorded outputs）重放依赖这些记录，M4 只能做 L1 | L2 记录留 M5（06/M5 接线）；**ISSUE-082** |
+| L10 | `llm_calls` / `worker_versions_json` 等 L2 记录表已在 06/architecture 定义，M4 未接线（Harness 未写 `llm_calls`） | L2（recorded outputs）重放依赖这些记录，M4 只能做 L1 | **部分修**：Harness 侧 `LlmCallRecorder` seam 已交付（REV-027）；CLI 写 `llm_calls` 落库、`runs.worker_versions_json/model_params_json` 与 L2 replay 随 REV-030；**ISSUE-082（部分修）** |
 
 > 以上 **ISSUE-073..082** 由 Lead 在 M4 收尾（REV-024）统一开号登记（编号以 `doc/issues.md` 最终为准）。上述限制不影响 M4 验收结论（AC-08a 必过 / AC-08b 手动）；偏差表 D13–D21 只记录**语义级**落地口径，L1–L10 属已知限制。
+>
+> **M5 状态（REV-035）**：L1 由 REV-026/REV-033 落地（CLI 转发待 REV-030）；L4 已修（REV-027）；L8 的 5 个目标函数已拆（REV-027），剩余清单随 M6；L10 的 seam 已交付（REV-027），落库待 REV-030；L2/L3/L5/L6/L7/L9 与 ISSUE-075/077/079/080 留 M6。M6 排除项与依据见 `doc/decisions/DR-002-m5-cli-replay-recording.md` §7。

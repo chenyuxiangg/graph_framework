@@ -50,21 +50,32 @@
    - 未改：08 审计关闭矩阵（历史记录，不改语义）；`doc/progress.md`、`doc/issues.md`（Lead 收尾）。
 
 
+8. **M5 spec 回写批次**（2026-10-30，REV-035；分支 `docs/docs-m5-writeback`，评审 REV-035）：
+   - **来源**：DR-002 §9 回写清单（REV-025 关闭项）+ 已合并实现评审 REV-026/027/028/029/033/034/038；未合并的 REV-030/031/032 只登记契约/退出码，**不写「已实现」**。
+   - **07**：验收资产落点 `examples/**` → `tests/fixtures/graphs/**`（architecture §2.2；仓库无 `examples/`）；AC-01/AC-08 补 `--fake-llm=<script>` 与裸 flag 语义（裸 flag=内置默认脚本、确定性需显式脚本）；AC-12 回写 M5 实测口径（REV-029：8+2 组合 / 同库 10 run / `with_limits(4,2)` / 峰值与耗时 / ISSUE-079 工具并发边界 / SQLITE_BUSY 未触发）；§7.2 状态注记与 §7.3 #6 标 ISSUE-084（REV-034+REV-030）。
+   - **05**：§5.2.6 实例超时优先级（test-hooks force > declared > `timeout_hint` > 180s）与 kernel/harness 落地口径（REV-026/REV-033，ISSUE-076 部分修）；§5.6.5 结构感知截断（输出必定合法 JSON 且 ≤8 KiB）/ traceback 8 KiB / summary ≤256·512（ISSUE-074 fixed，REV-027）；§5.8.5 严格上界；§5.13.3 L1/L4/L8/L10 状态更新（L8 剩余清单随 M6、L10 落库待 REV-030）。
+   - **06**：§6.2.4 `runs` 补 `worker_versions_json`/`model_params_json` 列与 `seed`/`record_mode` 写入口径（REV-028）；新增 §6.2.13 L2 记录表（`recorded_outputs`/`llm_calls` 的写者/键/hash/status/脱敏）；§6.8.1 中止标定两段原语与判活分工（REV-034，CLI 调用随 REV-030）；§6.8.3 ISSUE-048 更新；§6.9.1 `:memory:` event_count；§6.10.1 手写解析现状；§6.10.3 `--python`/`--record`/fake-llm 口径；§6.10.5 replay 退出码与 `REPLAY_*` 命名空间；§6.10.6 与新增 §6.10.7 `zgraph replay` 契约。
+   - **00**：§0.4 补 `REPLAY_RECORD_MISSING` 之外的 `REPLAY_OUTPUT_MISMATCH`/`REPLAY_RUN_NOT_COMPLETED`/`REPLAY_RECORD_CORRUPT` 并指向 06 §6.10.5（均为 CLI 命名空间、不写 `runs.error_code`）。
+   - **04**：§4.3.6 解释器优先级回写为 `--python` > `PYO3_PYTHON` > `ZGRAPH_PYTHON`（仅测试覆盖）> `python3`（REV-028）。
+   - **08**：只追加 **§8.7 M5 注记**（ISSUE-061/074 `fixed`；076/081/082 部分修；048/084 wave2；033/036/059/073/075/077/079/080/085 留 M6），**不改** 8.0–8.6 历史快照。
+   - **architecture**：§5.2 L2 写入口径、§5.3 replay 退出码、§6.1 legacy 归档（冻结只读、不物理删除）、§8.2 补 3 个 `REPLAY_*` 码。
+   - **索引/归档**：`doc/reviews/README.md` 补 REV-025–029/033/034/038（已合并）并标注未合并编号；`doc/index.md` 与 `legacy/README.md` 标「已归档、无维护、不得新增代码」（DR-002 §8）；根 `README.md` 更新 M5 收尾状态。本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **5938 行**）。
+
 ## 3. 文件清单（SHA-256 + 行数）
 
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | 2698b5a4fd87fcd4a9e30480d46019c7dfa8897938ba1684b2902c7fcee21dcb | 292 |
+| `00-总纲.md` | db96ee54f6b2daa7c1678da256e67c8e3e39f19c300b32620e0db5b1ee6388a7 | 294 |
 | `01-领域模型与状态机.md` | accb0e481fbd101a00a03a8a95518862b6f6232745667959e4bb646fbe28c283 | 302 |
 | `02-DSL与校验.md` | 506f058fa68b816c2e1b5e4d2cded718007e9cda8b14be6cace387d254933eb5 | 913 |
 | `03-调度器与生命周期.md` | 5f6c91bb45f6677a55f6e8d9b25c178a958c9adf7c96bbb2ca04401c5e47f002 | 388 |
-| `04-节点接口与扩展点.md` | d3a34053eaade3daea325203c54d254104a3d2d4ebfdb87f8dbee1a344e42b80 | 895 |
-| `05-AgentHarness.md` | 2dc2e12c91869c088c31d6c337b3b8bb858296bebbc6775324f7aa440a534f14 | 1418 |
-| `06-存储与可观测.md` | fdc42157c749a21b7cff9359ccedcfee3e41e271b95fc2503dde0b511acf9feb | 985 |
-| `07-验收用例.md` | 0cb84c40df0f9bcc45596ee40c3c89b3ce779fd5aa4a702b492084824b111e3d | 213 |
-| `08-审计关闭矩阵.md` | 317bc008d05bd59ce0c8f25a8991543b41a4c2b06d6205bb7263317021c2d524 | 412 |
+| `04-节点接口与扩展点.md` | 2d4a5ce95523b534273945f619fe3d40c32a969a1468c3b9d4600ad586221ccd | 895 |
+| `05-AgentHarness.md` | c71fe19f80d93af1f65e0539d64c6c0b065204b72ed3e349a62b2c384142785a | 1420 |
+| `06-存储与可观测.md` | 15a50415dc6eec51656a84506d523e89bfa03fcbe6cc1247cf3864581a6d499b | 1059 |
+| `07-验收用例.md` | 7836533e4c82576a65011d48be29b53b77809763c95d201b24092e7caf116987 | 228 |
+| `08-审计关闭矩阵.md` | 27105c7ae5bd696eb6f1a8dc643e3ac39fddfaf575ae5c62f67c6af61a3779d0 | 439 |
 
-> 00–08 合计 **5818 行**（`wc -l` 口径；2026-10-30 M4 回写批次后实测，评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+> 00–08 合计 **5938 行**（`wc -l` 口径；2026-10-30 **M5 回写批次后**实测，分支 `docs/docs-m5-writeback`、评审 REV-035，base 为含 REV-025–029/033/034/038 的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
 
 ## 4. 核验方式
 
@@ -79,3 +90,4 @@ wc -l 0*.md
 - 源稿与提取文本在仓库外，**不可就地复核**；本目录文件是审计与开发的实际依据。
 - **M0–M2 回写已完成（2026-10-30）**：00/01/02/03/04/06/07 正文即 v2 实现口径；`doc/architecture-v2.md` §8 的 D1–D12 与 §8.2 保留为**决策记录**，与正文冲突时以正文为准。**05 分册（Harness）的 v2 口径已于 M4 批次回写（2026-10-30，见 §2 第 7 条）**，新增 D13–D21 记录于 05 §5.13；08 为历史审计矩阵不改语义。
 - 任何对 spec 的后续修改**必须**：更新本文件的 SHA-256 与行数、在 §2 增加修订记录（日期 + 范围 + ISSUE/REV）、并在评审记录中引用。
+- **M5 回写已完成（2026-10-30，REV-035）**：00/04/05/06/07 正文与 `architecture-v2.md` §5.2/§5.3/§6.1/§8.2 已同步 M5 口径；08 只追加 §8.7 M5 注记（历史快照不改）。REV-030/031/032 合并后的第二批回写由 `docs/docs-m5-writeback` 追加提交完成并再次更新本文件 §3。
