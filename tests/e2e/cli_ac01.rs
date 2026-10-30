@@ -42,8 +42,8 @@ use serde_json::{json, Value};
 use zgraph_trace::{InstanceStatus as TraceInstanceStatus, TraceReader};
 
 use cli_support::{
-    ac01_dir, ac01_graph, arg, assert_exit, json_stdout, python_program, python_sdk_dir, repo_root,
-    run_cli, runs_count, stderr_text,
+    ac01_dir, ac01_run_args, arg, assert_exit, json_stdout, repo_root, run_cli, runs_count,
+    stderr_text,
 };
 
 /// AC-01 入口输入（07 AC-01 步骤）。
@@ -55,32 +55,6 @@ const AC01_ENTRY: &str = "input_parser";
 // ---------------------------------------------------------------------------
 // CLI 参数与 fixture 读取
 // ---------------------------------------------------------------------------
-
-/// AC-01 的 `zgraph run ...` 参数（不含可执行文件本身）。
-fn ac01_run_args(db: &Path, inputs: &str) -> Vec<String> {
-    let assets = ac01_dir();
-    let fake_script = assets.join("fake_llm.json");
-    vec![
-        "run".to_string(),
-        arg(&ac01_graph()),
-        "--inputs".to_string(),
-        inputs.to_string(),
-        "--db".to_string(),
-        arg(db),
-        "--assets-dir".to_string(),
-        arg(&assets),
-        "--tools-dir".to_string(),
-        arg(&assets.join("tools")),
-        "--python".to_string(),
-        python_program(),
-        "--python-path".to_string(),
-        arg(&python_sdk_dir()),
-        "--python-path".to_string(),
-        arg(&assets.join("py")),
-        format!("--fake-llm={}", fake_script.display()),
-        "--json".to_string(),
-    ]
-}
 
 /// `customer_ticket/fake_llm.json` 第一轮脚本内容（二次解析断言用）。
 fn fake_content() -> String {
@@ -195,7 +169,7 @@ fn assert_trace_command(db: &Path, run_id: &str) {
 fn ac01_cli_run_customer_ticket_completes_with_expected_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("ac01.db");
-    let output = run_cli(&ac01_run_args(&db, AC01_INPUTS), dir.path());
+    let output = run_cli(&ac01_run_args(&db, AC01_INPUTS, "hash", &[]), dir.path());
     assert_exit(&output, 0, "AC-01 CLI run");
 
     let payload = json_stdout(&output);
@@ -267,7 +241,7 @@ fn ac01_bad_entry_input_exits_3_without_creating_run() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("ac01_bad_input.db");
     let bad_inputs = format!(r#"{{"{AC01_ENTRY}":{{}}}}"#);
-    let output = run_cli(&ac01_run_args(&db, &bad_inputs), dir.path());
+    let output = run_cli(&ac01_run_args(&db, &bad_inputs, "hash", &[]), dir.path());
     assert_exit(&output, 3, "坏入口输入应 exit 3");
     assert_eq!(runs_count(&db), 0, "坏输入不得产生 run");
     assert!(

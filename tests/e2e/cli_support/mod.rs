@@ -15,15 +15,21 @@
 //!
 //! 验收需要断言「坏图/坏输入不产生 run」「L2 replay 不写新 run」「标定字段落库」等
 //! 存储侧事实；`zgraph-trace` 的只读 reader 按 `run_id` 查询、无跨 run 列表 API，
-//! 因此用与 trace crate 同版本的 workspace `rusqlite` 直接只读查询。
+//! 因此用与 trace crate 同版本的 workspace `rusqlite` 直接只读查询（Lead 批准的
+//! 跨模块 dev-dep；仅测试断言/篡改，不进入产品代码路径）。
+//!
+//! 另外提供 CLI e2e 的图/脚本/资产临时构造（AC-01 参数、慢 fake LLM、agent 资产、
+//! L2 marker py 覆盖包）与运行中 DB 轮询，供 `cli_ac01.rs` / `cli_replay.rs` 复用。
 
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
+use std::time::Duration;
 
-use serde_json::Value;
+use rusqlite::OpenFlags;
+use serde_json::{json, Value};
 
 /// 仓库根（本辅助位于 `<root>/tests/e2e/cli_support`）。
 pub fn repo_root() -> PathBuf {
@@ -213,4 +219,293 @@ pub fn run_status(db: &Path, run_id: &str) -> Option<String> {
             |row| row.get(0),
         )
         .ok()
+}
+
+// ---------------------------------------------------------------------------
+// 图 / 脚本 / 资产临时构造
+// ---------------------------------------------------------------------------
+
+/// 写文本文件（自动创建父目录）。
+pub fn write_text(dir: &Path, name: &str, text: &str) -> PathBuf {
+    let path = dir.join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent dir");
+    }
+    std::fs::write(&path, text).expect("write text file");
+    path
+}
+
+/// 写 JSON 文件（自动创建父目录）。
+pub fn write_json(dir: &Path, name: &str, value: &Value) -> PathBuf {
+    let text = serde_json::to_string_pretty(value).expect("serialize json");
+    write_text(dir, name, &text)
+}
+
+/// `start(x) -> end(r)` 内建图（不 spawn worker；恢复标定用例的第二次 run）。
+pub fn io_graph_text() -> String {
+    json!({
+        "version": "1.0",
+        "metadata": {"name": "cli_io"},
+        "entry_points": ["start"],
+        "nodes": [
+            {"id": "start", "type": "start",
+             "inputs": [{"name": "x", "type": "any", "required": true}], "config": {}},
+            {"id": "end", "type": "end",
+             "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+        ],
+        "edges": [{"from": "start", "to_node": "end", "to_input_port": "r"}]
+    })
+    .to_string()
+}
+
+/// `start(message) -> agent_call(agent_id) -> end(result)` 图。
+///
+/// `declared_timeout_ms=None` → DSL 不声明 `timeout_ms`（ISSUE-076 回退链用例）。
+pub fn agent_graph_text(agent_id: &str, declared_timeout_ms: Option<u64>) -> String {
+    let mut config = json!({"agent_id": agent_id});
+    if let Some(timeout_ms) = declared_timeout_ms {
+        config["timeout_ms"] = json!(timeout_ms);
+    }
+    json!({
+        "version": "1.0",
+        "metadata": {"name": "cli_agent"},
+        "entry_points": ["start"],
+        "nodes": [
+            {"id": "start", "type": "start",
+             "inputs": [{"name": "message", "type": "string", "required": true}],
+             "config": {}},
+            {"id": "worker", "type": "agent_call",
+             "inputs": [{"name": "message", "type": "any", "required": true}],
+             "trigger": "all",
+             "config": config},
+            {"id": "end", "type": "end",
+             "inputs": [{"name": "result", "type": "any", "required": true}],
+             "config": {}}
+        ],
+        "edges": [
+            {"from": "start", "to_node": "worker", "to_input_port": "message"},
+            {"from": "worker", "to_node": "end", "to_input_port": "result"}
+        ]
+    })
+    .to_string()
+}
+
+/// 慢响应 fake LLM 脚本：每 `chunk_chars` 个字符等 `delay_ms`（总时长 ≈ chars/chunk*delay）。
+pub fn slow_text_script(chunk_delay_ms: u64, response_chars: usize) -> Value {
+    json!({
+        "version": 1,
+        "chunk_chars": 3,
+        "chunk_delay_ms": chunk_delay_ms,
+        "calls": [{
+            "kind": "text",
+            "content": "x".repeat(response_chars),
+            "stop_reason": "EndTurn",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2}
+        }],
+        "failures": []
+    })
+}
+
+/// 临时 agent 资产根：`agents/<agent_id>.json`（含 node_timeout_ms）+ `agents/prompt.md` + `tools/`。
+pub fn write_agent_assets(dir: &Path, agent_id: &str, node_timeout_ms: u64) -> PathBuf {
+    let assets = dir.join(format!("assets_{agent_id}"));
+    let agents = assets.join("agents");
+    std::fs::create_dir_all(&agents).expect("create agents dir");
+    std::fs::create_dir_all(assets.join("tools")).expect("create tools dir");
+    let config = json!({
+        "id": agent_id,
+        "name": format!("e2e 临时 agent {agent_id}"),
+        "schema_version": 1,
+        "model": {
+            "provider": "deepseek",
+            "name": "deepseek-chat",
+            "base_url": null,
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "temperature": 0.0,
+            "max_tokens": 512,
+            "context_window_tokens": 65536
+        },
+        "role_prompt_file": "prompt.md",
+        "constraints_file": null,
+        "tools": [],
+        "input_mapping": {"message": "message"},
+        "max_iterations": 4,
+        "llm_timeout_ms": 60000,
+        "llm_max_retries": 1,
+        "node_timeout_ms": node_timeout_ms
+    });
+    write_json(&agents, &format!("{agent_id}.json"), &config);
+    write_text(
+        &agents,
+        "prompt.md",
+        "你是 e2e 临时 agent（行为由 fake LLM 脚本决定）。",
+    );
+    assets
+}
+
+/// L2 marker 的 py 覆盖包：`gates/hr.py` 在正常执行时把 worker pid 追加到
+/// `ZGRAPH_L2_MARKER_LOG`；`zgraph replay --mode=outputs` 不执行 python 节点，
+/// 因此 marker 行数保持不变 = 「重放未启动 worker」的可判定证据（不用 `ps`）。
+pub fn write_l2_marker_py(dir: &Path) -> PathBuf {
+    let root = dir.join("py_override");
+    write_text(
+        &root.join("gates"),
+        "__init__.py",
+        "\"\"\"L2 marker 覆盖包（e2e）。\"\"\"\n",
+    );
+    write_text(
+        &root.join("gates"),
+        "hr.py",
+        r#""""L2 replay e2e：AC-01 门控前置节点 + worker pid marker。
+
+正常执行时把当前 worker 进程 pid 追加到环境变量 ``ZGRAPH_L2_MARKER_LOG`` 指向的文件；
+``zgraph replay --mode=outputs`` 用 RecordedExecutor 直接返回记录输出、不执行本节点，
+因此 marker 行数在 replay 前后保持不变。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any
+
+from zgraph_worker import WorkerContext
+
+MARKER_ENV: str = "ZGRAPH_L2_MARKER_LOG"
+
+
+def _need_human(inputs: dict[str, Any]) -> bool:
+    """从上游 agent 四字段整包的 ``content`` 解析 ``need_human``（缺省 False）。"""
+    package: Any = inputs.get("answer") or {}
+    content: Any = package.get("content") if isinstance(package, dict) else None
+    if not isinstance(content, str):
+        return False
+    try:
+        parsed: Any = json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    if isinstance(parsed, dict) and isinstance(parsed.get("need_human"), bool):
+        return parsed["need_human"]
+    return False
+
+
+def need_human_check(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
+    """记录 worker pid marker 后返回 ``{"need_human": bool}``。"""
+    marker: str | None = os.environ.get(MARKER_ENV)
+    if marker:
+        with open(marker, "a", encoding="utf-8") as handle:
+            handle.write(f"{os.getpid()}\n")
+    return {"need_human": _need_human(inputs)}
+"#,
+    );
+    root
+}
+
+// ---------------------------------------------------------------------------
+// 运行中 DB 轮询 / 存储侧断言
+// ---------------------------------------------------------------------------
+
+/// 只读打开 trace DB（带 busy_timeout；运行中的 DB 可安全轮询）。
+pub fn read_only_connect(db: &Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open read-only trace db");
+    conn.busy_timeout(Duration::from_secs(5))
+        .expect("set busy_timeout");
+    conn
+}
+
+/// 当前 `Running`/`Paused` run 的 `(run_id, owner_pid)`（无则 `None`；DB 未就绪也 `None`）。
+pub fn running_run(db: &Path) -> Option<(String, i64)> {
+    if !db.is_file() {
+        return None;
+    }
+    let conn = read_only_connect(db);
+    conn.query_row(
+        "SELECT run_id, COALESCE(owner_pid, 0) FROM runs \
+         WHERE status IN ('Running','Paused') ORDER BY rowid DESC LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
+}
+
+/// 某 run 的 `recorded_outputs` 行数（L2 记录完整性）。
+pub fn recorded_outputs_count(db: &Path, run_id: &str) -> i64 {
+    read_only_connect(db)
+        .query_row(
+            "SELECT COUNT(*) FROM recorded_outputs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .expect("count recorded_outputs")
+}
+
+/// 某 run 的 `runs.output_json`（L2 输出一致性对比）。
+pub fn run_output_json(db: &Path, run_id: &str) -> Option<String> {
+    read_only_connect(db)
+        .query_row(
+            "SELECT output_json FROM runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+}
+
+/// trace DB 主文件字节（「replay 不修改原 trace」证据）。
+pub fn db_bytes(db: &Path) -> Vec<u8> {
+    std::fs::read(db).expect("read trace db bytes")
+}
+
+/// 读一个文本文件为行列表（marker 日志等）。
+pub fn read_lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("读取 {} 失败: {error}", path.display()))
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// AC-01 参数构造（cli_ac01 / cli_replay 共用）
+// ---------------------------------------------------------------------------
+
+/// AC-01 图 `zgraph run` 参数。
+///
+/// - `record`：`none|hash|full`（L2 重放要求 `full`）；
+/// - `extra_python_paths`：**先于** fixture `py/` 的 Python 搜索路径（L2 marker 覆盖用）。
+pub fn ac01_run_args(
+    db: &Path,
+    inputs: &str,
+    record: &str,
+    extra_python_paths: &[PathBuf],
+) -> Vec<String> {
+    let assets = ac01_dir();
+    let fake_script = assets.join("fake_llm.json");
+    let mut args = vec![
+        "run".to_string(),
+        arg(&ac01_graph()),
+        "--inputs".to_string(),
+        inputs.to_string(),
+        "--db".to_string(),
+        arg(db),
+        "--assets-dir".to_string(),
+        arg(&assets),
+        "--tools-dir".to_string(),
+        arg(&assets.join("tools")),
+        "--python".to_string(),
+        python_program(),
+        "--python-path".to_string(),
+        arg(&python_sdk_dir()),
+    ];
+    for path in extra_python_paths {
+        args.push("--python-path".to_string());
+        args.push(arg(path));
+    }
+    args.push("--python-path".to_string());
+    args.push(arg(&assets.join("py")));
+    args.push(format!("--fake-llm={}", fake_script.display()));
+    args.push(format!("--record={record}"));
+    args.push("--json".to_string());
+    args
 }
