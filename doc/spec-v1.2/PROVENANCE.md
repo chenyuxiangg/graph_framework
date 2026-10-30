@@ -88,16 +88,17 @@
    - 本批次后按 §3 重新实测并更新（00–08 合计 **5958 行**）。
 12. **REV-036 收尾批次**（2026-10-30，`docs/process-m5-wrapup`，评审 REV-036）：按 REV-035 §8.6 #2 把 ISSUE-084 状态在 06 §6.8.1 / 07 §7.3 #6 / 08 §8.7 / DR-002 §9 #10 统一为 **fixed**（残余多机/EPERM/host 边界转 **ISSUE-088**，M6）；06/07/08 仅措辞修订（行数不变），§3 对应 SHA-256 已再实测；§5 M5 完成声明不变。
 13. **M6 spec 回写批次**（2026-10-31，REV-057；分支 `docs/docs-m6-writeback`，评审 REV-057）：
-    - **来源**：M6 已合并实现/评审 REV-040/041/042/043/044/047/049/050/052/055/058/060；**未合并的 ISSUE-082（`runs.worker_versions_json/model_params_json`）与 ISSUE-088（多机加固）只写 pending 占位，不写「已实现」**。
-    - **06**：§6.2.2/§6.2.4/§6.7/§6.9.2/§6.10.7/§6.12.3 D5 回写 trace schema **v3** + `runs.global_vars_json`（canonical JSON）+ 逐版本迁移/`VACUUM INTO` 备份/失败恢复/只读拒绝 + replay 兼容（REV-049/ISSUE-087）；§6.4.1 双通道已拆回 + 发送序号有序合并（**同发送端有序、跨发送端各通道 FIFO、无全局序**；REV-041/ISSUE-033/ISSUE-092）；§6.4.5 fail-stop 已接线与边界（REV-047/ISSUE-036）；§6.10.1/§6.10.2/§6.10.5 CLI 退出码 0/2/1/70、`-v/--verbose`→`RUST_LOG`、纯文本无 ANSI/`NO_COLOR`、v0.1 不引入 `clap`、`--version` 字面（REV-043/ISSUE-059）；§6.10.3 human 生命周期实时 + token 聚合段/`[seq N]` 口径（REV-050/ISSUE-085）。
-    - **05**：§5.2.1 prompt/constraints `canonicalize` 路径安全（REV-042/ISSUE-077）；§5.8.5 preview 结构摘要 + 敏感键脱敏 + ≤256（REV-042/ISSUE-075）；§5.6.5/§5.13 D13/§5.13.1 工具并发共享 `WorkerLimits`（REV-052/ISSUE-079，e2e 适配 REV-060）；§5.6.2.1/§5.2.7 discover failure reason 闭集冻结（REV-057/ISSUE-080）；§5.13.3 L2/L5/L7/L9/L10 状态更新。
+    - **来源**：M6 已实现/评审 REV-040/041/042/043/044/047/048/049/050/052/055/058/060；**未合并的 ISSUE-088（多机加固）只写 pending 占位，不写「已实现」**；ISSUE-082 按 REV-048 已实现口径登记（代码分支与 docs 分支合并顺序由 Lead 保证）。
+    - **06**：§6.2.2/§6.2.4/§6.7/§6.9.2/§6.10.7/§6.12.3 D5 回写 trace schema **v3** + `runs.global_vars_json`（canonical JSON）+ 逐版本迁移/`VACUUM INTO` 备份/失败恢复/只读拒绝 + replay 兼容（REV-049/ISSUE-087）；§6.4.1 双通道已拆回 + 发送序号有序合并（**同发送端有序、跨发送端各通道 FIFO、无全局序**；REV-041/ISSUE-033/ISSUE-092）；§6.4.5 fail-stop 已接线与边界（REV-047/ISSUE-036）；§6.10.1/§6.10.2/§6.10.5 CLI 退出码 0/2/1/70、`-v/--verbose`→`RUST_LOG`、纯文本无 ANSI/`NO_COLOR`、v0.1 不引入 `clap`、`--version` 字面（REV-043/ISSUE-059）；§6.10.3 human 生命周期实时 + token 聚合段/`[seq N]` 口径（REV-050/ISSUE-085）；§6.2.4/§6.2.13/§6.9.1 `runs.worker_versions_json`/`model_params_json` 已接线（写时点=run 结束、关闭写端前；`update_run_columns` 原语；两列 JSON 数组形状/去重/无观测 `[]`/不含密钥/失败 run 保留摘要；`:memory:` 不写）——REV-048/ISSUE-082。
+    - **05**：§5.2.1 prompt/constraints `canonicalize` 路径安全（REV-042/ISSUE-077）；§5.8.5 preview 结构摘要 + 敏感键脱敏 + ≤256（REV-042/ISSUE-075）；§5.6.5/§5.13 D13/§5.13.1 工具并发共享 `WorkerLimits`（REV-052/ISSUE-079，e2e 适配 REV-060）；§5.6.2.1/§5.2.7 discover failure reason 闭集冻结（REV-057/ISSUE-080）；§5.13.3 L2/L5/L7/L9/L10 状态更新（L10 随 REV-049/REV-048 fixed）。
     - **07**：AC-06 补实例级 `NODE_TIMEOUT`（自报 + watchdog、`elapsed_ms` 同源；REV-040/REV-055/ISSUE-086）；AC-12 增「同一图 10 并发 run」用例（REV-044/ISSUE-089）与工具+节点峰值口径（REV-060），并更新 `tests/e2e` 资产路径/命令。
     - **03/04**：03 §3.12、04 A7/A17 与 §4.2 的 `emitter`/容量行的「M2 临时单通道」注记改「**M6 已拆回双通道（REV-041）**」（跨册一致性，避免与 06 §6.4.1 矛盾）。
-    - **08**：只追加 **§8.8 M6 注记**（按 REV 关闭 ISSUE-033/036/059/075/077/079/080/085/086/087/089/092/094；ISSUE-082/088 标 pending；081/090/091/093 仍开放），**不改** 8.0–8.7 历史快照。
-    - **architecture**：§5.2 注记 trace schema v3 / `runs.global_vars_json` / 逐版本迁移备份口径 / ISSUE-082 pending 占位。
-    - **台账**：`doc/issues.md` 更新 **ISSUE-079**（REV-052/060）、**ISSUE-080**（REV-057）、**ISSUE-085**（REV-050）、**ISSUE-087**（REV-049）、**ISSUE-092**（REV-057）为 `fixed`；**ISSUE-082/088 保持 open（pending，未合并）**。
+    - **08**：只追加 **§8.8 M6 注记**（按 REV 关闭 ISSUE-033/036/059/075/077/079/080/085/086/087/089/092/094，M6 已修 ISSUE-082（REV-048）；ISSUE-088 标 pending；081/090/091/093 仍开放），**不改** 8.0–8.7 历史快照。
+    - **architecture**：§5.2 注记 trace schema v3 / `runs.global_vars_json` / 逐版本迁移备份口径；以及 082 的两列写入口径（REV-048）。
+    - **台账**：`doc/issues.md` 更新 **ISSUE-079**（REV-052/060）、**ISSUE-080**（REV-057）、**ISSUE-082**（REV-048）、**ISSUE-085**（REV-050）、**ISSUE-087**（REV-049）、**ISSUE-092**（REV-057）为 `fixed`；**ISSUE-088 保持 open（pending，未合并）**。
     - **补齐（同分支第二提交）**：02 §2.7.4 `validate` 退出码删除 M1 临时口径 `3`（REV-043）；`README.md` 双通道口径改「M6 已拆回 8192+1024 + 发送序号有序合并（REV-041）」、行数表同步（05/06/07/08）、批次索引补 M6（§2 第 13 条）。
-    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6028 行**）。
+    - **第三提交（ISSUE-082 回写，REV-048）**：06 §6.2.4/§6.2.13/§6.9.1（两列写入口径/形状/`:memory:` 不写）、05 §5.13.3 L10 与 M6 状态、07 §7.2 状态、08 §8.8（ISSUE-082 → fixed）、`architecture §5.2`、`doc/issues.md`（ISSUE-082 → fixed）；§3 行数重测（00–08 合计 **6033 行**）。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6033 行**）。
 
 ## 3. 文件清单（SHA-256 + 行数）
 
@@ -108,12 +109,12 @@
 | `02-DSL与校验.md` | 30d9ba6794407f6e13c3cf88a5c276f821b1cf30034c33801eb172a6e48c947e | 913 |
 | `03-调度器与生命周期.md` | 4aaca988e89b91881c5aa17df83f778ecb21a656e21594589a321bae6a6be9c0 | 390 |
 | `04-节点接口与扩展点.md` | 625095fff24e769f4c8e4fe019ac50d186e86657b37b6f7c3ed05d9b22d29377 | 895 |
-| `05-AgentHarness.md` | 2c105841a2f03ff350fa1f3e997c464caa34dd5cdd7627ccfbade16edf26dddd | 1429 |
-| `06-存储与可观测.md` | 348895e4890d87fbec17503eb571d1fece6465420efde78e9d22c007c498e6e6 | 1088 |
-| `07-验收用例.md` | 09500eef0f5a86817f59a37e8952c62c86ebba4cd5078169ebb4e5aac1aadae2 | 241 |
-| `08-审计关闭矩阵.md` | bc3339e63f4c0f1e839d96caabf2fb5e71964264593a9476afdb33430b888295 | 476 |
+| `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
+| `06-存储与可观测.md` | 6b9b511aba52b3e8377e89a98559fad21b7d79d6ff26ef88fb6200c689d06d8b | 1093 |
+| `07-验收用例.md` | fdbe7fe046c3ed7d6912a34e64a78c8652e1b5dab817bf1c7c4186f9802f63cb | 241 |
+| `08-审计关闭矩阵.md` | 92953c79359329e84b350d74c42640e93231d98a21c9f34216a35ef2006d3b65 | 476 |
 
-> 00–08 合计 **6028 行**（`wc -l` 口径；2026-10-31 **M6 回写批次后**实测，分支 `docs/docs-m6-writeback`、评审 REV-057，base 为含 M6 实现（REV-040–060）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+> 00–08 合计 **6033 行**（`wc -l` 口径；2026-10-31 **M6 回写批次后**实测（含 ISSUE-082 回写），分支 `docs/docs-m6-writeback`、评审 REV-057，base 为含 M6 实现（REV-040–060）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
@@ -134,4 +135,4 @@ wc -l 0*.md
 - **M5 wave2 回写已完成（2026-10-30，REV-035 第二批）**：06/07/05/00/08/architecture 已按 REV-030/032 实际实现校准（replay L2、`llm_calls`、启动标定/`recovered[]`、e2e 结论）；REV-031（ISSUE-066）合并后由第三个提交补 06 §6.2.5.1 的 signal/exit 载荷与 08 注记。
 - **M5 ISSUE-066 回写已完成（2026-10-30，REV-035 第三批）**：03 §3.15 / 06 §6.2.5.1 / architecture §8.2 已回写 `NODE_WORKER_CRASH` 的 `signal`/`exit_code`/`stderr_tail` 证据字段与边界；08 §8.7 记 ISSUE-066 fixed（REV-031）；台账状态由 Lead 收口。
 - **REV-035 评审条件已关闭（2026-10-30）**：C1/C2/C3 + 建议已在同一分支追加提交（未改写评审记录）；等待 reviewer-a 复审翻「通过」。
-- **M6 回写已完成（2026-10-31，REV-057）**：05/06/07/08 正文与 `architecture-v2.md` §5.2 已同步 M6 已合并口径（REV-040/041/042/043/044/047/049/050/052/055/060）；03 §3.12 与 04 A7/A17/§4.2 的双通道临时口径同步撤销；08 只追加 §8.8 M6 注记（8.0–8.7 历史快照不改）。**ISSUE-082（`runs.worker_versions_json/model_params_json`）与 ISSUE-088（多机加固）尚未合并**，正文保持 pending 占位，待合并后由后续 docs 批次回填。
+- **M6 回写已完成（2026-10-31，REV-057）**：05/06/07/08 正文与 `architecture-v2.md` §5.2 已同步 M6 已实现口径（REV-040/041/042/043/044/047/048/049/050/052/055/060）；03 §3.12 与 04 A7/A17/§4.2 的双通道临时口径同步撤销；08 只追加 §8.8 M6 注记（8.0–8.7 历史快照不改）。**ISSUE-082 已按 REV-048 回写（`runs.worker_versions_json`/`model_params_json` 接线）；ISSUE-088（多机加固）尚未合并**，正文保持 pending 占位，待合并后由后续 docs 批次回填。
