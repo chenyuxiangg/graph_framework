@@ -9,7 +9,7 @@
 
 ## 1. 结论
 
-**结论：有条件通过**（C1：DR-003 §1 的 ISSUE-080 仍映射到未创建的 REV-051，与同文件 §2「REV-051 未创建、ISSUE-080 并入 REV-057」矛盾；修正后转「通过」）
+**结论：通过**（增量复审 `a593600`：C1 与 S1–S3 已关闭、S4 已接受，证据见 §6；首轮「有条件通过」原文保留）
 
 其余评审点（merge.sh/check.sh 脚本正确性、台账 081/096/097、reviews 索引、progress/README/index/baseline、DR-003 §2 编号收口）均通过；S1–S4 为可读性/口径建议（§3）。
 
@@ -26,10 +26,10 @@
 
 | # | 级别 | 位置 | 问题 | 建议 | 状态 |
 |---|---|---|---|---|---|
-| C1 | **重要** | `doc/decisions/DR-003-m6-scope-and-waves.md:24` vs `:52,:63` | §1 的 ISSUE-080 行仍写「W2 / **REV-051**（docs 主责）」；但同文件 §2 明写「（未创建）REV-051 / ISSUE-080 并入 REV-057」及注记「REV-051（ISSUE-080 并入 REV-057）与 REV-059 未创建」。评审要点 5 明确要求 §1 与 §2 一致；当前 M6 最终决策记录对同一 ISSUE 给出两条不同 REV 编号 | 把 §1 ISSUE-080 行改为 `W2 / REV-057（并入 spec 回写；REV-051 未创建）`，与 §2 一致（其余 §1 映射已核对一致） | **待关闭（条件）** |
-| S1 | 建议（低） | `doc/reviews/README.md:65`、`DR-003…:61` | REV-061 行的分支列写计划名 `docs/process-m6-wrapup`，实际分支/评审记录为 `docs/docs-m6-wrapup`（DR-003 §2 为计划表可保留计划名，但 reviews 索引应可定位；REV-053 计划名 `refactor/harness-m6-split` 实际为 `chore/harness-m6-split` 亦属计划/实际差异） | reviews README 的 REV-061 行改用实际分支 `docs/docs-m6-wrapup`；DR-003 §2 如需保留计划名，建议在表头注明「计划分支名，实际以评审记录为准」 | 非阻塞（建议随 C1 一并改） |
-| S2 | 建议（低） | `doc/index.md:18` | reviews 范围写「REV-000–REV-036、REV-038–061…REV-051/059 未创建」，未写明 **REV-037 从未创建**（DR-003 §2 已注明） | 补「REV-037/051/059 未创建」或沿用 DR-003 口径 | 非阻塞 |
-| S3 | 建议（低） | `README.md:17` | M6 已完成，但下方仍以「**已完成 M0–M5**：」起首列历史交付；易被读成 M6 未列 | 改为「**M0–M5 已完成交付（摘要）**」或「M0–M6」并注明 M6 见上段 | 非阻塞 |
+| C1 | **重要** | `doc/decisions/DR-003-m6-scope-and-waves.md:24` vs `:52,:63` | §1 的 ISSUE-080 行仍写「W2 / **REV-051**（docs 主责）」；但同文件 §2 明写「（未创建）REV-051 / ISSUE-080 并入 REV-057」及注记「REV-051（ISSUE-080 并入 REV-057）与 REV-059 未创建」。评审要点 5 明确要求 §1 与 §2 一致；当前 M6 最终决策记录对同一 ISSUE 给出两条不同 REV 编号 | 把 §1 ISSUE-080 行改为 `W2 / REV-057（并入 spec 回写；REV-051 未创建）`，与 §2 一致（其余 §1 映射已核对一致） | **已关闭（a593600）** |
+| S1 | 建议（低） | `doc/reviews/README.md:65`、`DR-003…:61` | REV-061 行的分支列写计划名 `docs/process-m6-wrapup`，实际分支/评审记录为 `docs/docs-m6-wrapup`（DR-003 §2 为计划表可保留计划名，但 reviews 索引应可定位；REV-053 计划名 `refactor/harness-m6-split` 实际为 `chore/harness-m6-split` 亦属计划/实际差异） | reviews README 的 REV-061 行改用实际分支 `docs/docs-m6-wrapup`；DR-003 §2 如需保留计划名，建议在表头注明「计划分支名，实际以评审记录为准」 | 已落实（a593600） |
+| S2 | 建议（低） | `doc/index.md:18` | reviews 范围写「REV-000–REV-036、REV-038–061…REV-051/059 未创建」，未写明 **REV-037 从未创建**（DR-003 §2 已注明） | 补「REV-037/051/059 未创建」或沿用 DR-003 口径 | 已落实（a593600） |
+| S3 | 建议（低） | `README.md:17` | M6 已完成，但下方仍以「**已完成 M0–M5**：」起首列历史交付；易被读成 M6 未列 | 改为「**M0–M5 已完成交付（摘要）**」或「M0–M6」并注明 M6 见上段 | 已落实（a593600） |
 | S4 | 备注 | AC-12 10 次重跑 | 10/10 仅见 commit body 记录（2 passed/0 failed、4.17–4.22s），本评审未独立复跑（按派单「无需跑 cargo」；合并门禁会跑全新 build+workspace test+clippy） | 以 merge 门禁日志兜底；如 wrapup 后保留重跑日志可附 index/REV-061 | 已接受（非阻塞） |
 
 ## 4. 验证命令与结果
@@ -66,10 +66,22 @@ grep -n refactor scripts/dev/check.sh scripts/dev/worktree.sh  # check.sh:41 + w
 
 ## 5. 遗留问题
 
-- **C1**（DR-003 §1 ISSUE-080 仍写 REV-051，与 §2/实际 REV-057 矛盾）——修正后由 reviewer-a 追加条件关闭记录并改结论「通过」。
-- S1–S3 为可读性/索引小建议，不阻塞；S4 已接受（AC-12 以 commit body + merge 门禁为准）。
+- **C1 与 S1–S3 已在 `a593600` 关闭**（DR-003 §1 080→REV-057；reviews 索引实际分支名；index 补 037；README 历史段措辞），证据见 §6，**无遗留条件**。
+- S4 已接受：AC-12 10/10 以 Lead commit body 记录 + merge 门禁全新 build/test/clippy 兜底（本评审未独立复跑）。
 - 无 crate/协议/测试代码改动；无代码风险。
 
-## 6. 条件关闭记录
+## 6. 条件关闭记录（增量复审 `a593600`）
 
-> 待 C1 修正（DR-003 §1 ISSUE-080 → REV-057）后追加，含复核结果。
+**关闭提交范围**：`1ede79f..a593600`，4 files +5/−5（`README.md`、`doc/decisions/DR-003-m6-scope-and-waves.md`、`doc/index.md`、`doc/reviews/README.md`），全部 doc/** + 根 README；worktree clean、check.sh PASS；base 仍为当前 main `b76d25d`（无 rebase）。
+
+| 条件/建议 | 关闭证据（`a593600`） | 结论 |
+|---|---|---|
+| **C1** | `DR-003-m6-scope-and-waves.md:24` ISSUE-080 行改为 `W2 / REV-057（并入 spec 回写；REV-051 未创建）`，与 §2 `:52,:63` 完全一致；复核无「ISSUE-080 … REV-051」残留 | ✅ 关闭 |
+| S1 | `doc/reviews/README.md:65` REV-061 分支列改实际 `docs/docs-m6-wrapup`；`DR-003…:61` wrapup 行注明「计划名；实际 `docs/docs-m6-wrapup`」 | ✅ 落实 |
+| S2 | `doc/index.md:18` reviews 范围补「REV-037/051/059 未创建」 | ✅ 落实 |
+| S3 | `README.md:17` 历史段改「**M0–M5 已完成交付（摘要）**」 | ✅ 落实 |
+| S4 | AC-12 10/10 依据 commit `4ddca05` body（2 passed/0 failed、4.17–4.22s）+ merge 门禁全新 build/test/clippy；本评审按派单未独立复跑 | 已接受（非阻塞） |
+
+**复核结果**：diff 仅 4 个 doc/README 文件 +5/−5，无 crate 代码；check.sh PASS；DR-003 §1/§2 编号映射一致（080→057，051/059 未创建注明），reviews 索引 REV-061 与实际分支/记录文件 `REV-061-process-m6-wrapup.md` 对应；index/README 措辞与 M6 完成状态一致。
+
+> 主评审结论：**通过**（首轮「有条件通过」→ C1/S1–S3 关闭、S4 接受 → 本次改「通过」）。这是 M6 最后合并；合并门禁将执行 `cargo build`（CLI bin，ISSUE-096）→ `cargo test --workspace` → `cargo clippy -D warnings` → `pytest`。
