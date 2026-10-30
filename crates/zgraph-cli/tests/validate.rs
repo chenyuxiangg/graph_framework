@@ -47,17 +47,71 @@ fn version_flag_prints_versions() {
     assert!(stdout(&output).contains("DSL 1.0"));
 }
 
+// ISSUE-059（REV-043）：validate 退出码统一为 06 §6.10.5 权威表——
+// 用法错误 → 2，IO/内部 → 1；M1 临时口径 3 已废弃。
 #[test]
-fn usage_errors_exit_3() {
+fn usage_errors_exit_2() {
     for args in [
         vec!["validate"],
         vec!["validate", "--nope"],
         vec!["validate", "--assets-dir"],
-        vec!["validate", "/definitely/not/a/file.json"],
         vec!["unknown-command"],
     ] {
         let output = zgraph(&args);
-        assert_eq!(code(&output), 3, "args={args:?}: {}", stderr(&output));
+        assert_eq!(code(&output), 2, "args={args:?}: {}", stderr(&output));
+    }
+}
+
+#[test]
+fn unreadable_graph_exits_1() {
+    let output = zgraph(&["validate", "/definitely/not/a/file.json"]);
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("cannot read"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+// 06 §6.10.1：`-v/--verbose` 是全局参数，可出现在子命令前后，且不改变输出/退出码。
+#[test]
+fn verbose_flag_is_accepted_globally() {
+    let graph = fixtures().join("customer_ticket.json");
+    let path = graph.to_str().expect("utf8 path");
+    let assets_dir = assets();
+    let assets_path = assets_dir.to_str().expect("utf8 path");
+    for args in [
+        vec!["-v", "validate", path, "--assets-dir", assets_path],
+        vec!["validate", path, "--assets-dir", assets_path, "--verbose"],
+        vec!["--version", "-v"],
+    ] {
+        let output = zgraph(&args);
+        assert_eq!(code(&output), 0, "args={args:?}: {}", stderr(&output));
+    }
+}
+
+// v0.1 颜色决策（06 §6.10.1，REV-028 #6）：全部输出为纯文本，不含 ANSI 转义，
+// 因此 `NO_COLOR` 语义天然满足；未来引入颜色时必须同时实现 TTY + `NO_COLOR` 判定。
+#[test]
+fn output_has_no_ansi_escapes_and_honours_no_color() {
+    let graph = fixtures().join("bad_port.json");
+    let path = graph.to_str().expect("utf8 path");
+    for no_color in [None, Some("1")] {
+        for args in [
+            vec!["--help"],
+            vec!["validate", path],
+            vec!["validate", path, "--json"],
+        ] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_zgraph"));
+            command.args(&args);
+            if let Some(value) = no_color {
+                command.env("NO_COLOR", value);
+            }
+            let output = command.output().expect("zgraph binary runs");
+            for text in [stdout(&output), stderr(&output)] {
+                assert!(!text.contains('\u{1b}'), "ANSI escape found: {text}");
+            }
+        }
     }
 }
 

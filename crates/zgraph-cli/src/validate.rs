@@ -8,6 +8,8 @@ use std::process::ExitCode;
 use serde_json::Value;
 use zgraph_dsl::{load_graph_with_options, LoadOptions, Location, ValidationReport};
 
+use crate::{EXIT_OTHER, EXIT_USAGE};
+
 /// `validate` 的参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidateArgs {
@@ -51,14 +53,20 @@ pub fn parse(args: &[String]) -> Result<ValidateArgs, String> {
     })
 }
 
-/// 执行 `validate` 并返回进程退出码。
+/// 执行 `validate` 并返回进程退出码（06 §6.10.5 权威表）。
+///
+/// `validate` 退出码（M6 起统一，ISSUE-059 废弃 M1 临时口径 3）：
+/// `0` 合法；`2` DSL/资产错误；`1` IO 错误（文件不可读）；panic 由顶层
+/// `catch_unwind` 统一映射为 `70`。用法错误（选项/参数）在 [`parse`] 阶段返回，
+/// 由 [`crate::dispatch`] 映射为 `2`。
 pub fn run(args: &ValidateArgs) -> ExitCode {
     let display = args.graph.display().to_string();
     let bytes = match std::fs::read(&args.graph) {
         Ok(bytes) => bytes,
         Err(error) => {
+            // 06 §6.10.5 / 02 §2.7.4：文件不可读属「其他（IO/内部）」→ 退出码 1。
             eprintln!("error: cannot read '{display}': {error}");
-            return ExitCode::from(3);
+            return ExitCode::from(EXIT_OTHER);
         }
     };
     let options = build_options(args);
@@ -84,7 +92,7 @@ pub fn run(args: &ValidateArgs) -> ExitCode {
         } else {
             print_errors(&display, &report);
         }
-        ExitCode::from(2)
+        ExitCode::from(EXIT_USAGE)
     }
 }
 
