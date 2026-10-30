@@ -244,6 +244,13 @@ fn node_error_codes_match_spec() {
             "HARNESS_MEMORY_DEGRADED",
         ),
         (
+            NodeError::Harness {
+                kind: HarnessErrorKind::ContextOverflow,
+                detail: json!({}),
+            },
+            "HARNESS_CONTEXT_OVERFLOW",
+        ),
+        (
             NodeError::Config {
                 message: "cfg".to_string(),
             },

@@ -105,6 +105,9 @@ pub const CODE_HARNESS_LLM_TIMEOUT: &str = "HARNESS_LLM_TIMEOUT";
 /// 工具执行失败（喂回 LLM，不终止；00 §0.4 统一为 `TOOL_ERROR`）。
 pub const CODE_HARNESS_TOOL_ERROR: &str = "TOOL_ERROR";
 
+/// 上下文预算裁剪后仍溢出（M4 追加；00 §0.4 已有该码，而 §0.3 七值缺该 kind，见 05 §5.13）。
+pub const CODE_HARNESS_CONTEXT_OVERFLOW: &str = "HARNESS_CONTEXT_OVERFLOW";
+
 /// 记忆检索/写入失败（降级告警，不终止）。
 pub const CODE_HARNESS_MEMORY_DEGRADED: &str = "HARNESS_MEMORY_DEGRADED";
 
@@ -333,6 +336,8 @@ pub enum HarnessErrorKind {
     ToolError,
     /// 记忆检索/写入失败（降级告警，不终止）。
     MemoryDegraded,
+    /// 上下文预算裁剪后仍溢出（M4 追加，见 05 §5.13；00 §0.4 `HARNESS_CONTEXT_OVERFLOW`）。
+    ContextOverflow,
 }
 
 impl HarnessErrorKind {
@@ -346,6 +351,7 @@ impl HarnessErrorKind {
             Self::LlmTimeout => CODE_HARNESS_LLM_TIMEOUT,
             Self::ToolError => CODE_HARNESS_TOOL_ERROR,
             Self::MemoryDegraded => CODE_HARNESS_MEMORY_DEGRADED,
+            Self::ContextOverflow => CODE_HARNESS_CONTEXT_OVERFLOW,
         }
     }
 }
