@@ -14,10 +14,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
-use zgraph_kernel::{CompiledHandler, NodeError, NodeExecution, NodeExecutor};
+use zgraph_kernel::{CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor};
 
 use crate::agent_loop::{run_agent, AgentRun, RunFailure};
-use crate::config::load_agent;
+use crate::config::{load_agent, peek_agent_node_timeout};
+use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
 use crate::ctx::{CancelToken, HarnessCtx};
 use crate::error::HarnessError;
 use crate::llm::LlmProvider;
@@ -129,7 +130,11 @@ impl NodeExecutor for HarnessExecutor {
         let ctx: Arc<dyn HarnessCtx> = Arc::new(execution.ctx.clone());
         let inputs = execution.inputs.clone();
         let declared_ports = execution.node.inputs.clone();
-        let node_timeout_ms = execution.node.timeout_ms;
+        let declared_timeout_ms = execution.node.declared_timeout_ms;
+        // ISSUE-076：Loading 早退（取消/超时/ConfigLoad）的 elapsed 上报也用同一优先级
+        // `declared > AgentConfig(node_timeout_ms 轻量读取) > DEFAULT`（与内核派发一致）。
+        let resolved_timeout_ms =
+            resolve_node_timeout_ms(declared_timeout_ms, &self.settings.assets_dir, &agent_id);
         Box::pin(async move {
             // ---- Phase Loading（取消/实例 deadline 预检优先）
             if ctx.cancel_requested() {
@@ -138,20 +143,23 @@ impl NodeExecutor for HarnessExecutor {
             let remaining = ctx.node_deadline_remaining_ms();
             if remaining == 0 {
                 return Err(NodeError::Timeout {
-                    elapsed_ms: node_timeout_ms.saturating_sub(remaining),
+                    elapsed_ms: resolved_timeout_ms.saturating_sub(remaining),
                 });
             }
             let registry = self
                 .registry(&ctx)
                 .await
-                .map_err(|error| config_failure(error, &ctx, node_timeout_ms))?;
+                .map_err(|error| config_failure(error, &ctx, resolved_timeout_ms))?;
             let agent = load_agent(
                 &self.settings.assets_dir,
                 &agent_id,
                 &registry,
                 self.settings.fake_mode,
             )
-            .map_err(|error| config_failure(error, &ctx, node_timeout_ms))?;
+            .map_err(|error| config_failure(error, &ctx, resolved_timeout_ms))?;
+            // ISSUE-076：有效实例超时 = DSL 声明 > AgentConfig > DEFAULT（05 §5.2.6），
+            // 与内核 dispatch 的解析顺序一致；仅用于 `Timeout.elapsed_ms` 上报。
+            let node_timeout_ms = declared_timeout_ms.unwrap_or(agent.config.node_timeout_ms);
             // 节点级 max_iterations 覆盖 AgentConfig（05 §5.2.6）。
             let effective_max_iterations = node_max_iterations
                 .unwrap_or(agent.config.max_iterations)
@@ -178,6 +186,31 @@ impl NodeExecutor for HarnessExecutor {
                 .map_err(RunFailure::into_node_error)
         })
     }
+
+    /// ISSUE-076：`agent_call` 在 DSL 未声明 `timeout_ms` 时回退
+    /// `AgentConfig.node_timeout_ms`（05 §5.2.6；DR-002 §4 同步轻量路径）。
+    ///
+    /// 只读资产 JSON 的 `node_timeout_ms` 字段（按 `id` 命中，轻量范围校验），
+    /// **不**查 `ToolRegistry`/密钥/prompt；仅对 `CompiledHandler::Agent` 返回
+    /// `Some`。任何失败或缺失 → `None`（内核回退 `DEFAULT_NODE_TIMEOUT_MS`，
+    /// 运行期 Loading 仍会以 `HARNESS_CONFIG_LOAD` 失败）。
+    fn timeout_hint(&self, node: &CompiledNode) -> Option<u64> {
+        let CompiledHandler::Agent { agent_id, .. } = &node.handler else {
+            return None;
+        };
+        peek_agent_node_timeout(&self.settings.assets_dir, agent_id)
+    }
+}
+
+/// 生效实例超时（05 §5.2.6，与内核派发解析同序）：DSL 声明 > AgentConfig > 默认。
+///
+/// 轻量同步读取 `AgentConfig.node_timeout_ms`（[`peek_agent_node_timeout`]）；
+/// 该值只用于 Loading 早退时的 `Timeout.elapsed_ms` 诊断，避免与内核 deadline 口径
+/// 漂移（ISSUE-076）。运行期成功加载后以校验过的 `agent.config.node_timeout_ms` 为准。
+fn resolve_node_timeout_ms(declared: Option<u64>, assets_dir: &Path, agent_id: &str) -> u64 {
+    declared
+        .or_else(|| peek_agent_node_timeout(assets_dir, agent_id))
+        .unwrap_or(DEFAULT_NODE_TIMEOUT_MS)
 }
 
 /// ConfigLoad 错误在“已请求取消/已超时”时按取消/超时优先映射（05 §5.7.3）。
@@ -209,6 +242,7 @@ fn absolute(path: &Path) -> PathBuf {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use serde_json::{json, Value};
     use tempfile::TempDir;
@@ -310,6 +344,33 @@ mod tests {
 
     fn fake_script(calls: Value) -> Value {
         json!({"version": 1, "chunk_chars": 64, "calls": calls})
+    }
+
+    /// 编译 `AGENT_GRAPH`（取 `CompiledNode` 供 `timeout_hint` 测试）。
+    fn compiled_graph() -> Arc<CompiledGraph> {
+        let loaded = load_graph(AGENT_GRAPH.as_bytes()).expect("valid graph");
+        CompiledGraph::compile(&loaded).expect("compiled graph")
+    }
+
+    /// 构造带指定 `node_timeout_ms` 的 agent 资产。
+    fn assets_with_node_timeout(timeout: Option<Value>) -> TempDir {
+        let mut agent = agent_config("parser", &[]);
+        if let Some(timeout) = timeout {
+            agent["node_timeout_ms"] = timeout;
+        }
+        assets(agent, "你是解析器。")
+    }
+
+    /// 只用于 `timeout_hint` 的轻量执行器（不跑图）。
+    fn hint_executor(assets_dir: &Path) -> HarnessExecutor {
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        HarnessExecutor::new(settings(assets_dir, &fake, &runner))
     }
 
     fn settings(
@@ -544,6 +605,112 @@ mod tests {
         assert!(
             !calls[0].request_text().contains("test-key"),
             "记录不得泄漏密钥"
+        );
+    }
+
+    // ---- ISSUE-076：`timeout_hint`（agent_call 的 AgentConfig 超时回退） ----
+
+    #[test]
+    fn timeout_hint_returns_agent_config_node_timeout() {
+        let dir = assets_with_node_timeout(Some(json!(123_000)));
+        let executor = hint_executor(dir.path());
+        let graph = compiled_graph();
+        let worker = graph.nodes.get("worker").expect("worker node");
+        assert_eq!(executor.timeout_hint(worker), Some(123_000));
+    }
+
+    #[test]
+    fn timeout_hint_is_none_for_non_agent_nodes() {
+        let dir = assets_with_node_timeout(Some(json!(123_000)));
+        let executor = hint_executor(dir.path());
+        let graph = compiled_graph();
+        for node_id in ["start", "end"] {
+            let node = graph.nodes.get(node_id).expect("builtin node");
+            assert_eq!(
+                executor.timeout_hint(node),
+                None,
+                "非 agent_call 节点不得返回 hint: {node_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_hint_is_none_when_config_omits_or_has_invalid_value() {
+        // 缺失 → None（内核用默认值兜底；不把 180000 钉成 hint）。
+        let dir = assets_with_node_timeout(None);
+        let graph = compiled_graph();
+        let worker = graph.nodes.get("worker").expect("worker");
+        assert_eq!(hint_executor(dir.path()).timeout_hint(worker), None);
+
+        // 越界/非整数 → None（运行期 Loading 仍按 HARNESS_CONFIG_LOAD 失败）。
+        for invalid in [json!(10), json!(4_000_000), json!("120000")] {
+            let dir = assets_with_node_timeout(Some(invalid.clone()));
+            assert_eq!(
+                hint_executor(dir.path()).timeout_hint(worker),
+                None,
+                "invalid node_timeout_ms {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_hint_is_none_when_assets_or_agent_are_missing() {
+        // 空资产目录（无 agents 子目录）。
+        let empty = TempDir::new().expect("tempdir");
+        let graph = compiled_graph();
+        let worker = graph.nodes.get("worker").expect("worker");
+        assert_eq!(hint_executor(empty.path()).timeout_hint(worker), None);
+
+        // agents 目录存在但 agent_id 未命中。
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("agents")).expect("agents");
+        assert_eq!(hint_executor(dir.path()).timeout_hint(worker), None);
+    }
+
+    #[test]
+    fn node_timeout_priority_is_declared_then_agent_config_then_default() {
+        let dir = assets_with_node_timeout(Some(json!(123_000)));
+        // DSL 声明优先于 AgentConfig hint。
+        assert_eq!(
+            resolve_node_timeout_ms(Some(300), dir.path(), "parser"),
+            300
+        );
+        // 未声明 → AgentConfig.node_timeout_ms。
+        assert_eq!(resolve_node_timeout_ms(None, dir.path(), "parser"), 123_000);
+        // 资产缺失 → 默认值（与内核 `DEFAULT_NODE_TIMEOUT_MS` 一致）。
+        assert_eq!(
+            resolve_node_timeout_ms(None, &dir.path().join("missing"), "parser"),
+            DEFAULT_NODE_TIMEOUT_MS
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_uses_agent_config_node_timeout_when_dsl_omits_it() {
+        // ISSUE-076 端到端：DSL 未声明 timeout_ms 时，内核经 `timeout_hint` 采用
+        // AgentConfig.node_timeout_ms=1s；若无 hint 则默认 180s（本用例会 Completed）。
+        let dir = assets_with_node_timeout(Some(json!(1_000)));
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
+        let started = Instant::now();
+        let (outcome, sink) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "hint 1s 应快速生效（默认 180s），实际 {elapsed:?}"
+        );
+        assert_eq!(outcome.status, RunStatus::Failed, "outcome: {outcome:?}");
+        let error = outcome.error.expect("run error");
+        assert_eq!(error.code, "NODE_TIMEOUT");
+        assert_eq!(
+            snapshot_status(&sink, "worker"),
+            Some(InstanceStatus::TimedOut)
         );
     }
 }

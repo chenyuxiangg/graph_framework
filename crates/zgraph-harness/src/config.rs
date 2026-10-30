@@ -207,6 +207,50 @@ pub fn agent_index(assets_dir: &Path) -> Result<BTreeMap<String, PathBuf>, Harne
     Ok(index)
 }
 
+/// `AgentConfig.node_timeout_ms` 合法范围下界（05 §5.2.2 V13）。
+pub(crate) const NODE_TIMEOUT_MIN_MS: u64 = 1_000;
+
+/// `AgentConfig.node_timeout_ms` 合法范围上界（05 §5.2.2 V13）。
+pub(crate) const NODE_TIMEOUT_MAX_MS: u64 = 3_600_000;
+
+/// 轻量同步读取 `AgentConfig.node_timeout_ms`（ISSUE-076 / DR-002 §4）。
+///
+/// 供 [`crate::executor::HarnessExecutor`] 的 `timeout_hint` 在**派发前**同步
+/// 给出 `agent_call` 实例超时回退值：只扫描 `<assets_dir>/agents/*.json`
+/// （按文件名排序，与 [`agent_index`] 一致），按文件内 `id` 命中后读取
+/// `node_timeout_ms`；**不**解析 model/tools/prompt、不读密钥、不查 `ToolRegistry`。
+///
+/// 返回 `None` 的情形（内核回退 [`DEFAULT_NODE_TIMEOUT_MS`]；运行期 Loading 仍会
+/// 以 `HARNESS_CONFIG_LOAD` 报错）：资产目录/文件缺失、JSON 非法、`id` 未命中、
+/// 字段缺失/非整数、值越界（[`NODE_TIMEOUT_MIN_MS`]..=[`NODE_TIMEOUT_MAX_MS`]）。
+pub(crate) fn peek_agent_node_timeout(assets_dir: &Path, agent_id: &str) -> Option<u64> {
+    let agents_dir = absolute(assets_dir).join("agents");
+    let entries = std::fs::read_dir(&agents_dir).ok()?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_json_file(path))
+        .collect();
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    for path in files {
+        let Ok(value) = read_json_file(&path, MAX_AGENT_CONFIG_BYTES) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        if object.get("id").and_then(Value::as_str) != Some(agent_id) {
+            continue;
+        }
+        // 命中即返回：与 `agent_index` 的「文件名排序取第一个 id」语义一致。
+        return object
+            .get("node_timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|value| (NODE_TIMEOUT_MIN_MS..=NODE_TIMEOUT_MAX_MS).contains(value));
+    }
+    None
+}
+
 /// 加载并校验一个 Agent（05 §5.2.4 确定性流程 1–10）。
 ///
 /// - `registry`：已发现的工具注册表（步 8 查表）；
@@ -736,13 +780,13 @@ fn parse_timeouts(
     }
     let node_timeout_ms = optional_u64(object, "node_timeout_ms", path, "$.node_timeout_ms")?
         .unwrap_or(DEFAULT_NODE_TIMEOUT_MS);
-    if !(1_000..=3_600_000).contains(&node_timeout_ms) {
+    if !(NODE_TIMEOUT_MIN_MS..=NODE_TIMEOUT_MAX_MS).contains(&node_timeout_ms) {
         return Err(range_error(
             path,
             "$.node_timeout_ms",
             &node_timeout_ms,
-            1_000,
-            3_600_000,
+            NODE_TIMEOUT_MIN_MS,
+            NODE_TIMEOUT_MAX_MS,
         ));
     }
     Ok((
@@ -1586,5 +1630,76 @@ mod tests {
         let index = agent_index(dir.path()).expect("index");
         let ids: Vec<&String> = index.keys().collect();
         assert_eq!(ids, vec!["alpha", "beta"]);
+    }
+
+    // ---- ISSUE-076：派发前轻量读取 `node_timeout_ms`（`timeout_hint` 数据源） ----
+
+    #[test]
+    fn peek_node_timeout_returns_validated_agent_config_value() {
+        let dir = asset_dir(&valid_agent(), "role", None);
+        assert_eq!(peek_agent_node_timeout(dir.path(), "parser"), Some(120_000));
+        // 未命中 id → None。
+        assert_eq!(peek_agent_node_timeout(dir.path(), "other"), None);
+    }
+
+    #[test]
+    fn peek_node_timeout_is_none_for_missing_or_invalid_assets() {
+        // 资产目录不存在 / agents 子目录不存在 → None。
+        let missing = TempDir::new().expect("tempdir");
+        assert_eq!(peek_agent_node_timeout(missing.path(), "parser"), None);
+        assert_eq!(
+            peek_agent_node_timeout(&missing.path().join("nope"), "parser"),
+            None
+        );
+
+        // 字段缺失（AgentConfig 默认 180s 由内核兜底）→ None。
+        let mut agent = valid_agent();
+        agent
+            .as_object_mut()
+            .expect("object")
+            .remove("node_timeout_ms");
+        let dir = asset_dir(&agent, "role", None);
+        assert_eq!(peek_agent_node_timeout(dir.path(), "parser"), None);
+
+        // 越界 / 非整数 → None（运行期 Loading 仍会 HARNESS_CONFIG_LOAD）。
+        for invalid in [json!(10), json!(4_000_000), json!("120000")] {
+            let mut agent = valid_agent();
+            agent
+                .as_object_mut()
+                .expect("object")
+                .insert("node_timeout_ms".to_string(), invalid.clone());
+            let dir = asset_dir(&agent, "role", None);
+            assert_eq!(
+                peek_agent_node_timeout(dir.path(), "parser"),
+                None,
+                "invalid node_timeout_ms {invalid}"
+            );
+        }
+
+        // JSON 非法/无 id 的文件被跳过，不影响其它资产命中。
+        let dir = asset_dir(&valid_agent(), "role", None);
+        std::fs::write(dir.path().join("agents").join("broken.json"), "{not json")
+            .expect("broken file");
+        std::fs::write(
+            dir.path().join("agents").join("anonymous.json"),
+            json!({"name": "no-id"}).to_string(),
+        )
+        .expect("anonymous file");
+        assert_eq!(peek_agent_node_timeout(dir.path(), "parser"), Some(120_000));
+    }
+
+    #[test]
+    fn peek_node_timeout_uses_first_file_for_duplicate_ids() {
+        // 与 `agent_index` 一致：文件名排序后第一个命中者生效。
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("agents")).expect("agents");
+        for (file, timeout) in [("a.json", 11_000), ("b.json", 22_000)] {
+            std::fs::write(
+                dir.path().join("agents").join(file),
+                json!({"id": "dup", "node_timeout_ms": timeout}).to_string(),
+            )
+            .expect("write");
+        }
+        assert_eq!(peek_agent_node_timeout(dir.path(), "dup"), Some(11_000));
     }
 }
