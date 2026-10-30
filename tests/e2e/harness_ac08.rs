@@ -53,7 +53,9 @@ use zgraph_harness::{
     FakeLlmProvider, GenaiLlmProvider, HarnessExecutor, HarnessSettings, LlmMessage, LlmProvider,
     LlmRequest, WorkerToolRunner,
 };
-use zgraph_kernel::{CompiledHandler, NodeError, NodeExecution, NodeExecutor, RunStatus};
+use zgraph_kernel::{
+    CompiledGraph, CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunStatus,
+};
 use zgraph_trace::{InstanceStatus as TraceInstanceStatus, StreamingRow, TraceReader};
 
 /// 单个用例的宽松上限（真 worker 冷启动 + CI 慢机余量；时序断言不猜 sleep）。
@@ -94,6 +96,16 @@ impl NodeExecutor for RoutingExecutor {
             self.harness.execute(execution)
         } else {
             self.worker.execute(execution)
+        }
+    }
+
+    /// ISSUE-076：必须转发内层执行器的 `timeout_hint`；否则包装层默认 `None` 会
+    /// 截断 harness 的 `AgentConfig.node_timeout_ms` 回退，端到端不生效。
+    fn timeout_hint(&self, node: &CompiledNode) -> Option<u64> {
+        if matches!(&node.handler, CompiledHandler::Agent { .. }) {
+            self.harness.timeout_hint(node)
+        } else {
+            self.worker.timeout_hint(node)
         }
     }
 }
@@ -575,6 +587,174 @@ async fn unknown_tool_crashes_instance() {
     let finished = common::run_finished_payload(reader, &run_id);
     assert_eq!(finished["status"], json!("Failed"));
     assert_eq!(finished["error"]["code"], json!("HARNESS_UNKNOWN_TOOL"));
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-076：DSL 未声明 timeout_ms 时回退 AgentConfig.node_timeout_ms（端到端）
+// ---------------------------------------------------------------------------
+
+/// ISSUE-076 用例的 AgentConfig 回退超时（毫秒）：DSL 不声明，内核经
+/// `NodeExecutor::timeout_hint` 采用该值；默认 180s 不可能在宽松上限内结束。
+const HINT_NODE_TIMEOUT_MS: u64 = 1_800;
+
+/// 慢 fake LLM 的 chunk 延迟与总字符数：`ceil(300/3) * 100ms = 10s` > hint。
+const HINT_CHUNK_DELAY_MS: u64 = 100;
+
+/// 慢 fake LLM 的回应字符数（300 / chunk_chars=3 = 100 个 chunk）。
+const HINT_RESPONSE_CHARS: usize = 300;
+
+/// 本用例的宽松上限（远小于默认 180s，远大于 hint）。
+const HINT_CASE_LIMIT: Duration = Duration::from_secs(15);
+
+/// 生成临时 agent 资产：`agents/slow_agent.json` 声明 `node_timeout_ms=1800`。
+fn timeout_hint_assets(dir: &std::path::Path) -> std::path::PathBuf {
+    let assets = dir.join("issue076_assets");
+    let agents = assets.join("agents");
+    std::fs::create_dir_all(&agents).expect("create agents dir");
+    std::fs::create_dir_all(assets.join("tools")).expect("create tools dir");
+    let config = json!({
+        "id": "slow_agent",
+        "name": "ISSUE-076 慢响应 agent",
+        "schema_version": 1,
+        "model": {
+            "provider": "deepseek",
+            "name": "deepseek-chat",
+            "base_url": null,
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "temperature": 0.0,
+            "max_tokens": 512,
+            "context_window_tokens": 65536
+        },
+        "role_prompt_file": "prompt.md",
+        "constraints_file": null,
+        "tools": [],
+        "input_mapping": {"message": "message"},
+        "max_iterations": 4,
+        "llm_timeout_ms": 60000,
+        "llm_max_retries": 1,
+        "node_timeout_ms": HINT_NODE_TIMEOUT_MS
+    });
+    std::fs::write(agents.join("slow_agent.json"), config.to_string()).expect("write agent config");
+    std::fs::write(
+        agents.join("prompt.md"),
+        "你是 ISSUE-076 慢响应测试 agent。",
+    )
+    .expect("write prompt");
+    assets
+}
+
+/// 慢响应 fake LLM 脚本（token 间隔 100ms，总时长约 10s）。
+fn slow_text_script() -> Value {
+    json!({
+        "version": 1,
+        "chunk_chars": 3,
+        "chunk_delay_ms": HINT_CHUNK_DELAY_MS,
+        "calls": [{
+            "kind": "text",
+            "content": "x".repeat(HINT_RESPONSE_CHARS),
+            "stop_reason": "EndTurn",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2}
+        }],
+        "failures": []
+    })
+}
+
+/// `start -> agent_call(不声明 timeout_ms) -> end`。
+fn timeout_hint_graph() -> Arc<CompiledGraph> {
+    let text = json!({
+        "version": "1.0",
+        "metadata": {"name": "e2e_issue076_timeout_hint"},
+        "entry_points": ["start"],
+        "nodes": [
+            {"id": "start", "type": "start",
+             "inputs": [{"name": "message", "type": "string", "required": true}],
+             "config": {}},
+            {"id": "worker", "type": "agent_call",
+             "inputs": [{"name": "message", "type": "any", "required": true}],
+             "trigger": "all",
+             "config": {"agent_id": "slow_agent"}},
+            {"id": "end", "type": "end",
+             "inputs": [{"name": "result", "type": "any", "required": true}],
+             "config": {}}
+        ],
+        "edges": [
+            {"from": "start", "to_node": "worker", "to_input_port": "message"},
+            {"from": "worker", "to_node": "end", "to_input_port": "result"}
+        ]
+    })
+    .to_string();
+    common::compile_text(&text)
+}
+
+/// ISSUE-076 端到端：DSL 未声明 timeout_ms → 内核经 RoutingExecutor 转发 harness
+/// `timeout_hint` 采用 AgentConfig.node_timeout_ms，实例 TimedOut / NODE_TIMEOUT，
+/// 且耗时与 hint 同量级（证明回退链生效，而非默认 180s）。
+#[tokio::test]
+async fn agent_config_node_timeout_hint_backs_off_when_dsl_omits_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let assets = timeout_hint_assets(dir.path());
+    let fake = Arc::new(FakeLlmProvider::from_script(slow_text_script()).expect("slow script"));
+    let settings = HarnessSettings {
+        assets_dir: assets.clone(),
+        tools_dir: assets.join("tools"),
+        provider: fake,
+        fake_mode: true,
+        tool_runner: Arc::new(WorkerToolRunner::new(common::worker_config(
+            common::RUN_TIMEOUT,
+        ))),
+    };
+    let executor = Arc::new(RoutingExecutor {
+        harness: Arc::new(HarnessExecutor::new(settings)),
+        worker: common::executor(common::RUN_TIMEOUT),
+    });
+    let db = dir.path().join("issue076.db");
+    let inputs = common::entry_inputs(&[("start", "message", json!("hi"))]);
+    let started = Instant::now();
+    let bridge = tokio::time::timeout(
+        HINT_CASE_LIMIT,
+        common::run_to_trace(common::spec(timeout_hint_graph(), inputs), executor, &db),
+    )
+    .await
+    .expect("hint=1800ms 必须远早于默认 180s（否则宽松上限内不会结束）");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(HINT_NODE_TIMEOUT_MS - 300),
+        "超时不应早于 hint：elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "hint 未生效（默认 180s 会超上限）：elapsed={elapsed:?}"
+    );
+    assert_eq!(bridge.outcome.status, RunStatus::Failed);
+    let error = bridge
+        .outcome
+        .error
+        .as_ref()
+        .expect("Failed run 应有 error");
+    assert_eq!(error.code, "NODE_TIMEOUT");
+
+    let run_id = bridge.outcome.run_id.clone();
+    let reader = bridge.reader();
+    common::assert_lifecycle_shape(reader, &run_id);
+    let run = common::run_row(reader, &run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
+    assert_eq!(run.error_code.as_deref(), Some("NODE_TIMEOUT"));
+    // agent_call 没有常驻 worker 子进程：超时由内核 abort harness 任务（工具 discover
+    // 的短命 worker 已退出），因此 `killed_workers` 对 agent 节点不适用（D1 口径只覆盖
+    // `WorkerExecutor` 的 python 节点）。节点超时由下面的 TimedOut + NodeTimedOut 证明。
+    let instance = common::instance(reader, &run_id, "worker");
+    assert_eq!(instance.status, TraceInstanceStatus::TimedOut);
+    // agent_call 的超时由 Harness 自报 `NodeError::Timeout`（LLM 调用超时取剩余 deadline）
+    // 或内核 watchdog 先到；自报路径当前不落 instances.error_code（内核 `fail_timeout`
+    // 未 set_instance_error，属 crates/** 既有行为，e2e 不改）。落库口径以 run
+    // error_code + NodeTimedOut 事件为准；已报告 Lead 供 kernel 侧评估。
+    let events = common::events(reader, &run_id);
+    assert_eq!(
+        common::count_kind(&events, "NodeTimedOut"),
+        1,
+        "NodeTimedOut 恰一次"
+    );
 }
 
 // ---------------------------------------------------------------------------
