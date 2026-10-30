@@ -21,7 +21,7 @@
 | ISSUE-077 | P3 | harness | prompt/constraints 路径 canonicalize（symlink 逃逸） | W1 / REV-042 |
 | ISSUE-078 | P3 | process | `futures-util` 提升 workspace.dependencies | W1 / REV-045 |
 | ISSUE-079 | P3 | harness(+cli) | 工具并发纳入全局 worker 上限（architecture §8 D4；`HarnessCtx` 无 run_id） | W2 / REV-052 |
-| ISSUE-080 | P3 | harness/docs | tool discover failure reason 闭集复核/文档化 | W2 / REV-051（docs 主责） |
+| ISSUE-080 | P3 | harness/docs | tool discover failure reason 闭集复核/文档化 | W2 / REV-057（并入 spec 回写；REV-051 未创建） |
 | ISSUE-081 | P3 | harness / cli | 剩余 >60 行生产函数与测试函数拆分 | W2 / REV-053（harness）、REV-054（cli） |
 | ISSUE-082 | P2 | harness+cli+trace | `runs.worker_versions_json/model_params_json` 接线 | W2 / REV-048（跨模块双评审） |
 | ISSUE-085 | P3 | cli | human 模式生命周期行实时输出（非结束后回读） | W2 / REV-050 |
@@ -58,7 +58,7 @@
 | 3 | `docs/docs-m6-writeback` | docs | REV-057 | spec 05/06/07/08 + architecture §5.2 + PROVENANCE 回写 |
 | 3 | `chore/process-m6-ci-clippy` | process/cli/docs | REV-058 | merge 门禁 clippy + cli lint + refactor 前缀 + ISSUE-094（计划外插入） |
 | 3 | `test/e2e-m6-tool-limits` | e2e | REV-060 | e2e 工具+节点共享上限适配（计划外插入；REV-059 未使用） |
-| 3 | `docs/process-m6-wrapup` | process/docs | REV-061 | 台账/进度/README/index/评审索引/基线 + ISSUE-096/097 + AC-12 连续 10 次重跑 |
+| 3 | `docs/process-m6-wrapup`（计划名；实际 `docs/docs-m6-wrapup`） | process/docs | REV-061 | 台账/进度/README/index/评审索引/基线 + ISSUE-096/097 + AC-12 连续 10 次重跑 |
 
 > REV-037 从未创建（M5 顺延 M6）；M6 起评审编号从 **REV-039** 连续分配（REV-038 已用）。上表编号为预留；实际执行中 **REV-046**（W1 收口）、**REV-058**（merge 门禁 clippy）、**REV-060**（e2e 工具共享上限适配）为计划外插入，**REV-051**（ISSUE-080 并入 REV-057）与 **REV-059** 未创建，wrapup 顺延为 **REV-061**。M6 收口结果：全部计划项已交付（详见 `README.md` 状态段与 `doc/reviews/README.md`）。
 

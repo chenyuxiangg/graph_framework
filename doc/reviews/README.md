@@ -62,7 +62,7 @@
 | [REV-057](REV-057-docs-m6-writeback.md) | 2026-10-31 | docs | `docs/docs-m6-writeback` | 通过（M6 spec 回写 05/06/07/08 + architecture + PROVENANCE；C1–C3 关闭后通过） | reviewer-a |
 | [REV-058](REV-058-process-m6-ci-clippy.md) | 2026-10-31 | process/cli/docs | `chore/process-m6-ci-clippy` | 通过（merge 门禁 clippy + cli lint + refactor 前缀 + ISSUE-094） | reviewer-a |
 | [REV-060](REV-060-e2e-m6-tool-limits.md) | 2026-10-31 | e2e | `test/e2e-m6-tool-limits` | 通过（e2e 工具+节点共享上限适配） | lead |
-| [REV-061](REV-061-process-m6-wrapup.md) | 2026-10-31 | process/docs | `docs/process-m6-wrapup` | 通过（M6 收口：台账/进度/索引/baseline/ISSUE-096/097、AC-12 10 次重跑） | reviewer-a |
+| [REV-061](REV-061-process-m6-wrapup.md) | 2026-10-31 | process/docs | `docs/docs-m6-wrapup` | 通过（M6 收口：台账/进度/索引/baseline/ISSUE-096/097、AC-12 10 次重跑） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 

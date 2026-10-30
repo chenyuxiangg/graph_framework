@@ -14,7 +14,7 @@
 
 **M6 已交付（2026-10-31，REV-039–061）**：范围 = M5 顺延的 17 个 ISSUE + REV-037 依赖/CI 治理 + AC-12「同一图 10 并发 run」加强用例；波次、分支与 REV 编号见 [`doc/decisions/DR-003-m6-scope-and-waves.md`](doc/decisions/DR-003-m6-scope-and-waves.md)，状态见 [`doc/progress.md`](doc/progress.md)。关键交付：trace 双通道（033）、fail-stop 接线（036）、CLI 退出码统一（059）、依赖治理 + CI `--locked`（068/073/078）、harness 安全（075/077）、实例超时错误码（086）、e2e 质量 + AC-12 同图 10 并发（089）、工具并发共享全局上限（079）、runs 版本/模型参数列（082）、`global_vars` schema v3（087）、human 生命周期实时（085）、函数拆分（081）、主机/EPERM 加固（088）、spec 00–08 回写（057）、merge 门禁 clippy + CLI bin（058/061）。**M0–M6 全部完成**，遗留项见 [`doc/issues.md`](doc/issues.md)。
 
-**已完成 M0–M5**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
+**M0–M5 已完成交付（摘要）**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
 图内核与事件循环、trace/SQLite（L1 回放）、worker supervisor + `WorkerExecutor`（进程组 kill/取消升级/帧超时/并发上限）、
 **Agent Harness**（`agent_call`：`genai 0.7.2` LLM 流式 + Fake provider、tool loop（每次调用一个 Python worker 子进程）、
 上下文预算/裁剪、错误映射、`HarnessExecutor`）、`python/workers` 与 `python/zgraph_worker.tool_runner`、
