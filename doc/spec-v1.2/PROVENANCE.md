@@ -89,7 +89,7 @@
 12. **REV-036 收尾批次**（2026-10-30，`docs/process-m5-wrapup`，评审 REV-036）：按 REV-035 §8.6 #2 把 ISSUE-084 状态在 06 §6.8.1 / 07 §7.3 #6 / 08 §8.7 / DR-002 §9 #10 统一为 **fixed**（残余多机/EPERM/host 边界转 **ISSUE-088**，M6）；06/07/08 仅措辞修订（行数不变），§3 对应 SHA-256 已再实测；§5 M5 完成声明不变。
 13. **M6 spec 回写批次**（2026-10-31，REV-057；分支 `docs/docs-m6-writeback`，评审 REV-057）：
     - **来源**：M6 已实现/评审 REV-040/041/042/043/044/047/048/049/050/052/055/058/060；**未合并的 ISSUE-088（多机加固）只写 pending 占位，不写「已实现」**；ISSUE-082 按 REV-048 已实现口径登记（代码分支与 docs 分支合并顺序由 Lead 保证）。
-    - **06**：§6.2.2/§6.2.4/§6.7/§6.9.2/§6.10.7/§6.12.3 D5 回写 trace schema **v3** + `runs.global_vars_json`（canonical JSON）+ 逐版本迁移/`VACUUM INTO` 备份/失败恢复/只读拒绝 + replay 兼容（REV-049/ISSUE-087）；§6.4.1 双通道已拆回 + 发送序号有序合并（**同发送端有序、跨发送端各通道 FIFO、无全局序**；REV-041/ISSUE-033/ISSUE-092）；§6.4.5 fail-stop 已接线与边界（REV-047/ISSUE-036）；§6.10.1/§6.10.2/§6.10.5 CLI 退出码 0/2/1/70、`-v/--verbose`→`RUST_LOG`、纯文本无 ANSI/`NO_COLOR`、v0.1 不引入 `clap`、`--version` 字面（REV-043/ISSUE-059）；§6.10.3 human 生命周期实时 + token 聚合段/`[seq N]` 口径（REV-050/ISSUE-085）；§6.2.4/§6.2.13/§6.9.1 `runs.worker_versions_json`/`model_params_json` 已接线（写时点=run 结束、关闭写端前；`update_run_columns` 原语；两列 JSON 数组形状/去重/无观测 `[]`/不含密钥/失败 run 保留摘要；`:memory:` 不写；写失败为尽力写——仅返回 Err、不置 fatal、不影响退出码，真实损坏由 flush/close 走 fail-stop；worker 版本仅聚合节点 worker，`base_url` 防御性脱敏）——REV-048/ISSUE-082（C1 方案 B）。
+    - **06**：§6.2.2/§6.2.4/§6.7/§6.9.2/§6.10.7/§6.12.3 D5 回写 trace schema **v3** + `runs.global_vars_json`（canonical JSON）+ 逐版本迁移/`VACUUM INTO` 备份/失败恢复/只读拒绝 + replay 兼容（REV-049/ISSUE-087）；§6.4.1 双通道已拆回 + 发送序号有序合并（**同发送端有序、跨发送端各通道 FIFO、无全局序**；REV-041/ISSUE-033/ISSUE-092）；§6.4.5 fail-stop 已接线与边界（REV-047/ISSUE-036）；§6.10.1/§6.10.2/§6.10.5 CLI 退出码 0/2/1/70、`-v/--verbose`→`RUST_LOG`、纯文本无 ANSI/`NO_COLOR`、v0.1 不引入 `clap`、`--version` 字面（REV-043/ISSUE-059）；§6.10.3 human 生命周期实时 + token 聚合段/`[seq N]` 口径（REV-050/ISSUE-085）；§6.2.4/§6.2.13/§6.9.1 `runs.worker_versions_json`/`model_params_json` 已接线（写时点=run 结束、关闭写端前；`update_run_columns` 原语；两列 JSON 数组形状/去重/无观测 `[]`/不含密钥/失败 run 保留摘要；`:memory:` 不写；写失败为尽力写——仅返回 Err、不置 fatal、不影响退出码，真实损坏由 flush/close 走 fail-stop；worker 版本仅聚合节点 worker，`base_url` 防御性脱敏（去 userinfo/query/fragment，仅保留 scheme://host[:port][/path]））——REV-048/ISSUE-082（C1 方案 B）。
     - **05**：§5.2.1 prompt/constraints `canonicalize` 路径安全（REV-042/ISSUE-077）；§5.8.5 preview 结构摘要 + 敏感键脱敏 + ≤256（REV-042/ISSUE-075）；§5.6.5/§5.13 D13/§5.13.1 工具并发共享 `WorkerLimits`（REV-052/ISSUE-079，e2e 适配 REV-060）；§5.6.2.1/§5.2.7 discover failure reason 闭集冻结（REV-057/ISSUE-080）；§5.13.3 L2/L5/L7/L9/L10 状态更新（L10 随 REV-049/REV-048 fixed）。
     - **07**：AC-06 补实例级 `NODE_TIMEOUT`（自报 + watchdog、`elapsed_ms` 同源；REV-040/REV-055/ISSUE-086）；AC-12 增「同一图 10 并发 run」用例（REV-044/ISSUE-089）与工具+节点峰值口径（REV-060），并更新 `tests/e2e` 资产路径/命令。
     - **03/04**：03 §3.12、04 A7/A17 与 §4.2 的 `emitter`/容量行的「M2 临时单通道」注记改「**M6 已拆回双通道（REV-041）**」（跨册一致性，避免与 06 §6.4.1 矛盾）。
@@ -110,9 +110,9 @@
 | `03-调度器与生命周期.md` | 4aaca988e89b91881c5aa17df83f778ecb21a656e21594589a321bae6a6be9c0 | 390 |
 | `04-节点接口与扩展点.md` | 625095fff24e769f4c8e4fe019ac50d186e86657b37b6f7c3ed05d9b22d29377 | 895 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | 3d3f01d3d7e2762fe663b4234e42db231af332b839505fdac7cb81592c4842b9 | 1093 |
+| `06-存储与可观测.md` | 1283142770684e2a46a68dc5d820ee9b79c3a767c05a1e2a93492b23a8c0279c | 1093 |
 | `07-验收用例.md` | fdbe7fe046c3ed7d6912a34e64a78c8652e1b5dab817bf1c7c4186f9802f63cb | 241 |
-| `08-审计关闭矩阵.md` | c40adf8c8a690dcb0df0a4785c8c8d4dc76148ab5ef8bdba7b5a87d3a514622c | 476 |
+| `08-审计关闭矩阵.md` | 034703cb09c17c87be2c66b941ebc10d058aeeaa6142aa18b8cfdfb5bba7b77f | 476 |
 
 > 00–08 合计 **6033 行**（`wc -l` 口径；2026-10-31 **M6 回写批次后**实测（含 ISSUE-082 回写），分支 `docs/docs-m6-writeback`、评审 REV-057，base 为含 M6 实现（REV-040–060）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
 
