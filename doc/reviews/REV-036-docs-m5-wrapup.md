@@ -13,7 +13,7 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：有条件通过**（修订：C1/C2 已由 `4cef51c` 关闭，最终结论见 §7「最终结论：通过」；原条件/发现保留不删）
 
 本分支把 M5 收尾文档基本落到位：`doc/progress.md` 24 行、四块结构完整；`doc/issues.md` 89 条编号连续无重号、8 列格式一致（脚本核验），048/066/076/084 转 fixed、081/082 保持部分修的说明与既有评审结论基本相符，新增 ISSUE-086–089 内容与 REV-032/REV-030 发现逐条对应；`doc/reviews/README.md` 补 REV-035/036 行与 M5 段落；`doc/index.md` 更新 reviews 范围；`doc/test-baseline.txt` **仅新增 1 行 # 注释、未扩大失败名额**（0 failed / 2 ignored，fresh workspace 实测 552 passed/0 failed/2 ignored、pytest 84）；根 `README.md` M5 完成态与主要交付清单准确；`PROVENANCE.md` §2 第 11 条复审完成态更新。`check.sh` PASS、diff 仅 7 文件、worktree clean。
 
@@ -37,7 +37,7 @@
 
 | # | 级别 | 位置 | 问题 | 建议 | 状态 |
 |---|---|---|---|---|---|
-| 1 | **阻塞（C1）** | `doc/issues.md:92`（084 fixed）vs `doc/spec-v1.2/06-存储与可观测.md:688`、`doc/spec-v1.2/07-验收用例.md:231`、`doc/spec-v1.2/08-审计关闭矩阵.md:428`、`doc/decisions/DR-002-m5-cli-replay-recording.md:142`（均写 084 保持 open/M6） | ISSUE-084 状态跨文档矛盾：issues/README/progress 按 **fixed（核心实现完成，残余硬化→ISSUE-088）**，但 REV-035 回写的 spec 06/07/08 与 DR-002 §9 #10 仍按 **open/M6 加固**；REV-035 §8.6 #2 已把「统一 README/05/08 措辞」交给 REV-036。 | 二选一并全仓一致：①（推荐）保留 084 fixed：把 spec 06 §6.8.1 注、07 §7.3 #6、08 §8.7 行、DR-002 §9 #10 改为「核心实现完成 → fixed；多机/EPERM/host 硬化转 ISSUE-088（M6，open）」；或②把 issues 084 改回 open/partial 并在 M6 清单补 084（但会与 088 重复）。修订后本评审增量复审关闭。 | open |
+| 1 | **阻塞（C1）** | `doc/issues.md:92`（084 fixed）vs `doc/spec-v1.2/06-存储与可观测.md:688`、`doc/spec-v1.2/07-验收用例.md:231`、`doc/spec-v1.2/08-审计关闭矩阵.md:428`、`doc/decisions/DR-002-m5-cli-replay-recording.md:142`（均写 084 保持 open/M6） | ISSUE-084 状态跨文档矛盾：issues/README/progress 按 **fixed（核心实现完成，残余硬化→ISSUE-088）**，但 REV-035 回写的 spec 06/07/08 与 DR-002 §9 #10 仍按 **open/M6 加固**；REV-035 §8.6 #2 已把「统一 README/05/08 措辞」交给 REV-036。 | 二选一并全仓一致：①（推荐）保留 084 fixed：把 spec 06 §6.8.1 注、07 §7.3 #6、08 §8.7 行、DR-002 §9 #10 改为「核心实现完成 → fixed；多机/EPERM/host 硬化转 ISSUE-088（M6，open）」；或②把 issues 084 改回 open/partial 并在 M6 清单补 084（但会与 088 重复）。修订后本评审增量复审关闭。 | closed（§7） |
 | 2 | **阻塞（C2）** | `doc/progress.md:5`；`doc/progress.md:19`、`README.md:26`；`doc/progress.md:20` vs `README.md:26` | ① `REV-025–038` 包含从未创建的 REV-037（reviews README 已注「REV-037 顺延 M6」）；② M6 清单把 086–089（本批新登记）、075/077/079/080（DR-002 §4）、085（REV-028）统称「DR-002 §7/§9 排除/顺延项」，与 DR-002 §7/§9 实际条目不符；③ progress 列 ISSUE-068/078（process 依赖治理）而 README M6 清单未列，两处 M6 集合不一致。 | ① 改为「REV-025–036/038（REV-037 顺延 M6）」；② 改为分类表述：「M6：DR-002 §7/§9 顺延（033/036/059/073/081/084→088 等）+ DR-002 §4 顺延（075/077/079/080）+ REV-028/030/032 新登记（085/086/087/088/089）」；③ README M6 补 ISSUE-068/078（或明确「见 REV-037 依赖治理」并保持与 progress 一致）。 | open |
 | 3 | 建议（Nit） | `doc/spec-v1.2/05-AgentHarness.md:1407`（L8 表「74/78/88 等」） | REV-035 §8.6 #3 指出 74 为 REV-028 期旧值（当前 `tests/run.rs:625` 为 68 行）；本分支未精确化。因有「等」且 91/build_plan 75 已正确，不阻塞 | 可与 C1/C2 同批将 74 改为 68/78/88（或保留「等」并注明当前值）。 | open |
 | 4 | 建议/Nit | `doc/reviews/README.md:43`、`doc/index.md`、`README.md:25` | REV-036 索引行、`doc/index.md`「已全部合入 main」、README「本批已合入」在评审/合并前即为完成态；本评审为有条件通过时这些断言暂不成立（合并/关闭条件后成立） | C1/C2 修订并最终通过后保留即可；若需严格时点，可在合并前把 REV-036 行注为「有条件通过（待修订）」，合并后更新为通过。不阻塞（属最终态文档惯例）。 | open |
@@ -96,5 +96,58 @@ git status --short          # 空（评审时 clean）
 
 | 条件 | 内容 | 关闭证据 | 关闭日期 |
 |---|---|---|---|
-| **C1** | ISSUE-084 状态 / 残余硬化归属在 issues、README、progress 与 spec 06/07/08、DR-002 §9 #10 全仓一致（推荐：084 fixed；硬化→ISSUE-088 M6） | 修订 commit + `grep ISSUE-084` 各文档结果；本评审增量复审 | 待关闭 |
-| **C2** | M6 清单/REV 编号表述准确且 progress/README 一致：`REV-025–036/038`（REV-037 顺延）、M6 来源分类、ISSUE-068/078 在 README 与 progress 对齐 | 修订 commit + 本评审增量复审 | 待关闭 |
+| **C1** | ISSUE-084 状态 / 残余硬化归属在 issues、README、progress 与 spec 06/07/08、DR-002 §9 #10 全仓一致（推荐：084 fixed；硬化→ISSUE-088 M6） | `4cef51c`（06 §6.8.1/07 §7.3 #6/08 §8.7/DR-002 §9 #10 统一 fixed+ISSUE-088；PROVENANCE §2 #12+SHA 更新）；本评审 §7 复审 | 已关闭 |
+| **C2** | M6 清单/REV 编号表述准确且 progress/README 一致：`REV-025–036/038`（REV-037 顺延）、M6 来源分类、ISSUE-068/078 在 README 与 progress 对齐 | `4cef51c`（progress:5 REV-025–036/038；progress/README M6 分类含 068/078 且集合一致；本评审 §7） | 已关闭 |
+
+
+## 7. 修订/复审/条件关闭（2026-10-30，reviewer-b）
+
+> **修订对象**：Lead 同分支新增 commit **`4cef51c`**（`docs(process): 关闭 REV-036 C1/C2——ISSUE-084 状态统一 fixed/ISSUE-088 + M6 清单分类（REV-036）`；`a027932..4cef51c` = **7 files changed, +12/−11**，仅 doc/** + README）；未 amend 本记录。复审以 `4cef51c` 为最终代码/文档状态，原 §1–§6 保留（§1 上沿已注明最终结论见本节）。
+
+### 7.1 C1 关闭核对（ISSUE-084 状态全仓一致）
+
+- `doc/spec-v1.2/06-存储与可观测.md:688`：改为「**ISSUE-084 已 fixed**（核心实现 + kill -9 e2e，REV-034/030/032）；下列多机/多用户边界**转 ISSUE-088（M6，open）**」；
+- `doc/spec-v1.2/07-验收用例.md:231`（§7.3 #6）：改为「**M5 已修（ISSUE-084 fixed；多机边界转 ISSUE-088，M6）**」；
+- `doc/spec-v1.2/08-审计关闭矩阵.md:428`（§8.7）：状态由「实现完成，保持 open」改为「**M5 已修**」并注明固定边界转 ISSUE-088；
+- `doc/decisions/DR-002-m5-cli-replay-recording.md:142`（§9 #10）：改为「**已实现并 fixed**……残余多机/EPERM/host 判定边界转 **ISSUE-088（M6，open）**，不阻塞 084」；
+- `doc/issues.md:92`（084 fixed、残余转 088）与 `README.md:24`/`doc/progress.md:13` 维持原状态，现与 spec/DR 一致；`grep -n ISSUE-084` 仅余「fixed + 088」表述（历史评审记录/历史 PROVENANCE 批次条目作为审计留痕保留，不改写历史；当前态文档无「084 保持 open」残留）。
+- **结论：C1 关闭**。
+
+### 7.2 C2 关闭核对（M6 清单/REV 编号一致）
+
+- `doc/progress.md:5`：改为「REV-025–036/038（**REV-037 顺延 M6**）」，不再出现不存在的 REV-037 参与 `REV-025–038` 的歧义；
+- `doc/progress.md:19` 与 `README.md:26`：M6 统一为分类表述——「DR-002 §7/§9 顺延（033/036/059/073/081 剩余/082 版本列/**084→088**）+ DR-002 §4 顺延（075/077/079/080）+ REV-028/030/032 新登记（085/086/087/089）+ process 依赖治理/CI（**068/078**/073，REV-037 顺延 M6）」；README 已补 ISSUE-068/078，两处集合**一致**（脚本抽取 progress/README M6 ISSUE 集合并集相同；均无 REV-037 编号）；
+- `doc/reviews/README.md` 已如实注明 REV-037 未创建/顺延 M6；`doc/index.md` 的 reviews 范围（REV-000–036 与 038）不变且正确。
+- **结论：C2 关闭**。
+
+### 7.3 修订后独立验证
+
+| 项 | 结果 |
+|---|---|
+| 修订 diff 范围 | `a027932..4cef51c` 7 files +12/−11（仅 doc/** + README，无代码/依赖/脚本）；最终 `main...HEAD` = 12 files（含本记录） |
+| 规格/SHA | spec 00–08 合计仍 **5958 行**；06/07/08 行数不变（1068/232/444）；PROVENANCE §3 三行 SHA-256 与当前文件实测一致（脚本核对）；PROVENANCE §2 新增第 12 条记录本批次（行数不变、SHA 再实测） |
+| `cargo test --workspace -- --test-threads=2`（fresh `/tmp/rev036-target`） | **552 passed / 0 failed / 2 ignored**（2 ignored = harness real smoke + e2e AC-08b） |
+| `pytest --tb=no` | **84 passed** |
+| `bash scripts/dev/check.sh` / `git diff --check` | **CHECK PASSED** / exit 0；worktree clean |
+| review 索引链接 | REV-036 记录文件已随本分支提交，原先缺失的链接成立；REV-035/036/038 行与 main 事实一致 |
+| merge dry-run | 见 §7.4（本轮 fresh target 实测） |
+
+### 7.4 merge dry-run（fresh target `/tmp/rev036-target`，`cargo clean -p` 工作区成员后）
+
+- **清理**：`cargo clean -p zgraph-dsl -p zgraph-kernel -p zgraph-trace -p zgraph-worker -p zgraph-harness -p zgraph-cli -p zgraph-e2e` → Removed 631 files / 654.4 MiB（隔离 target，避免共享 target 陈旧 CARGO_MANIFEST_DIR/rlib 串写）。
+- **实跑**：`CARGO_HOME=<repo>/.cargo-home CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/tmp/rev036-target CARGO_INCREMENTAL=0 PYTHON_BIN=<repo>/.venv/bin/python bash scripts/dev/merge.sh docs/process-m5-wrapup --dry-run`
+  - `INFO: 评审记录: .worktrees/process-lead/doc/reviews/REV-036-docs-m5-wrapup.md -> 通过`
+  - `INFO: cargo test 通过`（workspace **552 passed / 0 failed / 2 ignored**，58 test binaries）
+  - pytest：`失败 0 项，基线 0 项，无新增`（独立 `pytest --tb=no` 亦 **84 passed**）
+  - `INFO: dry-run 结束：检查全部通过，未执行合并（不清理作者 worktree）` → **exit 0**（attempt 1 即成功，`git fetch origin main` 未报错，无需重试；92.1s）。
+- 说明：dry-run 在结论翻「通过」后的记录 commit（`c731140`/`e44b94c`）及本分支最终文档树上执行；评审记录门禁、cargo/pytest、分支/工作区检查全部通过。
+- **最终记录 commit（`e44b94c`）复跑 dry-run**（同 target，40.1s，attempt 1）：`INFO: 评审记录 -> 通过` → `INFO: cargo test 通过`（552 passed/0 failed/2 ignored）→ pytest「失败 0 项，基线 0 项，无新增」→ `INFO: dry-run 结束：检查全部通过`，exit 0；fetch 未报错、无需重试。
+
+### 7.5 最终结论
+
+**最终结论：通过**
+
+- C1/C2 均已按本评审条件关闭：ISSUE-084 在 issues/README/progress 与 spec 06/07/08、DR-002 §9 #10 全仓统一为 **fixed（残余→ISSUE-088 M6）**；M6 清单/REV 编号在 progress/README 一致且分类准确；spec 行数不变、PROVENANCE SHA 已再实测；修订范围仅文档。
+- 修订后 fresh workspace **552 passed / 0 failed / 2 ignored**、pytest **84 passed**、`check.sh` PASS、worktree clean；本记录 §6 条件表已标关闭。
+- 原「有条件通过」及其条件/发现保留为历史；本分支可进入 merge 门禁（dry-run 结果见 §7.4 追加）。
+- 复审人：`reviewer-b`（非作者）；时间：2026-10-30。
