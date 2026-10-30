@@ -141,3 +141,51 @@ bash scripts/dev/merge.sh fix/worker-m5-crash-detail --dry-run
 - 唯一遗留为 **spec 06 §6.2.5.1 冻结闭集冲突**，按 Lead 口径由 docs 第二批同步（记录已写明，不阻塞）。
 - **结论：通过**（待 reviewer-b 追加第二评审段；Lead 合并前如需 rebase 再复跑门禁）。
 - 评审人：`reviewer-a`（非作者）；评审时间：2026-10-30。
+
+## 7. 第二评审（跨模块，reviewer-b，2026-10-30）
+
+> 依据 DR-002 §4/§6 的双评审要求，本段为 reviewer-a 主审后的**增量第二评审**；按 AGENTS §6 不删改 §1–§6，原结论/证据保留。评审对象为代码 `58239fc..22f4395`（评审期间 HEAD 由 `5556dd6` amend 为 `e9b2b19`：reviewer-a 仅对记录补 dry-run 证据，代码 commit `22f4395` 未变，`git diff 22f4395 e9b2b19 -- crates` 为空）。本次在**独有 fresh target** `/tmp/rev031-b-target` 下独立复核（避开共享 `target/` 被并行 worktree 产物污染），未修改分支任何代码/文档（本段除外）；未 merge/push。
+
+### 7.1 跨模块改动最小性（四模块逐项）
+
+| 模块 | 实际 diff | 第二评审核对 |
+|---|---|---|
+| kernel | `types.rs`：`NodeError::NodeWorker` 只增 `signal/exit_code/stderr_tail` 三个 `Option` 字段；`code()` 改 `NodeWorker { kind, .. }`；新增 3 个单测。`tests/failure.rs`：既有 4 码构造补 `None` | ✅ 最小。`Display` 仍 `#[error("worker error ({kind:?})")]`，`code()` 仍 `kind.code()`（4 个 worker 码不变，单测 `worker_error_codes_are_stable_with_crash_details`/`node_worker_crash_payload_keeps_code_and_display`）；kernel 无其它文件改动。**注意**：给公开 enum variant 增字段对「仓外按字面量构造 `NodeError::NodeWorker`」是 **source-breaking**（仓内全部构造点已更新、workspace 编译通过；crate 0.1、Lead 已批准该跨模块变更） |
+| worker | `spawn.rs`：`WorkerFailure::Exit` 增 `signal`；`supervisor.rs`：`classify_exit` 用 `ExitStatusExt::signal()`（`cfg(unix)`，非 Unix `None`）、`attach_stderr` 保留 signal、单测补 signal 断言；`executor.rs`：`map_failure` 仅 `Exit` 路径填充三字段（其余 `node_worker_error` 恒 `None`）、`stderr_tail`/`STDERR_TAIL_BYTES`、`stderr_tail` 取尾部 ≤1 KiB 并按 UTF-8 字符边界回退、空白→`None`；`lib.rs` re-export；tests/fixtures 增真实 `exit 7`/`SIGKILL`/`exit 3` 场景 | ✅ 最小且证据只在进程退出路径：exit 3 仍 `Protocol`（`supervisor_m3` 真 fixture 断言），`Spawn`/`Protocol`/`Timeout`/worker 自报 crash 均无进程证据（`None`）；`code`/`signal` 互斥；`stderr_tail` 方向为 supervisor 已保留末尾 8 KiB 的尾部 1 KiB。无 Cargo/依赖/其它模块改动 |
+| cli | `bridge.rs::node_error_json` 的 `NodeWorker` 分支 | ✅ 最小。既有 `code/message/kind/worker_kind` 键与值不变；`signal/exit_code/stderr_tail` **仅 Some 时插入**（非 null，非崩溃零新增键）；单测覆盖 signal-only/exit-only/非崩溃三态 |
+| harness | `tools.rs::call_worker_failure` **一处** match arm：`WorkerFailure::Exit` 解构 `signal` 并把 `signal` 拼入诊断串（`format!("… code={code:?} signal={signal:?}: {stderr}")`）；无其它 harness 改动、无测试改动、无控制流/分支变化，`ToolFailure.reason="worker_crash"` 与映射语义不变 | ✅ 行为上可接受的最小适配。**描述需修正**：这不是「纯模式绑定」——诊断串文本确实增加了 `signal=…`（同文件另一处 `discover_worker_error` 的 `failure.to_string()` 也因 `WorkerFailure::Exit` Display 变化而多出 `signal`）；但无执行语义变化、无测试/下游精确字符串断言（全仓 grep `worker exited unexpectedly|tool worker exited|worker_crash` 仅命中实现与测试名），不阻塞。建议 Lead/记录把该项目表述为「模式解构 + 诊断串补 signal（编译必需）」，避免被误读为逐字节行为不变 |
+
+**范围复核**：代码 commit（`58239fc..22f4395`）**13 文件全部属于 kernel/worker/cli/harness**（+tests/fixtures），无 `Cargo.toml/Cargo.lock`、无 `doc/**`/其它 crate 改动；`Cargo.lock` 无变化（与主审一致）。harness 交叉依赖 worker 新字段、cli 读 kernel 新字段，四处并非「只改一模块」：Lead 已批准跨模块并由本第二评审确认，满足 DR-002 §4 双评审要求。
+
+### 7.2 独立验证证据（独有 fresh target）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test -p zgraph-kernel -p zgraph-worker -p zgraph-cli -p zgraph-harness -- --test-threads=2`（**fresh** `/tmp/rev031-b-target`；`ZGRAPH_PYTHON=<repo>/.venv/bin/python`） | **404 passed / 0 failed / 1 ignored**（与主审 404/0/1 一致；含真实子进程 `exit 7`→`exit_code=Some(7)+stderr_tail`、`SIGKILL`→`signal=Some(9)`、`exit 3`→`NODE_WORKER_PROTOCOL`，以及 kernel 码/Display/CLI JSON/字符边界单测） |
+| 新增子进程用例点名核对 | `non_convention_exit_code_is_recorded_in_crash_failure`、`signal_kill_is_recorded_in_crash_failure`、`sdk_self_check_exit_three_stays_a_protocol_error`、`signal_exit_maps_to_worker_crash`、`non_convention_exit_maps_to_crash_with_exit_code_and_stderr`、`node_error_json_expands_node_worker_crash_details`、`stderr_tail_is_truncated_on_char_boundary` 均 **ok**（真实 Python 子进程，非 mock `ExitStatus`） |
+| `cargo test -p zgraph-e2e --test fault_injection`（CLI 错误 JSON 消费方回归） | **7 passed / 0 failed**（`NODE_WORKER_CRASH`/HANDSHAKE/IMPORT/PROTOCOL 既有断言不回归） |
+| `cargo test --workspace -- --test-threads=2`（附加交叉验证） | **552 passed / 0 failed / 2 ignored**（无失败；与主审 workspace 无新增失败口径一致） |
+| `cargo clippy -p zgraph-kernel -p zgraph-worker -p zgraph-cli -p zgraph-harness --all-targets -- -D warnings`（fresh） | **exit 0 / 0 warning** |
+| `cargo fmt --all -- --check`、`bash scripts/dev/check.sh` | **PASS**（fmt/身份/冻结文件/禁用文件/fmt/diff-check） |
+| 函数长度（改动源码） | 新增/改动函数均 ≤60（`stderr_tail`、`node_worker_error`、`exit_signal` 等短函数；既有 >60 的 `validate_schema_node`/worker roundtrip test 非本分支引入） |
+
+### 7.3 第二评审发现（增量；不重复主审 §3）
+
+| # | 级别 | 位置 | 问题 | 建议 | 状态 |
+|---|---|---|---|---|---|
+| 1 | 建议（测试加固） | `crates/zgraph-worker/src/executor.rs:472`（`stderr_tail_is_truncated_on_char_boundary` 用例） | 用例输入 `"a" + "é".repeat(1024)` 的尾部起点 `len-1024 = 1025` 恰好是字符边界（`é` 从奇数偏移开始），因此**没有触发** `stderr_tail` 的「`while !is_char_boundary(start) { start += 1 }` 回退分支；实现按代码审查正确，但该边界分支未被测试覆盖 | 把输入改为总长使 `len-1024` 落在 3 字节字符中间（如 `"a" + "汉".repeat(N)` 且总字节 >1024 且 `len-1024 % 3 == 1`），断言 tail ≤1024 且全部为完整字符、`stderr.ends_with(tail)`。**不阻塞**（实现正确；主审已通过） | open（建议） |
+| 2 | 备注（描述准确性） | `crates/zgraph-harness/src/tools.rs:1376-1385`；`crates/zgraph-worker/src/spawn.rs:74-87` | harness 的「一处模式绑定修正」实际还修改了 `call_worker_failure` 诊断串（追加 `signal=…`）；`WorkerFailure::Exit` 的 `Display` 也追加 signal（`discover_worker_error` 的 message 随之变化）。均属诊断信息增强，无执行语义/错误码/分支变化，且全仓无精确字符串断言 | Lead/后续记录按「解构 + 诊断串补 signal」描述；无需代码修改。**不阻塞** | 无需处理 |
+| 3 | 备注（API 兼容） | `crates/zgraph-kernel/src/types.rs:442-451`；`crates/zgraph-worker/src/spawn.rs:79-90` | 新增字段使公开 enum variant 的**字面量构造** source-breaking（仓内已全部更新、编译通过；crate 版本 0.1、仓内私有发布面）。与 ISSUE-066「只增不删」字段语义一致，但外部按旧字面量构造会编译失败 | 若后续对外发布该 crate，需在发布说明标注 API 变更/考虑 `#[non_exhaustive]`；本轮 Lead 已批准跨模块。**不阻塞** | 无需处理（发布说明备注） |
+| 4 | 备注（docs 遗留） | 同主审 §3 #1/#2/#3 | spec 06 §6.2.5.1 的 `NodeWorker` canonical JSON 闭集与 03 §3.15/architecture §8.2 的 signal/exit 记录要求仍需 docs 第二批（REV-035）回写；stderr_tail 不脱敏/证据窗口（8 KiB 尾部的 1 KiB）、worker 自报 crash 无进程证据需注记 | 由 docs REV-035 承接；ISSUE-066 待 docs 后转 fixed。**不阻塞** | open（docs） |
+
+> 第二评审未发现阻塞/重要项；主审 §3 的 docs 遗留（#1）、敏感信息（#2）、自报 crash 无证据（#3）在本轮仍成立，无需重复登记。
+
+### 7.4 第二评审结论
+
+**第二评审：同意（通过）**。
+
+- 四模块改动满足「最小、按批准范围」：kernel 只增证据字段且错误码/`Display` 不回归；worker 仅在真实进程退出路径采集 signal/exit/stderr_tail（exit 3 仍协议、其它路径 `None`）；cli 仅 Some 输出新键、既有 JSON 键不变；harness 一处解构 + 诊断串补 signal（非纯模式绑定，但无逻辑/语义变化，已如实标注）。
+- 真实子进程证据有效（exit 7 / SIGKILL / exit 3 均由真实 Python 进程产生，非 mock）；fresh target 定向 **404 passed/0 failed/1 ignored**、e2e fault_injection 7/7、workspace 552/0/2、clippy/fmt/check PASS；无新增失败。
+- 唯一需修正的是**评审记录/Lead 对 harness 改动的表述**（模式解构 + 诊断串，而非纯模式绑定）与**可选**的字符边界测试加固（§7.3 #1）；均不阻塞，不影响主审「通过」结论。
+- 遗留：spec 06 §6.2.5.1 闭集/03 §3.15/architecture §8.2 注记由 docs REV-035 回写后关闭 ISSUE-066。
+- 第二评审人：`reviewer-b`（非作者）；评审时间：2026-10-30。
