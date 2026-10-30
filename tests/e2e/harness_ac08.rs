@@ -42,6 +42,7 @@
 mod common;
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -686,13 +687,9 @@ fn timeout_hint_graph() -> Arc<CompiledGraph> {
     common::compile_text(&text)
 }
 
-/// ISSUE-076 端到端：DSL 未声明 timeout_ms → 内核经 RoutingExecutor 转发 harness
-/// `timeout_hint` 采用 AgentConfig.node_timeout_ms，实例 TimedOut / NODE_TIMEOUT，
-/// 且耗时与 hint 同量级（证明回退链生效，而非默认 180s）。
-#[tokio::test]
-async fn agent_config_node_timeout_hint_backs_off_when_dsl_omits_timeout() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let assets = timeout_hint_assets(dir.path());
+/// ISSUE-076 用例的组合执行器（agent → Harness + 慢 fake；其余 → 真 worker）。
+fn timeout_hint_executor(dir: &Path) -> Arc<dyn NodeExecutor> {
+    let assets = timeout_hint_assets(dir);
     let fake = Arc::new(FakeLlmProvider::from_script(slow_text_script()).expect("slow script"));
     let settings = HarnessSettings {
         assets_dir: assets.clone(),
@@ -703,21 +700,32 @@ async fn agent_config_node_timeout_hint_backs_off_when_dsl_omits_timeout() {
             common::RUN_TIMEOUT,
         ))),
     };
-    let executor = Arc::new(RoutingExecutor {
+    Arc::new(RoutingExecutor {
         harness: Arc::new(HarnessExecutor::new(settings)),
         worker: common::executor(common::RUN_TIMEOUT),
-    });
-    let db = dir.path().join("issue076.db");
+    })
+}
+
+/// 跑 ISSUE-076 用例（DSL 不声明 timeout_ms），返回 outcome 与耗时。
+async fn run_timeout_hint_case(dir: &Path) -> (BridgeOutcome, Duration) {
+    let db = dir.join("issue076.db");
     let inputs = common::entry_inputs(&[("start", "message", json!("hi"))]);
     let started = Instant::now();
     let bridge = tokio::time::timeout(
         HINT_CASE_LIMIT,
-        common::run_to_trace(common::spec(timeout_hint_graph(), inputs), executor, &db),
+        common::run_to_trace(
+            common::spec(timeout_hint_graph(), inputs),
+            timeout_hint_executor(dir),
+            &db,
+        ),
     )
     .await
     .expect("hint=1800ms 必须远早于默认 180s（否则宽松上限内不会结束）");
-    let elapsed = started.elapsed();
+    (bridge, started.elapsed())
+}
 
+/// ISSUE-076 时序断言：耗时与 hint 同量级（证明回退链生效，而非默认 180s）。
+fn assert_timeout_hint_elapsed(elapsed: Duration) {
     assert!(
         elapsed >= Duration::from_millis(HINT_NODE_TIMEOUT_MS - 300),
         "超时不应早于 hint：elapsed={elapsed:?}"
@@ -726,6 +734,39 @@ async fn agent_config_node_timeout_hint_backs_off_when_dsl_omits_timeout() {
         elapsed < Duration::from_secs(8),
         "hint 未生效（默认 180s 会超上限）：elapsed={elapsed:?}"
     );
+}
+
+/// ISSUE-076 trace 断言：实例 TimedOut + `NodeTimedOut` 恰一次（落库口径见注释）。
+fn assert_timeout_hint_trace(reader: &TraceReader, run_id: &str) {
+    common::assert_lifecycle_shape(reader, run_id);
+    let run = common::run_row(reader, run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
+    assert_eq!(run.error_code.as_deref(), Some("NODE_TIMEOUT"));
+    // agent_call 没有常驻 worker 子进程：超时由内核 abort harness 任务（工具 discover
+    // 的短命 worker 已退出），因此 `killed_workers` 对 agent 节点不适用（D1 口径只覆盖
+    // `WorkerExecutor` 的 python 节点）。节点超时由下面的 TimedOut + NodeTimedOut 证明。
+    let instance = common::instance(reader, run_id, "worker");
+    assert_eq!(instance.status, TraceInstanceStatus::TimedOut);
+    // agent_call 的超时由 Harness 自报 `NodeError::Timeout`（LLM 调用超时取剩余 deadline）
+    // 或内核 watchdog 先到；自报路径当前不落 instances.error_code（内核 `fail_timeout`
+    // 未 set_instance_error，属 crates/** 既有行为，e2e 不改）。落库口径以 run
+    // error_code + NodeTimedOut 事件为准；已报告 Lead 供 kernel 侧评估。
+    let events = common::events(reader, run_id);
+    assert_eq!(
+        common::count_kind(&events, "NodeTimedOut"),
+        1,
+        "NodeTimedOut 恰一次"
+    );
+}
+
+/// ISSUE-076 端到端：DSL 未声明 timeout_ms → 内核经 RoutingExecutor 转发 harness
+/// `timeout_hint` 采用 AgentConfig.node_timeout_ms，实例 TimedOut / NODE_TIMEOUT，
+/// 且耗时与 hint 同量级（证明回退链生效，而非默认 180s）。
+#[tokio::test]
+async fn agent_config_node_timeout_hint_backs_off_when_dsl_omits_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (bridge, elapsed) = run_timeout_hint_case(dir.path()).await;
+    assert_timeout_hint_elapsed(elapsed);
     assert_eq!(bridge.outcome.status, RunStatus::Failed);
     let error = bridge
         .outcome
@@ -733,28 +774,8 @@ async fn agent_config_node_timeout_hint_backs_off_when_dsl_omits_timeout() {
         .as_ref()
         .expect("Failed run 应有 error");
     assert_eq!(error.code, "NODE_TIMEOUT");
-
     let run_id = bridge.outcome.run_id.clone();
-    let reader = bridge.reader();
-    common::assert_lifecycle_shape(reader, &run_id);
-    let run = common::run_row(reader, &run_id);
-    assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
-    assert_eq!(run.error_code.as_deref(), Some("NODE_TIMEOUT"));
-    // agent_call 没有常驻 worker 子进程：超时由内核 abort harness 任务（工具 discover
-    // 的短命 worker 已退出），因此 `killed_workers` 对 agent 节点不适用（D1 口径只覆盖
-    // `WorkerExecutor` 的 python 节点）。节点超时由下面的 TimedOut + NodeTimedOut 证明。
-    let instance = common::instance(reader, &run_id, "worker");
-    assert_eq!(instance.status, TraceInstanceStatus::TimedOut);
-    // agent_call 的超时由 Harness 自报 `NodeError::Timeout`（LLM 调用超时取剩余 deadline）
-    // 或内核 watchdog 先到；自报路径当前不落 instances.error_code（内核 `fail_timeout`
-    // 未 set_instance_error，属 crates/** 既有行为，e2e 不改）。落库口径以 run
-    // error_code + NodeTimedOut 事件为准；已报告 Lead 供 kernel 侧评估。
-    let events = common::events(reader, &run_id);
-    assert_eq!(
-        common::count_kind(&events, "NodeTimedOut"),
-        1,
-        "NodeTimedOut 恰一次"
-    );
+    assert_timeout_hint_trace(bridge.reader(), &run_id);
 }
 
 // ---------------------------------------------------------------------------

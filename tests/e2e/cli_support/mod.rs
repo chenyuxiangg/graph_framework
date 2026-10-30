@@ -137,6 +137,21 @@ fn build_zgraph_binary() {
     );
 }
 
+/// Python 字节码缓存开关（ISSUE-089）：e2e 派生的 Python 子进程一律不写
+/// `__pycache__`，避免运行 fixtures 时在仓库里留下忽略文件。
+pub const PYTHONDONTWRITEBYTECODE: &str = "PYTHONDONTWRITEBYTECODE";
+
+/// 构造 `zgraph` 子进程（已注入 e2e 统一环境）。
+///
+/// CLI 以**继承环境** spawn Python worker，因此在 CLI 进程上设置
+/// `PYTHONDONTWRITEBYTECODE=1` 即可覆盖其所有后代（worker / tool runner）。
+/// 需要直接 spawn CLI（而非捕获输出）的用例应复用本函数，例如崩溃标定用例。
+pub fn zgraph_command() -> Command {
+    let mut command = Command::new(zgraph_binary());
+    command.env(PYTHONDONTWRITEBYTECODE, "1");
+    command
+}
+
 /// 运行 `zgraph` 并捕获输出；`cwd` 为子进程工作目录。
 pub fn run_cli(args: &[String], cwd: &Path) -> Output {
     run_cli_env(args, cwd, &[])
@@ -154,7 +169,7 @@ pub fn run_cli_full(
     envs: &[(&str, &str)],
     removed: &[&str],
 ) -> Output {
-    let mut command = Command::new(zgraph_binary());
+    let mut command = zgraph_command();
     command
         .args(args)
         .envs(envs.iter().copied())
@@ -204,8 +219,11 @@ pub fn connect(db: &Path) -> rusqlite::Connection {
 }
 
 /// `runs` 表行数（断言「不产生 run」）。
+///
+/// 用**只读**连接：断言本身不得成为 WAL 写者（ISSUE-089：读-写连接会触碰
+/// `-wal`/`-shm`，污染「replay 前后 DB 字节不变」的证据链）。
 pub fn runs_count(db: &Path) -> i64 {
-    connect(db)
+    read_only_connect(db)
         .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
         .expect("count runs")
 }
@@ -452,9 +470,25 @@ pub fn run_output_json(db: &Path, run_id: &str) -> Option<String> {
         .flatten()
 }
 
-/// trace DB 主文件字节（「replay 不修改原 trace」证据）。
-pub fn db_bytes(db: &Path) -> Vec<u8> {
-    std::fs::read(db).expect("read trace db bytes")
+/// trace DB 的**全部磁盘字节**：主文件 + WAL 模式下可能承载写入的 `-wal`/`-shm`。
+///
+/// 返回 `(后缀, 字节)`：`""` = 主文件、`"-wal"`/`"-shm"` = 伴生文件；文件不存在记
+/// `None`（这样「伴生文件从无到有 / 从有到无」也能被快照比较发现）。
+///
+/// ISSUE-089：只比主文件会漏掉「replay 只写 WAL 不落主文件」的情况；因此
+/// 「不修改原 trace」的证据必须覆盖伴生文件。快照只做文件 IO、**不打开数据库连接**
+/// （读连接在 WAL 模式下也会更新 `-shm`），调用方必须先在数据库查询之前取快照。
+pub fn db_files_snapshot(db: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+    const SIDECARS: [&str; 3] = ["", "-wal", "-shm"];
+    SIDECARS
+        .iter()
+        .map(|suffix| {
+            let mut name = db.as_os_str().to_os_string();
+            name.push(suffix);
+            let path = PathBuf::from(name);
+            (suffix.to_string(), std::fs::read(path).ok())
+        })
+        .collect()
 }
 
 /// 读一个文本文件为行列表（marker 日志等）。

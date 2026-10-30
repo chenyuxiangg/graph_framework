@@ -1,10 +1,18 @@
-//! AC-12（M5 全栈）：10 个 run 并发隔离 + 全局/每 run worker 上限。
+//! AC-12（M5/M6 全栈）：10 个 run 并发隔离 + 全局/每 run worker 上限。
 //!
 //! 语义基准：`doc/spec-v1.2/07-验收用例.md` AC-12（并发 10 run、同图不同 run_id、
 //! 独立 db 或同 db 不同 run_id；instances/gate_results/events 不串；global_vars/
 //! user_id 不串；全局 `MAX_WORKERS` 与每 run `MAX_WORKERS_PER_RUN` 生效；总耗时/
 //! 单 run 比记录基线）与 `doc/architecture-v2.md` §8 D4/D8（每节点一进程；全局
 //! max_workers + 每 run max_workers_per_run，取消 CPU=1/IO=4 信号量）。
+//!
+//! # 两个用例
+//!
+//! - [`ac12_ten_concurrent_runs_share_one_db_and_are_isolated`]（M5 8+2 组合）：覆盖面
+//!   更广（纯 python run + 含 `agent_call` 的完整栈 run 混合并发）。
+//! - [`ac12_ten_same_graph_runs_are_isolated_and_bounded`]（M6，ISSUE-089 / REV-032
+//!   加强）：spec 07 AC-12 原文形态——**同一张图** 10 个并发 run（同库不同 run_id），
+//!   补齐 M5 未字面满足的「10×同图」口径，另断言 10 个 run 的 `graph_hash` 完全一致。
 //!
 //! # 数据通路（禁止 mock kernel/worker/trace）
 //!
@@ -28,6 +36,8 @@
 //! - **DB 形态**：10 个 run 全部写同一个 SQLite 文件（同 db 不同 run_id，AC 允许的
 //!   更强形态）；全部写端关闭后打开**最终共享 reader**，逐 run 查询验证 run 级隔离
 //!   （`stats.db_runs == 10` + 逐 run 行/实例/事件归属）。
+//! - **同图用例**：把上述 10 个 run 全部替换为同一条三并发分支图（`start → a/b/c →
+//!   done`，10× python），其余启动/收集/隔离/上限断言复用同一套 helper。
 //! - 全局/每 run 上限：`WorkerExecutor::with_limits(4, 2)`；峰值用**真实进程区间**
 //!   度量（fixture 把 start/end 墙钟追加到共享日志，按 run_tag 分组求峰值）。
 //!   **口径边界（ISSUE-079）**：本测试的峰值 = `WorkerExecutor` 的 python 节点子进程
@@ -35,12 +45,17 @@
 //!   执行，使用独立进程级信号量，**不计入** `with_limits` 全局/每 run 统计（M6 统一）。
 //!   因此实测全局峰值是「节点进程并发」的下界，不代表全栈所有 worker 子进程。
 //!
-//! # 实测基线（本机 macOS / Rust 1.99.1 / Python 3.13，2026-10-30 连跑 3 次）
+//! # 实测基线（本机 macOS / Rust 1.99.1 / Python 3.13）
 //!
-//! - 区间总数 26（8×3 分支 + 2×1 echo）；全局峰值 **4**（= with_limits 全局上限）；
-//!   每 run 峰值：8 个 python run 均 **2**（= 每 run 上限），2 个 agent run 为 1。
-//! - 单 run 基线 **0.79–0.85s**；10 run 并发总耗时 **2.46–2.54s**，比值 **2.9–3.1**
-//!   （完全串行 ≈ 10x）。断言只保留宽松上界 10x，具体数值随机器波动只记录。
+//! - 8+2 组合（2026-10-30 连跑 3 次）：区间总数 26（8×3 分支 + 2×1 echo）；全局峰值
+//!   **4**（= with_limits 全局上限）；每 run 峰值：8 个 python run 均 **2**（= 每 run
+//!   上限），2 个 agent run 为 1；单 run 基线 **0.79–0.85s**、10 run 并发总耗时
+//!   **2.46–2.54s**、比值 **2.9–3.1**（完全串行 ≈ 10x）。2026-10-31 私有 target
+//!   复跑 2 次：0.80–0.86s / 2.50–2.51s / 2.90–3.14，量级一致。
+//! - 同图用例（2026-10-31 连跑 2 次，私有 target 干净构建）：区间总数 30（10×3 分支）；
+//!   全局峰值 **4**；10 个 run 的每 run 峰值均 **2**；单 run 基线 **0.79–0.81s**、
+//!   10 run 总耗时 **3.29s**、比值 **4.04–4.15**。
+//! - 断言只保留宽松上界 10x，具体数值随机器波动只记录；两个用例各自独立 tempdir/DB。
 //! - **同库 10 并发写未触发 `SQLITE_BUSY`/写线程错误**（WAL + 5s `busy_timeout` +
 //!   写线程 busy 重试）：10 run 全部 Completed，逐 run reader 查询均成功。若未来在
 //!   更慢磁盘/更大流量下出现写线程错误，按 AC 措辞退化为「独立 db」组合并登记台账。
@@ -74,10 +89,8 @@ use zgraph_worker::WorkerExecutor;
 
 /// 并发 run 总数（AC-12：10）。
 const RUN_COUNT: usize = 10;
-/// 纯 python 图 run 数（前 8 个）。
+/// 纯 python 图 run 数（8+2 组合的前 8 个；同图用例为全部 10 个）。
 const PYTHON_RUN_COUNT: usize = 8;
-/// 含 agent_call 的 run 数（后 2 个）。
-const AGENT_RUN_COUNT: usize = RUN_COUNT - PYTHON_RUN_COUNT;
 /// 纯 python 图的实例节点集合。
 const PYTHON_NODES: [&str; 5] = ["start", "a", "b", "c", "done"];
 /// agent 图的实例节点集合。
@@ -132,6 +145,16 @@ impl RunPlan {
             user_id: format!("u-ac12-{index:02}"),
             tenant: format!("tenant-{index:02}"),
             kind,
+        }
+    }
+
+    /// 同图用例的第 `index` 个 run：10 个 run 全部使用同一条 python 分支图。
+    fn same_graph(index: usize) -> Self {
+        Self {
+            tag: format!("ac12-same-{index:02}"),
+            user_id: format!("u-ac12-same-{index:02}"),
+            tenant: format!("tenant-same-{index:02}"),
+            kind: RunKind::Python,
         }
     }
 
@@ -352,10 +375,21 @@ fn routing_executor(
 // ---------------------------------------------------------------------------
 
 /// 依次启动 10 个 run（同库不同 run_id）；`start_traced_run` 立即返回，run 由内核任务驱动。
-fn launch_runs(db: &Path, log_file: &Path, worker: &Arc<WorkerExecutor>) -> Vec<LaunchedRun> {
+///
+/// `plan_for` 决定第 `index` 个 run 的图/user_id/global_vars：8+2 组合用
+/// [`RunPlan::new`]，同图用例用 [`RunPlan::same_graph`]。
+fn launch_runs<F>(
+    db: &Path,
+    log_file: &Path,
+    worker: &Arc<WorkerExecutor>,
+    plan_for: F,
+) -> Vec<LaunchedRun>
+where
+    F: Fn(usize) -> RunPlan,
+{
     (0..RUN_COUNT)
         .map(|index| {
-            let plan = RunPlan::new(index);
+            let plan = plan_for(index);
             let (executor, fake): (Arc<dyn NodeExecutor>, Option<Arc<FakeLlmProvider>>) =
                 match plan.kind {
                     RunKind::Python => (worker.clone(), None),
@@ -463,6 +497,27 @@ fn assert_runs_isolated(runs: &[FinishedRun], shared_db: &Path) {
             );
         }
     }
+}
+
+/// 同图证据：全部 run 的 `runs.graph_hash` 一致（同一张图定义，spec 07 AC-12「同图」）。
+fn assert_single_graph_hash(runs: &[FinishedRun], shared_db: &Path) {
+    let reader = TraceReader::open_readonly(shared_db).expect("open shared trace db");
+    let hashes: HashSet<String> = runs
+        .iter()
+        .map(|run| {
+            reader
+                .run(&run.run_id)
+                .expect("query run row")
+                .expect("run row exists")
+                .graph_hash
+        })
+        .collect();
+    assert_eq!(
+        hashes.len(),
+        1,
+        "{} 个 run 应共用同一张图（同 graph_hash），实际 {hashes:?}",
+        runs.len()
+    );
 }
 
 /// 单 run 的完整 trace 断言，返回形状摘要供跨 run 比较。
@@ -807,10 +862,15 @@ fn assert_worker_limits(
     elapsed: Duration,
 ) {
     let intervals = common::read_intervals_by_run(log_file);
-    assert_eq!(intervals.len(), RUN_COUNT, "每个 run 都应记录进程区间");
+    assert_eq!(intervals.len(), runs.len(), "每个 run 都应记录进程区间");
     let all: Vec<(f64, f64)> = intervals.values().flatten().copied().collect();
-    let expected_total =
-        PYTHON_RUN_COUNT * PYTHON_INTERVALS_PER_RUN + AGENT_RUN_COUNT * AGENT_INTERVALS_PER_RUN;
+    let expected_total: usize = runs
+        .iter()
+        .map(|run| match run.plan.kind {
+            RunKind::Python => PYTHON_INTERVALS_PER_RUN,
+            RunKind::Agent => AGENT_INTERVALS_PER_RUN,
+        })
+        .sum();
     assert_eq!(all.len(), expected_total, "区间总数（真进程证据）");
     let global_peak = common::peak_concurrency(&all);
     assert!(
@@ -870,7 +930,7 @@ fn per_run_peaks(
 }
 
 // ---------------------------------------------------------------------------
-// 唯一用例
+// 用例（8+2 全栈组合 / spec 07 原文「10×同图」形态）
 // ---------------------------------------------------------------------------
 
 /// AC-12：10 个 run 并发（同一 SQLite 库、不同 run_id）全栈隔离 + 并发上限。
@@ -889,7 +949,7 @@ async fn ac12_ten_concurrent_runs_share_one_db_and_are_isolated() {
     .await;
 
     let started = Instant::now();
-    let launched = launch_runs(&shared_db, &log_file, &worker);
+    let launched = launch_runs(&shared_db, &log_file, &worker, RunPlan::new);
     let runs = tokio::time::timeout(common::RUN_TIMEOUT, finish_runs(launched))
         .await
         .expect("10 个并发 run 必须在宽松上限内全部结束");
@@ -899,5 +959,39 @@ async fn ac12_ten_concurrent_runs_share_one_db_and_are_isolated() {
     assert_runs_isolated(&runs, &shared_db);
     assert_python_outputs(&runs);
     assert_agent_outputs(&runs);
+    assert_worker_limits(&log_file, &runs, baseline, elapsed);
+}
+
+/// AC-12（spec 07 原文形态，ISSUE-089 / REV-032 加强）：**同一张图** 10 个并发 run。
+///
+/// M5 的 8+2 组合虽覆盖更强核心语义，但未字面满足「10 个同图 run」——这里把 10 个
+/// run 全部换成同一条三并发分支图，并额外断言 10 个 `runs.graph_hash` 完全一致；
+/// run 间隔离（instances/gate_results/events/transitions/streaming 精确计数 +
+/// `instance_id` 互斥 + 同形）与全局/每 run 上限沿用同一套 helper，避免两套口径。
+#[tokio::test]
+async fn ac12_ten_same_graph_runs_are_isolated_and_bounded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared_db = dir.path().join("ac12_same_graph.db");
+    let log_file = dir.path().join("ac12_same_graph_intervals.log");
+    let worker =
+        common::executor_with_limits(common::RUN_TIMEOUT, GLOBAL_MAX_WORKERS, MAX_WORKERS_PER_RUN);
+    let baseline = run_single_baseline(
+        dir.path(),
+        worker.clone(),
+        &dir.path().join("ac12_same_graph_baseline.log"),
+    )
+    .await;
+
+    let started = Instant::now();
+    let launched = launch_runs(&shared_db, &log_file, &worker, RunPlan::same_graph);
+    let runs = tokio::time::timeout(common::RUN_TIMEOUT, finish_runs(launched))
+        .await
+        .expect("10 个同图并发 run 必须在宽松上限内全部结束");
+    let elapsed = started.elapsed();
+
+    assert_all_completed(&runs);
+    assert_runs_isolated(&runs, &shared_db);
+    assert_single_graph_hash(&runs, &shared_db);
+    assert_python_outputs(&runs);
     assert_worker_limits(&log_file, &runs, baseline, elapsed);
 }

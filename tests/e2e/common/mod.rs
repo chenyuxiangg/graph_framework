@@ -91,12 +91,23 @@ pub fn python_path() -> String {
 // worker / executor 构造
 // ---------------------------------------------------------------------------
 
+/// Python 子进程环境变量名：禁止写 `.pyc`/`__pycache__`（ISSUE-089）。
+///
+/// e2e 运行会 import `tests/fixtures/**` 下的 Python 资产；不设该变量时 Python 会在
+/// fixtures 目录写 `__pycache__/`（`.gitignore` 已忽略、git 语义不脏，但本地工作区
+/// 会多出忽略文件）。所有 e2e 派生的 Python 子进程（worker / tool runner / CLI 的
+/// 后代）都通过此变量统一关闭字节码缓存。
+pub const PYTHONDONTWRITEBYTECODE: &str = "PYTHONDONTWRITEBYTECODE";
+
 /// 以 Python worker SDK（`python -m zgraph_worker.runtime`）为入口的基础配置。
 pub fn worker_config(timeout: Duration) -> WorkerConfig {
     WorkerConfig {
         program: python_program(),
         args: vec!["-m".to_string(), "zgraph_worker.runtime".to_string()],
-        env: vec![("PYTHONPATH".to_string(), python_path())],
+        env: vec![
+            ("PYTHONPATH".to_string(), python_path()),
+            (PYTHONDONTWRITEBYTECODE.to_string(), "1".to_string()),
+        ],
         cwd: Some(repo_root()),
         timeout,
         hello_timeout: Duration::from_secs(5),

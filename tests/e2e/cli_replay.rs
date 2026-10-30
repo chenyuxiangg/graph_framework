@@ -23,11 +23,15 @@
 //! `RecordedExecutor` 直接返回记录输出、不执行 python 节点，marker 行数在 replay
 //! 前后不变 = 未启动 worker 的可判定证据（`cli_support::write_l2_marker_py`）。
 //!
-//! **「不产生新 run / 不修改 trace」证据**：`rusqlite` 只读查 `runs` 计数，并比较
-//! replay 前后 DB 主文件字节完全一致（replay 全程只读打开 DB）。
+//! **「不产生新 run / 不修改 trace」证据**：`rusqlite` 只读查 `runs` 计数，并在
+//! **任何数据库连接/查询之前**取 DB **主文件 + `-wal` + `-shm`** 字节快照，replay
+//! 后逐一比较完全一致（replay 全程只读打开 DB；ISSUE-089：只比主文件会漏掉「只写
+//! WAL 不落主文件」的情况，且快照必须早于任何读-写连接）。
 //!
 //! 稳定性约定：每个用例独立 `tempfile::TempDir`；kill/轮询用 20ms 轮询 + 15s 宽松
-//! 上限，不用 sleep 猜时序；篡改用例直接改临时 DB（不触碰产品代码）。
+//! 上限，不用 sleep 猜时序；篡改用例直接改临时 DB（不触碰产品代码）。所有 CLI 子进程
+//! 都经 `cli_support` 的公共 helper 注入 `PYTHONDONTWRITEBYTECODE=1`（ISSUE-089：
+//! 运行 fixtures 不在仓库里留 ignored `__pycache__`）。
 
 #![cfg(unix)]
 
@@ -38,7 +42,7 @@ mod common;
 
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -46,11 +50,11 @@ use serde_json::{json, Value};
 use zgraph_trace::{InstanceStatus as TraceInstanceStatus, TraceReader};
 
 use cli_support::{
-    ac01_run_args, agent_graph_text, arg, assert_exit, connect, db_bytes, io_graph_text,
+    ac01_run_args, agent_graph_text, arg, assert_exit, connect, db_files_snapshot, io_graph_text,
     json_stdout, python_program, python_sdk_dir, read_lines, read_only_connect,
     recorded_outputs_count, repo_root, run_cli, run_cli_env, run_output_json, running_run,
     runs_count, slow_text_script, stderr_text, write_agent_assets, write_json, write_l2_marker_py,
-    write_text, zgraph_binary,
+    write_text, zgraph_command,
 };
 
 /// AC-01 入口输入（07 AC-01 步骤；与 `cli_ac01.rs` 一致）。
@@ -90,10 +94,11 @@ struct RecordedRun {
     marker: PathBuf,
 }
 
-/// 只读快照：`runs` 计数 / DB 主文件字节 / worker marker 行（replay 前后对比）。
+/// 只读快照：DB 磁盘字节（主文件 + `-wal`/`-shm`）/ `runs` 计数 / worker marker 行。
 struct DbSnapshot {
+    /// `(后缀, 字节)`；文件缺失记 `None`（见 [`db_files_snapshot`]）。
+    files: Vec<(String, Option<Vec<u8>>)>,
     runs: i64,
-    bytes: Vec<u8>,
     marker: Vec<String>,
 }
 
@@ -113,6 +118,15 @@ fn record_ac01_run(dir: &Path) -> RecordedRun {
         read_lines(&marker).len(),
         1,
         "原始 run 应执行 1 次 python 节点（worker pid marker）"
+    );
+    // ISSUE-089：marker 覆盖包在临时目录内，worker import 它时不得写 `__pycache__`；
+    // 这里直接断言环境变量确实传到了 worker 子进程（公共 helper 统一注入）。
+    assert!(
+        !dir.join("py_override")
+            .join("gates")
+            .join("__pycache__")
+            .exists(),
+        "worker 不得写 __pycache__（PYTHONDONTWRITEBYTECODE=1 未生效）"
     );
     RecordedRun { db, run_id, marker }
 }
@@ -135,25 +149,31 @@ fn replay_args(run_id: &str, db: &Path, mode: Option<&str>) -> Vec<String> {
 }
 
 /// 捕获只读快照。
+///
+/// **顺序强制（ISSUE-089）**：先取文件字节（主文件 + `-wal`/`-shm`），再打开任何
+/// 数据库连接。读连接在 WAL 模式下也会创建/更新 `-shm`，若先查询再取字节，快照会
+/// 混入连接自身的副作用，「replay 前后不变」的证据被削弱。
 fn snapshot(recorded: &RecordedRun) -> DbSnapshot {
+    let files = db_files_snapshot(&recorded.db);
     DbSnapshot {
+        files,
         runs: runs_count(&recorded.db),
-        bytes: db_bytes(&recorded.db),
         marker: read_lines(&recorded.marker),
     }
 }
 
-/// 断言 replay 未产生新 run / 未修改原 trace / 未启动 worker。
+/// 断言 replay 未产生新 run / 未修改原 trace（主文件 + WAL/SHM）/ 未启动 worker。
 fn assert_replay_is_read_only(recorded: &RecordedRun, before: &DbSnapshot) {
+    // 与 `snapshot` 同序：先比较文件字节，再打开只读连接查计数。
+    let after_files = db_files_snapshot(&recorded.db);
+    assert_eq!(
+        after_files, before.files,
+        "replay 不得修改原 trace DB（主文件 + -wal + -shm 字节）"
+    );
     assert_eq!(
         runs_count(&recorded.db),
         before.runs,
         "replay 不得产生新 run"
-    );
-    assert_eq!(
-        db_bytes(&recorded.db),
-        before.bytes,
-        "replay 不得修改原 trace DB 主文件"
     );
     assert_eq!(
         read_lines(&recorded.marker),
@@ -456,30 +476,26 @@ fn assert_trace_truncated(db: &Path, run_id: &str) {
     assert!(!stdout.contains("RunFinished"));
 }
 
-/// kill -9 长 run → 同库再 run：recovered[] / RunRow 标定 / trace truncated 全链路。
-#[test]
-fn interrupted_run_is_marked_on_next_start_and_trace_is_truncated() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("crash.db");
-    let graph = write_text(
-        dir.path(),
-        "long.json",
-        &agent_graph_text("long_agent", None),
-    );
-    let assets = write_agent_assets(dir.path(), "long_agent", LONG_NODE_TIMEOUT_MS);
+/// 起长 run（慢 fake 总时长约 133s）：graph/assets/fake 脚本落在 `dir`，返回子进程句柄。
+///
+/// 用 [`zgraph_command`]（而非裸 `Command`）以继承 e2e 统一环境
+/// （`PYTHONDONTWRITEBYTECODE=1`，ISSUE-089）。
+fn spawn_long_run(dir: &Path, db: &Path) -> Child {
+    let graph = write_text(dir, "long.json", &agent_graph_text("long_agent", None));
+    let assets = write_agent_assets(dir, "long_agent", LONG_NODE_TIMEOUT_MS);
     let script = write_json(
-        dir.path(),
+        dir,
         "long_fake.json",
         &slow_text_script(LONG_CHUNK_DELAY_MS, LONG_RESPONSE_CHARS),
     );
-    let mut child = Command::new(zgraph_binary())
+    zgraph_command()
         .args([
             "run".to_string(),
             arg(&graph),
             "--inputs".to_string(),
             r#"{"start":{"message":"hi"}}"#.to_string(),
             "--db".to_string(),
-            arg(&db),
+            arg(db),
             "--assets-dir".to_string(),
             arg(&assets),
             "--tools-dir".to_string(),
@@ -491,11 +507,58 @@ fn interrupted_run_is_marked_on_next_start_and_trace_is_truncated() {
             format!("--fake-llm={}", script.display()),
             "--json".to_string(),
         ])
-        .current_dir(dir.path())
+        .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn long zgraph run");
+        .expect("spawn long zgraph run")
+}
+
+/// 同库再起一次 run（启动时标定遗留 run），返回捕获输出。
+fn second_run_after_kill(dir: &Path, db: &Path) -> Output {
+    let graph = write_text(dir, "io.json", &io_graph_text());
+    run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--inputs".to_string(),
+            r#"{"start":{"x":1}}"#.to_string(),
+            "--db".to_string(),
+            arg(db),
+            "--json".to_string(),
+        ],
+        dir,
+    )
+}
+
+/// 断言第二次 run 的 `recovered[]` 与 stderr 标定 warning。
+fn assert_recovered_after_kill(output: &Output, leftover_run_id: &str) {
+    assert_exit(output, 0, "标定后的第二次 run");
+    let payload = json_stdout(output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let recovered = payload["recovered"].as_array().expect("recovered[]");
+    assert_eq!(recovered.len(), 1, "应标定 1 个遗留 run：{payload}");
+    assert_eq!(recovered[0]["run_id"], json!(leftover_run_id));
+    assert_eq!(recovered[0]["previous_status"], json!("Running"));
+    assert!(
+        recovered[0]["recovered_at"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "recovered_at 非空"
+    );
+    let stderr = stderr_text(output);
+    assert!(
+        stderr.contains(leftover_run_id) && stderr.contains("marked interrupted"),
+        "stderr 应有标定 warning：{stderr}"
+    );
+}
+
+/// kill -9 长 run → 同库再 run：recovered[] / RunRow 标定 / trace truncated 全链路。
+#[test]
+fn interrupted_run_is_marked_on_next_start_and_trace_is_truncated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("crash.db");
+    let mut child = spawn_long_run(dir.path(), &db);
 
     let (run_id, owner_pid) = wait_running_run(&db);
     assert_eq!(
@@ -508,38 +571,8 @@ fn interrupted_run_is_marked_on_next_start_and_trace_is_truncated() {
     assert_eq!(status.signal(), Some(9), "kill -9 语义");
     let instances_before = instance_count(&db, &run_id);
 
-    // 同库再起一次 run：启动时标定遗留 run。
-    let second_graph = write_text(dir.path(), "io.json", &io_graph_text());
-    let second = run_cli(
-        &[
-            "run".to_string(),
-            arg(&second_graph),
-            "--inputs".to_string(),
-            r#"{"start":{"x":1}}"#.to_string(),
-            "--db".to_string(),
-            arg(&db),
-            "--json".to_string(),
-        ],
-        dir.path(),
-    );
-    assert_exit(&second, 0, "标定后的第二次 run");
-    let payload = json_stdout(&second);
-    assert_eq!(payload["status"], json!("Completed"));
-    let recovered = payload["recovered"].as_array().expect("recovered[]");
-    assert_eq!(recovered.len(), 1, "应标定 1 个遗留 run：{payload}");
-    assert_eq!(recovered[0]["run_id"], json!(run_id));
-    assert_eq!(recovered[0]["previous_status"], json!("Running"));
-    assert!(
-        recovered[0]["recovered_at"]
-            .as_str()
-            .is_some_and(|text| !text.is_empty()),
-        "recovered_at 非空"
-    );
-    let stderr = stderr_text(&second);
-    assert!(
-        stderr.contains(&run_id) && stderr.contains("marked interrupted"),
-        "stderr 应有标定 warning：{stderr}"
-    );
+    let second = second_run_after_kill(dir.path(), &db);
+    assert_recovered_after_kill(&second, &run_id);
     assert_eq!(runs_count(&db), 2, "应恰有 2 个 run（遗留 + 新增）");
     assert_interrupted_row(&db, &run_id);
     assert_eq!(
@@ -554,20 +587,17 @@ fn interrupted_run_is_marked_on_next_start_and_trace_is_truncated() {
 // 3. ISSUE-076：CLI 层 timeout_hint 端到端
 // ---------------------------------------------------------------------------
 
-/// CLI 层 ISSUE-076：DSL 未声明 timeout_ms → AgentConfig.node_timeout_ms 经 CLI 组合
-/// 执行器转发给内核；实例 TimedOut / run NODE_TIMEOUT 且耗时与 hint 同量级。
-#[test]
-fn cli_agent_config_timeout_hint_is_end_to_end() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("hint.db");
-    let assets = write_agent_assets(dir.path(), "slow_agent", HINT_NODE_TIMEOUT_MS);
+/// 构造慢 fake + agent 资产 + 图，执行一次 `zgraph run`，返回输出与耗时。
+fn run_hint_case(dir: &Path) -> (Output, Duration) {
+    let db = dir.join("hint.db");
+    let assets = write_agent_assets(dir, "slow_agent", HINT_NODE_TIMEOUT_MS);
     let script = write_json(
-        dir.path(),
+        dir,
         "hint_fake.json",
         &slow_text_script(HINT_CHUNK_DELAY_MS, HINT_RESPONSE_CHARS),
     );
     let graph = write_text(
-        dir.path(),
+        dir,
         "hint_graph.json",
         &agent_graph_text("slow_agent", None),
     );
@@ -591,11 +621,15 @@ fn cli_agent_config_timeout_hint_is_end_to_end() {
             format!("--fake-llm={}", script.display()),
             "--json".to_string(),
         ],
-        dir.path(),
+        dir,
     );
-    let elapsed = started.elapsed();
-    assert_exit(&output, 1, "CLI 层 ISSUE-076 超时回退");
-    let payload = json_stdout(&output);
+    (output, started.elapsed())
+}
+
+/// ISSUE-076 断言：exit 1 `NODE_TIMEOUT` 且耗时与 hint 同量级（证明回退链生效）。
+fn assert_hint_timeout(output: &Output, elapsed: Duration) -> Value {
+    assert_exit(output, 1, "CLI 层 ISSUE-076 超时回退");
+    let payload = json_stdout(output);
     assert_eq!(payload["status"], json!("Failed"));
     assert_eq!(payload["error"]["code"], json!("NODE_TIMEOUT"));
     assert_eq!(payload["run_output"], Value::Null);
@@ -607,9 +641,12 @@ fn cli_agent_config_timeout_hint_is_end_to_end() {
         elapsed < HINT_CASE_LIMIT,
         "hint 未生效（慢 fake 走完需约 10s）：elapsed={elapsed:?}"
     );
+    payload
+}
 
-    let run_id = payload["run_id"].as_str().expect("run_id");
-    let reader = TraceReader::open_readonly(&db).expect("open trace");
+/// ISSUE-076 trace 断言：实例 TimedOut / `NodeTimedOut` 恰一次 / run NODE_TIMEOUT。
+fn assert_hint_trace(db: &Path, run_id: &str) {
+    let reader = TraceReader::open_readonly(db).expect("open trace");
     let row = common::run_row(&reader, run_id);
     assert_eq!(row.status, zgraph_trace::RunStatus::Failed);
     assert_eq!(row.error_code.as_deref(), Some("NODE_TIMEOUT"));
@@ -621,4 +658,15 @@ fn cli_agent_config_timeout_hint_is_end_to_end() {
         1,
         "NodeTimedOut 恰一次"
     );
+}
+
+/// CLI 层 ISSUE-076：DSL 未声明 timeout_ms → AgentConfig.node_timeout_ms 经 CLI 组合
+/// 执行器转发给内核；实例 TimedOut / run NODE_TIMEOUT 且耗时与 hint 同量级。
+#[test]
+fn cli_agent_config_timeout_hint_is_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (output, elapsed) = run_hint_case(dir.path());
+    let payload = assert_hint_timeout(&output, elapsed);
+    let run_id = payload["run_id"].as_str().expect("run_id");
+    assert_hint_trace(&dir.path().join("hint.db"), run_id);
 }
