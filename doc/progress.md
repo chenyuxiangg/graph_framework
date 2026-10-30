@@ -20,4 +20,4 @@
 3. 收口：ISSUE-086 e2e 断言（REV-054）、ISSUE-088 多机加固（REV-055）、spec 回写（REV-056）、wrapup（REV-057）。
 
 **阻塞**
-- 无硬阻塞。环境：本机无 `uv`（Python 测试用 `.venv/bin/python`）；`merge.sh` 传 `PYTHON_BIN`；worktree 共用 `CARGO_TARGET_DIR=<repo>/target` 省磁盘。
+- 无硬阻塞。环境：本机无 `uv`（Python 测试用 `.venv/bin/python`）；`merge.sh` 传 `PYTHON_BIN`；cargo 必须 `CARGO_HOME=<repo>/.cargo-home` + `CARGO_NET_OFFLINE=true` + 共用 `CARGO_TARGET_DIR=<repo>/target`（默认 ~/.cargo 缺缓存会卡下载）。

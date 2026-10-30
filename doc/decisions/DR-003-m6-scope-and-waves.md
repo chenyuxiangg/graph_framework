@@ -29,7 +29,7 @@
 | ISSUE-087 | P3 | trace+cli | L2 记录/重放补 `global_vars`（schema v3） | W2 / REV-048（跨模块） |
 | ISSUE-088 | P3 | cli(+trace) | 崩溃标定多机/EPERM/host 加固 | W3 / REV-055 |
 | ISSUE-089 | P3 | e2e | L2 只读断言含 WAL/SHM、测试函数拆分、description、`__pycache__` | W1 / REV-044 |
-| REV-028 #6（DR-002 §9 #11） | — | cli | pre-existing CLI 偏差：clap 决策/`-v`/`--version`/`NO_COLOR`（`--version` 已符合） | W1 / REV-043 |
+| REV-028 #6（DR-002 §9 #11） | — | cli | pre-existing CLI 偏差：clap 决策/`-v`/`--version`/`NO_COLOR`（`--version` 字面按 06 目标口径复核） | W1 / REV-043 |
 | REV-037 顺延 | — | process | 依赖治理 + CI clippy 固化（= 068/078/073 的载体） | W1b / REV-045 |
 | AC-12 加强 | — | e2e | 同一图 10 并发 run（07 AC-12 原文字面形态） | W1 / REV-044 |
 
@@ -90,6 +90,8 @@
 |---|---|
 | 依赖管理 | 本机 **uv 未安装**：Python 测试用 `.venv/bin/python -m pytest`；`merge.sh` 传 `PYTHON_BIN=<repo>/.venv/bin/python` |
 | 磁盘 | 剩余约 6.6 GiB：所有 worktree 与 `merge.sh` 共用 `CARGO_TARGET_DIR=<repo>/target`，构建串行等锁（不删 target） |
+| Cargo 缓存 | **必须** `CARGO_HOME=<repo>/.cargo-home` + `CARGO_NET_OFFLINE=true`：默认 `~/.cargo` 缺 181 个依赖缓存，会卡在 crates.io 下载并阻塞全局构建锁；`.cargo-home` 已含 273 个 `.crate`（仓库既有缓存，勿删） |
+| Python | 本机无 `uv`：`pytest` 用 `<repo>/.venv/bin/python -m pytest -q`；`merge.sh` 传 `PYTHON_BIN=<repo>/.venv/bin/python` |
 | 并发 | 同一模块同一时间只有一个写入者；不同模块 worktree 互不重叠；Lead 统一合并 |
 | e2e | 真子进程 + SQLite，耗时长；新增用例必须连续 2 次通过，防 flaky |
 | 推送 | `origin` SSH 连通已确认；每个合并用 `--push` 保持 `origin/main` 与本地一致（merge.sh 以 origin/main 为基） |
