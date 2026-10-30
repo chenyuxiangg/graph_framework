@@ -13,6 +13,7 @@
 ## 当前状态：M6 进行中（M0–M5 已完成）
 
 **M6（进行中，2026-10-30 开工）**：范围 = M5 顺延的 17 个 ISSUE + REV-037 依赖/CI 治理 + AC-12「同一图 10 并发 run」加强用例；波次、分支与 REV 编号见 [`doc/decisions/DR-003-m6-scope-and-waves.md`](doc/decisions/DR-003-m6-scope-and-waves.md)，实时状态见 [`doc/progress.md`](doc/progress.md)。
+**M6 W1 已交付（REV-039–045）**：DR-003、ISSUE-033/059/068/073/075/077/078/086/089、REV-037 依赖治理（`nix`/`blake3`/`futures-util` 提升 + CI `--locked`）、AC-12「同一图 10 并发 run」加强用例；W2/W3（ISSUE-036/079/080/081/082/085/087/088 + spec 回写）待推进。
 
 **已完成 M0–M5**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
 图内核与事件循环、trace/SQLite（L1 回放）、worker supervisor + `WorkerExecutor`（进程组 kill/取消升级/帧超时/并发上限）、

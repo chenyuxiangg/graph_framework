@@ -4,3 +4,4 @@
 # 2026-10-30（M3 收尾）：cargo test --workspace 313+ passed、pytest 44 passed；基线名额为 0（全绿）。
 # 2026-10-30（M4 收尾）：cargo test --workspace 423 passed / 2 ignored（harness 真模型 smoke + e2e AC-08b 手动）、pytest 84 passed；基线名额仍为 0。
 # 2026-10-30（M5 收尾）：cargo test --workspace 0 failed / 2 ignored（M5 全量：cli run/replay、e2e AC-12/AC-01/L2/标定、kernel/harness/trace/worker P2；计数随新增测试增长，以 merge 门禁日志为准）、pytest 84 passed；基线名额仍为 0（全绿）。REV-036。
+# 2026-10-31（M6 W1）：合并门禁 cargo test --workspace 0 failed / 2 ignored（计数随新增测试增长）；pytest 84 passed；基线名额仍为 0（全绿）。REV-039–045。
