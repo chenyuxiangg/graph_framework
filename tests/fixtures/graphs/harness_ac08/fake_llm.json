@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "chunk_chars": 3,
+  "chunk_delay_ms": 0,
+  "calls": [
+    {
+      "kind": "tool_calls",
+      "content": null,
+      "stop_reason": "ToolCalls",
+      "tool_calls": [
+        { "call_id": "call_add_1", "name": "add", "args": { "a": 2, "b": 3 } }
+      ],
+      "usage": { "prompt_tokens": 120, "completion_tokens": 8 }
+    },
+    {
+      "kind": "text",
+      "content": "{\"answer\":\"5\"}",
+      "stop_reason": "EndTurn",
+      "usage": { "prompt_tokens": 160, "completion_tokens": 12 }
+    }
+  ],
+  "failures": []
+}

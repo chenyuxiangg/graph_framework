@@ -1,0 +1,34 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "harness_ac08",
+    "description": "AC-08 验收图：start -> agent(answer_writer) -> end；真 kernel + Harness + 真 Python 工具 worker + 真 SQLite trace",
+    "author": "e2e-dev"
+  },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [{ "name": "message", "type": "string", "required": true }],
+      "config": {}
+    },
+    {
+      "id": "answer_writer",
+      "type": "agent_call",
+      "inputs": [{ "name": "message", "type": "any", "required": true }],
+      "trigger": "all",
+      "config": { "agent_id": "answer_writer", "timeout_ms": 60000 }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "inputs": [{ "name": "result", "type": "any", "required": true }],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "answer_writer", "to_input_port": "message" },
+    { "from": "answer_writer", "to_node": "end", "to_input_port": "result" }
+  ]
+}

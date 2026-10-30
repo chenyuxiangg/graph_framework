@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 publish = false
-description = "M3 e2e 验收包：真 kernel run + 真 Python worker 子进程 + 真 SQLite trace"
+description = "M3/M4 e2e 验收包：真 kernel run + 真 Python worker 子进程 + 真 SQLite trace"
 
 # 测试文件直接放在包根（07 §7.1 期望 `tests/e2e/*.rs`），因此关闭自动发现并用
 # `[[test]] path` 显式声明；公共辅助在 `common/mod.rs` 由各用例
@@ -16,6 +16,7 @@ autotests = false
 [dev-dependencies]
 zgraph-cli = { path = "../../crates/zgraph-cli" }
 zgraph-dsl = { path = "../../crates/zgraph-dsl" }
+zgraph-harness = { path = "../../crates/zgraph-harness" }
 zgraph-kernel = { path = "../../crates/zgraph-kernel" }
 zgraph-trace = { path = "../../crates/zgraph-trace" }
 zgraph-worker = { path = "../../crates/zgraph-worker" }
@@ -47,3 +48,7 @@ path = "fault_injection.rs"
 [[test]]
 name = "concurrency"
 path = "concurrency.rs"
+
+[[test]]
+name = "harness_ac08"
+path = "harness_ac08.rs"
