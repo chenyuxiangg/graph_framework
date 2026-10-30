@@ -69,9 +69,19 @@ def exit_zero(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
 
 
 def kill_self(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
-    """用户代码被信号杀死 → NODE_WORKER_CRASH。"""
+    """用户代码被信号杀死 → NODE_WORKER_CRASH（signal=9）。"""
     os.kill(os.getpid(), signal.SIGKILL)
     raise AssertionError("unreachable")
+
+
+def exit_seven(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
+    """非约定退出码（无 result）→ NODE_WORKER_CRASH（exit_code=7）。
+
+    同时向 stderr 写一行可识别文本，验证崩溃载荷的 stderr 尾部证据。
+    """
+    sys.stderr.write("fatal: exit-seven fixture\n")
+    sys.stderr.flush()
+    os._exit(7)
 
 
 def sleep_forever(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:

@@ -577,9 +577,24 @@ pub fn node_error_json(error: &kernel::NodeError) -> Value {
         kernel::NodeError::Internal { .. } => {
             object.insert("kind".to_string(), json!("Internal"));
         }
-        kernel::NodeError::NodeWorker { kind } => {
+        kernel::NodeError::NodeWorker {
+            kind,
+            signal,
+            exit_code,
+            stderr_tail,
+        } => {
             object.insert("kind".to_string(), json!("NodeWorker"));
             object.insert("worker_kind".to_string(), json!(format!("{kind:?}")));
+            // ISSUE-066：崩溃证据仅在有值时输出（保持既有键集合兼容）。
+            if let Some(signal) = signal {
+                object.insert("signal".to_string(), json!(signal));
+            }
+            if let Some(code) = exit_code {
+                object.insert("exit_code".to_string(), json!(code));
+            }
+            if let Some(tail) = stderr_tail {
+                object.insert("stderr_tail".to_string(), json!(tail));
+            }
         }
     }
     Value::Object(object)
@@ -663,6 +678,50 @@ mod tests {
         let timeout = node_error_json(&NodeError::Timeout { elapsed_ms: 100 });
         assert_eq!(timeout["code"], "NODE_TIMEOUT");
         assert_eq!(timeout["elapsed_ms"], 100);
+    }
+
+    /// ISSUE-066：NodeWorker 崩溃证据仅在 Some 时输出，既有 `kind`/`code`/
+    /// `worker_kind` 保持不变（spec 06 §6.2.5.1 的 NodeWorker 形状仅增字段）。
+    #[test]
+    fn node_error_json_expands_node_worker_crash_details() {
+        use zgraph_kernel::WorkerErrorKind;
+
+        let signal = node_error_json(&NodeError::NodeWorker {
+            kind: WorkerErrorKind::Crash,
+            signal: Some(9),
+            exit_code: None,
+            stderr_tail: Some("killed by SIGKILL".to_string()),
+        });
+        assert_eq!(signal["code"], "NODE_WORKER_CRASH");
+        assert_eq!(signal["kind"], "NodeWorker");
+        assert_eq!(signal["worker_kind"], "Crash");
+        assert_eq!(signal["signal"], 9);
+        assert!(signal.get("exit_code").is_none());
+        assert_eq!(signal["stderr_tail"], "killed by SIGKILL");
+
+        let exit = node_error_json(&NodeError::NodeWorker {
+            kind: WorkerErrorKind::Crash,
+            signal: None,
+            exit_code: Some(7),
+            stderr_tail: None,
+        });
+        assert_eq!(exit["code"], "NODE_WORKER_CRASH");
+        assert_eq!(exit["exit_code"], 7);
+        assert!(exit.get("signal").is_none());
+        assert!(exit.get("stderr_tail").is_none());
+
+        // 非崩溃路径不携带崩溃证据（字段省略而不是 null）。
+        let handshake = node_error_json(&NodeError::NodeWorker {
+            kind: WorkerErrorKind::Handshake,
+            signal: None,
+            exit_code: None,
+            stderr_tail: None,
+        });
+        assert_eq!(handshake["code"], "NODE_WORKER_HANDSHAKE");
+        assert_eq!(handshake["worker_kind"], "Handshake");
+        assert!(handshake.get("signal").is_none());
+        assert!(handshake.get("exit_code").is_none());
+        assert!(handshake.get("stderr_tail").is_none());
     }
 
     #[test]

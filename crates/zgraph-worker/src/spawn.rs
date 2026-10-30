@@ -72,10 +72,15 @@ pub enum WorkerFailure {
     #[error("worker cancelled")]
     Cancelled,
     /// 非预期退出（被信号杀死或非约定退出码）。
-    #[error("worker exited unexpectedly: code={code:?}, stderr={stderr}")]
+    ///
+    /// `signal` 记录 Unix 信号编号（非 Unix 平台恒 `None`），`code` 记录非约定
+    /// 退出码；二者互斥（ISSUE-066：`NODE_WORKER_CRASH` 必须留下 signal/exit 证据）。
+    #[error("worker exited unexpectedly: code={code:?}, signal={signal:?}, stderr={stderr}")]
     Exit {
-        /// 退出码。
+        /// 退出码（被信号杀死时为 `None`）。
         code: Option<i32>,
+        /// 终止进程的信号编号（仅 Unix；非 Unix 平台恒 `None`）。
+        signal: Option<i32>,
         /// stderr 尾部。
         stderr: String,
     },

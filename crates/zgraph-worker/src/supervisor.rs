@@ -405,11 +405,15 @@ impl Supervisor {
     }
 
     /// 退出码分类：exit 3 = SDK 自检失败（协议错误）；其余非 0/信号 = 崩溃（§3）。
+    ///
+    /// `Exit` 同时记录信号编号与退出码（ISSUE-066：architecture §8.2 要求
+    /// `NODE_WORKER_CRASH` 留下 signal/exit 证据；二者互斥）。
     fn classify_exit(status: ExitStatus) -> WorkerFailure {
         match status.code() {
             Some(3) => protocol_failure("worker exited with code 3 (sdk self-check failed)"),
             code => WorkerFailure::Exit {
                 code,
+                signal: exit_signal(&status),
                 stderr: String::new(),
             },
         }
@@ -505,10 +509,26 @@ impl Supervisor {
     async fn attach_stderr(&mut self, failure: WorkerFailure) -> WorkerFailure {
         let stderr = self.take_stderr().await;
         match failure {
-            WorkerFailure::Exit { code, .. } => WorkerFailure::Exit { code, stderr },
+            WorkerFailure::Exit { code, signal, .. } => WorkerFailure::Exit {
+                code,
+                signal,
+                stderr,
+            },
             other => other,
         }
     }
+}
+
+/// 提取终止进程的 Unix 信号编号；非 Unix 平台恒 `None`（ISSUE-066）。
+#[cfg(unix)]
+fn exit_signal(status: &ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &ExitStatus) -> Option<i32> {
+    None
 }
 
 /// 帧读取：`timeout` 为 `Some` 时超过即 `NODE_WORKER_PROTOCOL`（帧空闲超时）。
@@ -699,17 +719,29 @@ mod tests {
         }
 
         match Supervisor::classify_exit(ExitStatus::from_raw(2 << 8)) {
-            WorkerFailure::Exit { code: Some(2), .. } => {}
-            other => panic!("exit 2 must be a crash, got {other:?}"),
+            WorkerFailure::Exit {
+                code: Some(2),
+                signal: None,
+                ..
+            } => {}
+            other => panic!("exit 2 must be a crash with no signal, got {other:?}"),
         }
         match Supervisor::classify_exit(ExitStatus::from_raw(0)) {
-            WorkerFailure::Exit { code: Some(0), .. } => {}
+            WorkerFailure::Exit {
+                code: Some(0),
+                signal: None,
+                ..
+            } => {}
             other => panic!("exit 0 must map to Exit(0), got {other:?}"),
         }
-        // 信号杀死：raw 低 7 位为信号，code() = None → 崩溃。
+        // 信号杀死：raw 低 7 位为信号，code() = None → 崩溃；signal 必须有值（ISSUE-066）。
         match Supervisor::classify_exit(ExitStatus::from_raw(9)) {
-            WorkerFailure::Exit { code: None, .. } => {}
-            other => panic!("signal death must map to crash, got {other:?}"),
+            WorkerFailure::Exit {
+                code: None,
+                signal: Some(9),
+                ..
+            } => {}
+            other => panic!("signal death must record SIGKILL, got {other:?}"),
         }
     }
 

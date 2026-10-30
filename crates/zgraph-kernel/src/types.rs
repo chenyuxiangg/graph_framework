@@ -433,10 +433,21 @@ pub enum NodeError {
         message: String,
     },
     /// worker 子进程错误（D10）。
+    ///
+    /// `signal`/`exit_code`/`stderr_tail` 是 **M5 仅增**的崩溃证据（ISSUE-066；
+    /// architecture §8.2 要求 `NODE_WORKER_CRASH` 记录 signal/exit）：仅崩溃路径
+    /// 且确实有该证据时可能为 `Some`，其余路径（握手/协议/导入/worker 自报错误）
+    /// 保持 `None`；错误码与 `Display` 均不因此改变。
     #[error("worker error ({kind:?})")]
     NodeWorker {
         /// 错误分类。
         kind: WorkerErrorKind,
+        /// 终止 worker 的 Unix 信号编号（非 Unix 平台恒 `None`）。
+        signal: Option<i32>,
+        /// 非约定退出码（被信号杀死时为 `None`）。
+        exit_code: Option<i32>,
+        /// stderr 尾部（≤ 1 KiB，按字符边界截断；空则 `None`）。
+        stderr_tail: Option<String>,
     },
 }
 
@@ -451,7 +462,7 @@ impl NodeError {
             Self::Harness { kind, .. } => kind.code(),
             Self::Config { .. } => CODE_NODE_CONFIG_ERROR,
             Self::Internal { .. } => CODE_NODE_INTERNAL,
-            Self::NodeWorker { kind } => kind.code(),
+            Self::NodeWorker { kind, .. } => kind.code(),
         }
     }
 }
@@ -461,4 +472,78 @@ impl NodeError {
 /// 内核所有 `*_at`/`ts` 字段与 trace 记录统一走这里，避免精度/时区漂移。
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ISSUE-066：崩溃证据只增字段，不改错误码与 `Display`。
+    #[test]
+    fn node_worker_crash_payload_keeps_code_and_display() {
+        let error = NodeError::NodeWorker {
+            kind: WorkerErrorKind::Crash,
+            signal: Some(9),
+            exit_code: None,
+            stderr_tail: Some("killed".to_string()),
+        };
+        assert_eq!(error.code(), CODE_NODE_WORKER_CRASH);
+        assert_eq!(error.to_string(), "worker error (Crash)");
+        match &error {
+            NodeError::NodeWorker {
+                kind,
+                signal,
+                exit_code,
+                stderr_tail,
+            } => {
+                assert_eq!(*kind, WorkerErrorKind::Crash);
+                assert_eq!(*signal, Some(9));
+                assert_eq!(*exit_code, None);
+                assert_eq!(stderr_tail.as_deref(), Some("killed"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// 4 个 worker 码不因新增载荷而改变（§8.2）；非崩溃路径细节保持 `None`。
+    #[test]
+    fn worker_error_codes_are_stable_with_crash_details() {
+        let cases = [
+            (WorkerErrorKind::Handshake, CODE_NODE_WORKER_HANDSHAKE),
+            (WorkerErrorKind::Protocol, CODE_NODE_WORKER_PROTOCOL),
+            (WorkerErrorKind::Import, CODE_NODE_WORKER_IMPORT),
+            (WorkerErrorKind::Crash, CODE_NODE_WORKER_CRASH),
+        ];
+        for (kind, expected) in cases {
+            let error = NodeError::NodeWorker {
+                kind,
+                signal: None,
+                exit_code: Some(7),
+                stderr_tail: Some("tail".to_string()),
+            };
+            assert_eq!(error.code(), expected, "code for {error:?}");
+        }
+    }
+
+    /// 新载荷可被下游（CLI 桥接）逐字段读取并序列化（内核本身保持无 serde，
+    /// 见 spec 06 §6.2.5.1；序列化断言在 `zgraph-cli` 的 `node_error_json` 测试）。
+    #[test]
+    fn node_worker_payload_fields_are_reachable() {
+        let error = NodeError::NodeWorker {
+            kind: WorkerErrorKind::Crash,
+            signal: None,
+            exit_code: Some(7),
+            stderr_tail: Some("tail".to_string()),
+        };
+        let NodeError::NodeWorker {
+            exit_code,
+            stderr_tail,
+            ..
+        } = &error
+        else {
+            panic!("expected NodeWorker");
+        };
+        assert_eq!(*exit_code, Some(7));
+        assert_eq!(stderr_tail.as_deref(), Some("tail"));
+    }
 }

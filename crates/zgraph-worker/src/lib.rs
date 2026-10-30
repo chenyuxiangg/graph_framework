@@ -16,7 +16,7 @@ pub mod supervisor;
 
 pub use executor::{
     default_max_workers, map_failure, map_worker_error, streaming_event, WorkerExecutor,
-    DEFAULT_MAX_WORKERS_PER_RUN,
+    DEFAULT_MAX_WORKERS_PER_RUN, STDERR_TAIL_BYTES,
 };
 pub use protocol::{
     Frame, Hello, ProtocolError, RunRequest, WorkerError, WorkerOutcome, CODE_BUSINESS_ERROR,

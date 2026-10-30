@@ -247,43 +247,66 @@ pub fn streaming_event(frame: &Frame) -> Option<StreamingEvent> {
 pub fn map_failure(failure: WorkerFailure) -> NodeError {
     match failure {
         WorkerFailure::Worker(error) => map_worker_error(&error),
-        WorkerFailure::Protocol(error) => NodeError::NodeWorker {
-            kind: protocol_kind(error.code),
-        },
+        WorkerFailure::Protocol(error) => node_worker_error(protocol_kind(error.code)),
         // 04 §4.1.4 规则 1：只有 AgentCallHandler 允许自报 Timeout；worker 帧/调度
         // 停滞都按协议错误处理（Lead 批准口径），避免被内核归一化成 Internal。
-        WorkerFailure::Timeout(_) => NodeError::NodeWorker {
-            kind: WorkerErrorKind::Protocol,
-        },
+        WorkerFailure::Timeout(_) => node_worker_error(WorkerErrorKind::Protocol),
         WorkerFailure::Cancelled => NodeError::Cancelled,
         // spec 03 §3.9.4 步 1：worker spawn 失败（解释器不存在/exec 失败等）→
         // `NODE_WORKER_CRASH`；`NODE_CONFIG_ERROR` 只覆盖「非 Harness 资产加载失败」
-        // （spec 00 §0.4），不覆盖进程启动失败。`NodeError::NodeWorker` 只携带 kind
-        // （D10/§8.2），OS 错误细节暂无承载字段（已知限制，见 schema §7）。
-        WorkerFailure::Spawn(_) => NodeError::NodeWorker {
+        // （spec 00 §0.4），不覆盖进程启动失败。spawn 失败没有子进程退出证据，
+        // 故 `signal`/`exit_code`/`stderr_tail` 均为 `None`（OS 错误细节仍无承载字段）。
+        WorkerFailure::Spawn(_) => node_worker_error(WorkerErrorKind::Crash),
+        // ISSUE-066：崩溃必须留下 signal/exit/stderr 证据（architecture §8.2）。
+        WorkerFailure::Exit {
+            code,
+            signal,
+            stderr,
+        } => NodeError::NodeWorker {
             kind: WorkerErrorKind::Crash,
-        },
-        WorkerFailure::Exit { .. } => NodeError::NodeWorker {
-            kind: WorkerErrorKind::Crash,
+            signal,
+            exit_code: code,
+            stderr_tail: stderr_tail(&stderr),
         },
     }
+}
+
+/// 构造不带崩溃证据的 worker 错误（握手/协议/导入/worker 自报错误）。
+fn node_worker_error(kind: WorkerErrorKind) -> NodeError {
+    NodeError::NodeWorker {
+        kind,
+        signal: None,
+        exit_code: None,
+        stderr_tail: None,
+    }
+}
+
+/// stderr 尾部上限（字节；ISSUE-066：崩溃载荷只保留 1 KiB，避免撑大 error_json）。
+pub const STDERR_TAIL_BYTES: usize = 1024;
+
+/// 取 stderr 尾部（≤ [`STDERR_TAIL_BYTES`]），按 UTF-8 字符边界截断；
+/// 空白内容返回 `None`（CLI 仅在 `Some` 时输出该字段）。
+fn stderr_tail(stderr: &str) -> Option<String> {
+    if stderr.trim().is_empty() {
+        return None;
+    }
+    if stderr.len() <= STDERR_TAIL_BYTES {
+        return Some(stderr.to_string());
+    }
+    let mut start = stderr.len() - STDERR_TAIL_BYTES;
+    while !stderr.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(stderr[start..].to_string())
 }
 
 /// worker `error` 帧码 → `NodeError`（§8.2/D10；业务码保留原 code 进入 `BusinessError`）。
 pub fn map_worker_error(error: &WorkerError) -> NodeError {
     match error.code.as_str() {
-        CODE_HANDSHAKE => NodeError::NodeWorker {
-            kind: WorkerErrorKind::Handshake,
-        },
-        CODE_PROTOCOL => NodeError::NodeWorker {
-            kind: WorkerErrorKind::Protocol,
-        },
-        CODE_IMPORT => NodeError::NodeWorker {
-            kind: WorkerErrorKind::Import,
-        },
-        CODE_CRASH => NodeError::NodeWorker {
-            kind: WorkerErrorKind::Crash,
-        },
+        CODE_HANDSHAKE => node_worker_error(WorkerErrorKind::Handshake),
+        CODE_PROTOCOL => node_worker_error(WorkerErrorKind::Protocol),
+        CODE_IMPORT => node_worker_error(WorkerErrorKind::Import),
+        CODE_CRASH => node_worker_error(WorkerErrorKind::Crash),
         CODE_PYTHON_EXCEPTION => NodeError::PythonException {
             message: error.message.clone(),
             traceback: error.traceback.clone().unwrap_or_default(),
@@ -292,9 +315,7 @@ pub fn map_worker_error(error: &WorkerError) -> NodeError {
         // worker 自报 `NODE_TIMEOUT` 属协议违例：04 §4.1.4 规定 Timeout 只由内核
         // deadline 或 AgentCallHandler 预检产生，因此按协议错误处理（不映射 Timeout，
         // 否则会被内核归一化成 Internal，掩盖真实问题）。
-        CODE_TIMEOUT => NodeError::NodeWorker {
-            kind: WorkerErrorKind::Protocol,
-        },
+        CODE_TIMEOUT => node_worker_error(WorkerErrorKind::Protocol),
         // `NODE_BUSINESS_ERROR` / `NODE_RETURN_NOT_DICT` / `BIZ_*` 及自定义业务码：
         // Python `BusinessError.code` 是载荷值，必须原样保留（04 §4.3.4）。
         _ => NodeError::BusinessError {
@@ -346,7 +367,7 @@ mod tests {
         for (code, kind) in cases {
             assert_eq!(
                 map_worker_error(&worker_error(code)),
-                NodeError::NodeWorker { kind },
+                node_worker_error(kind),
                 "code {code}"
             );
         }
@@ -394,22 +415,82 @@ mod tests {
         // 04 §4.1.4：非 AgentCallHandler 不得自报 Timeout（否则内核归一化 Internal）。
         assert_eq!(
             map_failure(WorkerFailure::Timeout(Duration::from_secs(1))),
-            NodeError::NodeWorker {
-                kind: WorkerErrorKind::Protocol
-            }
+            node_worker_error(WorkerErrorKind::Protocol)
         );
     }
 
+    /// ISSUE-066：被信号杀死时 NodeError 必须保留 signal，且不伪造退出码。
     #[test]
-    fn crash_exit_maps_to_crash_kind() {
+    fn crash_exit_records_signal_and_stderr_tail() {
+        let mapped = map_failure(WorkerFailure::Exit {
+            code: None,
+            signal: Some(9),
+            stderr: "fatal: killed by SIGKILL\n".to_string(),
+        });
+        assert_eq!(mapped.code(), "NODE_WORKER_CRASH");
+        match mapped {
+            NodeError::NodeWorker {
+                kind: WorkerErrorKind::Crash,
+                signal,
+                exit_code,
+                stderr_tail,
+            } => {
+                assert_eq!(signal, Some(9));
+                assert_eq!(exit_code, None);
+                assert_eq!(stderr_tail.as_deref(), Some("fatal: killed by SIGKILL\n"));
+            }
+            other => panic!("unexpected mapping: {other:?}"),
+        }
+    }
+
+    /// ISSUE-066：非约定退出码保留 exit_code；空 stderr 不输出载荷（None）。
+    #[test]
+    fn crash_exit_records_exit_code_and_omits_empty_stderr() {
+        let mapped = map_failure(WorkerFailure::Exit {
+            code: Some(7),
+            signal: None,
+            stderr: "  \n".to_string(),
+        });
+        assert_eq!(mapped.code(), "NODE_WORKER_CRASH");
+        match mapped {
+            NodeError::NodeWorker {
+                kind: WorkerErrorKind::Crash,
+                signal,
+                exit_code,
+                stderr_tail,
+            } => {
+                assert_eq!(signal, None);
+                assert_eq!(exit_code, Some(7));
+                assert_eq!(stderr_tail, None);
+            }
+            other => panic!("unexpected mapping: {other:?}"),
+        }
+    }
+
+    /// stderr 尾部上限 1 KiB，且不能把多字节 UTF-8 字符截断成非法字节序列。
+    #[test]
+    fn stderr_tail_is_truncated_on_char_boundary() {
+        let stderr = format!("a{}", "é".repeat(STDERR_TAIL_BYTES));
+        assert!(stderr.len() > STDERR_TAIL_BYTES);
+        let tail = stderr_tail(&stderr).expect("non-empty stderr");
+        assert!(
+            tail.len() <= STDERR_TAIL_BYTES,
+            "tail must fit the byte cap, got {}",
+            tail.len()
+        );
+        assert!(tail.chars().all(|ch| ch == 'é'), "tail: {tail:?}");
+        assert!(stderr.ends_with(&tail));
+    }
+
+    #[test]
+    fn crash_exit_without_signal_maps_to_crash_kind() {
         assert_eq!(
             map_failure(WorkerFailure::Exit {
                 code: None,
+                signal: None,
                 stderr: String::new()
             }),
-            NodeError::NodeWorker {
-                kind: WorkerErrorKind::Crash
-            }
+            node_worker_error(WorkerErrorKind::Crash)
         );
     }
 
@@ -417,12 +498,7 @@ mod tests {
     fn spawn_failure_maps_to_worker_crash() {
         // spec 03 §3.9.4：spawn 失败 → NODE_WORKER_CRASH（不是 NODE_CONFIG_ERROR）。
         let mapped = map_failure(WorkerFailure::Spawn("no python".to_string()));
-        assert_eq!(
-            mapped,
-            NodeError::NodeWorker {
-                kind: WorkerErrorKind::Crash
-            }
-        );
+        assert_eq!(mapped, node_worker_error(WorkerErrorKind::Crash));
         assert_eq!(mapped.code(), "NODE_WORKER_CRASH");
     }
 
@@ -431,9 +507,7 @@ mod tests {
         // 04 §4.1.4：Timeout 只允许内核/AgentCallHandler 产生；worker 自报按协议错误处理。
         assert_eq!(
             map_worker_error(&worker_error(CODE_TIMEOUT)),
-            NodeError::NodeWorker {
-                kind: WorkerErrorKind::Protocol
-            }
+            node_worker_error(WorkerErrorKind::Protocol)
         );
     }
 

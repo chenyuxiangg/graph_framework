@@ -1373,9 +1373,13 @@ fn call_worker_failure(failure: WorkerFailure, timeout_ms: u64) -> ToolFailure {
         WorkerFailure::Protocol(error) => {
             ToolFailure::new("worker_protocol", format!("tool worker protocol: {error}"))
         }
-        WorkerFailure::Exit { code, stderr } => ToolFailure::new(
+        WorkerFailure::Exit {
+            code,
+            signal,
+            stderr,
+        } => ToolFailure::new(
             "worker_crash",
-            format!("tool worker exited unexpectedly code={code:?}: {stderr}"),
+            format!("tool worker exited unexpectedly code={code:?} signal={signal:?}: {stderr}"),
         ),
     }
 }

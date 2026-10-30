@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use zgraph_kernel::{
     start_run, InstanceStatus, MemoryTraceSink, NodeError, RunControl, RunOutcome, RunStatus,
-    StreamingEvent,
+    StreamingEvent, WorkerErrorKind,
 };
-use zgraph_worker::WorkerExecutor;
+use zgraph_worker::{WorkerExecutor, STDERR_TAIL_BYTES};
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -98,8 +98,44 @@ async fn exit_without_result_maps_to_worker_protocol() {
 
 #[tokio::test]
 async fn signal_exit_maps_to_worker_crash() {
-    let (outcome, _sink) = run_fault("kill_self").await;
+    // ISSUE-066：真实子进程被 SIGKILL 杀死 → NodeError 必须带 signal、不带退出码。
+    let (outcome, sink) = run_fault("kill_self").await;
     assert_failed_with(&outcome, "NODE_WORKER_CRASH");
+    match last_node_error(&sink) {
+        Some(NodeError::NodeWorker {
+            kind: WorkerErrorKind::Crash,
+            signal: Some(9),
+            exit_code: None,
+            ..
+        }) => {}
+        other => panic!("expected Crash with signal=Some(9), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn non_convention_exit_maps_to_crash_with_exit_code_and_stderr() {
+    // ISSUE-066：真实子进程 exit 7 + stderr 证据 → NodeError 载荷（不 mock ExitStatus）。
+    let (outcome, sink) = run_fault("exit_seven").await;
+    assert_failed_with(&outcome, "NODE_WORKER_CRASH");
+    match last_node_error(&sink) {
+        Some(NodeError::NodeWorker {
+            kind: WorkerErrorKind::Crash,
+            signal: None,
+            exit_code: Some(7),
+            stderr_tail: Some(tail),
+        }) => {
+            assert!(
+                tail.contains("exit-seven fixture"),
+                "stderr tail must carry the crash evidence: {tail:?}"
+            );
+            assert!(
+                tail.len() <= STDERR_TAIL_BYTES,
+                "stderr tail must stay within the 1 KiB cap, got {}",
+                tail.len()
+            );
+        }
+        other => panic!("expected Crash with exit_code=Some(7), got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -341,3 +341,72 @@ async fn error_frame_with_exit_zero_is_protocol_error() {
         other => panic!("expected protocol error, got {other:?}"),
     }
 }
+
+/// ISSUE-066：真实子进程以非约定退出码退出 → `Exit{code, signal: None}`，
+/// 让 executor 能把它写进 `NODE_WORKER_CRASH` 载荷。
+#[cfg(unix)]
+#[tokio::test]
+async fn non_convention_exit_code_is_recorded_in_crash_failure() {
+    let env = vec![("ZGRAPH_FIXTURE_EXIT_CODE".to_string(), "7".to_string())];
+    let config = common::script_config("exit_code_worker.py", env, Duration::from_secs(10));
+    let request = sample_request("unused", "run", json!({}));
+
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("exit 7 without result must be a crash");
+    match err {
+        WorkerFailure::Exit {
+            code: Some(7),
+            signal: None,
+            ..
+        } => {}
+        other => panic!("expected Exit(code=7, signal=None), got {other:?}"),
+    }
+}
+
+/// ISSUE-066：真实子进程被 SIGKILL 杀死 → `Exit{code: None, signal: Some(9)}`。
+///
+/// fixture 等价 shell 的 `kill -9 $$`；断言真实 `ExitStatus::signal()` 而非 mock。
+#[cfg(unix)]
+#[tokio::test]
+async fn signal_kill_is_recorded_in_crash_failure() {
+    let config =
+        common::script_config("signal_exit_worker.py", Vec::new(), Duration::from_secs(10));
+    let request = sample_request("unused", "run", json!({}));
+
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("SIGKILL without result must be a crash");
+    match err {
+        WorkerFailure::Exit {
+            code: None,
+            signal: Some(9),
+            ..
+        } => {}
+        other => panic!("expected Exit(code=None, signal=Some(9)), got {other:?}"),
+    }
+}
+
+/// 协议 §3 封闭表回归：exit 3（SDK 自检失败）仍是协议错误，不是崩溃。
+#[cfg(unix)]
+#[tokio::test]
+async fn sdk_self_check_exit_three_stays_a_protocol_error() {
+    let env = vec![("ZGRAPH_FIXTURE_EXIT_CODE".to_string(), "3".to_string())];
+    let config = common::script_config("exit_code_worker.py", env, Duration::from_secs(10));
+    let request = sample_request("unused", "run", json!({}));
+
+    let err = run_worker(&config, &request)
+        .await
+        .expect_err("exit 3 must be a protocol error");
+    match err {
+        WorkerFailure::Protocol(protocol) => {
+            assert_eq!(protocol.code, CODE_PROTOCOL);
+            assert!(
+                protocol.message.contains("code 3"),
+                "unexpected message: {}",
+                protocol.message
+            );
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+}

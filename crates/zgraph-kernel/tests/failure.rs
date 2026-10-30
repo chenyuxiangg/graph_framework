@@ -265,24 +265,36 @@ fn node_error_codes_match_spec() {
         (
             NodeError::NodeWorker {
                 kind: WorkerErrorKind::Handshake,
+                signal: None,
+                exit_code: None,
+                stderr_tail: None,
             },
             "NODE_WORKER_HANDSHAKE",
         ),
         (
             NodeError::NodeWorker {
                 kind: WorkerErrorKind::Protocol,
+                signal: None,
+                exit_code: None,
+                stderr_tail: None,
             },
             "NODE_WORKER_PROTOCOL",
         ),
         (
             NodeError::NodeWorker {
                 kind: WorkerErrorKind::Import,
+                signal: None,
+                exit_code: None,
+                stderr_tail: None,
             },
             "NODE_WORKER_IMPORT",
         ),
         (
             NodeError::NodeWorker {
                 kind: WorkerErrorKind::Crash,
+                signal: None,
+                exit_code: None,
+                stderr_tail: None,
             },
             "NODE_WORKER_CRASH",
         ),
