@@ -237,6 +237,18 @@ fn recorded_outputs(db: &Path) -> Vec<(String, i64, String, Option<String>)> {
     rows.map(|row| row.expect("recorded_outputs row")).collect()
 }
 
+/// 某节点最后一条实例快照的状态字符串。
+fn instance_status(db: &Path, node_id: &str) -> Option<String> {
+    connect(db)
+        .query_row(
+            "SELECT status FROM instances WHERE node_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            [node_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("query instance status")
+}
+
 /// `llm_calls` 行：`(run_id, call_index, request 原文, response 原文, status, recorded_at)`。
 fn llm_calls(db: &Path) -> Vec<(String, i64, String, Option<String>, String, String)> {
     let conn = connect(db);
@@ -1025,6 +1037,90 @@ fn trace_memory_db_exits_4_with_storage_error() {
         "{}",
         stderr_text(&output)
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4d. ISSUE-076：AgentConfig.node_timeout_ms 经 CLI 包装层转发到内核 deadline
+// ---------------------------------------------------------------------------
+
+#[test]
+fn run_agent_config_timeout_hint_is_forwarded_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 图：复制 AC-08 图但删除 agent 节点的 DSL timeout_ms（让执行器 hint 生效）。
+    let graph_src = std::fs::read_to_string(ac08_dir().join("graph.json")).expect("graph fixture");
+    let mut graph: Value = serde_json::from_str(&graph_src).expect("graph json");
+    for node in graph["nodes"].as_array_mut().expect("nodes") {
+        if node["type"] == json!("agent_call") {
+            node["config"]
+                .as_object_mut()
+                .expect("agent config")
+                .remove("timeout_ms");
+        }
+    }
+    let graph_path = write_text(dir.path(), "graph.json", &graph.to_string());
+    // 资产：AgentConfig.node_timeout_ms=1000（合法下界），tools=[]。
+    let agent_src = std::fs::read_to_string(ac08_dir().join("agents/answer_writer.json"))
+        .expect("agent fixture");
+    let mut agent: Value = serde_json::from_str(&agent_src).expect("agent json");
+    agent["tools"] = json!([]);
+    agent["node_timeout_ms"] = json!(1000);
+    write_text(
+        dir.path(),
+        "assets/agents/answer_writer.json",
+        &agent.to_string(),
+    );
+    let prompt = std::fs::read_to_string(ac08_dir().join("agents/prompt.md")).expect("prompt");
+    write_text(dir.path(), "assets/agents/prompt.md", &prompt);
+    std::fs::create_dir_all(dir.path().join("assets/tools")).expect("tools dir");
+    // fake LLM：20 字符 × 200ms/字符 ≈ 4s，远超 1000ms 的 AgentConfig 超时。
+    let script = write_text(
+        dir.path(),
+        "fake_llm.json",
+        &json!({
+            "version": 1,
+            "chunk_chars": 1,
+            "chunk_delay_ms": 200,
+            "calls": [{"kind": "text", "content": "0123456789abcdefghij",
+                       "stop_reason": "EndTurn"}]
+        })
+        .to_string(),
+    );
+    let db = dir.path().join("hint.db");
+    let output = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph_path),
+            "--db".to_string(),
+            arg(&db),
+            "--assets-dir".to_string(),
+            arg(&dir.path().join("assets")),
+            "--tools-dir".to_string(),
+            arg(&dir.path().join("assets/tools")),
+            "--inputs".to_string(),
+            r#"{"start":{"message":"hi"}}"#.to_string(),
+            "--python".to_string(),
+            python_program(),
+            "--python-path".to_string(),
+            arg(&python_path()),
+            format!("--fake-llm={}", script.display()),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&output, 1, "timeout_hint run must fail by NodeTimeout");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(
+        payload["error"]["code"],
+        json!("NODE_TIMEOUT"),
+        "AgentConfig.node_timeout_ms must become the kernel deadline (ISSUE-076): {payload}"
+    );
+    assert_eq!(
+        instance_status(&db, "answer_writer").as_deref(),
+        Some("TimedOut"),
+        "instance must be TimedOut, not the 180s default timeout"
+    );
+    assert!(event_count(&db, "NodeTimedOut") >= 1);
 }
 
 // ---------------------------------------------------------------------------

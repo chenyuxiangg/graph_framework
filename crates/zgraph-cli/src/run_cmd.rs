@@ -1216,10 +1216,14 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::sync::Arc;
+    use zgraph_harness::{
+        FakeLlmProvider, FakeToolRunner, HarnessExecutor, HarnessSettings, LlmProvider,
+    };
     use zgraph_kernel::{
         CompiledGraph, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunStatus,
     };
     use zgraph_trace::{RecordMode, TraceWriter};
+    use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -1503,6 +1507,95 @@ mod tests {
         }
         writer.close().expect("close writer");
         drop(dir);
+    }
+
+    /// `start -> agent_call(agent_id=a) -> end`（无 DSL timeout_ms）。
+    fn agent_graph_text() -> String {
+        json!({
+            "version": "1.0",
+            "metadata": {"name": "agent"},
+            "entry_points": ["start"],
+            "nodes": [
+                {"id": "start", "type": "start",
+                 "inputs": [{"name": "message", "type": "any", "required": true}], "config": {}},
+                {"id": "work", "type": "agent_call",
+                 "inputs": [{"name": "message", "type": "any", "required": true}],
+                 "config": {"agent_id": "a"}},
+                {"id": "end", "type": "end",
+                 "inputs": [{"name": "result", "type": "any", "required": true}], "config": {}}
+            ],
+            "edges": [
+                {"from": "start", "to_node": "work", "to_input_port": "message"},
+                {"from": "work", "to_node": "end", "to_input_port": "result"}
+            ]
+        })
+        .to_string()
+    }
+
+    /// `start -> python_node -> end` 图（用于断言 worker 分支无 hint）。
+    fn python_graph_text() -> String {
+        json!({
+            "version": "1.0",
+            "metadata": {"name": "py"},
+            "entry_points": ["start"],
+            "nodes": [
+                {"id": "start", "type": "start",
+                 "inputs": [{"name": "x", "type": "any", "required": true}], "config": {}},
+                {"id": "work", "type": "python_node",
+                 "inputs": [{"name": "x", "type": "any", "required": true}],
+                 "config": {"module": "workers.echo", "function": "run"}},
+                {"id": "end", "type": "end",
+                 "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+            ],
+            "edges": [
+                {"from": "start", "to_node": "work", "to_input_port": "x"},
+                {"from": "work", "to_node": "end", "to_input_port": "r"}
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn routing_executor_forwards_agent_timeout_hint_to_harness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let assets_dir = dir.path().join("assets");
+        std::fs::create_dir_all(assets_dir.join("agents")).expect("agents dir");
+        std::fs::write(
+            assets_dir.join("agents/agent_a.json"),
+            r#"{"id":"a","node_timeout_ms":1234}"#,
+        )
+        .expect("agent asset");
+        std::fs::create_dir_all(assets_dir.join("tools")).expect("tools dir");
+        let provider: Arc<dyn LlmProvider> = Arc::new(
+            FakeLlmProvider::from_script(json!({
+                "version": 1,
+                "calls": [{"kind": "text", "content": "x"}]
+            }))
+            .expect("fake provider"),
+        );
+        let harness = Arc::new(HarnessExecutor::new(HarnessSettings {
+            assets_dir: assets_dir.clone(),
+            tools_dir: assets_dir.join("tools"),
+            provider,
+            fake_mode: true,
+            tool_runner: Arc::new(FakeToolRunner::new()),
+        }));
+        let worker = Arc::new(WorkerExecutor::new(SupervisorConfig::from_worker(
+            WorkerConfig::default(),
+        )));
+        let routing = super::RoutingExecutor { harness, worker };
+
+        let agent_graph = compiled_graph(&agent_graph_text());
+        let agent_node = agent_graph.nodes.get("work").expect("agent node");
+        assert_eq!(
+            routing.timeout_hint(agent_node),
+            Some(1234),
+            "ISSUE-076: routing must forward the harness hint for agent_call"
+        );
+
+        let python_graph = compiled_graph(&python_graph_text());
+        let python_node = python_graph.nodes.get("work").expect("python node");
+        assert_eq!(routing.timeout_hint(python_node), None);
     }
 
     #[test]
