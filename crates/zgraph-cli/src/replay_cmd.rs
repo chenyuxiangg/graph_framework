@@ -36,8 +36,8 @@ use zgraph_kernel::{
     NodeId, PortName, RunOptions, RunOutcome, RunSpec, RunStatus,
 };
 use zgraph_trace::{
-    InstanceStatus as TraceInstanceStatus, RunRow, RunStatus as TraceRunStatus, TraceError,
-    TraceReader,
+    InstanceRow, InstanceStatus as TraceInstanceStatus, RecordedOutputRow, RunRow,
+    RunStatus as TraceRunStatus, TraceError, TraceReader,
 };
 
 use crate::run_cmd::output_hash;
@@ -333,7 +333,20 @@ async fn run_outputs(args: &ReplayArgs) -> ExitCode {
 
 /// 预检：record_mode/status/记录完整性与 hash 复核（DR-002 §3.3 步 2）。
 fn build_plan(reader: &TraceReader, run: &RunRow) -> Result<ReplayPlan, ReplayError> {
-    let record_mode = run.record_mode.as_deref().unwrap_or("unknown");
+    ensure_replayable(run.record_mode.as_deref(), run.status)?;
+    let instances = reader.instances(&run.run_id)?;
+    let records = reader.recorded_outputs(&run.run_id)?;
+    let outputs = index_recorded_outputs(&records)?;
+    ensure_executed_nodes_recorded(&instances, &outputs)?;
+    Ok(ReplayPlan {
+        outputs,
+        recorded: records.len(),
+    })
+}
+
+/// 前置校验：原 run 必须 `--record=full` 且状态 `Completed`（DR-002 §3.3 步 2）。
+fn ensure_replayable(record_mode: Option<&str>, status: TraceRunStatus) -> Result<(), ReplayError> {
+    let record_mode = record_mode.unwrap_or("unknown");
     if record_mode != "full" {
         return Err(ReplayError::record(
             CODE_REPLAY_RECORD_MISSING,
@@ -342,19 +355,25 @@ fn build_plan(reader: &TraceReader, run: &RunRow) -> Result<ReplayPlan, ReplayEr
             ),
         ));
     }
-    if run.status != TraceRunStatus::Completed {
+    if status != TraceRunStatus::Completed {
         return Err(ReplayError::record(
             CODE_REPLAY_RUN_NOT_COMPLETED,
             format!(
                 "run status is {}; only Completed runs can be replayed",
-                run.status.as_str()
+                status.as_str()
             ),
         ));
     }
-    let instances = reader.instances(&run.run_id)?;
-    let records = reader.recorded_outputs(&run.run_id)?;
+    Ok(())
+}
+
+/// 把 `recorded_outputs` 行建成 `(node_id, attempt) -> output` 索引，并复核
+/// `output_json` 存在性、hash 一致性与重复记录（DR-002 §3.3 步 2）。
+fn index_recorded_outputs(
+    records: &[RecordedOutputRow],
+) -> Result<HashMap<(String, u32), Value>, ReplayError> {
     let mut outputs: HashMap<(String, u32), Value> = HashMap::new();
-    for record in &records {
+    for record in records {
         let output = record.output_json.as_ref().ok_or_else(|| {
             ReplayError::record(
                 CODE_REPLAY_RECORD_CORRUPT,
@@ -385,7 +404,16 @@ fn build_plan(reader: &TraceReader, run: &RunRow) -> Result<ReplayPlan, ReplayEr
             ));
         }
     }
-    for instance in &instances {
+    Ok(outputs)
+}
+
+/// 完整性预检：已执行且 `Completed` 的 `python_node`/`agent_call` 必须有记录
+/// （DR-002 §3.3 步 2）。
+fn ensure_executed_nodes_recorded(
+    instances: &[InstanceRow],
+    outputs: &HashMap<(String, u32), Value>,
+) -> Result<(), ReplayError> {
+    for instance in instances {
         if !EXECUTED_NODE_TYPES.contains(&instance.node_type.as_str())
             || instance.status != TraceInstanceStatus::Completed
         {
@@ -402,10 +430,7 @@ fn build_plan(reader: &TraceReader, run: &RunRow) -> Result<ReplayPlan, ReplayEr
             ));
         }
     }
-    Ok(ReplayPlan {
-        outputs,
-        recorded: records.len(),
-    })
+    Ok(())
 }
 
 /// 读 `runs.graph_hash` 对应的 `graphs.dsl_json` 并编译（不校验 agent 资产，R14c 跳过）。
@@ -586,7 +611,11 @@ fn json_text(value: Option<&Value>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_spec, parse, ReplayArgs, ReplayMode};
+    use super::{
+        build_spec, ensure_replayable, index_recorded_outputs, parse, ReplayArgs, ReplayMode,
+        CODE_REPLAY_RECORD_CORRUPT, CODE_REPLAY_RECORD_MISSING, CODE_REPLAY_RUN_NOT_COMPLETED,
+    };
+    use crate::run_cmd::output_hash;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -771,5 +800,61 @@ mod tests {
         assert!(parse(&args(&["--run", "r", "-h"]))
             .expect("parse")
             .is_none());
+    }
+
+    #[test]
+    fn ensure_replayable_checks_record_mode_and_status() {
+        // 非 full 记录 → REPLAY_RECORD_MISSING（含 mode 文案）。
+        let error = ensure_replayable(Some("hash"), TraceRunStatus::Completed)
+            .expect_err("hash mode must be rejected");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_MISSING);
+        assert!(error.message.contains("--record=full"), "{}", error.message);
+        // 未记录 record_mode 视为 unknown → 同样拒绝。
+        let error = ensure_replayable(None, TraceRunStatus::Completed).expect_err("unknown mode");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_MISSING);
+        // 非 Completed → REPLAY_RUN_NOT_COMPLETED。
+        let error = ensure_replayable(Some("full"), TraceRunStatus::Failed)
+            .expect_err("failed run must be rejected");
+        assert_eq!(error.code, CODE_REPLAY_RUN_NOT_COMPLETED);
+        assert!(ensure_replayable(Some("full"), TraceRunStatus::Completed).is_ok());
+    }
+
+    #[test]
+    fn index_recorded_outputs_verifies_hash_duplicates_and_missing_json() {
+        let output = json!({"r": 1});
+        let hash = output_hash(&output);
+        let record = |hash: String, output_json: Option<Value>| zgraph_trace::RecordedOutputRow {
+            recorded_output_id: 1,
+            run_id: "run-1".to_string(),
+            instance_id: "inst-1".to_string(),
+            node_id: "work".to_string(),
+            attempt: 0,
+            output_hash: hash,
+            output_json,
+            recorded_at: "2026-10-30T00:00:00.000Z".to_string(),
+        };
+
+        // 合法记录 → 建立索引。
+        let outputs = index_recorded_outputs(&[record(hash.clone(), Some(output.clone()))])
+            .expect("valid record");
+        assert_eq!(outputs.get(&("work".to_string(), 0)), Some(&output));
+
+        // hash 不符 → CORRUPT。
+        let error = index_recorded_outputs(&[record("bad-hash".to_string(), Some(output.clone()))])
+            .expect_err("hash mismatch");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+
+        // 缺 output_json（hash 模式记录）→ CORRUPT。
+        let error =
+            index_recorded_outputs(&[record(hash.clone(), None)]).expect_err("missing json");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+
+        // 重复 (node_id, attempt) → CORRUPT。
+        let error = index_recorded_outputs(&[
+            record(hash.clone(), Some(output.clone())),
+            record(hash, Some(output)),
+        ])
+        .expect_err("duplicate record");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
     }
 }

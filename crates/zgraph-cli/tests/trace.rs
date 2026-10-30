@@ -128,9 +128,9 @@ fn streaming(instance: &str, node: &str, event: StreamingEvent, ts: String) -> T
     }
 }
 
-/// 发送固定 16 条事件（7 Transition / 4 Streaming / 其余各 1）。
-fn send_events(handle: &TraceHandle) {
-    handle.send(TraceInput::RunStarted(RunStartedInfo {
+/// `RunStarted`（16 条事件中的第 1 条）。
+fn run_started_event() -> TraceInput {
+    TraceInput::RunStarted(RunStartedInfo {
         run_id: RUN_ID.to_string(),
         graph_hash: GRAPH_HASH.to_string(),
         graph_name: GRAPH_NAME.to_string(),
@@ -143,64 +143,80 @@ fn send_events(handle: &TraceHandle) {
         owner_pid: std::process::id(),
         owner_host: "test-host".to_string(),
         started_at: at(0),
-    }));
-    handle.send(transition(
-        "start",
-        "inst-start",
-        InstanceStatus::Pending,
-        InstanceStatus::Ready,
-        "inputs ready",
-        at(10),
-    ));
-    handle.send(transition(
-        "start",
-        "inst-start",
-        InstanceStatus::Ready,
-        InstanceStatus::Running,
-        "dispatch",
-        at(20),
-    ));
-    handle.send(transition(
-        "start",
-        "inst-start",
-        InstanceStatus::Running,
-        InstanceStatus::Completed,
-        "completed",
-        at(30),
-    ));
-    handle.send(transition(
-        "answer_writer",
-        "inst-answer",
-        InstanceStatus::Pending,
-        InstanceStatus::Ready,
-        "inputs ready",
-        at(40),
-    ));
-    handle.send(transition(
-        "answer_writer",
-        "inst-answer",
-        InstanceStatus::Ready,
-        InstanceStatus::Running,
-        "dispatch",
-        at(50),
-    ));
-    handle.send(transition(
-        "answer_writer",
-        "inst-answer",
-        InstanceStatus::Running,
-        InstanceStatus::Completed,
-        "completed",
-        at(60),
-    ));
-    handle.send(transition(
-        "human_handoff",
-        "inst-human",
-        InstanceStatus::Pending,
-        InstanceStatus::Skipped,
-        "all_sources_blocked",
-        at(70),
-    ));
-    handle.send(TraceInput::GateResult(GateResultRecord {
+    })
+}
+
+/// `start` 实例的 3 条 Transition（Pending→Ready→Running→Completed）。
+fn start_transitions() -> Vec<TraceInput> {
+    vec![
+        transition(
+            "start",
+            "inst-start",
+            InstanceStatus::Pending,
+            InstanceStatus::Ready,
+            "inputs ready",
+            at(10),
+        ),
+        transition(
+            "start",
+            "inst-start",
+            InstanceStatus::Ready,
+            InstanceStatus::Running,
+            "dispatch",
+            at(20),
+        ),
+        transition(
+            "start",
+            "inst-start",
+            InstanceStatus::Running,
+            InstanceStatus::Completed,
+            "completed",
+            at(30),
+        ),
+    ]
+}
+
+/// `answer_writer`(3) + `human_handoff`(Skipped, 1) 共 4 条 Transition。
+fn answer_transitions() -> Vec<TraceInput> {
+    vec![
+        transition(
+            "answer_writer",
+            "inst-answer",
+            InstanceStatus::Pending,
+            InstanceStatus::Ready,
+            "inputs ready",
+            at(40),
+        ),
+        transition(
+            "answer_writer",
+            "inst-answer",
+            InstanceStatus::Ready,
+            InstanceStatus::Running,
+            "dispatch",
+            at(50),
+        ),
+        transition(
+            "answer_writer",
+            "inst-answer",
+            InstanceStatus::Running,
+            InstanceStatus::Completed,
+            "completed",
+            at(60),
+        ),
+        transition(
+            "human_handoff",
+            "inst-human",
+            InstanceStatus::Pending,
+            InstanceStatus::Skipped,
+            "all_sources_blocked",
+            at(70),
+        ),
+    ]
+}
+
+/// 门控结果事件（第 8 条）。
+fn gate_result_event() -> TraceInput {
+    TraceInput::GateResult(GateResultRecord {
         run_id: RUN_ID.to_string(),
         instance_id: "inst-answer".to_string(),
         node_id: "answer_writer".to_string(),
@@ -211,69 +227,98 @@ fn send_events(handle: &TraceHandle) {
         passed: false,
         error: None,
         ts: at(80),
-    }));
-    handle.send(streaming(
-        "inst-answer",
-        "answer_writer",
-        StreamingEvent::TokenDelta {
-            text: "hello".to_string(),
+    })
+}
+
+/// 4 条 Streaming 事件（token / progress / tool_call_start / tool_call_end）。
+fn streaming_events() -> Vec<TraceInput> {
+    vec![
+        streaming(
+            "inst-answer",
+            "answer_writer",
+            StreamingEvent::TokenDelta {
+                text: "hello".to_string(),
+            },
+            at(100),
+        ),
+        streaming(
+            "inst-answer",
+            "answer_writer",
+            StreamingEvent::Progress {
+                percent: 42,
+                message: "half".to_string(),
+            },
+            at(110),
+        ),
+        streaming(
+            "inst-answer",
+            "answer_writer",
+            StreamingEvent::ToolCallStart {
+                call_id: "call-1".to_string(),
+                tool_name: "search".to_string(),
+                args_summary: json!({"q": "refund"}),
+            },
+            at(120),
+        ),
+        streaming(
+            "inst-answer",
+            "answer_writer",
+            StreamingEvent::ToolCallEnd {
+                call_id: "call-1".to_string(),
+                tool_name: "search".to_string(),
+                ok: false,
+                result_summary: None,
+            },
+            at(130),
+        ),
+    ]
+}
+
+/// NodeTimedOut / NodeAbandoned / RunFinished（最后 3 条）。
+fn tail_events() -> Vec<TraceInput> {
+    vec![
+        TraceInput::NodeTimedOut {
+            run_id: RUN_ID.to_string(),
+            instance_id: "inst-timeout".to_string(),
+            elapsed_ms: 1000,
+            at: at(140),
         },
-        at(100),
-    ));
-    handle.send(streaming(
-        "inst-answer",
-        "answer_writer",
-        StreamingEvent::Progress {
-            percent: 42,
-            message: "half".to_string(),
+        TraceInput::NodeAbandoned {
+            run_id: RUN_ID.to_string(),
+            instance_id: "inst-timeout".to_string(),
+            at: at(150),
         },
-        at(110),
-    ));
-    handle.send(streaming(
-        "inst-answer",
-        "answer_writer",
-        StreamingEvent::ToolCallStart {
-            call_id: "call-1".to_string(),
-            tool_name: "search".to_string(),
-            args_summary: json!({"q": "refund"}),
-        },
-        at(120),
-    ));
-    handle.send(streaming(
-        "inst-answer",
-        "answer_writer",
-        StreamingEvent::ToolCallEnd {
-            call_id: "call-1".to_string(),
-            tool_name: "search".to_string(),
-            ok: false,
-            result_summary: None,
-        },
-        at(130),
-    ));
-    handle.send(TraceInput::NodeTimedOut {
-        run_id: RUN_ID.to_string(),
-        instance_id: "inst-timeout".to_string(),
-        elapsed_ms: 1000,
-        at: at(140),
-    });
-    handle.send(TraceInput::NodeAbandoned {
-        run_id: RUN_ID.to_string(),
-        instance_id: "inst-timeout".to_string(),
-        at: at(150),
-    });
-    handle.send(TraceInput::RunFinished(RunFinishedInfo {
-        run_id: RUN_ID.to_string(),
-        status: RunStatus::Completed,
-        output_summary: Some(json!({"result": "ok"})),
-        error: None,
-        metrics: RunMetrics {
-            streaming_dropped: 2,
-            abandoned_tasks: 0,
-            trace_backpressure: 5,
-            killed_workers: 1,
-        },
-        at: at(1842),
-    }));
+        TraceInput::RunFinished(RunFinishedInfo {
+            run_id: RUN_ID.to_string(),
+            status: RunStatus::Completed,
+            output_summary: Some(json!({"result": "ok"})),
+            error: None,
+            metrics: RunMetrics {
+                streaming_dropped: 2,
+                abandoned_tasks: 0,
+                trace_backpressure: 5,
+                killed_workers: 1,
+            },
+            at: at(1842),
+        }),
+    ]
+}
+
+/// 发送固定 16 条事件（7 Transition / 4 Streaming / 其余各 1）。
+fn send_events(handle: &TraceHandle) {
+    handle.send(run_started_event());
+    let mut transitions = start_transitions();
+    transitions.extend(answer_transitions());
+    for event in transitions {
+        handle.send(event);
+    }
+    handle.send(gate_result_event());
+    for event in streaming_events() {
+        handle.send(event);
+    }
+    for event in tail_events() {
+        handle.send(event);
+    }
 }
 
 /// 造一个写入并关闭好的临时库，返回路径与事件 seq 列表。
@@ -344,16 +389,8 @@ fn human_replay_renders_header_timeline_and_details() {
     assert!(stderr(&output).is_empty(), "{}", stderr(&output));
 }
 
-#[test]
-fn json_replay_is_ndjson_ordered_by_seq() {
-    let fx = fixture();
-    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&fx.path), "--json"]);
-    assert_eq!(code(&output), 0, "{}", stderr(&output));
-    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
-    assert!(!stdout(&output).contains('\u{1b}'));
-
-    let events = json_lines(&output);
-    assert_eq!(events.len(), EVENT_COUNT);
+/// NDJSON 行：seq 严格递增、kind 序列固定（16 条事件的发送顺序）。
+fn assert_ndjson_order_and_kinds(events: &[Value]) {
     for pair in events.windows(2) {
         assert!(
             pair[1]["seq"].as_i64().expect("seq") > pair[0]["seq"].as_i64().expect("seq"),
@@ -362,7 +399,6 @@ fn json_replay_is_ndjson_ordered_by_seq() {
             pair[1]["seq"]
         );
     }
-
     let kinds: Vec<&str> = events
         .iter()
         .map(|event| event["kind"].as_str().expect("kind"))
@@ -388,24 +424,27 @@ fn json_replay_is_ndjson_ordered_by_seq() {
             "RunFinished",
         ]
     );
+}
 
-    let first = &events[0];
-    assert_eq!(first["kind"], "RunStarted");
-    assert_eq!(first["run_id"], RUN_ID);
-    assert_eq!(first["at"], "2026-10-28T09:12:03.104Z");
-    assert_eq!(first["severity"], "info");
-    assert!(first.get("instance_id").is_none());
-    assert!(first.get("node_id").is_none());
-    assert_eq!(first["payload"]["status"], "Running");
-    assert_eq!(first["payload"]["graph_hash"], GRAPH_HASH);
+/// 首条事件的字段形状（RunStarted 无 instance_id/node_id）。
+fn assert_run_started_event(event: &Value) {
+    assert_eq!(event["kind"], "RunStarted");
+    assert_eq!(event["run_id"], RUN_ID);
+    assert_eq!(event["at"], "2026-10-28T09:12:03.104Z");
+    assert_eq!(event["severity"], "info");
+    assert!(event.get("instance_id").is_none());
+    assert!(event.get("node_id").is_none());
+    assert_eq!(event["payload"]["status"], "Running");
+    assert_eq!(event["payload"]["graph_hash"], GRAPH_HASH);
+}
 
-    // 迁移 / gate / streaming / timeout / abandoned / finished 字段
+/// gate / timeout / abandoned / token / finished 事件的字段。
+fn assert_tail_event_fields(events: &[Value]) {
     let ok = |kind: &str, severity: &str| {
-        let event = events
+        events
             .iter()
             .find(|event| event["kind"] == kind && event["severity"] == severity)
-            .unwrap_or_else(|| panic!("missing {kind}/{severity}"));
-        event
+            .unwrap_or_else(|| panic!("missing {kind}/{severity}"))
     };
     let gate = ok("GateResult", "warn");
     assert_eq!(gate["payload"]["record"]["passed"], json!(false));
@@ -429,57 +468,64 @@ fn json_replay_is_ndjson_ordered_by_seq() {
 }
 
 #[test]
-fn filters_limit_kinds_and_streaming_toggle() {
+fn json_replay_is_ndjson_ordered_by_seq() {
+    let fx = fixture();
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&fx.path), "--json"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains('\u{1b}'));
+
+    let events = json_lines(&output);
+    assert_eq!(events.len(), EVENT_COUNT);
+    assert_ndjson_order_and_kinds(&events);
+    assert_run_started_event(&events[0]);
+    assert_tail_event_fields(&events);
+}
+
+/// 跑一次 `trace --json`（附 `extra` 参数）并返回解析后的 NDJSON 事件。
+fn trace_json_events(db: &str, extra: &[&str]) -> Vec<Value> {
+    let mut args = vec!["trace", RUN_ID, "--db", db, "--json"];
+    args.extend(extra.iter().copied());
+    let output = zgraph(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    json_lines(&output)
+}
+
+#[test]
+fn filters_since_seq_and_limit() {
     let fx = fixture();
     let db = path_str(&fx.path);
     let since = fx.seqs[9].to_string();
 
-    let output = zgraph(&["trace", RUN_ID, "--db", db, "--json", "--since-seq", &since]);
-    assert_eq!(code(&output), 0, "{}", stderr(&output));
-    let events = json_lines(&output);
-    assert_eq!(events.len(), EVENT_COUNT - 10, "{}", stdout(&output));
+    let events = trace_json_events(db, &["--since-seq", &since]);
+    assert_eq!(events.len(), EVENT_COUNT - 10, "{}", events.len());
     assert!(events
         .iter()
         .all(|event| event["seq"].as_i64().expect("seq") > fx.seqs[9]));
 
-    let output = zgraph(&["trace", RUN_ID, "--db", db, "--json", "--limit", "2"]);
-    let events = json_lines(&output);
+    let events = trace_json_events(db, &["--limit", "2"]);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["seq"], json!(fx.seqs[0]));
     assert_eq!(events[1]["seq"], json!(fx.seqs[1]));
 
-    let output = zgraph(&["trace", RUN_ID, "--db", db, "--json", "--limit", "0"]);
-    assert_eq!(json_lines(&output).len(), EVENT_COUNT);
+    let events = trace_json_events(db, &["--limit", "0"]);
+    assert_eq!(events.len(), EVENT_COUNT);
+}
 
-    let output = zgraph(&[
-        "trace",
-        RUN_ID,
-        "--db",
-        db,
-        "--json",
-        "--kinds",
-        "Transition",
-    ]);
-    let events = json_lines(&output);
+#[test]
+fn filters_kinds_and_no_streaming_toggle() {
+    let fx = fixture();
+    let db = path_str(&fx.path);
+
+    let events = trace_json_events(db, &["--kinds", "Transition"]);
     assert_eq!(events.len(), 7);
     assert!(events.iter().all(|event| event["kind"] == "Transition"));
 
-    let output = zgraph(&["trace", RUN_ID, "--db", db, "--json", "--no-streaming"]);
-    let events = json_lines(&output);
+    let events = trace_json_events(db, &["--no-streaming"]);
     assert_eq!(events.len(), EVENT_COUNT - 4);
     assert!(events.iter().all(|event| event["kind"] != "Streaming"));
 
-    let output = zgraph(&[
-        "trace",
-        RUN_ID,
-        "--db",
-        db,
-        "--json",
-        "--kinds",
-        "Streaming,RunFinished",
-        "--no-streaming",
-    ]);
-    let events = json_lines(&output);
+    let events = trace_json_events(db, &["--kinds", "Streaming,RunFinished", "--no-streaming"]);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["kind"], "RunFinished");
 

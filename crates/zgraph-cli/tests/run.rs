@@ -684,28 +684,31 @@ fn inject_trace_write_failure(db: &Path) {
     .expect("create failure-injection trigger");
 }
 
-#[test]
-fn trace_write_failure_fails_run_and_exits_4() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let module = write_text(
-        dir.path(),
+/// 造 failstop 模块（fast 正常、slow 睡 5s）+ failstop 图 + 注入 trace 写失败。
+///
+/// 返回图路径；DB 需调用方先建路径（trigger 装在空库上）。
+fn prepare_failstop_case(dir: &Path, db: &Path) -> PathBuf {
+    let _module = write_text(
+        dir,
         "failstop.py",
         "import time\n\n\
          def fast(inputs, ctx):\n    return {\"x\": inputs[\"x\"]}\n\n\
          def slow(inputs, ctx):\n    time.sleep(5)\n    return {\"r\": inputs[\"x\"]}\n",
     );
-    let module_dir = module.parent().expect("module dir");
-    let graph = write_text(dir.path(), "failstop.json", &failstop_graph());
-    let db = dir.path().join("failstop.db");
-    inject_trace_write_failure(&db);
+    let graph = write_text(dir, "failstop.json", &failstop_graph());
+    inject_trace_write_failure(db);
+    graph
+}
 
+/// 跑一次 failstop 用例（真 python worker + 注入写失败），返回输出与耗时。
+fn run_failstop_case(dir: &Path, graph: &Path, db: &Path) -> (Output, Duration) {
     let started = Instant::now();
     let output = run_cli(
         &[
             "run".to_string(),
-            arg(&graph),
+            arg(graph),
             "--db".to_string(),
-            arg(&db),
+            arg(db),
             "--inputs".to_string(),
             r#"{"start":{"x":1}}"#.to_string(),
             "--python".to_string(),
@@ -713,26 +716,16 @@ fn trace_write_failure_fails_run_and_exits_4() {
             "--python-path".to_string(),
             arg(&python_path()),
             "--python-path".to_string(),
-            arg(module_dir),
+            arg(dir),
         ],
-        dir.path(),
+        dir,
     );
-    let elapsed = started.elapsed();
+    (output, started.elapsed())
+}
 
-    assert_exit(&output, 4, "trace write failure");
-    let stderr = stderr_text(&output);
-    assert!(stderr.contains("error[STORAGE_ERROR]"), "{stderr}");
-    assert!(
-        !stderr.contains("status=Completed"),
-        "fail-stop must not report a completed run: {stderr}"
-    );
-    assert!(
-        elapsed < Duration::from_secs(4),
-        "fail-stop must abort before the 5s slow node finishes (elapsed {elapsed:?})"
-    );
-
-    // 致命写失败后 run 不得显示 Completed；终态写入属"尽力"（06 §6.4.5/§6.10.5）。
-    let conn = connect(&db);
+/// 致命写失败后不得 Completed、不得落 RunFinished（终态写入属尽力）。
+fn assert_failstop_rows(db: &Path) {
+    let conn = connect(db);
     let status: Option<String> = conn
         .query_row("SELECT status FROM runs", [], |row| row.get(0))
         .optional()
@@ -753,6 +746,27 @@ fn trace_write_failure_fails_run_and_exits_4() {
         finished_rows, 0,
         "fatal writer cannot persist the best-effort RunFinished"
     );
+}
+
+#[test]
+fn trace_write_failure_fails_run_and_exits_4() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("failstop.db");
+    let graph = prepare_failstop_case(dir.path(), &db);
+    let (output, elapsed) = run_failstop_case(dir.path(), &graph, &db);
+
+    assert_exit(&output, 4, "trace write failure");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("error[STORAGE_ERROR]"), "{stderr}");
+    assert!(
+        !stderr.contains("status=Completed"),
+        "fail-stop must not report a completed run: {stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "fail-stop must abort before the 5s slow node finishes (elapsed {elapsed:?})"
+    );
+    assert_failstop_rows(&db);
 }
 
 #[test]
@@ -782,35 +796,39 @@ fn run_invalid_fake_llm_script_exits_2() {
 // 3. 失败 run：--json 结构与退出码 1（真 worker 抛异常）
 // ---------------------------------------------------------------------------
 
-#[test]
-fn run_failed_run_emits_json_error_and_exits_1() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let module = write_text(
-        dir.path(),
+/// `boom` python 模块 + 图，跑一次失败 run（`json_mode` 控制是否加 `--json`）。
+fn run_boom_case(dir: &Path, db: &Path, json_mode: bool) -> Output {
+    write_text(
+        dir,
         "boom.py",
         "def run(inputs, ctx):\n    raise RuntimeError(\"boom\")\n",
     );
-    let module_dir = module.parent().expect("module dir");
-    let graph = write_text(dir.path(), "boom_graph.json", &python_graph("boom", "run"));
+    let graph = write_text(dir, "boom_graph.json", &python_graph("boom", "run"));
+    let mut args = vec![
+        "run".to_string(),
+        arg(&graph),
+        "--db".to_string(),
+        arg(db),
+        "--inputs".to_string(),
+        r#"{"start":{"x":1}}"#.to_string(),
+        "--python".to_string(),
+        python_program(),
+        "--python-path".to_string(),
+        arg(&python_path()),
+        "--python-path".to_string(),
+        arg(dir),
+    ];
+    if json_mode {
+        args.push("--json".to_string());
+    }
+    run_cli(&args, dir)
+}
+
+#[test]
+fn run_failed_json_error_and_exits_1() {
+    let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("boom.db");
-    let output = run_cli(
-        &[
-            "run".to_string(),
-            arg(&graph),
-            "--db".to_string(),
-            arg(&db),
-            "--inputs".to_string(),
-            r#"{"start":{"x":1}}"#.to_string(),
-            "--python".to_string(),
-            python_program(),
-            "--python-path".to_string(),
-            arg(&python_path()),
-            "--python-path".to_string(),
-            arg(module_dir),
-            "--json".to_string(),
-        ],
-        dir.path(),
-    );
+    let output = run_boom_case(dir.path(), &db, true);
     assert_exit(&output, 1, "python exception run");
     let payload = json_stdout(&output);
     assert_eq!(payload["ok"], json!(false));
@@ -825,26 +843,13 @@ fn run_failed_run_emits_json_error_and_exits_1() {
     );
     assert_eq!(runs_count(&db), 1);
     assert_eq!(run_status(&db), "Failed");
+}
 
-    // human 模式失败：stdout `null`、stderr 有 summary 与 error 行。
-    let human_db = dir.path().join("boom_human.db");
-    let human = run_cli(
-        &[
-            "run".to_string(),
-            arg(&graph),
-            "--db".to_string(),
-            arg(&human_db),
-            "--inputs".to_string(),
-            r#"{"start":{"x":1}}"#.to_string(),
-            "--python".to_string(),
-            python_program(),
-            "--python-path".to_string(),
-            arg(&python_path()),
-            "--python-path".to_string(),
-            arg(module_dir),
-        ],
-        dir.path(),
-    );
+#[test]
+fn run_failed_human_mode_prints_null_and_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("boom_human.db");
+    let human = run_boom_case(dir.path(), &db, false);
     assert_exit(&human, 1, "python exception run (human mode)");
     assert_eq!(String::from_utf8_lossy(&human.stdout).trim(), "null");
     let stderr = stderr_text(&human);
@@ -1227,10 +1232,11 @@ fn trace_memory_db_exits_4_with_storage_error() {
 // 4d. ISSUE-076：AgentConfig.node_timeout_ms 经 CLI 包装层转发到内核 deadline
 // ---------------------------------------------------------------------------
 
-#[test]
-fn run_agent_config_timeout_hint_is_forwarded_end_to_end() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    // 图：复制 AC-08 图但删除 agent 节点的 DSL timeout_ms（让执行器 hint 生效）。
+/// 造 timeout_hint 用例：删 DSL timeout_ms 的 AC-08 图 + `node_timeout_ms=1000` 的
+/// AgentConfig + 慢 fake 脚本（20 字符 × 200ms/字符 ≈ 4s，远超 1000ms 超时）。
+///
+/// 返回（图路径, fake 脚本路径）。
+fn prepare_timeout_hint_case(dir: &Path) -> (PathBuf, PathBuf) {
     let graph_src = std::fs::read_to_string(ac08_dir().join("graph.json")).expect("graph fixture");
     let mut graph: Value = serde_json::from_str(&graph_src).expect("graph json");
     for node in graph["nodes"].as_array_mut().expect("nodes") {
@@ -1241,24 +1247,20 @@ fn run_agent_config_timeout_hint_is_forwarded_end_to_end() {
                 .remove("timeout_ms");
         }
     }
-    let graph_path = write_text(dir.path(), "graph.json", &graph.to_string());
-    // 资产：AgentConfig.node_timeout_ms=1000（合法下界），tools=[]。
+    let graph_path = write_text(dir, "graph.json", &graph.to_string());
+
     let agent_src = std::fs::read_to_string(ac08_dir().join("agents/answer_writer.json"))
         .expect("agent fixture");
     let mut agent: Value = serde_json::from_str(&agent_src).expect("agent json");
     agent["tools"] = json!([]);
     agent["node_timeout_ms"] = json!(1000);
-    write_text(
-        dir.path(),
-        "assets/agents/answer_writer.json",
-        &agent.to_string(),
-    );
+    write_text(dir, "assets/agents/answer_writer.json", &agent.to_string());
     let prompt = std::fs::read_to_string(ac08_dir().join("agents/prompt.md")).expect("prompt");
-    write_text(dir.path(), "assets/agents/prompt.md", &prompt);
-    std::fs::create_dir_all(dir.path().join("assets/tools")).expect("tools dir");
-    // fake LLM：20 字符 × 200ms/字符 ≈ 4s，远超 1000ms 的 AgentConfig 超时。
+    write_text(dir, "assets/agents/prompt.md", &prompt);
+    std::fs::create_dir_all(dir.join("assets/tools")).expect("tools dir");
+
     let script = write_text(
-        dir.path(),
+        dir,
         "fake_llm.json",
         &json!({
             "version": 1,
@@ -1269,6 +1271,13 @@ fn run_agent_config_timeout_hint_is_forwarded_end_to_end() {
         })
         .to_string(),
     );
+    (graph_path, script)
+}
+
+#[test]
+fn run_agent_config_timeout_hint_is_forwarded_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (graph_path, script) = prepare_timeout_hint_case(dir.path());
     let db = dir.path().join("hint.db");
     let output = run_cli(
         &[
@@ -1346,40 +1355,32 @@ fn seed_running_runs(db: &Path, runs: &[(String, String, u32, String)]) {
     writer.close().expect("close seed writer");
 }
 
+/// 播种 4 个 `Running` run，覆盖判活分支：同机死 pid（判死）/ 同机活 pid（跳过）/
+/// 跨机陈旧心跳（判死）/ 跨机新心跳（跳过+告警）。
 #[cfg(unix)]
-#[test]
-fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let graph = write_text(dir.path(), "io.json", &io_graph());
-    let db = dir.path().join("calibrate.db");
-    let host = zgraph_cli::recovery::current_host();
-    let dead = dead_pid();
+fn seed_calibration_runs(db: &Path, host: &str, dead: u32) {
     let fresh = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     seed_running_runs(
-        &db,
+        db,
         &[
-            // 同机 + pid 已死 → 判死。
             (
                 "run-dead".to_string(),
-                host.clone(),
+                host.to_string(),
                 dead,
                 "2026-10-30T00:00:00.000Z".to_string(),
             ),
-            // 同机 + pid 存活 → 合法并发，跳过。
             (
                 "run-live".to_string(),
-                host.clone(),
+                host.to_string(),
                 std::process::id(),
                 "2026-10-30T00:00:00.000Z".to_string(),
             ),
-            // 跨机 + heartbeat 陈旧 → 判死。
             (
                 "run-stale".to_string(),
                 "other-host".to_string(),
                 dead,
                 "2020-01-01T00:00:00.000Z".to_string(),
             ),
-            // 跨机 + heartbeat 新 → 跳过并告警（06 §6.8.1 步骤 2②，ISSUE-088）。
             (
                 "run-fresh".to_string(),
                 "other-host".to_string(),
@@ -1388,22 +1389,28 @@ fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
             ),
         ],
     );
+}
 
-    let output = run_cli(
+/// 跑一次启动标定的 CLI（io 图 + `--json`）。
+#[cfg(unix)]
+fn run_calibration_case(dir: &Path, graph: &Path, db: &Path) -> Output {
+    run_cli(
         &[
             "run".to_string(),
-            arg(&graph),
+            arg(graph),
             "--db".to_string(),
-            arg(&db),
+            arg(db),
             "--inputs".to_string(),
             r#"{"start":{"x":1}}"#.to_string(),
             "--json".to_string(),
         ],
-        dir.path(),
-    );
-    assert_exit(&output, 0, "run with startup calibration");
-    let payload = json_stdout(&output);
-    assert_eq!(payload["status"], json!("Completed"));
+        dir,
+    )
+}
+
+/// `recovered[]`：只含 dead + stale 两个 run，字段形状正确。
+#[cfg(unix)]
+fn assert_recovered_payload(payload: &Value) {
     let recovered = payload["recovered"].as_array().expect("recovered array");
     assert_eq!(
         recovered.len(),
@@ -1425,11 +1432,13 @@ fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
             "{entry}"
         );
     }
-    // stderr：使用 stderr 警告（06 §6.8.1 步骤 5），含判死 pid。
-    let stderr = stderr_text(&output);
+}
+
+/// stderr 与 `--json.warnings[]`：标定告警 + 跨机新心跳的跳过告警（ISSUE-088）。
+#[cfg(unix)]
+fn assert_recovery_warnings(payload: &Value, stderr: &str, dead: u32) {
     assert!(stderr.contains("marked interrupted"), "{stderr}");
     assert!(stderr.contains(&format!("pid {dead} gone")), "{stderr}");
-    // ISSUE-088：跨机 + 心跳未陈旧 → 跳过并告警（stderr + --json.warnings[]）。
     assert!(stderr.contains("skipped recovery"), "{stderr}");
     assert!(
         stderr.contains("run-fresh") && stderr.contains("other-host"),
@@ -1443,24 +1452,45 @@ fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
             .is_some_and(|line| line.contains("run-fresh") && line.contains("skipped recovery")),
         "{warnings:?}"
     );
+}
 
-    // DB：只改 runs（status/interrupted/recovered_at），error_code 保持 NULL。
-    let (status, interrupted, error_code, recovered_at) = run_state(&db, "run-dead");
+/// DB 终态：dead/stale → Failed+interrupted；live/fresh 保持 Running；error_code NULL。
+#[cfg(unix)]
+fn assert_calibrated_rows(db: &Path) {
+    let (status, interrupted, error_code, recovered_at) = run_state(db, "run-dead");
     assert_eq!(status, "Failed");
     assert!(interrupted);
     assert_eq!(error_code, None, "interrupted is not a domain error code");
     assert!(recovered_at.is_some());
-    let (status, interrupted, _, _) = run_state(&db, "run-stale");
+    let (status, interrupted, _, _) = run_state(db, "run-stale");
     assert_eq!(status, "Failed");
     assert!(interrupted);
-    let (status, interrupted, _, _) = run_state(&db, "run-live");
+    let (status, interrupted, _, _) = run_state(db, "run-live");
     assert_eq!(status, "Running", "live owner must not be calibrated");
     assert!(!interrupted);
-    // 跨机心跳未陈旧 → 跳过，不改 DB。
-    let (status, interrupted, _, _) = run_state(&db, "run-fresh");
+    let (status, interrupted, _, _) = run_state(db, "run-fresh");
     assert_eq!(status, "Running", "fresh cross-host run must be skipped");
     assert!(!interrupted);
-    assert_eq!(runs_count(&db), 5, "4 seeded + 1 new run");
+    assert_eq!(runs_count(db), 5, "4 seeded + 1 new run");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = write_text(dir.path(), "io.json", &io_graph());
+    let db = dir.path().join("calibrate.db");
+    let host = zgraph_cli::recovery::current_host();
+    let dead = dead_pid();
+    seed_calibration_runs(&db, &host, dead);
+
+    let output = run_calibration_case(dir.path(), &graph, &db);
+    assert_exit(&output, 0, "run with startup calibration");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    assert_recovered_payload(&payload);
+    assert_recovery_warnings(&payload, &stderr_text(&output), dead);
+    assert_calibrated_rows(&db);
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,34 +1610,36 @@ fn wait_child(child: &mut Child, timeout: Duration) -> std::process::ExitStatus 
     }
 }
 
-#[test]
-fn run_human_lifecycle_lines_are_realtime() {
-    // ISSUE-085：慢节点（3s）尚未结束时，stderr 必须已有 created + 生命周期行——
-    // 证明生命周期行来自运行期旁路，而不是 run 结束后从 trace 回读。
-    let dir = tempfile::tempdir().expect("tempdir");
-    let graph = write_text(dir.path(), "sleep.json", &sleep_graph());
-    let db = dir.path().join("realtime.db");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zgraph"))
+/// 起一次慢 run（`workers.slow`，human 模式，stdout/stderr 管道），用于实时行断言。
+fn spawn_slow_run(dir: &Path, graph: &Path, db: &Path, seconds: u32) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_zgraph"))
         .args([
             "run".to_string(),
-            arg(&graph),
+            arg(graph),
             "--db".to_string(),
-            arg(&db),
+            arg(db),
             "--inputs".to_string(),
-            r#"{"start":{"seconds":3}}"#.to_string(),
+            format!(r#"{{"start":{{"seconds":{seconds}}}}}"#),
             "--python".to_string(),
             python_program(),
             "--python-path".to_string(),
             arg(&python_path()),
         ])
-        .current_dir(dir.path())
+        .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn zgraph run");
-    let (lines, reader) = stderr_line_reader(child.stderr.take().expect("stderr"));
+        .expect("spawn zgraph run")
+}
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+/// 边跑边读 stderr，直到看到 RunStarted + Transition 或超时。
+///
+/// 返回（已收到的行, 是否见到 RunStarted, 是否见到 Transition）。
+fn collect_lifecycle_lines(
+    lines: &std::sync::mpsc::Receiver<String>,
+    timeout: Duration,
+) -> (Vec<String>, bool, bool) {
+    let deadline = Instant::now() + timeout;
     let mut seen: Vec<String> = Vec::new();
     let mut saw_started = false;
     let mut saw_transition = false;
@@ -1620,6 +1652,21 @@ fn run_human_lifecycle_lines_are_realtime() {
         saw_transition |= line.contains("Transition");
         seen.push(line);
     }
+    (seen, saw_started, saw_transition)
+}
+
+#[test]
+fn run_human_lifecycle_lines_are_realtime() {
+    // ISSUE-085：慢节点（3s）尚未结束时，stderr 必须已有 created + 生命周期行——
+    // 证明生命周期行来自运行期旁路，而不是 run 结束后从 trace 回读。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = write_text(dir.path(), "sleep.json", &sleep_graph());
+    let db = dir.path().join("realtime.db");
+    let mut child = spawn_slow_run(dir.path(), &graph, &db, 3);
+    let (lines, reader) = stderr_line_reader(child.stderr.take().expect("stderr"));
+
+    let (mut seen, saw_started, saw_transition) =
+        collect_lifecycle_lines(&lines, Duration::from_secs(2));
     assert!(saw_started, "run 期间应已看到 RunStarted 行: {seen:?}");
     assert!(saw_transition, "run 期间应已看到 Transition 行: {seen:?}");
     assert!(

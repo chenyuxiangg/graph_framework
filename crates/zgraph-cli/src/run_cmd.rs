@@ -200,82 +200,146 @@ pub fn parse(args: &[String]) -> Result<Option<RunArgs>, String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return Ok(None);
     }
-    let mut graph = None;
-    let mut inputs = None;
-    let mut user_id = DEFAULT_USER_ID.to_string();
-    let mut db = None;
-    let mut assets_dir = None;
-    let mut tools_dir = None;
-    let mut python = None;
-    let mut python_paths = Vec::new();
-    let mut fake_llm = FakeLlmMode::Off;
-    let mut real = false;
-    let mut record = RecordMode::Hash;
-    let mut stream = false;
-    let mut json = false;
-    let mut quiet = false;
+    let mut state = ParseState::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if let Some(path) = arg.strip_prefix("--fake-llm=") {
-            fake_llm = FakeLlmMode::Script(non_empty_path(path, "--fake-llm")?);
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--record=") {
-            record = parse_record(value)?;
-            continue;
-        }
-        match arg.as_str() {
-            "--inputs" => inputs = Some(option_value(&mut iter, "--inputs")?),
-            "--user-id" => user_id = option_value(&mut iter, "--user-id")?,
-            "--db" => db = Some(PathBuf::from(option_value(&mut iter, "--db")?)),
-            "--assets-dir" => {
-                assets_dir = Some(PathBuf::from(option_value(&mut iter, "--assets-dir")?));
-            }
-            "--tools-dir" => {
-                tools_dir = Some(PathBuf::from(option_value(&mut iter, "--tools-dir")?));
-            }
-            "--python" => python = Some(option_value(&mut iter, "--python")?),
-            "--python-path" => {
-                python_paths.push(PathBuf::from(option_value(&mut iter, "--python-path")?));
-            }
-            "--fake-llm" => fake_llm = FakeLlmMode::DefaultScript,
-            "--real" => real = true,
-            "--record" => record = parse_record(&option_value(&mut iter, "--record")?)?,
-            "--stream" => stream = true,
-            "--json" => json = true,
-            "-q" | "--quiet" => quiet = true,
-            flag if flag.starts_with('-') => return Err(format!("unknown option: {flag}")),
-            value => {
-                if graph.is_some() {
-                    return Err(format!("unexpected argument: {value}"));
-                }
-                graph = Some(PathBuf::from(value));
-            }
+        match state.consume(arg, &mut iter)? {
+            Consumed::Handled => {}
+            Consumed::Positional => state.set_graph(arg)?,
         }
     }
-    if real && fake_llm != FakeLlmMode::Off {
-        return Err("--real conflicts with --fake-llm".to_string());
-    }
-    let graph = graph.ok_or_else(|| "run requires <graph.json>".to_string())?;
-    let inputs = inputs.ok_or_else(|| "run requires --inputs <json|@file>".to_string())?;
-    Ok(Some(RunArgs {
-        graph,
-        inputs,
-        user_id,
-        db,
-        assets_dir,
-        tools_dir,
-        python,
-        python_paths,
-        fake_llm,
-        real,
-        record,
-        stream,
-        json,
-        quiet,
-    }))
+    state.finish()
 }
 
+/// 一个参数的消费结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Consumed {
+    /// 已作为选项消费（含 `--fake-llm=`/`--record=` 前缀形式）。
+    Handled,
+    /// 非选项参数：由 [`parse`] 按位置参数（图路径）处理。
+    Positional,
+}
+
+/// `run` 参数的扫描中间态（`Default` 即 CLI 默认值；`parse` 内部使用）。
+#[derive(Debug)]
+struct ParseState {
+    graph: Option<PathBuf>,
+    inputs: Option<String>,
+    user_id: String,
+    db: Option<PathBuf>,
+    assets_dir: Option<PathBuf>,
+    tools_dir: Option<PathBuf>,
+    python: Option<String>,
+    python_paths: Vec<PathBuf>,
+    fake_llm: FakeLlmMode,
+    real: bool,
+    record: RecordMode,
+    stream: bool,
+    json: bool,
+    quiet: bool,
+}
+
+impl Default for ParseState {
+    fn default() -> Self {
+        Self {
+            graph: None,
+            inputs: None,
+            user_id: DEFAULT_USER_ID.to_string(),
+            db: None,
+            assets_dir: None,
+            tools_dir: None,
+            python: None,
+            python_paths: Vec::new(),
+            fake_llm: FakeLlmMode::Off,
+            real: false,
+            record: RecordMode::Hash,
+            stream: false,
+            json: false,
+            quiet: false,
+        }
+    }
+}
+
+impl ParseState {
+    /// 消费一个参数；未知选项/缺值按用法错误返回，非选项交给调用方按位置参数处理。
+    fn consume<'a>(
+        &mut self,
+        arg: &'a str,
+        iter: &mut impl Iterator<Item = &'a String>,
+    ) -> Result<Consumed, String> {
+        if let Some(path) = arg.strip_prefix("--fake-llm=") {
+            self.fake_llm = FakeLlmMode::Script(non_empty_path(path, "--fake-llm")?);
+            return Ok(Consumed::Handled);
+        }
+        if let Some(value) = arg.strip_prefix("--record=") {
+            self.record = parse_record(value)?;
+            return Ok(Consumed::Handled);
+        }
+        match arg {
+            "--inputs" => self.inputs = Some(option_value(iter, "--inputs")?),
+            "--user-id" => self.user_id = option_value(iter, "--user-id")?,
+            "--db" => self.db = Some(PathBuf::from(option_value(iter, "--db")?)),
+            "--assets-dir" => {
+                self.assets_dir = Some(PathBuf::from(option_value(iter, "--assets-dir")?));
+            }
+            "--tools-dir" => {
+                self.tools_dir = Some(PathBuf::from(option_value(iter, "--tools-dir")?));
+            }
+            "--python" => self.python = Some(option_value(iter, "--python")?),
+            "--python-path" => {
+                self.python_paths
+                    .push(PathBuf::from(option_value(iter, "--python-path")?));
+            }
+            "--fake-llm" => self.fake_llm = FakeLlmMode::DefaultScript,
+            "--real" => self.real = true,
+            "--record" => self.record = parse_record(&option_value(iter, "--record")?)?,
+            "--stream" => self.stream = true,
+            "--json" => self.json = true,
+            "-q" | "--quiet" => self.quiet = true,
+            flag if flag.starts_with('-') => return Err(format!("unknown option: {flag}")),
+            _ => return Ok(Consumed::Positional),
+        }
+        Ok(Consumed::Handled)
+    }
+
+    /// 记录图路径（只允许一个位置参数）。
+    fn set_graph(&mut self, value: &str) -> Result<(), String> {
+        if self.graph.is_some() {
+            return Err(format!("unexpected argument: {value}"));
+        }
+        self.graph = Some(PathBuf::from(value));
+        Ok(())
+    }
+
+    /// 校验必填项/互斥项并构造 [`RunArgs`]（错误文案与顺序与拆分前一致）。
+    fn finish(self) -> Result<Option<RunArgs>, String> {
+        if self.real && self.fake_llm != FakeLlmMode::Off {
+            return Err("--real conflicts with --fake-llm".to_string());
+        }
+        let graph = self
+            .graph
+            .ok_or_else(|| "run requires <graph.json>".to_string())?;
+        let inputs = self
+            .inputs
+            .ok_or_else(|| "run requires --inputs <json|@file>".to_string())?;
+        Ok(Some(RunArgs {
+            graph,
+            inputs,
+            user_id: self.user_id,
+            db: self.db,
+            assets_dir: self.assets_dir,
+            tools_dir: self.tools_dir,
+            python: self.python,
+            python_paths: self.python_paths,
+            fake_llm: self.fake_llm,
+            real: self.real,
+            record: self.record,
+            stream: self.stream,
+            json: self.json,
+            quiet: self.quiet,
+        }))
+    }
+}
 /// 取一个必填选项值。
 fn option_value<'a>(
     iter: &mut impl Iterator<Item = &'a String>,
@@ -745,79 +809,143 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     if memory_db {
         warn_memory_db();
     }
-    let writer = match TraceWriter::open(&db_path) {
-        Ok(writer) => writer,
-        Err(error) => return report_storage_error(&error),
+    let (writer, recovery) = match open_writer_with_recovery(&db_path) {
+        Ok(opened) => opened,
+        Err(code) => return code,
     };
-    // 启动中止标定（06 §6.8.1：打开/迁移 DB 后、编译/启动 run 前）。
+    let assets_dir = resolve_assets_dir(args);
+    let tools_dir = resolve_tools_dir(args, &assets_dir);
+    let (graph, entry_inputs) = match load_graph_and_inputs(args, &assets_dir) {
+        Ok(loaded) => loaded,
+        Err(code) => {
+            close_quietly(writer);
+            return code;
+        }
+    };
+    let trace_handle = writer.handle();
+    // run id 由 CLI 预生成：`llm_calls` 记录器在启动前就需要 run_id（快照不含 run）。
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let built = match prepare_executor(args, &assets_dir, &tools_dir, &trace_handle, &run_id) {
+        Ok(built) => built,
+        Err(code) => {
+            close_quietly(writer);
+            return code;
+        }
+    };
+    let run_metadata = run_metadata_hook(memory_db, &built, &run_id);
+    let (traced, lifecycle) =
+        match start_run(args, writer, graph, entry_inputs, built.executor, &run_id) {
+            Ok(started) => started,
+            Err(code) => return code,
+        };
+    debug_assert_eq!(traced.run_id(), run_id);
+    wait_and_report(
+        args,
+        traced,
+        lifecycle,
+        memory_db,
+        run_metadata,
+        &db_path,
+        &recovery,
+    )
+    .await
+}
+
+/// 打开 trace 写端并执行启动中止标定（06 §6.8.1；打开/标定失败 → exit 4）。
+///
+/// 标定告警与「跳过标定」告警都在此处写 stderr（06 §6.8.1 步骤 2②/步骤 5）。
+fn open_writer_with_recovery(
+    db_path: &Path,
+) -> Result<(TraceWriter, recovery::Recovery), ExitCode> {
+    let writer = match TraceWriter::open(db_path) {
+        Ok(writer) => writer,
+        Err(error) => return Err(report_storage_error(&error)),
+    };
     let recovery = match recovery::recover_interrupted(&writer) {
         Ok(recovery) => recovery,
         Err(error) => {
             close_quietly(writer);
-            return report_storage_error(&error);
+            return Err(report_storage_error(&error));
         }
     };
-    // 跳过告警（跨机/host 未知且 heartbeat 未陈旧；06 §6.8.1 步骤 2②）与标定告警
-    // 都是 stderr 诊断行；告警同时进入 `--json.warnings[]`。
     for warning in &recovery.warnings {
         eprintln!("{warning}");
     }
     for item in &recovery.recovered {
         eprintln!("{}", recovery::warning_line(item));
     }
-    let assets_dir = resolve_assets_dir(args);
-    let tools_dir = resolve_tools_dir(args, &assets_dir);
-    let graph = match load_compiled_graph(args, &assets_dir) {
-        Ok(graph) => graph,
-        Err(code) => {
-            close_quietly(writer);
-            return code;
-        }
-    };
-    let entry_inputs = match resolve_inputs(args, &graph) {
-        Ok(inputs) => inputs,
-        Err(code) => {
-            close_quietly(writer);
-            return code;
-        }
-    };
+    Ok((writer, recovery))
+}
+
+/// 加载并编译图 + 校验入口输入（失败由调用方关闭写端并返回对应退出码）。
+fn load_graph_and_inputs(
+    args: &RunArgs,
+    assets_dir: &Path,
+) -> Result<(Arc<CompiledGraph>, EntryInputs), ExitCode> {
+    let graph = load_compiled_graph(args, assets_dir)?;
+    let entry_inputs = resolve_inputs(args, &graph)?;
+    Ok((graph, entry_inputs))
+}
+
+/// 组合执行器（provider 错误 → 2/4；记录器与并发上限按 CLI 口径接线）。
+fn prepare_executor(
+    args: &RunArgs,
+    assets_dir: &Path,
+    tools_dir: &Path,
+    trace_handle: &TraceHandle,
+    run_id: &str,
+) -> Result<BuiltExecutors, ExitCode> {
     let (provider, fake_mode) = match build_provider(args) {
         Ok(built) => built,
-        Err(error) => {
-            close_quietly(writer);
-            return report_provider_error(error);
-        }
+        Err(error) => return Err(report_provider_error(error)),
     };
-    let trace_handle = writer.handle();
-    // run id 由 CLI 预生成：`llm_calls` 记录器在启动前就需要 run_id（快照不含 run）。
-    let run_id = uuid::Uuid::now_v7().to_string();
-    let recorder = llm_call_recorder(args, &trace_handle, &run_id);
-    let built = build_executor(
+    let recorder = llm_call_recorder(args, trace_handle, run_id);
+    Ok(build_executor(
         args,
-        &assets_dir,
-        &tools_dir,
+        assets_dir,
+        tools_dir,
         provider,
         fake_mode,
-        &trace_handle,
+        trace_handle,
         recorder,
-    );
-    // ISSUE-082：run 结束后补写版本/模型参数列（失败 run 尽力；`:memory:` 不写）。
-    let run_metadata: Option<BeforeCloseHook> = (!memory_db).then(|| {
+    ))
+}
+
+/// run 结束后补写版本/模型参数列的 hook（ISSUE-082；`:memory:` 不写）。
+fn run_metadata_hook(
+    memory_db: bool,
+    built: &BuiltExecutors,
+    run_id: &str,
+) -> Option<BeforeCloseHook> {
+    (!memory_db).then(|| {
         let worker = Arc::clone(&built.worker);
         let harness = Arc::clone(&built.harness);
-        let run_id = run_id.clone();
+        let run_id = run_id.to_string();
         Box::new(move |writer: &TraceWriter| {
             write_run_metadata(writer, &run_id, &worker, &harness);
         }) as BeforeCloseHook
-    });
-    // human 模式（非 --json、非 -q）订阅 bridge 内存事件旁路，实时输出生命周期行
-    // （ISSUE-085 / 06 §6.10.3）；`--json` 的 stdout 契约与 `-q` 抑制行为不变。
-    let (mut lifecycle, lifecycle_observer) = if args.json || args.quiet {
-        (None, None)
-    } else {
-        let (printer, observer) = LifecyclePrinter::new();
-        (Some(printer), Some(observer))
-    };
+    })
+}
+
+/// human 实时生命周期输出器（ISSUE-085；`--json`/`-q` 不订阅旁路）。
+fn lifecycle_output(args: &RunArgs) -> (Option<LifecyclePrinter>, Option<LifecycleObserver>) {
+    if args.json || args.quiet {
+        return (None, None);
+    }
+    let (printer, observer) = LifecyclePrinter::new();
+    (Some(printer), Some(observer))
+}
+
+/// 启动 run 并输出 `created` 行；human 模式在 `created` 之后启动实时打印线程。
+fn start_run(
+    args: &RunArgs,
+    writer: TraceWriter,
+    graph: Arc<CompiledGraph>,
+    entry_inputs: EntryInputs,
+    executor: Arc<dyn NodeExecutor>,
+    run_id: &str,
+) -> Result<(TracedRun, Option<LifecyclePrinter>), ExitCode> {
+    let (mut lifecycle, lifecycle_observer) = lifecycle_output(args);
     let observers = BridgeObservers {
         streaming: args.stream.then(stream_observer),
         lifecycle: lifecycle_observer,
@@ -832,14 +960,13 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     let traced = match bridge::start_traced_run_with_writer_and_run_id(
         writer,
         spec,
-        built.executor,
+        executor,
         observers,
-        run_id.clone(),
+        run_id.to_string(),
     ) {
         Ok(traced) => traced,
-        Err(error) => return report_bridge_error(&error),
+        Err(error) => return Err(report_bridge_error(&error)),
     };
-    debug_assert_eq!(traced.run_id(), run_id);
     if !args.json && !args.quiet {
         eprintln!(
             "run {run_id} created (graph={} hash={})",
@@ -851,6 +978,19 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
             printer.start_printing();
         }
     }
+    Ok((traced, lifecycle))
+}
+
+/// 等待 run 结束并输出结果（先收尾实时生命周期行，再输出 run_output/摘要）。
+async fn wait_and_report(
+    args: &RunArgs,
+    traced: TracedRun,
+    mut lifecycle: Option<LifecyclePrinter>,
+    memory_db: bool,
+    run_metadata: Option<BeforeCloseHook>,
+    db_path: &Path,
+    recovery: &recovery::Recovery,
+) -> ExitCode {
     let started = Instant::now();
     let outcome = wait_for_run(traced, memory_db, run_metadata).await;
     let duration_ms = duration_millis(started);
@@ -866,12 +1006,11 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         args,
         outcome,
         duration_ms,
-        &db_path,
+        db_path,
         &recovery.recovered,
         &recovery.warnings,
     )
 }
-
 /// 加载并编译图；失败时打印 stderr 并返回退出码 2（不产生 run）。
 fn load_compiled_graph(args: &RunArgs, assets_dir: &Path) -> Result<Arc<CompiledGraph>, ExitCode> {
     let display = args.graph.display().to_string();
@@ -1421,8 +1560,9 @@ fn close_quietly(writer: TraceWriter) {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_code_for, is_memory_db, llm_call_recorder, output_hash, parse, resolve_entry_inputs,
-        FakeLlmMode, RecordingExecutor, RunArgs, DEFAULT_USER_ID,
+        exit_code_for, is_memory_db, lifecycle_detail, llm_call_recorder, output_hash, parse,
+        resolve_entry_inputs, Consumed, FakeLlmMode, ParseState, RecordingExecutor, RunArgs,
+        DEFAULT_USER_ID,
     };
     use serde_json::json;
     use std::future::Future;
@@ -1436,7 +1576,10 @@ mod tests {
         CompiledGraph, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunError, RunMetrics,
         RunOutcome, RunStatus, CODE_STORAGE_ERROR,
     };
-    use zgraph_trace::{RecordMode, TraceWriter};
+    use zgraph_trace::{
+        GateResultRecord, RecordMode, RunFinishedInfo, RunStartedInfo, StreamingEvent, TraceInput,
+        TraceWriter,
+    };
     use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -1830,15 +1973,8 @@ mod tests {
         assert_eq!(routing.timeout_hint(python_node), None);
     }
 
-    #[test]
-    fn lifecycle_detail_covers_realtime_events() {
-        // ISSUE-085：旁路事件 → 实时生命周期行；非 events 输入与流式增量不产生行。
-        use super::lifecycle_detail;
-        use zgraph_trace::{
-            GateResultRecord, RunFinishedInfo, RunStartedInfo, StreamingEvent, TraceInput,
-        };
-
-        let started = TraceInput::RunStarted(RunStartedInfo {
+    fn trace_input_run_started() -> TraceInput {
+        TraceInput::RunStarted(RunStartedInfo {
             run_id: "r1".to_string(),
             graph_hash: "0123456789abcdef".to_string(),
             graph_name: "demo".to_string(),
@@ -1851,13 +1987,11 @@ mod tests {
             owner_pid: 1,
             owner_host: "test-host".to_string(),
             started_at: "2026-10-28T09:12:03.104Z".to_string(),
-        });
-        assert_eq!(
-            lifecycle_detail(&started).as_deref(),
-            Some("RunStarted status=Running user=local")
-        );
+        })
+    }
 
-        let gate = TraceInput::GateResult(GateResultRecord {
+    fn trace_input_gate() -> TraceInput {
+        TraceInput::GateResult(GateResultRecord {
             run_id: "r1".to_string(),
             instance_id: "i1".to_string(),
             node_id: "work".to_string(),
@@ -1868,78 +2002,129 @@ mod tests {
             passed: false,
             error: None,
             ts: "2026-10-28T09:12:03.104Z".to_string(),
-        });
-        assert_eq!(
-            lifecycle_detail(&gate).as_deref(),
-            Some("GateResult work edge#2 gate=gates.ok passed=false")
-        );
+        })
+    }
 
-        let timed_out = TraceInput::NodeTimedOut {
+    fn trace_input_timed_out() -> TraceInput {
+        TraceInput::NodeTimedOut {
             run_id: "r1".to_string(),
             instance_id: "i1".to_string(),
             elapsed_ms: 1500,
             at: "2026-10-28T09:12:03.104Z".to_string(),
-        };
-        assert_eq!(
-            lifecycle_detail(&timed_out).as_deref(),
-            Some("NodeTimedOut - elapsed_ms=1500")
-        );
+        }
+    }
 
-        // Streaming：progress/tool_call 实时成行；token/reasoning 增量由 `--stream` 负责。
-        let progress = TraceInput::Streaming {
-            run_id: "r1".to_string(),
-            instance_id: "i1".to_string(),
-            node_id: Some("work".to_string()),
-            event: StreamingEvent::Progress {
-                percent: 42,
-                message: "calling".to_string(),
-            },
-            at: "2026-10-28T09:12:03.104Z".to_string(),
-        };
-        assert_eq!(
-            lifecycle_detail(&progress).as_deref(),
-            Some("Streaming work progress 42% (calling)")
-        );
-
-        let tool_start = TraceInput::Streaming {
-            run_id: "r1".to_string(),
-            instance_id: "i1".to_string(),
-            node_id: Some("work".to_string()),
-            event: StreamingEvent::ToolCallStart {
-                call_id: "c1".to_string(),
-                tool_name: "now".to_string(),
-                args_summary: json!({}),
-            },
-            at: "2026-10-28T09:12:03.104Z".to_string(),
-        };
-        assert_eq!(
-            lifecycle_detail(&tool_start).as_deref(),
-            Some("Streaming work tool_call_start now")
-        );
-
-        let token = TraceInput::Streaming {
-            run_id: "r1".to_string(),
-            instance_id: "i1".to_string(),
-            node_id: Some("work".to_string()),
-            event: StreamingEvent::TokenDelta {
-                text: "he".to_string(),
-            },
-            at: "2026-10-28T09:12:03.104Z".to_string(),
-        };
-        assert_eq!(lifecycle_detail(&token), None, "token 增量不逐块成行");
-
-        let finished = TraceInput::RunFinished(RunFinishedInfo {
+    fn trace_input_run_finished() -> TraceInput {
+        TraceInput::RunFinished(RunFinishedInfo {
             run_id: "r1".to_string(),
             status: zgraph_trace::RunStatus::Cancelled,
             output_summary: None,
             error: None,
             metrics: zgraph_trace::RunMetrics::default(),
             at: "2026-10-28T09:12:04.104Z".to_string(),
-        });
+        })
+    }
+
+    fn trace_input_streaming(event: StreamingEvent) -> TraceInput {
+        TraceInput::Streaming {
+            run_id: "r1".to_string(),
+            instance_id: "i1".to_string(),
+            node_id: Some("work".to_string()),
+            event,
+            at: "2026-10-28T09:12:03.104Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_detail_formats_control_events() {
+        // ISSUE-085：旁路事件 → 实时生命周期行（控制面事件）。
         assert_eq!(
-            lifecycle_detail(&finished).as_deref(),
+            lifecycle_detail(&trace_input_run_started()).as_deref(),
+            Some("RunStarted status=Running user=local")
+        );
+        assert_eq!(
+            lifecycle_detail(&trace_input_gate()).as_deref(),
+            Some("GateResult work edge#2 gate=gates.ok passed=false")
+        );
+        assert_eq!(
+            lifecycle_detail(&trace_input_timed_out()).as_deref(),
+            Some("NodeTimedOut - elapsed_ms=1500")
+        );
+        assert_eq!(
+            lifecycle_detail(&trace_input_run_finished()).as_deref(),
             Some("RunFinished status=Cancelled")
         );
+    }
+
+    #[test]
+    fn lifecycle_detail_formats_streaming_and_skips_deltas() {
+        // Streaming：progress/tool_call 实时成行；token/reasoning 增量由 `--stream` 负责。
+        let progress = trace_input_streaming(StreamingEvent::Progress {
+            percent: 42,
+            message: "calling".to_string(),
+        });
+        assert_eq!(
+            lifecycle_detail(&progress).as_deref(),
+            Some("Streaming work progress 42% (calling)")
+        );
+        let tool_start = trace_input_streaming(StreamingEvent::ToolCallStart {
+            call_id: "c1".to_string(),
+            tool_name: "now".to_string(),
+            args_summary: json!({}),
+        });
+        assert_eq!(
+            lifecycle_detail(&tool_start).as_deref(),
+            Some("Streaming work tool_call_start now")
+        );
+        let token = trace_input_streaming(StreamingEvent::TokenDelta {
+            text: "he".to_string(),
+        });
+        assert_eq!(lifecycle_detail(&token), None, "token 增量不逐块成行");
+    }
+
+    #[test]
+    fn parse_state_consumes_options_and_reports_positional() {
+        let values = args(&["--json", "graph.json", "-x"]);
+        let mut state = ParseState::default();
+        let mut iter = values.iter();
+        let flag = iter.next().expect("flag arg");
+        assert_eq!(
+            state.consume(flag, &mut iter).expect("flag consumed"),
+            Consumed::Handled
+        );
+        assert!(state.json);
+
+        let graph = iter.next().expect("graph arg");
+        assert_eq!(
+            state.consume(graph, &mut iter).expect("positional"),
+            Consumed::Positional
+        );
+        state.set_graph(graph).expect("graph recorded");
+
+        let unknown = iter.next().expect("unknown arg");
+        let error = state
+            .consume(unknown, &mut iter)
+            .expect_err("unknown option");
+        assert!(error.contains("unknown option"), "{error}");
+    }
+
+    #[test]
+    fn parse_state_finish_validates_required_fields_and_conflicts() {
+        let error = ParseState::default().finish().expect_err("missing graph");
+        assert!(error.contains("run requires <graph.json>"), "{error}");
+
+        let mut state = ParseState::default();
+        state.set_graph("graph.json").expect("graph");
+        let error = state.finish().expect_err("missing inputs");
+        assert!(error.contains("run requires --inputs"), "{error}");
+
+        let mut state = ParseState::default();
+        state.set_graph("graph.json").expect("graph");
+        state.inputs = Some("{}".to_string());
+        state.real = true;
+        state.fake_llm = FakeLlmMode::DefaultScript;
+        let error = state.finish().expect_err("conflict");
+        assert!(error.contains("--real conflicts"), "{error}");
     }
 
     #[test]

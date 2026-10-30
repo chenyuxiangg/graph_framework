@@ -736,6 +736,7 @@ pub fn node_error_json(error: &kernel::NodeError) -> Value {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     use super::{node_error_json, run_in_process, BridgeError, TraceBridge};
     use zgraph_kernel::{
@@ -919,15 +920,53 @@ mod tests {
         writer.close().expect("close writer");
     }
 
-    #[test]
-    fn lifecycle_observer_receives_events_before_writer_close() {
-        // ISSUE-085：旁路回调与落库解耦——事件一产生就回调（写端未 flush/close 也能收到），
-        // 且不改变 trace 行数/内容；不产生 `events` 行的快照不触发实时行。
-        use std::sync::{Arc, Mutex};
+    fn kernel_run_started() -> zgraph_kernel::RunStartedInfo {
+        zgraph_kernel::RunStartedInfo {
+            run_id: "run-1".to_string(),
+            graph_hash: "0123456789abcdef".to_string(),
+            graph_name: "demo".to_string(),
+            dsl_json: "{}".to_string(),
+            user_id: "local".to_string(),
+            entry_inputs: serde_json::json!({}),
+            seed: 7,
+            record_mode: "hash".to_string(),
+            owner_pid: std::process::id(),
+            owner_host: "test-host".to_string(),
+            started_at: "2026-10-28T09:12:03.104Z".to_string(),
+        }
+    }
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("trace.db");
-        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+    fn kernel_snapshot() -> InstanceSnapshot {
+        InstanceSnapshot {
+            run_id: "run-1".to_string(),
+            instance_id: "inst-1".to_string(),
+            node_id: "n1".to_string(),
+            node_type: "python_node".to_string(),
+            attempt: 0,
+            status: InstanceStatus::Running,
+            input: Some(serde_json::json!({"x": 1})),
+            output: None,
+            error: None,
+            error_code: None,
+            created_at: "2026-10-28T09:12:03.104Z".to_string(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    fn kernel_run_finished() -> zgraph_kernel::RunFinishedInfo {
+        zgraph_kernel::RunFinishedInfo {
+            run_id: "run-1".to_string(),
+            status: RunStatus::Completed,
+            output_summary: Some(serde_json::json!({"r": 1})),
+            error: None,
+            metrics: zgraph_kernel::RunMetrics::default(),
+            at: "2026-10-28T09:12:04.104Z".to_string(),
+        }
+    }
+
+    /// 记录型生命周期观察者 + 收到的 kind 序列（并发共享）。
+    fn recording_lifecycle_observer() -> (super::LifecycleObserver, Arc<Mutex<Vec<&'static str>>>) {
         let seen = Arc::new(Mutex::new(Vec::<&'static str>::new()));
         let observer_seen = Arc::clone(&seen);
         let observer: super::LifecycleObserver = Arc::new(move |input| {
@@ -945,59 +984,12 @@ mod tests {
             };
             observer_seen.lock().expect("lock").push(kind);
         });
-        let bridge = TraceBridge::with_observers(
-            writer.handle(),
-            super::BridgeObservers {
-                streaming: None,
-                lifecycle: Some(observer),
-            },
-        );
-        bridge.run_started(zgraph_kernel::RunStartedInfo {
-            run_id: "run-1".to_string(),
-            graph_hash: "0123456789abcdef".to_string(),
-            graph_name: "demo".to_string(),
-            dsl_json: "{}".to_string(),
-            user_id: "local".to_string(),
-            entry_inputs: serde_json::json!({}),
-            seed: 7,
-            record_mode: "hash".to_string(),
-            owner_pid: std::process::id(),
-            owner_host: "test-host".to_string(),
-            started_at: "2026-10-28T09:12:03.104Z".to_string(),
-        });
-        bridge.instance_snapshot(InstanceSnapshot {
-            run_id: "run-1".to_string(),
-            instance_id: "inst-1".to_string(),
-            node_id: "n1".to_string(),
-            node_type: "python_node".to_string(),
-            attempt: 0,
-            status: InstanceStatus::Running,
-            input: Some(serde_json::json!({"x": 1})),
-            output: None,
-            error: None,
-            error_code: None,
-            created_at: "2026-10-28T09:12:03.104Z".to_string(),
-            started_at: None,
-            finished_at: None,
-        });
-        bridge.run_finished(zgraph_kernel::RunFinishedInfo {
-            run_id: "run-1".to_string(),
-            status: RunStatus::Completed,
-            output_summary: Some(serde_json::json!({"r": 1})),
-            error: None,
-            metrics: zgraph_kernel::RunMetrics::default(),
-            at: "2026-10-28T09:12:04.104Z".to_string(),
-        });
+        (observer, seen)
+    }
 
-        // 实时性：写端尚未 flush/close，回调已按事件顺序收到（快照不产生 events 行）。
-        assert_eq!(
-            seen.lock().expect("lock").as_slice(),
-            ["RunStarted", "RunFinished"]
-        );
-
-        // 落库语义不变：仍只有两条 events 行（快照只 upsert instances）。
-        writer.flush().expect("flush writer");
-        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+    /// 关闭写端前只读校验 events 行（读连接在函数返回前释放）。
+    fn assert_trace_event_kinds(path: &std::path::Path, expected: &[&str]) {
+        let reader = zgraph_trace::TraceReader::open_readonly(path).expect("reader");
         let events = reader
             .events("run-1", &zgraph_trace::EventQuery::default())
             .expect("events");
@@ -1006,9 +998,37 @@ mod tests {
                 .iter()
                 .map(|event| event.kind.as_str())
                 .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn lifecycle_observer_receives_events_before_writer_close() {
+        // ISSUE-085：旁路回调与落库解耦——事件一产生就回调（写端未 flush/close 也能收到），
+        // 且不改变 trace 行数/内容；不产生 `events` 行的快照不触发实时行。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let (observer, seen) = recording_lifecycle_observer();
+        let bridge = TraceBridge::with_observers(
+            writer.handle(),
+            super::BridgeObservers {
+                streaming: None,
+                lifecycle: Some(observer),
+            },
+        );
+        bridge.run_started(kernel_run_started());
+        bridge.instance_snapshot(kernel_snapshot());
+        bridge.run_finished(kernel_run_finished());
+
+        // 实时性：写端尚未 flush/close，回调已按事件顺序收到（快照不产生 events 行）。
+        assert_eq!(
+            seen.lock().expect("lock").as_slice(),
             ["RunStarted", "RunFinished"]
         );
-        drop(reader);
+        // 落库语义不变：仍只有两条 events 行（快照只 upsert instances）。
+        writer.flush().expect("flush writer");
+        assert_trace_event_kinds(&path, &["RunStarted", "RunFinished"]);
         writer.close().expect("close writer");
     }
 
