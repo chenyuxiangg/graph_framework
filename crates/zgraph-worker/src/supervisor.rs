@@ -175,6 +175,8 @@ pub struct Supervisor {
     pgid: Option<i32>,
     /// 已 reap 的退出状态（避免重复 wait）。
     exit: Option<ExitStatus>,
+    /// 握手成功的 `hello`（ISSUE-082：worker/SDK/Python 版本来源；失败为 `None`）。
+    hello: Option<Hello>,
     streaming: StreamingStats,
     events: Vec<Frame>,
 }
@@ -231,9 +233,15 @@ impl Supervisor {
             config,
             pgid,
             exit: None,
+            hello: None,
             streaming: StreamingStats::default(),
             events: Vec::new(),
         })
+    }
+
+    /// 握手成功时记录的 `hello`（ISSUE-082：版本聚合来源；未握手为 `None`）。
+    pub fn hello(&self) -> Option<&Hello> {
+        self.hello.as_ref()
     }
 
     /// 完整生命周期：握手 → 发送 run → 收集 emit/result/error → reap。
@@ -245,7 +253,7 @@ impl Supervisor {
         on_frame: FrameSink<'_>,
         cancel: &mut CancelSignal,
     ) -> Result<WorkerRun, WorkerFailure> {
-        self.handshake(cancel).await?;
+        self.hello = Some(self.handshake(cancel).await?);
         self.write_run(request).await?;
         let idle = self.config.run_frame_timeout(request);
         loop {
@@ -619,12 +627,31 @@ pub async fn run_supervised(
     on_frame: FrameSink<'_>,
     cancel: CancelSignal,
 ) -> Result<WorkerRun, WorkerFailure> {
+    run_supervised_observed(config, request, on_frame, cancel)
+        .await
+        .1
+}
+
+/// 同 [`run_supervised`]，但额外返回握手 `hello`（ISSUE-082：worker/SDK/Python 版本）。
+///
+/// `hello` 在握手成功后返回（**即使后续 run 失败**，用于失败 run 也尽力记录版本）；
+/// spawn/握手失败 → `None`。协议与执行语义不变。
+pub async fn run_supervised_observed(
+    config: &SupervisorConfig,
+    request: &crate::protocol::RunRequest,
+    on_frame: FrameSink<'_>,
+    cancel: CancelSignal,
+) -> (Option<Hello>, Result<WorkerRun, WorkerFailure>) {
     let timeout = config.worker.timeout;
-    let mut supervisor = Supervisor::spawn(config.clone()).await?;
+    let mut supervisor = match Supervisor::spawn(config.clone()).await {
+        Ok(supervisor) => supervisor,
+        Err(failure) => return (None, Err(failure)),
+    };
     let mut cancel = cancel;
     let outcome =
         tokio::time::timeout(timeout, supervisor.drive(request, on_frame, &mut cancel)).await;
-    match outcome {
+    let hello = supervisor.hello().cloned();
+    let result = match outcome {
         Ok(Ok(run)) => Ok(run),
         Ok(Err(WorkerFailure::Cancelled)) => {
             let _ = supervisor.cancel_and_reap().await;
@@ -641,7 +668,8 @@ pub async fn run_supervised(
                 .await;
             Err(failure)
         }
-    }
+    };
+    (hello, result)
 }
 
 /// 把 emit 帧载荷解析成 `serde_json::Value`（测试/调用方便捷入口）。

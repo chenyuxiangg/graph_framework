@@ -212,6 +212,12 @@ impl Writer {
                     .and_then(|()| self.mark_interrupted(&request.run_ids, &request.now));
                 let _ = request.reply.send(result);
             }
+            WriterMsg::UpdateRunColumns(request) => {
+                let result = self
+                    .finish_batch(batch)
+                    .and_then(|()| self.update_run_columns(&request));
+                let _ = request.reply.send(result);
+            }
             WriterMsg::Shutdown(reply) => {
                 let _ = self.finish_batch(batch);
                 return Some(CycleOutcome::Shutdown(reply));
@@ -334,6 +340,35 @@ impl Writer {
     ) -> Result<Vec<RecoveredRun>, TraceError> {
         match recovery::mark_interrupted(&mut self.conn, run_ids, now) {
             Ok(recovered) => Ok(recovered),
+            Err(err) => {
+                self.record_fatal(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    /// 仅更新 `runs` 的两列（ISSUE-082；不触碰 status/instances/events）。
+    ///
+    /// SQL/IO 失败按不可恢复错误处理（06 §6.4.5）；`0` 行 = run 不存在，不是错误。
+    fn update_run_columns(
+        &mut self,
+        request: &crate::writer::UpdateRunColumnsRequest,
+    ) -> Result<u64, TraceError> {
+        let result = self
+            .conn
+            .execute(
+                "UPDATE runs SET worker_versions_json = ?1, model_params_json = ?2 \
+                 WHERE run_id = ?3",
+                rusqlite::params![
+                    request.worker_versions_json,
+                    request.model_params_json,
+                    request.run_id
+                ],
+            )
+            .map(|updated| u64::try_from(updated).unwrap_or(u64::MAX))
+            .map_err(db_err);
+        match result {
+            Ok(updated) => Ok(updated),
             Err(err) => {
                 self.record_fatal(err.clone());
                 Err(err)

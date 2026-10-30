@@ -14,7 +14,7 @@
 //!   [`WorkerLimits`] 可被 CLI 注入给 Harness 共享（ISSUE-079：工具调用与节点执行
 //!   共用同一实例，合计不超上限）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -28,11 +28,11 @@ use zgraph_kernel::{
 };
 
 use crate::protocol::{
-    Frame, RunRequest, WorkerError, CODE_CANCELLED, CODE_CRASH, CODE_HANDSHAKE, CODE_IMPORT,
+    Frame, Hello, RunRequest, WorkerError, CODE_CANCELLED, CODE_CRASH, CODE_HANDSHAKE, CODE_IMPORT,
     CODE_PROTOCOL, CODE_PYTHON_EXCEPTION, CODE_TIMEOUT, EMIT_TYPES,
 };
 use crate::spawn::WorkerFailure;
-use crate::supervisor::{no_cancel, SupervisorConfig};
+use crate::supervisor::{no_cancel, run_supervised_observed, SupervisorConfig};
 
 /// 每 run 默认并发上限（架构 §4 / D4）。
 pub const DEFAULT_MAX_WORKERS_PER_RUN: usize = 8;
@@ -125,6 +125,8 @@ impl WorkerLimits {
 pub struct WorkerExecutor {
     config: SupervisorConfig,
     limits: Arc<WorkerLimits>,
+    /// 每 run 的 worker/SDK/Python 版本集合（ISSUE-082；握手 hello 聚合、去重排序）。
+    worker_versions: Mutex<HashMap<String, BTreeSet<(String, String)>>>,
 }
 
 impl WorkerExecutor {
@@ -147,7 +149,11 @@ impl WorkerExecutor {
 
     /// 使用调用方提供的共享上限句柄（ISSUE-079：可与 Harness 工具调用共享同一实例）。
     pub fn with_shared_limits(config: SupervisorConfig, limits: Arc<WorkerLimits>) -> Self {
-        Self { config, limits }
+        Self {
+            config,
+            limits,
+            worker_versions: Mutex::new(HashMap::new()),
+        }
     }
 
     /// 全局并发上限（配置值，不是当前剩余许可）。
@@ -163,6 +169,42 @@ impl WorkerExecutor {
     /// 共享上限句柄（只读克隆；CLI 组合根可注入给 Harness，见 ISSUE-079）。
     pub fn limits(&self) -> Arc<WorkerLimits> {
         self.limits.clone()
+    }
+
+    /// 本 run 观察到的 worker 版本集合（ISSUE-082；去重排序后的 JSON 对象数组）。
+    ///
+    /// 数据源 = worker 握手 `hello` 的 `python_version`/`sdk_version`（协议 v1 不变）；
+    /// 同一 run 内多个 worker 进程按 `(python, sdk)` 去重升序。`None` = 本 run
+    /// 尚未成功握手任何 worker（CLI 按 `[]` 写入）。
+    pub fn worker_versions(&self, run_id: &str) -> Option<Vec<Value>> {
+        let guard = match self.worker_versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let versions = guard.get(run_id)?;
+        Some(
+            versions
+                .iter()
+                .map(|(python_version, sdk_version)| {
+                    serde_json::json!({
+                        "python_version": python_version,
+                        "sdk_version": sdk_version,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// 记录一次握手 `hello`（ISSUE-082；去重由 `BTreeSet` 保证）。
+    fn record_hello(&self, run_id: &str, hello: &Hello) {
+        let mut guard = match self.worker_versions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .entry(run_id.to_string())
+            .or_default()
+            .insert((hello.python_version.clone(), hello.sdk_version.clone()));
     }
 
     /// 为本节点派生 supervisor 配置：总超时 = 内核剩余 deadline + 兜底余量。
@@ -211,9 +253,12 @@ impl NodeExecutor for WorkerExecutor {
                     ctx.emit(event);
                 }
             };
-            let result =
-                crate::supervisor::run_supervised(&config, &request, &mut on_frame, no_cancel())
-                    .await;
+            let (hello, result) =
+                run_supervised_observed(&config, &request, &mut on_frame, no_cancel()).await;
+            if let Some(hello) = hello {
+                // 失败 run 也尽量记录（只要握手成功）。
+                self.record_hello(ctx.run_id(), &hello);
+            }
             result.map(|run| run.output).map_err(map_failure)
         })
     }
@@ -407,7 +452,7 @@ fn internal(message: impl Into<String>) -> NodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::CODE_BUSINESS_ERROR;
+    use crate::protocol::{CODE_BUSINESS_ERROR, PROTOCOL_VERSION};
     use serde_json::json;
 
     fn worker_error(code: &str) -> WorkerError {
@@ -731,6 +776,36 @@ mod tests {
         drop(run_a);
         drop(run_b);
         assert!(limits.acquire_run("run-a").await.is_some());
+    }
+
+    /// ISSUE-082：握手 hello 按 run 聚合、去重并按 `(python, sdk)` 升序输出。
+    #[test]
+    fn worker_versions_aggregate_dedup_and_sort_per_run() {
+        let executor = WorkerExecutor::new(SupervisorConfig::default());
+        let hello = |python: &str, sdk: &str| Hello {
+            protocol_version: PROTOCOL_VERSION,
+            python_version: python.to_string(),
+            sdk_version: sdk.to_string(),
+            worker_id: "w1".to_string(),
+        };
+        executor.record_hello("run-a", &hello("3.11.9", "0.1.0"));
+        executor.record_hello("run-a", &hello("3.11.9", "0.1.0"));
+        executor.record_hello("run-a", &hello("3.10.13", "0.1.0"));
+        executor.record_hello("run-b", &hello("3.12.1", "0.2.0"));
+        assert_eq!(
+            executor.worker_versions("run-a"),
+            Some(vec![
+                serde_json::json!({"python_version": "3.10.13", "sdk_version": "0.1.0"}),
+                serde_json::json!({"python_version": "3.11.9", "sdk_version": "0.1.0"}),
+            ])
+        );
+        assert_eq!(
+            executor.worker_versions("run-b"),
+            Some(vec![
+                serde_json::json!({"python_version": "3.12.1", "sdk_version": "0.2.0"})
+            ])
+        );
+        assert_eq!(executor.worker_versions("run-c"), None);
     }
 
     /// ISSUE-079：每 run 峰值上限 = 8（默认）且 run 间隔离。

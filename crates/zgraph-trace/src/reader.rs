@@ -137,6 +137,14 @@ pub struct RunRow {
     /// `None` = 未记录：v2→v3 迁移前的历史 run 或非 CLI/库驱动的旧记录；
     /// `replay --mode=outputs` 对 `None` 按空 map 兼容并在 stderr 告警。
     pub global_vars: Option<serde_json::Value>,
+    /// worker/SDK/Python 版本集合（ISSUE-082；JSON 数组，run 结束时由 CLI 写入）。
+    ///
+    /// `None` = 未写入（`:memory:` 库、旧记录或 run 未走到结束写入点）。
+    pub worker_versions: Option<serde_json::Value>,
+    /// 模型参数快照集合（ISSUE-082；JSON 数组，**不含密钥**，run 结束时由 CLI 写入）。
+    ///
+    /// `None` = 未写入（同 [`RunRow::worker_versions`]）。
+    pub model_params: Option<serde_json::Value>,
 }
 
 /// 实例快照行（06 §6.2.5）。
@@ -378,7 +386,8 @@ impl TraceReader {
                    r.error_message, r.interrupted, r.recovered_at, r.last_seq, r.event_count, \
                    r.streaming_dropped, r.abandoned_tasks, r.trace_backpressure, \
                    r.killed_workers, r.seed, r.record_mode, r.owner_pid, r.owner_host, \
-                   r.heartbeat_at, r.global_vars_json \
+                   r.heartbeat_at, r.global_vars_json, r.worker_versions_json, \
+                   r.model_params_json \
                    FROM runs r LEFT JOIN graphs g ON g.graph_hash = r.graph_hash \
                    WHERE r.run_id = ?1";
         let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
@@ -671,6 +680,8 @@ fn map_run_row(row: &rusqlite::Row<'_>) -> Result<RunRow, TraceError> {
         owner_host: row.get(22).map_err(db_err)?,
         heartbeat_at: row.get(23).map_err(db_err)?,
         global_vars: parse_json_opt(row.get(24).map_err(db_err)?)?,
+        worker_versions: parse_json_opt(row.get(25).map_err(db_err)?)?,
+        model_params: parse_json_opt(row.get(26).map_err(db_err)?)?,
     })
 }
 

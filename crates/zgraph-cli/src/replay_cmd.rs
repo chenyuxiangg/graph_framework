@@ -651,6 +651,8 @@ mod tests {
             owner_host: None,
             heartbeat_at: None,
             global_vars,
+            worker_versions: None,
+            model_params: None,
         }
     }
 

@@ -22,7 +22,15 @@
 //!
 //! `RecordedOutput` 只对**成功**执行发送：`full` 带 `output_json`，`hash` 只带
 //! `output_hash`，`none` 不发（architecture §5.2）。agent 节点与 python 节点同规则
-//! （agent 输出为整包四字段，05 §5.9.2）。LLM `llm_calls` 记录不在本轮（ISSUE-082）。
+//! （agent 输出为整包四字段，05 §5.9.2）。LLM `llm_calls` 记录见 [`LlmCallTraceRecorder`]。
+//!
+//! # run 结束元数据列（ISSUE-082 / 06 §6.2.4）
+//!
+//! run 结束（**Completed 与 Failed 均尽力**）且关闭写端前，CLI 经
+//! [`TraceWriter::update_run_columns`] 补写 `runs.worker_versions_json`（来自 worker
+//! 握手 `hello` 的 python/sdk 版本，去重排序）与 `runs.model_params_json`（来自
+//! AgentConfig `model` 段摘要，**不含密钥**，去重）；本 run 未使用 worker/agent 时
+//! 写 `[]`。`:memory:` 库**不写**这两列（跨进程不可读，同 06 §6.9.1 口径）。
 //!
 //! # 解释器与特殊库
 //!
@@ -779,7 +787,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     // run id 由 CLI 预生成：`llm_calls` 记录器在启动前就需要 run_id（快照不含 run）。
     let run_id = uuid::Uuid::now_v7().to_string();
     let recorder = llm_call_recorder(args, &trace_handle, &run_id);
-    let executor = build_executor(
+    let built = build_executor(
         args,
         &assets_dir,
         &tools_dir,
@@ -788,6 +796,15 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         &trace_handle,
         recorder,
     );
+    // ISSUE-082：run 结束后补写版本/模型参数列（失败 run 尽力；`:memory:` 不写）。
+    let run_metadata: Option<BeforeCloseHook> = (!memory_db).then(|| {
+        let worker = Arc::clone(&built.worker);
+        let harness = Arc::clone(&built.harness);
+        let run_id = run_id.clone();
+        Box::new(move |writer: &TraceWriter| {
+            write_run_metadata(writer, &run_id, &worker, &harness);
+        }) as BeforeCloseHook
+    });
     // human 模式（非 --json、非 -q）订阅 bridge 内存事件旁路，实时输出生命周期行
     // （ISSUE-085 / 06 §6.10.3）；`--json` 的 stdout 契约与 `-q` 抑制行为不变。
     let (mut lifecycle, lifecycle_observer) = if args.json || args.quiet {
@@ -810,7 +827,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     let traced = match bridge::start_traced_run_with_writer_and_run_id(
         writer,
         spec,
-        executor,
+        built.executor,
         observers,
         run_id.clone(),
     ) {
@@ -830,7 +847,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         }
     }
     let started = Instant::now();
-    let outcome = wait_for_run(traced, memory_db).await;
+    let outcome = wait_for_run(traced, memory_db, run_metadata).await;
     let duration_ms = duration_millis(started);
     // 先收尾实时行，再输出 run 结果/摘要（stderr 行序稳定、且结果行必然最后出现）。
     if let Some(printer) = lifecycle.take() {
@@ -898,6 +915,19 @@ fn llm_call_recorder(
     }))
 }
 
+/// 关闭写端前的回调：补写 run 元数据列（ISSUE-082；`:memory:` 不调用）。
+type BeforeCloseHook = Box<dyn FnOnce(&TraceWriter)>;
+
+/// 组合执行器 + run 结束元数据写入所需的只读句柄（ISSUE-082）。
+struct BuiltExecutors {
+    /// 对外的组合执行器（Recording → Routing）。
+    executor: Arc<dyn NodeExecutor>,
+    /// Harness 句柄（查询 `model_params`）。
+    harness: Arc<HarnessExecutor>,
+    /// Worker 句柄（查询 `worker_versions`）。
+    worker: Arc<WorkerExecutor>,
+}
+
 /// 组合执行器：Recording → Routing（Harness / Worker）。
 fn build_executor(
     args: &RunArgs,
@@ -907,7 +937,7 @@ fn build_executor(
     fake_mode: bool,
     trace_handle: &TraceHandle,
     recorder: Option<Arc<dyn LlmCallRecorder>>,
-) -> Arc<dyn NodeExecutor> {
+) -> BuiltExecutors {
     let config = worker_config(args);
     // ISSUE-079（DR-003 D7）：工具调用与节点执行共享**同一**并发上限实例
     // （全局 CPU×2 / 每 run 8），避免两者叠加超过 D4 上限。
@@ -929,12 +959,37 @@ fn build_executor(
         )),
         None => Arc::new(HarnessExecutor::with_tool_limits(settings, limits)),
     };
-    let routing: Arc<dyn NodeExecutor> = Arc::new(RoutingExecutor { harness, worker });
-    Arc::new(RecordingExecutor::new(
+    let routing: Arc<dyn NodeExecutor> = Arc::new(RoutingExecutor {
+        harness: Arc::clone(&harness),
+        worker: Arc::clone(&worker),
+    });
+    let executor: Arc<dyn NodeExecutor> = Arc::new(RecordingExecutor::new(
         routing,
         trace_handle.clone(),
         args.record,
-    ))
+    ));
+    BuiltExecutors {
+        executor,
+        harness,
+        worker,
+    }
+}
+
+/// run 结束（Completed/Failed 尽力）补写 `runs` 两列（ISSUE-082；06 §6.2.4）。
+///
+/// 无对应观测时写 `[]`（表示本 run 未使用 worker/agent）；失败不影响退出码
+/// （尽力写）。`:memory:` 库不调用本函数（跨进程不可读，文档注明）。
+fn write_run_metadata(
+    writer: &TraceWriter,
+    run_id: &str,
+    worker: &WorkerExecutor,
+    harness: &HarnessExecutor,
+) {
+    let worker_versions = worker.worker_versions(run_id).unwrap_or_default();
+    let model_params = harness.model_params(run_id).unwrap_or_default();
+    let worker_json = serde_json::to_string(&worker_versions).unwrap_or_else(|_| "[]".to_string());
+    let model_json = serde_json::to_string(&model_params).unwrap_or_else(|_| "[]".to_string());
+    let _ = writer.update_run_columns(run_id, &worker_json, &model_json);
 }
 
 /// run 结束产物：常规库带只读 reader；`:memory:` 只有内核 outcome（06 §6.9.1）。
@@ -946,7 +1001,14 @@ enum RunCompletion {
 }
 
 /// 等待 run 结束（SIGINT → cancel → 退出码 130）。
-async fn wait_for_run(traced: TracedRun, memory_db: bool) -> Result<RunCompletion, ExitCode> {
+///
+/// `before_close`：关闭写端前的回调（ISSUE-082 补写 run 元数据列）；`:memory:`
+/// 库不写，回调被丢弃。
+async fn wait_for_run(
+    traced: TracedRun,
+    memory_db: bool,
+    before_close: Option<BeforeCloseHook>,
+) -> Result<RunCompletion, ExitCode> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let signal_task = tokio::spawn(watch_interrupt(Arc::clone(&interrupted)));
     while !traced.status().is_terminal() {
@@ -956,12 +1018,18 @@ async fn wait_for_run(traced: TracedRun, memory_db: bool) -> Result<RunCompletio
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let completion = if memory_db {
+        // ISSUE-082：`:memory:` 无跨进程可读库，版本/模型参数列不写（文档注明）。
+        drop(before_close);
         traced
             .wait_without_reader()
             .await
             .map(RunCompletion::OutcomeOnly)
     } else {
-        traced.wait().await.map(|outcome| {
+        let waited = match before_close {
+            Some(before_close) => traced.wait_with_before_close(before_close).await,
+            None => traced.wait().await,
+        };
+        waited.map(|outcome| {
             let (outcome, reader) = outcome.into_parts();
             RunCompletion::WithReader(outcome, reader)
         })

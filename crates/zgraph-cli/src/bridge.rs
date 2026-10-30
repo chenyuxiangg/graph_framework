@@ -303,6 +303,36 @@ impl TracedRun {
         })
     }
 
+    /// 等待 run 结束；在关闭写端前执行 `before_close` 回调（ISSUE-082）。
+    ///
+    /// 用于 run 结束后补写 `runs.worker_versions_json`/`model_params_json`：回调与
+    /// 数据消息共用写线程 FIFO，保证在 `RunFinished` 落库之后、`close` 之前执行；
+    /// 回调失败不影响 run 结果（尽力写，06 §6.2.4）。
+    pub async fn wait_with_before_close<F>(
+        self,
+        before_close: F,
+    ) -> Result<BridgeOutcome, BridgeError>
+    where
+        F: FnOnce(&trace::TraceWriter),
+    {
+        let TracedRun {
+            handle,
+            trace_handle,
+            writer,
+        } = self;
+        let outcome = handle.wait().await;
+        if let Some(writer) = writer.as_ref() {
+            before_close(writer);
+        }
+        let db_path = close_writer(writer, &trace_handle)?;
+        let reader = trace::TraceReader::open_readonly(&db_path)?;
+        Ok(BridgeOutcome {
+            outcome,
+            reader,
+            db_path,
+        })
+    }
+
     /// 等待 run 结束并关闭写端，但**不**打开只读 reader。
     ///
     /// 用于跨进程不可读的库（`:memory:`，06 §6.9.1）：run 结果由内核 outcome 直接

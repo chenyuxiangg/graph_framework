@@ -46,8 +46,9 @@
 //! - 06 §6.8.1 的**判活**（`kill(pid, 0)`/`RECOVERY_HEARTBEAT_STALE_MS`）与
 //!   `zgraph run` 启动接线不在本 crate：trace 只提供候选查询与标定两段原语，
 //!   避免引入 OS/进程依赖（CLI 消费见 REV-030）。本 crate 不实现断点续跑（§6.8.4）。
-//! - `worker_versions_json`/`model_params_json` 由 M4 Harness 写入；v2 列已建好但
-//!   [`RunStartedInfo`] 暂不携带（保持冻结签名）。
+//! - `worker_versions_json`/`model_params_json` 由 CLI 在 run 结束（Completed/Failed
+//!   尽力）时经 [`TraceWriter::update_run_columns`] 补写（ISSUE-082，06 §6.2.4）；
+//!   [`RunStartedInfo`] 不携带这两列（保持冻结签名）；`:memory:` 库不写。
 //!
 //! # 快速开始
 //!

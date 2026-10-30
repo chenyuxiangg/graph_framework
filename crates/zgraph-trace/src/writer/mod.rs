@@ -42,6 +42,8 @@ pub(crate) enum WriterMsg {
     InterruptedCandidates(SyncSender<Result<Vec<InterruptedCandidate>, TraceError>>),
     /// 中止标定（单事务 UPDATE）；装箱以保持 `WriterMsg` 尺寸与通道开销不变。
     MarkInterrupted(Box<MarkInterruptedRequest>),
+    /// run 结束补写 `worker_versions_json`/`model_params_json`（ISSUE-082；仅两列）。
+    UpdateRunColumns(Box<UpdateRunColumnsRequest>),
 }
 
 /// 可丢流式通道消息：携带发送序号，写线程据此与无损通道合并排序。
@@ -55,6 +57,14 @@ pub(crate) struct MarkInterruptedRequest {
     pub(crate) run_ids: Vec<String>,
     pub(crate) now: String,
     pub(crate) reply: SyncSender<Result<Vec<RecoveredRun>, TraceError>>,
+}
+
+/// `WriterMsg::UpdateRunColumns` 的载荷（ISSUE-082：run 结束补写两列）。
+pub(crate) struct UpdateRunColumnsRequest {
+    pub(crate) run_id: String,
+    pub(crate) worker_versions_json: String,
+    pub(crate) model_params_json: String,
+    pub(crate) reply: SyncSender<Result<u64, TraceError>>,
 }
 
 /// trace 写端：持有写线程与写通道发送端。
@@ -139,6 +149,28 @@ impl TraceWriter {
             WriterMsg::MarkInterrupted(Box::new(MarkInterruptedRequest {
                 run_ids: run_ids.to_vec(),
                 now: now.to_string(),
+                reply,
+            }))
+        })
+    }
+
+    /// 仅更新 `runs.worker_versions_json` / `runs.model_params_json`（ISSUE-082；06 §6.2.4）。
+    ///
+    /// 单条 `UPDATE`，**不触碰** `status`/`instances`/`events`；与数据消息共用写线程
+    /// 的同一 FIFO，因此调用前已入队的 `RunFinished` 必先落库（barrier 语义）。
+    /// 返回实际更新行数：`0` = run 不存在（幂等，不算错误）。CLI 在 run 结束
+    /// （Completed/**Failed** 均尽力）且关闭写端前调用。
+    pub fn update_run_columns(
+        &self,
+        run_id: &str,
+        worker_versions_json: &str,
+        model_params_json: &str,
+    ) -> Result<u64, TraceError> {
+        self.handle.control(|reply| {
+            WriterMsg::UpdateRunColumns(Box::new(UpdateRunColumnsRequest {
+                run_id: run_id.to_string(),
+                worker_versions_json: worker_versions_json.to_string(),
+                model_params_json: model_params_json.to_string(),
                 reply,
             }))
         })

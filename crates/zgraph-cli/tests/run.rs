@@ -195,6 +195,47 @@ fn run_status(db: &Path) -> String {
         .expect("run status")
 }
 
+/// `runs.worker_versions_json` / `runs.model_params_json` 原始文本（ISSUE-082）。
+fn run_columns(db: &Path) -> (Option<String>, Option<String>) {
+    connect(db)
+        .query_row(
+            "SELECT worker_versions_json, model_params_json FROM runs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query run columns")
+}
+
+/// AC-01 客服工单 fixture 目录（复用 e2e AC-01 资产）。
+fn ac01_dir() -> PathBuf {
+    repo_root().join("tests/fixtures/graphs/customer_ticket")
+}
+
+/// AC-01 真链路参数（fake LLM + 真 Python worker + 真 trace）。
+fn ac01_args(db: &Path) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        arg(&repo_root().join("tests/fixtures/graphs/customer_ticket.json")),
+        "--db".to_string(),
+        arg(db),
+        "--assets-dir".to_string(),
+        arg(&ac01_dir()),
+        "--tools-dir".to_string(),
+        arg(&ac01_dir().join("tools")),
+        "--inputs".to_string(),
+        r#"{"input_parser":{"user_message":"我要退款"}}"#.to_string(),
+        "--fake-llm".to_string(),
+        format!("--fake-llm={}", ac01_dir().join("fake_llm.json").display()),
+        "--python".to_string(),
+        python_program(),
+        "--python-path".to_string(),
+        arg(&python_path()),
+        "--python-path".to_string(),
+        arg(&ac01_dir().join("py")),
+        "--json".to_string(),
+    ]
+}
+
 /// `runs.record_mode` 存储值（architecture §5.2 / 06 §6.2.4）。
 fn run_record_mode(db: &Path) -> String {
     connect(db)
@@ -1607,4 +1648,101 @@ fn run_json_mode_keeps_lifecycle_off_stderr() {
         !stderr.contains("[seq "),
         "--json 不应输出生命周期行: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 5. ISSUE-082：runs.worker_versions_json / model_params_json 接线
+// ---------------------------------------------------------------------------
+
+#[test]
+fn completed_run_writes_worker_versions_and_model_params_columns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("ac01_columns.db");
+    let output = run_cli(&ac01_args(&db), dir.path());
+    assert_exit(&output, 0, "AC-01 run with metadata columns");
+    let (worker_versions, model_params) = run_columns(&db);
+    let worker_versions: Value = serde_json::from_str(
+        worker_versions
+            .as_deref()
+            .expect("worker_versions_json written"),
+    )
+    .expect("worker versions JSON");
+    let model_params: Value =
+        serde_json::from_str(model_params.as_deref().expect("model_params_json written"))
+            .expect("model params JSON");
+    let versions = worker_versions.as_array().expect("array");
+    assert!(
+        !versions.is_empty(),
+        "worker hello must be recorded: {worker_versions}"
+    );
+    assert!(versions
+        .iter()
+        .all(|value| { value["python_version"].is_string() && value["sdk_version"].is_string() }));
+    let params = model_params.as_array().expect("array");
+    assert!(!params.is_empty(), "agent model params must be recorded");
+    assert!(params.iter().all(|value| {
+        value["provider"] == json!("deepseek")
+            && value["name"].is_string()
+            && value["temperature"].is_number()
+            && value["max_tokens"].is_u64()
+            && value.get("api_key_env").is_none()
+            && value.get("api_key").is_none()
+    }));
+    // 同一模型参数在同一 run 内去重。
+    let mut texts: Vec<String> = params.iter().map(Value::to_string).collect();
+    texts.sort();
+    texts.dedup();
+    assert_eq!(texts.len(), params.len(), "model params must be deduped");
+}
+
+#[test]
+fn failed_run_also_writes_run_columns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let module = write_text(
+        dir.path(),
+        "boom_columns.py",
+        "def run(inputs, ctx):\n    raise RuntimeError(\"boom\")\n",
+    );
+    let module_dir = module.parent().expect("module dir");
+    let graph = write_text(
+        dir.path(),
+        "boom_columns.json",
+        &python_graph("boom_columns", "run"),
+    );
+    let db = dir.path().join("boom_columns.db");
+    let output = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            arg(&db),
+            "--inputs".to_string(),
+            r#"{"start":{"x":1}}"#.to_string(),
+            "--python".to_string(),
+            python_program(),
+            "--python-path".to_string(),
+            arg(&python_path()),
+            "--python-path".to_string(),
+            arg(module_dir),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&output, 1, "failed run still writes columns");
+    let (worker_versions, model_params) = run_columns(&db);
+    let versions: Value = serde_json::from_str(
+        worker_versions
+            .as_deref()
+            .expect("worker_versions_json written"),
+    )
+    .expect("worker versions JSON");
+    assert!(
+        !versions.as_array().expect("array").is_empty(),
+        "handshake succeeded before node failure: {versions}"
+    );
+    let params: Value =
+        serde_json::from_str(model_params.as_deref().expect("model_params_json written"))
+            .expect("model params JSON");
+    // 本 run 无 agent 节点：写空数组而非 NULL（「尽力写」口径）。
+    assert_eq!(params, json!([]));
 }

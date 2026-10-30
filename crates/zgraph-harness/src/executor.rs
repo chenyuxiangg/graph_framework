@@ -7,11 +7,11 @@
 //! - 每次执行**懒加载** AgentConfig（不缓存），工具发现结果按 `tools_dir`
 //!   在进程内缓存一次（D3：工具模块本身无跨调用缓存）。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use zgraph_dsl::InputPort;
@@ -22,7 +22,7 @@ use zgraph_kernel::{
 use zgraph_worker::WorkerLimits;
 
 use crate::agent_loop::{run_agent, AgentRun, RunFailure};
-use crate::config::{load_agent, peek_agent_node_timeout};
+use crate::config::{load_agent, peek_agent_node_timeout, ModelConfig};
 use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
 use crate::ctx::{CancelToken, HarnessCtx};
 use crate::error::HarnessError;
@@ -64,6 +64,8 @@ pub struct HarnessExecutor {
     recorder: Option<Arc<dyn LlmCallRecorder>>,
     /// CLI 组合根注入的共享并发上限（ISSUE-079；`None` = 进程级默认回退）。
     tool_limits: Option<Arc<WorkerLimits>>,
+    /// 本 run 用到的模型参数摘要（ISSUE-082；按 run 聚合、canonical 去重）。
+    model_params: Mutex<HashMap<String, BTreeSet<String>>>,
 }
 
 impl HarnessExecutor {
@@ -74,6 +76,7 @@ impl HarnessExecutor {
             tools_cache: tokio::sync::Mutex::new(HashMap::new()),
             recorder: None,
             tool_limits: None,
+            model_params: Mutex::new(HashMap::new()),
         }
     }
 
@@ -90,6 +93,7 @@ impl HarnessExecutor {
             tools_cache: tokio::sync::Mutex::new(HashMap::new()),
             recorder: Some(recorder),
             tool_limits: None,
+            model_params: Mutex::new(HashMap::new()),
         }
     }
 
@@ -104,6 +108,7 @@ impl HarnessExecutor {
             tools_cache: tokio::sync::Mutex::new(HashMap::new()),
             recorder: None,
             tool_limits: Some(limits),
+            model_params: Mutex::new(HashMap::new()),
         }
     }
 
@@ -118,12 +123,53 @@ impl HarnessExecutor {
             tools_cache: tokio::sync::Mutex::new(HashMap::new()),
             recorder: Some(recorder),
             tool_limits: Some(limits),
+            model_params: Mutex::new(HashMap::new()),
         }
     }
 
     /// 执行器配置（只读）。
     pub fn settings(&self) -> &HarnessSettings {
         &self.settings
+    }
+
+    /// 本 run 用到的模型参数摘要（ISSUE-082；JSON 对象数组，**不含密钥**）。
+    ///
+    /// 每个摘要 = AgentConfig `model` 段的可见参数（provider/name/base_url/
+    /// temperature/max_tokens/context_window_tokens）；同一 run 内按 canonical JSON
+    /// 去重并按 JSON 文本升序输出。`None` = 本 run 尚未成功加载过 AgentConfig。
+    pub fn model_params(&self, run_id: &str) -> Option<Vec<Value>> {
+        let guard = match self.model_params.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let params = guard.get(run_id)?;
+        Some(
+            params
+                .iter()
+                .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+                .collect(),
+        )
+    }
+
+    /// 记录一次 AgentConfig 模型参数摘要（ISSUE-082；canonical 去重）。
+    fn record_model_params(&self, run_id: &str, model: &ModelConfig) {
+        // 显式枚举字段：**不包含** `api_key_env` 等密钥来源信息。
+        let summary = serde_json::json!({
+            "provider": model.provider.as_str(),
+            "name": model.name,
+            "base_url": model.base_url,
+            "temperature": model.temperature,
+            "max_tokens": model.max_tokens,
+            "context_window_tokens": model.context_window_tokens,
+        });
+        let Ok(text) = serde_json::to_string(&summary) else {
+            return;
+        };
+        let mut guard = match self.model_params.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.entry(run_id.to_string()).or_default().insert(text);
     }
 
     /// 取得（并缓存）`tools_dir` 的工具注册表；同一进程内只 `discover` 一次。
@@ -307,6 +353,8 @@ impl HarnessExecutor {
             self.settings.fake_mode,
         )
         .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
+        // ISSUE-082：记录本 run 的模型参数摘要（去重；失败 run 也保留已加载的摘要）。
+        self.record_model_params(job.ctx.run_id(), &agent.config.model);
         // ISSUE-076：有效实例超时 = DSL 声明 > AgentConfig > DEFAULT（05 §5.2.6），
         // 与内核 dispatch 的解析顺序一致；仅用于 `Timeout.elapsed_ms` 上报。
         let node_timeout_ms = job
@@ -575,6 +623,76 @@ mod tests {
             .into_iter()
             .rfind(|snapshot| snapshot.node_id == node)
             .map(|snapshot| snapshot.status)
+    }
+
+    /// ISSUE-082：run 结束可查询模型参数摘要（含字段、不含密钥）。
+    #[tokio::test]
+    async fn model_params_are_recorded_per_run_without_secrets() {
+        let dir = assets(agent_config("parser", &[]), "你是解析器。");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "ok", "stop_reason": "EndTurn"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
+        let (outcome, _sink) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed);
+        let params = executor
+            .model_params(&outcome.run_id)
+            .expect("model params recorded");
+        assert_eq!(params.len(), 1, "one distinct model per run");
+        let summary = &params[0];
+        assert_eq!(summary["provider"], json!("deepseek"));
+        assert_eq!(summary["name"], json!("deepseek-chat"));
+        assert_eq!(summary["base_url"], Value::Null);
+        assert_eq!(summary["temperature"], json!(0.0));
+        assert_eq!(summary["max_tokens"], json!(256));
+        assert_eq!(summary["context_window_tokens"], json!(65536));
+        let text = summary.to_string();
+        assert!(
+            !text.contains("api_key"),
+            "model params must not leak secrets: {text}"
+        );
+        assert!(
+            !text.contains("HARNESS_TEST_KEY"),
+            "env var name excluded: {text}"
+        );
+        assert_eq!(executor.model_params("missing-run"), None);
+    }
+
+    /// ISSUE-082：同一 run 内相同模型参数去重、不同模型并列。
+    #[test]
+    fn model_params_dedup_within_run() {
+        let executor = HarnessExecutor::new(HarnessSettings {
+            assets_dir: PathBuf::from("/tmp/assets"),
+            tools_dir: PathBuf::from("/tmp/tools"),
+            provider: Arc::new(
+                FakeLlmProvider::from_script(fake_script(json!([
+                    {"kind": "text", "content": "unused"}
+                ])))
+                .expect("script"),
+            ),
+            fake_mode: true,
+            tool_runner: Arc::new(FakeToolRunner::new()),
+        });
+        let model = |temperature: f32| ModelConfig {
+            provider: crate::llm::ProviderKind::Deepseek,
+            name: "deepseek-chat".to_string(),
+            base_url: None,
+            api_key_env: "SECRET_ENV".to_string(),
+            temperature,
+            max_tokens: 256,
+            context_window_tokens: 65_536,
+        };
+        executor.record_model_params("run-a", &model(0.2));
+        executor.record_model_params("run-a", &model(0.2));
+        executor.record_model_params("run-a", &model(0.7));
+        executor.record_model_params("run-b", &model(0.2));
+        assert_eq!(executor.model_params("run-a").expect("run-a").len(), 2);
+        assert_eq!(executor.model_params("run-b").expect("run-b").len(), 1);
+        assert_eq!(executor.model_params("run-c"), None);
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ pub use spawn::{
     run_worker, run_worker_controlled, sample_request, WorkerConfig, WorkerFailure, WorkerRun,
 };
 pub use supervisor::{
-    no_cancel, run_supervised, CancelSignal, FrameSink, StreamingLimits, StreamingStats,
-    SupervisorConfig, DEFAULT_CANCEL_GRACE, DEFAULT_FRAME_TIMEOUT, DEFAULT_MAX_EMIT_BYTES,
-    DEFAULT_MAX_EMIT_EVENTS, DEFAULT_TERM_GRACE,
+    no_cancel, run_supervised, run_supervised_observed, CancelSignal, FrameSink, StreamingLimits,
+    StreamingStats, SupervisorConfig, DEFAULT_CANCEL_GRACE, DEFAULT_FRAME_TIMEOUT,
+    DEFAULT_MAX_EMIT_BYTES, DEFAULT_MAX_EMIT_EVENTS, DEFAULT_TERM_GRACE,
 };
