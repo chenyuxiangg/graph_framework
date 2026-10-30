@@ -28,7 +28,7 @@ rusqlite.workspace = true
 
 # 进程存活性断言（`kill(pid, 0)`）；与 `zgraph-worker` 同一版本，仅 Unix 提供。
 [target.'cfg(unix)'.dev-dependencies]
-nix = { version = "0.29", features = ["signal", "process"] }
+nix = { workspace = true, features = ["signal", "process"] }
 
 [[test]]
 name = "timeout_kill"

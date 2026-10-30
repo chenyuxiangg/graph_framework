@@ -28,5 +28,12 @@ uuid = { version = "1", features = ["v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 async-trait = "0.1"
+# ISS-073：genai 0.7.2 会无条件打开 serde_json 的 preserve_order（feature 统一），
+# 使 Vec/Value 变大；已用 WorkerFailure::Worker(Box<WorkerError>) 装箱缓解，并靠
+# CI clippy -D warnings 守卫尺寸回归。升级/替代不在 v1 范围（DR-003 D2），勿在本行随意升级。
 genai = "0.7.2"
 tokio-util = { version = "0.7", features = ["rt"] }
+blake3 = "1"
+futures-util = "0.3"
+# nix 只在 Unix 提供；成员 crate 在 [target.'cfg(unix)'.dependencies] 里按需启用 feature。
+nix = "0.29"

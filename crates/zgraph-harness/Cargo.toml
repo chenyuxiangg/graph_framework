@@ -18,7 +18,7 @@ async-trait.workspace = true
 genai.workspace = true
 # genai 0.7.2 的 `ChatStream` 只实现 `futures::Stream`；取流需要 `StreamExt`。
 # 选更小的 `futures-util`（genai 已把它作为传递依赖编译）。
-futures-util = "0.3"
+futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
