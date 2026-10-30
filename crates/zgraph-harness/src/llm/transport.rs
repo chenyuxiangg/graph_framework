@@ -22,9 +22,9 @@ use std::time::Instant;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, ContentPart, MessageContent,
-    StopReason as GenaiStopReason, Tool as GenaiTool, ToolCall as GenaiToolCall, ToolResponse,
-    Usage as GenaiUsage,
+    ChatMessage, ChatOptions, ChatRequest, ChatStream, ChatStreamEvent, ContentPart,
+    MessageContent, StopReason as GenaiStopReason, Tool as GenaiTool, ToolCall as GenaiToolCall,
+    ToolResponse, Usage as GenaiUsage,
 };
 use genai::resolver::{AuthData, Endpoint};
 use genai::webc::Error as GenaiWebcError;
@@ -77,80 +77,124 @@ impl LlmProvider for GenaiLlmProvider {
         if cancel.is_cancelled() {
             return Err(cancelled_error(LlmPhase::Establish, 0));
         }
-        let (target, chat_request, options) = build_genai_request(&req);
-        let mut stream = match self
+        let stream = self.open_stream(&req).await?;
+        drain_stream(stream, sink, cancel, started).await
+    }
+}
+
+impl GenaiLlmProvider {
+    /// 建立流式请求；Establish 阶段失败按 provider 错误分类映射。
+    async fn open_stream(&self, req: &LlmRequest) -> Result<ChatStream, LlmError> {
+        let (target, chat_request, options) = build_genai_request(req);
+        match self
             .client
             .exec_chat_stream(target, chat_request, Some(&options))
             .await
         {
-            Ok(response) => Box::pin(response.stream),
-            Err(error) => return Err(map_genai_error(&error, LlmPhase::Establish, 0)),
-        };
+            Ok(response) => Ok(response.stream),
+            Err(error) => Err(map_genai_error(&error, LlmPhase::Establish, 0)),
+        }
+    }
+}
 
-        let mut phase = LlmPhase::Establish;
-        let mut streamed: u32 = 0;
-        let mut tool_index: u32 = 0;
-        let mut started_calls: HashSet<String> = HashSet::new();
-        let mut cancel_wait = Box::pin(wait_cancelled(cancel));
-        loop {
-            let next = tokio::select! {
-                biased;
-                _ = &mut cancel_wait => {
-                    return Err(cancelled_error(phase, streamed));
-                }
-                item = stream.next() => item,
-            };
-            let Some(event) = next else {
-                return Err(LlmError::new(
-                    LlmErrorKind::StreamBroken,
-                    phase,
-                    "stream ended without ChatStreamEvent::End",
-                    streamed,
-                ));
-            };
-            let event = match event {
-                Ok(event) => event,
-                Err(error) => return Err(map_genai_error(&error, phase, streamed)),
-            };
-            match event {
-                ChatStreamEvent::Start | ChatStreamEvent::Heartbeat => {}
-                ChatStreamEvent::Chunk(chunk) => {
-                    phase = LlmPhase::Streaming;
-                    streamed = streamed.saturating_add(1);
-                    sink.on_delta(LlmDelta::Token {
-                        text: chunk.content,
-                    });
-                }
-                ChatStreamEvent::ReasoningChunk(chunk) => {
-                    phase = LlmPhase::Streaming;
-                    streamed = streamed.saturating_add(1);
-                    sink.on_delta(LlmDelta::Reasoning {
-                        text: chunk.content,
-                    });
-                }
-                // 思维签名只参与 provider 续传，不进正文/推理增量。
-                ChatStreamEvent::ThoughtSignatureChunk(_) => {}
-                ChatStreamEvent::ToolCallChunk(chunk) => {
-                    let call = chunk.tool_call;
-                    if started_calls.insert(call.call_id.clone()) {
-                        sink.on_delta(LlmDelta::ToolCallStarted {
-                            index: tool_index,
-                            call_id: call.call_id.clone(),
-                            name: call.fn_name.clone(),
-                        });
-                        tool_index = tool_index.saturating_add(1);
-                    }
-                    sink.on_delta(LlmDelta::ToolCallArgs {
-                        index: tool_index.saturating_sub(1),
-                        delta: call.fn_arguments.to_string(),
-                    });
-                }
-                ChatStreamEvent::End(end) => {
-                    let latency_ms =
-                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    return Ok(build_response(end, latency_ms));
-                }
+/// 流式事件循环的累计状态（phase / 已交付增量 / 工具调用序号）。
+struct StreamState {
+    phase: LlmPhase,
+    streamed: u32,
+    tool_index: u32,
+    started_calls: HashSet<String>,
+}
+
+impl Default for StreamState {
+    fn default() -> Self {
+        Self {
+            phase: LlmPhase::Establish,
+            streamed: 0,
+            tool_index: 0,
+            started_calls: HashSet::new(),
+        }
+    }
+}
+
+impl StreamState {
+    /// 处理一个流事件；`Some(response)` 表示收到 `End`。
+    fn apply(
+        &mut self,
+        event: ChatStreamEvent,
+        sink: &mut dyn LlmStreamSink,
+        started: Instant,
+    ) -> Option<LlmResponse> {
+        match event {
+            ChatStreamEvent::Start | ChatStreamEvent::Heartbeat => {}
+            ChatStreamEvent::Chunk(chunk) => {
+                self.phase = LlmPhase::Streaming;
+                self.streamed = self.streamed.saturating_add(1);
+                sink.on_delta(LlmDelta::Token {
+                    text: chunk.content,
+                });
             }
+            ChatStreamEvent::ReasoningChunk(chunk) => {
+                self.phase = LlmPhase::Streaming;
+                self.streamed = self.streamed.saturating_add(1);
+                sink.on_delta(LlmDelta::Reasoning {
+                    text: chunk.content,
+                });
+            }
+            // 思维签名只参与 provider 续传，不进正文/推理增量。
+            ChatStreamEvent::ThoughtSignatureChunk(_) => {}
+            ChatStreamEvent::ToolCallChunk(chunk) => {
+                let call = chunk.tool_call;
+                if self.started_calls.insert(call.call_id.clone()) {
+                    sink.on_delta(LlmDelta::ToolCallStarted {
+                        index: self.tool_index,
+                        call_id: call.call_id.clone(),
+                        name: call.fn_name.clone(),
+                    });
+                    self.tool_index = self.tool_index.saturating_add(1);
+                }
+                sink.on_delta(LlmDelta::ToolCallArgs {
+                    index: self.tool_index.saturating_sub(1),
+                    delta: call.fn_arguments.to_string(),
+                });
+            }
+            ChatStreamEvent::End(end) => {
+                let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                return Some(build_response(end, latency_ms));
+            }
+        }
+        None
+    }
+}
+
+/// 消费 genai 流：取消/错误映射/事件累积，直到 `End` 返回响应。
+async fn drain_stream(
+    stream: ChatStream,
+    sink: &mut dyn LlmStreamSink,
+    cancel: &CancelToken,
+    started: Instant,
+) -> Result<LlmResponse, LlmError> {
+    let mut stream = Box::pin(stream);
+    let mut state = StreamState::default();
+    let mut cancel_wait = Box::pin(wait_cancelled(cancel));
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = &mut cancel_wait => {
+                return Err(cancelled_error(state.phase, state.streamed));
+            }
+            item = stream.next() => item,
+        };
+        let Some(event) = next else {
+            return Err(LlmError::new(
+                LlmErrorKind::StreamBroken,
+                state.phase,
+                "stream ended without ChatStreamEvent::End",
+                state.streamed,
+            ));
+        };
+        let event = event.map_err(|error| map_genai_error(&error, state.phase, state.streamed))?;
+        if let Some(response) = state.apply(event, sink, started) {
+            return Ok(response);
         }
     }
 }

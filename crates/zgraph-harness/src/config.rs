@@ -310,11 +310,46 @@ pub fn load_agent(
 // ---------------------------------------------------------------------------
 
 /// 解析 AgentConfig JSON（未知字段拒绝 + V1–V16）。
+///
+/// ISSUE-081：顶层对象/身份/版本/model/prompt 各自拆成小函数，本函数只做编排。
 fn parse_agent_config(
     value: &Value,
     path: &Path,
     requested_id: &str,
 ) -> Result<AgentConfig, HarnessError> {
+    let object = agent_config_object(value, path)?;
+    let id = parse_agent_id(object, path, requested_id)?;
+    let name = parse_agent_name(object, path)?;
+    let schema_version = parse_schema_version(object, path)?;
+    let model = parse_model_section(object, path)?;
+    let role_prompt_file = parse_role_prompt_file(object, path)?;
+    let constraints_file = optional_string(object, "constraints_file", path, "$.constraints_file")?;
+    let tools = parse_tools(object, path)?;
+    let input_mapping = parse_input_mapping(object, path)?;
+    let max_iterations = parse_max_iterations(object, path)?;
+    let (llm_timeout_ms, llm_max_retries, node_timeout_ms) = parse_timeouts(object, path)?;
+
+    Ok(AgentConfig {
+        id,
+        name,
+        schema_version,
+        model,
+        role_prompt_file,
+        constraints_file,
+        tools,
+        input_mapping,
+        max_iterations,
+        llm_timeout_ms,
+        llm_max_retries,
+        node_timeout_ms,
+    })
+}
+
+/// 顶层必须是对象，且不含未知/保留字段。
+fn agent_config_object<'a>(
+    value: &'a Value,
+    path: &Path,
+) -> Result<&'a Map<String, Value>, HarnessError> {
     let object = value.as_object().ok_or_else(|| {
         config_error(
             "type_mismatch",
@@ -326,8 +361,15 @@ fn parse_agent_config(
         )
     })?;
     reject_unknown(object, path, "$", &TOP_LEVEL_KEYS, &RESERVED_KEYS)?;
+    Ok(object)
+}
 
-    // V1/V2：id 与索引键一致 + 命名规则。
+/// V1/V2：`id` 必填、与索引键一致且符合命名规则。
+fn parse_agent_id(
+    object: &Map<String, Value>,
+    path: &Path,
+    requested_id: &str,
+) -> Result<String, HarnessError> {
     let id = required_string(object, "id", path, "$.id")?;
     if id != requested_id {
         return Err(config_error(
@@ -349,8 +391,11 @@ fn parse_agent_config(
             format!("invalid agent id '{id}'"),
         ));
     }
+    Ok(id)
+}
 
-    // V3：name。
+/// V3：`name` 必填且 1..=128 字符。
+fn parse_agent_name(object: &Map<String, Value>, path: &Path) -> Result<String, HarnessError> {
     let name = required_string(object, "name", path, "$.name")?;
     let name_chars = name.chars().count();
     if name_chars == 0 || name_chars > 128 {
@@ -363,8 +408,11 @@ fn parse_agent_config(
             "agent name length must be 1..=128".to_string(),
         ));
     }
+    Ok(name)
+}
 
-    // V4：schema_version。
+/// V4：`schema_version`（缺省 1；仅支持 1）。
+fn parse_schema_version(object: &Map<String, Value>, path: &Path) -> Result<u64, HarnessError> {
     let schema_version = optional_u64(object, "schema_version", path, "$.schema_version")?
         .unwrap_or(SUPPORTED_SCHEMA_VERSION);
     if schema_version != SUPPORTED_SCHEMA_VERSION {
@@ -377,7 +425,14 @@ fn parse_agent_config(
             format!("unsupported schema_version {schema_version}"),
         ));
     }
+    Ok(schema_version)
+}
 
+/// V5–V11：`model` 段（必填）。
+fn parse_model_section(
+    object: &Map<String, Value>,
+    path: &Path,
+) -> Result<ModelConfig, HarnessError> {
     let model_value = object.get("model").ok_or_else(|| {
         config_error(
             "missing_field",
@@ -388,8 +443,14 @@ fn parse_agent_config(
             "AgentConfig missing required field 'model'".to_string(),
         )
     })?;
-    let model = parse_model(model_value, path)?;
+    parse_model(model_value, path)
+}
 
+/// V12：`role_prompt_file`（必填、非空白）。
+fn parse_role_prompt_file(
+    object: &Map<String, Value>,
+    path: &Path,
+) -> Result<String, HarnessError> {
     let role_prompt_file = required_string(object, "role_prompt_file", path, "$.role_prompt_file")?;
     if role_prompt_file.trim().is_empty() {
         return Err(config_error(
@@ -401,27 +462,7 @@ fn parse_agent_config(
             "role_prompt_file must not be empty".to_string(),
         ));
     }
-    let constraints_file = optional_string(object, "constraints_file", path, "$.constraints_file")?;
-
-    let tools = parse_tools(object, path)?;
-    let input_mapping = parse_input_mapping(object, path)?;
-    let max_iterations = parse_max_iterations(object, path)?;
-    let (llm_timeout_ms, llm_max_retries, node_timeout_ms) = parse_timeouts(object, path)?;
-
-    Ok(AgentConfig {
-        id,
-        name,
-        schema_version,
-        model,
-        role_prompt_file,
-        constraints_file,
-        tools,
-        input_mapping,
-        max_iterations,
-        llm_timeout_ms,
-        llm_max_retries,
-        node_timeout_ms,
-    })
+    Ok(role_prompt_file)
 }
 
 /// 解析 `model` 段（V5–V11；ISSUE-081 拆分，逐字段校验见下方子函数）。
@@ -574,70 +615,91 @@ fn parse_temperature(object: &Map<String, Value>, path: &Path) -> Result<f32, Ha
     Ok(temperature as f32)
 }
 
-/// V6/V7：`base_url` 条件必填与格式。
+/// V6/V7：`base_url` 条件必填与格式（按 provider 分派）。
 fn parse_base_url(
     object: &Map<String, Value>,
     path: &Path,
     provider: ProviderKind,
 ) -> Result<Option<String>, HarnessError> {
-    let raw = match object.get("base_url") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(text)) if text.is_empty() => None,
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(other) => {
-            return Err(type_error(
-                path,
-                "$.model.base_url",
-                "string or null",
-                json_type_name(other),
-                "base_url must be a string or null",
-            ))
-        }
-    };
+    let raw = parse_base_url_value(object, path)?;
     match provider {
-        ProviderKind::Deepseek => {
-            if raw.is_some() {
-                return Err(config_error(
-                    "unsupported_value",
-                    Some(&path.display().to_string()),
-                    Some("$.model.base_url"),
-                    Some(Value::from("null for provider=deepseek")),
-                    Some(Value::from(raw.unwrap_or_default())),
-                    "provider=deepseek requires base_url=null".to_string(),
-                ));
-            }
-            Ok(None)
-        }
-        ProviderKind::OpenAiCompatible => {
-            let Some(base_url) = raw else {
-                return Err(config_error(
-                    "missing_field",
-                    Some(&path.display().to_string()),
-                    Some("$.model.base_url"),
-                    Some(Value::from("http(s)://... (no trailing slash)")),
-                    None,
-                    "provider=openai_compatible requires base_url".to_string(),
-                ));
-            };
-            let valid = (base_url.starts_with("http://") || base_url.starts_with("https://"))
-                && !base_url.ends_with('/')
-                && !base_url.ends_with("/chat/completions")
-                && !base_url.contains(char::is_whitespace);
-            if !valid {
-                return Err(config_error(
-                    "unsupported_value",
-                    Some(&path.display().to_string()),
-                    Some("$.model.base_url"),
-                    Some(Value::from(
-                        "http(s)://host[/path]，无尾斜杠，不以 /chat/completions 结尾",
-                    )),
-                    Some(Value::from(base_url.clone())),
-                    "invalid base_url format".to_string(),
-                ));
-            }
-            Ok(Some(base_url))
-        }
+        ProviderKind::Deepseek => deepseek_base_url(raw, path),
+        ProviderKind::OpenAiCompatible => openai_compatible_base_url(raw, path),
     }
+}
+
+/// `base_url` 原始值：缺省/null/空串 → `None`；非字符串 → `type_mismatch`。
+fn parse_base_url_value(
+    object: &Map<String, Value>,
+    path: &Path,
+) -> Result<Option<String>, HarnessError> {
+    match object.get("base_url") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(other) => Err(type_error(
+            path,
+            "$.model.base_url",
+            "string or null",
+            json_type_name(other),
+            "base_url must be a string or null",
+        )),
+    }
+}
+
+/// `provider=deepseek`：`base_url` 必须缺省/null。
+fn deepseek_base_url(raw: Option<String>, path: &Path) -> Result<Option<String>, HarnessError> {
+    if raw.is_some() {
+        return Err(config_error(
+            "unsupported_value",
+            Some(&path.display().to_string()),
+            Some("$.model.base_url"),
+            Some(Value::from("null for provider=deepseek")),
+            Some(Value::from(raw.unwrap_or_default())),
+            "provider=deepseek requires base_url=null".to_string(),
+        ));
+    }
+    Ok(None)
+}
+
+/// `provider=openai_compatible`：`base_url` 必填且格式合法。
+fn openai_compatible_base_url(
+    raw: Option<String>,
+    path: &Path,
+) -> Result<Option<String>, HarnessError> {
+    let Some(base_url) = raw else {
+        return Err(config_error(
+            "missing_field",
+            Some(&path.display().to_string()),
+            Some("$.model.base_url"),
+            Some(Value::from("http(s)://... (no trailing slash)")),
+            None,
+            "provider=openai_compatible requires base_url".to_string(),
+        ));
+    };
+    validate_openai_base_url(&base_url, path)?;
+    Ok(Some(base_url))
+}
+
+/// `http(s)://host[/path]`：无尾斜杠、不以 `/chat/completions` 结尾、无空白。
+fn validate_openai_base_url(base_url: &str, path: &Path) -> Result<(), HarnessError> {
+    let valid = (base_url.starts_with("http://") || base_url.starts_with("https://"))
+        && !base_url.ends_with('/')
+        && !base_url.ends_with("/chat/completions")
+        && !base_url.contains(char::is_whitespace);
+    if !valid {
+        return Err(config_error(
+            "unsupported_value",
+            Some(&path.display().to_string()),
+            Some("$.model.base_url"),
+            Some(Value::from(
+                "http(s)://host[/path]，无尾斜杠，不以 /chat/completions 结尾",
+            )),
+            Some(Value::from(base_url.to_string())),
+            "invalid base_url format".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// V14：tools 列表（数量、引用名规则；注册表命中在 `resolve_tools`）。
@@ -845,8 +907,8 @@ fn resolve_asset_file(
         // 目标缺失/不可解析：保持既有错误码（read_bounded → file_missing/file_unreadable）。
         return Ok(normalized);
     };
-    if !canonical.starts_with(&canonical_or_lexical(&assets_root))
-        && !canonical.starts_with(&canonical_or_lexical(&cwd))
+    if !canonical.starts_with(canonical_or_lexical(&assets_root))
+        && !canonical.starts_with(canonical_or_lexical(&cwd))
     {
         return Err(path_escape_error(agent_dir, raw, json_path));
     }

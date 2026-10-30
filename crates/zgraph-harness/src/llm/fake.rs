@@ -183,29 +183,53 @@ impl LlmProvider for FakeLlmProvider {
         }
         let (call, failure, attempt) = self.plan(&req);
         if let Some(failure) = failure {
-            if failure.phase == LlmPhase::Establish {
-                return Err(
-                    LlmError::new(failure.kind, LlmPhase::Establish, failure.message, 0)
-                        .with_status(failure.status, failure.retry_after_ms),
-                );
-            }
-            // streaming 失败：先交付一个正文增量，确保 `streamed_tokens > 0`。
-            let mut streamed = 0u32;
-            if let Some(text) = call.content.as_deref() {
-                if let Some(chunk) = chunks(text, self.chunk_chars()).into_iter().next() {
-                    sink.on_delta(LlmDelta::Token { text: chunk });
-                    streamed = 1;
-                }
-            }
-            return Err(LlmError::new(
-                failure.kind,
-                LlmPhase::Streaming,
-                failure.message,
-                streamed,
-            )
-            .with_status(failure.status, failure.retry_after_ms));
+            return Err(self.injected_failure(&call, failure, sink));
         }
+        self.emit_planned_deltas(&call, sink, cancel).await?;
+        let usage = usage_for(&req, &call);
+        Ok(LlmResponse {
+            content: call.content.clone(),
+            reasoning: call.reasoning.clone(),
+            tool_calls: call.tool_calls.clone(),
+            stop_reason: call.stop_reason.clone(),
+            usage,
+            latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            provider_request_id: Some(format!("fake-{attempt}")),
+            attempts: attempt.saturating_add(1),
+        })
+    }
+}
 
+impl FakeLlmProvider {
+    /// 失败注入 → [`LlmError`]；streaming 失败先交付一个正文增量确保 `streamed > 0`。
+    fn injected_failure(
+        &self,
+        call: &FakeCall,
+        failure: FakeFailure,
+        sink: &mut dyn LlmStreamSink,
+    ) -> LlmError {
+        if failure.phase == LlmPhase::Establish {
+            return LlmError::new(failure.kind, LlmPhase::Establish, failure.message, 0)
+                .with_status(failure.status, failure.retry_after_ms);
+        }
+        let mut streamed = 0u32;
+        if let Some(text) = call.content.as_deref() {
+            if let Some(chunk) = chunks(text, self.chunk_chars()).into_iter().next() {
+                sink.on_delta(LlmDelta::Token { text: chunk });
+                streamed = 1;
+            }
+        }
+        LlmError::new(failure.kind, LlmPhase::Streaming, failure.message, streamed)
+            .with_status(failure.status, failure.retry_after_ms)
+    }
+
+    /// 依次交付 reasoning → content → tool_calls 增量（delta 之间可暂停并检查取消）。
+    async fn emit_planned_deltas(
+        &self,
+        call: &FakeCall,
+        sink: &mut dyn LlmStreamSink,
+        cancel: &CancelToken,
+    ) -> Result<(), LlmError> {
         let mut streamed = 0u32;
         if let Some(reasoning) = call.reasoning.as_deref() {
             for chunk in chunks(reasoning, self.chunk_chars()) {
@@ -233,22 +257,9 @@ impl LlmProvider for FakeLlmProvider {
                 sink.on_delta(LlmDelta::ToolCallArgs { index, delta });
             }
         }
-
-        let usage = usage_for(&req, &call);
-        Ok(LlmResponse {
-            content: call.content.clone(),
-            reasoning: call.reasoning.clone(),
-            tool_calls: call.tool_calls.clone(),
-            stop_reason: call.stop_reason.clone(),
-            usage,
-            latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            provider_request_id: Some(format!("fake-{attempt}")),
-            attempts: attempt.saturating_add(1),
-        })
+        Ok(())
     }
-}
 
-impl FakeLlmProvider {
     fn chunk_chars(&self) -> usize {
         self.script.chunk_chars
     }

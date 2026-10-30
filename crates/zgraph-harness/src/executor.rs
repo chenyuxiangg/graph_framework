@@ -7,14 +7,17 @@
 //! - 每次执行**懒加载** AgentConfig（不缓存），工具发现结果按 `tools_dir`
 //!   在进程内缓存一次（D3：工具模块本身无跨调用缓存）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
-use zgraph_kernel::{CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor};
+use zgraph_dsl::InputPort;
+use zgraph_kernel::{
+    CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor, PortName,
+};
 
 use crate::agent_loop::{run_agent, AgentRun, RunFailure};
 use crate::config::{load_agent, peek_agent_node_timeout};
@@ -113,11 +116,8 @@ impl NodeExecutor for HarnessExecutor {
         execution: NodeExecution<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Value, NodeError>> + Send + 'a>> {
         // 只有 Agent handler 归本执行器；其它 handler 是内核路由错误。
-        let CompiledHandler::Agent {
-            agent_id,
-            input_mapping,
-            max_iterations,
-        } = execution.node.handler.clone()
+        let Some((agent_id, node_mapping, node_max_iterations)) =
+            agent_call_parts(&execution.node.handler)
         else {
             return Box::pin(async move {
                 Err(NodeError::Internal {
@@ -125,66 +125,24 @@ impl NodeExecutor for HarnessExecutor {
                 })
             });
         };
-        let node_mapping = input_mapping;
-        let node_max_iterations = max_iterations;
-        let ctx: Arc<dyn HarnessCtx> = Arc::new(execution.ctx.clone());
-        let inputs = execution.inputs.clone();
-        let declared_ports = execution.node.inputs.clone();
         let declared_timeout_ms = execution.node.declared_timeout_ms;
         // ISSUE-076：Loading 早退（取消/超时/ConfigLoad）的 elapsed 上报也用同一优先级
         // `declared > AgentConfig(node_timeout_ms 轻量读取) > DEFAULT`（与内核派发一致）。
-        let resolved_timeout_ms =
-            resolve_node_timeout_ms(declared_timeout_ms, &self.settings.assets_dir, &agent_id);
-        Box::pin(async move {
-            // ---- Phase Loading（取消/实例 deadline 预检优先）
-            if ctx.cancel_requested() {
-                return Err(NodeError::Cancelled);
-            }
-            let remaining = ctx.node_deadline_remaining_ms();
-            if remaining == 0 {
-                return Err(NodeError::Timeout {
-                    elapsed_ms: resolved_timeout_ms.saturating_sub(remaining),
-                });
-            }
-            let registry = self
-                .registry(&ctx)
-                .await
-                .map_err(|error| config_failure(error, &ctx, resolved_timeout_ms))?;
-            let agent = load_agent(
+        let job = AgentCallJob {
+            resolved_timeout_ms: resolve_node_timeout_ms(
+                declared_timeout_ms,
                 &self.settings.assets_dir,
                 &agent_id,
-                &registry,
-                self.settings.fake_mode,
-            )
-            .map_err(|error| config_failure(error, &ctx, resolved_timeout_ms))?;
-            // ISSUE-076：有效实例超时 = DSL 声明 > AgentConfig > DEFAULT（05 §5.2.6），
-            // 与内核 dispatch 的解析顺序一致；仅用于 `Timeout.elapsed_ms` 上报。
-            let node_timeout_ms = declared_timeout_ms.unwrap_or(agent.config.node_timeout_ms);
-            // 节点级 max_iterations 覆盖 AgentConfig（05 §5.2.6）。
-            let effective_max_iterations = node_max_iterations
-                .unwrap_or(agent.config.max_iterations)
-                .clamp(1, 50);
-            let tools_dir = absolute(&self.settings.tools_dir);
-            let cancel = CancelToken::new(ctx.clone());
-            let run = AgentRun {
-                agent: &agent,
-                tools_dir: &tools_dir,
-                provider: &self.settings.provider,
-                tool_runner: &self.settings.tool_runner,
-                inputs: &inputs,
-                declared_ports: &declared_ports,
-                node_mapping: &node_mapping,
-                max_iterations: effective_max_iterations,
-                node_timeout_ms,
-                ctx: ctx.clone(),
-                cancel,
-                recorder: self.recorder.as_ref(),
-            };
-            run_agent(run)
-                .await
-                .map(|output| output.to_json())
-                .map_err(RunFailure::into_node_error)
-        })
+            ),
+            agent_id,
+            node_mapping,
+            node_max_iterations,
+            ctx: Arc::new(execution.ctx.clone()),
+            inputs: execution.inputs.clone(),
+            declared_ports: execution.node.inputs.clone(),
+            declared_timeout_ms,
+        };
+        Box::pin(async move { self.run_agent_call(job).await })
     }
 
     /// ISSUE-076：`agent_call` 在 DSL 未声明 `timeout_ms` 时回退
@@ -200,6 +158,97 @@ impl NodeExecutor for HarnessExecutor {
         };
         peek_agent_node_timeout(&self.settings.assets_dir, agent_id)
     }
+}
+
+/// `agent_call` 单次执行的输入快照（`execute` → [`HarnessExecutor::run_agent_call`] 的 seam）。
+struct AgentCallJob {
+    agent_id: String,
+    node_mapping: BTreeMap<String, String>,
+    node_max_iterations: Option<u32>,
+    ctx: Arc<dyn HarnessCtx>,
+    inputs: HashMap<PortName, Value>,
+    declared_ports: Vec<InputPort>,
+    declared_timeout_ms: Option<u64>,
+    resolved_timeout_ms: u64,
+}
+
+/// 从 handler 取出 `agent_call` 三元组；其它 handler → `None`（内核路由错误）。
+fn agent_call_parts(
+    handler: &CompiledHandler,
+) -> Option<(String, BTreeMap<String, String>, Option<u32>)> {
+    match handler {
+        CompiledHandler::Agent {
+            agent_id,
+            input_mapping,
+            max_iterations,
+        } => Some((agent_id.clone(), input_mapping.clone(), *max_iterations)),
+        _ => None,
+    }
+}
+
+impl HarnessExecutor {
+    /// `agent_call` 执行主体：Loading → Assembling → Invoking/ToolExec（05 §5.5.4）。
+    async fn run_agent_call(&self, job: AgentCallJob) -> Result<Value, NodeError> {
+        check_loading_guard(&job.ctx, job.resolved_timeout_ms)?;
+        let registry = self
+            .registry(&job.ctx)
+            .await
+            .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
+        let agent = load_agent(
+            &self.settings.assets_dir,
+            &job.agent_id,
+            &registry,
+            self.settings.fake_mode,
+        )
+        .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
+        // ISSUE-076：有效实例超时 = DSL 声明 > AgentConfig > DEFAULT（05 §5.2.6），
+        // 与内核 dispatch 的解析顺序一致；仅用于 `Timeout.elapsed_ms` 上报。
+        let node_timeout_ms = job
+            .declared_timeout_ms
+            .unwrap_or(agent.config.node_timeout_ms);
+        // 节点级 max_iterations 覆盖 AgentConfig（05 §5.2.6）。
+        let effective_max_iterations = job
+            .node_max_iterations
+            .unwrap_or(agent.config.max_iterations)
+            .clamp(1, 50);
+        let tools_dir = absolute(&self.settings.tools_dir);
+        let cancel = CancelToken::new(job.ctx.clone());
+        let run = AgentRun {
+            agent: &agent,
+            tools_dir: &tools_dir,
+            provider: &self.settings.provider,
+            tool_runner: &self.settings.tool_runner,
+            inputs: &job.inputs,
+            declared_ports: &job.declared_ports,
+            node_mapping: &job.node_mapping,
+            max_iterations: effective_max_iterations,
+            node_timeout_ms,
+            ctx: job.ctx.clone(),
+            cancel,
+            recorder: self.recorder.as_ref(),
+        };
+        run_agent(run)
+            .await
+            .map(|output| output.to_json())
+            .map_err(RunFailure::into_node_error)
+    }
+}
+
+/// Phase Loading 预检（05 §5.7.3）：取消优先，其次实例 deadline。
+fn check_loading_guard(
+    ctx: &Arc<dyn HarnessCtx>,
+    resolved_timeout_ms: u64,
+) -> Result<(), NodeError> {
+    if ctx.cancel_requested() {
+        return Err(NodeError::Cancelled);
+    }
+    let remaining = ctx.node_deadline_remaining_ms();
+    if remaining == 0 {
+        return Err(NodeError::Timeout {
+            elapsed_ms: resolved_timeout_ms.saturating_sub(remaining),
+        });
+    }
+    Ok(())
 }
 
 /// 生效实例超时（05 §5.2.6，与内核派发解析同序）：DSL 声明 > AgentConfig > 默认。

@@ -953,86 +953,130 @@ fn validate_schema_node(
     };
     for (keyword, keyword_value) in object {
         let keyword_path = format!("{json_path}.{keyword}");
-        if FORBIDDEN_SCHEMA_KEYWORDS.contains(&keyword.as_str()) {
-            return Err(unsupported_schema_keyword(
-                tool_name,
-                &keyword_path,
-                keyword,
-            ));
+        validate_schema_keyword(tool_name, keyword, keyword_value, &keyword_path, depth)?;
+    }
+    Ok(())
+}
+
+/// 单个 schema 关键字：白名单判定 + 按关键字校验值结构（子节点递归回 [`validate_schema_node`]）。
+fn validate_schema_keyword(
+    tool_name: &str,
+    keyword: &str,
+    value: &Value,
+    keyword_path: &str,
+    depth: usize,
+) -> Result<(), HarnessError> {
+    if FORBIDDEN_SCHEMA_KEYWORDS.contains(&keyword) || !ALLOWED_SCHEMA_KEYWORDS.contains(&keyword) {
+        return Err(unsupported_schema_keyword(tool_name, keyword_path, keyword));
+    }
+    match keyword {
+        "properties" => validate_properties_keyword(tool_name, value, keyword_path, depth),
+        "items" => validate_items_keyword(tool_name, value, keyword_path, depth),
+        "additionalProperties" => {
+            validate_additional_properties_keyword(tool_name, value, keyword_path)
         }
-        if !ALLOWED_SCHEMA_KEYWORDS.contains(&keyword.as_str()) {
-            return Err(unsupported_schema_keyword(
-                tool_name,
-                &keyword_path,
-                keyword,
-            ));
-        }
-        match keyword.as_str() {
-            "properties" => {
-                let Some(properties) = keyword_value.as_object() else {
-                    return Err(config_schema_error(
-                        tool_name,
-                        &keyword_path,
-                        "properties must be an object",
-                    ));
-                };
-                for (name, schema) in properties {
-                    validate_schema_node(
-                        tool_name,
-                        schema,
-                        &format!("{keyword_path}.{name}"),
-                        depth + 1,
-                    )?;
-                }
-            }
-            "items" => {
-                if !keyword_value.is_object() {
-                    return Err(config_schema_error(
-                        tool_name,
-                        &keyword_path,
-                        "items must be a schema object",
-                    ));
-                }
-                validate_schema_node(tool_name, keyword_value, &keyword_path, depth + 1)?;
-            }
-            "additionalProperties" => {
-                if !keyword_value.is_boolean() {
-                    return Err(unsupported_schema_keyword(
-                        tool_name,
-                        &keyword_path,
-                        "additionalProperties (only bool allowed)",
-                    ));
-                }
-            }
-            "type" => {
-                let Some(type_name) = keyword_value.as_str() else {
-                    return Err(config_schema_error(
-                        tool_name,
-                        &keyword_path,
-                        "type must be a string",
-                    ));
-                };
-                if !matches!(
-                    type_name,
-                    "object" | "string" | "number" | "integer" | "boolean" | "array" | "null"
-                ) {
-                    return Err(unsupported_schema_keyword(
-                        tool_name,
-                        &keyword_path,
-                        type_name,
-                    ));
-                }
-            }
-            "required" | "enum" if !keyword_value.is_array() => {
-                return Err(config_schema_error(
-                    tool_name,
-                    &keyword_path,
-                    "required/enum must be arrays",
-                ));
-            }
-            "required" | "enum" => {}
-            _ => {}
-        }
+        "type" => validate_type_keyword(tool_name, value, keyword_path),
+        "required" | "enum" => validate_array_keyword(tool_name, value, keyword_path),
+        _ => Ok(()),
+    }
+}
+
+/// `properties`：对象，逐个属性递归校验（路径追加属性名）。
+fn validate_properties_keyword(
+    tool_name: &str,
+    value: &Value,
+    keyword_path: &str,
+    depth: usize,
+) -> Result<(), HarnessError> {
+    let Some(properties) = value.as_object() else {
+        return Err(config_schema_error(
+            tool_name,
+            keyword_path,
+            "properties must be an object",
+        ));
+    };
+    for (name, schema) in properties {
+        validate_schema_node(
+            tool_name,
+            schema,
+            &format!("{keyword_path}.{name}"),
+            depth + 1,
+        )?;
+    }
+    Ok(())
+}
+
+/// `items`：单个 schema 对象，递归校验。
+fn validate_items_keyword(
+    tool_name: &str,
+    value: &Value,
+    keyword_path: &str,
+    depth: usize,
+) -> Result<(), HarnessError> {
+    if !value.is_object() {
+        return Err(config_schema_error(
+            tool_name,
+            keyword_path,
+            "items must be a schema object",
+        ));
+    }
+    validate_schema_node(tool_name, value, keyword_path, depth + 1)
+}
+
+/// `additionalProperties`：仅允许 bool。
+fn validate_additional_properties_keyword(
+    tool_name: &str,
+    value: &Value,
+    keyword_path: &str,
+) -> Result<(), HarnessError> {
+    if !value.is_boolean() {
+        return Err(unsupported_schema_keyword(
+            tool_name,
+            keyword_path,
+            "additionalProperties (only bool allowed)",
+        ));
+    }
+    Ok(())
+}
+
+/// `type`：字符串且属于冻结的 JSON 类型子集。
+fn validate_type_keyword(
+    tool_name: &str,
+    value: &Value,
+    keyword_path: &str,
+) -> Result<(), HarnessError> {
+    let Some(type_name) = value.as_str() else {
+        return Err(config_schema_error(
+            tool_name,
+            keyword_path,
+            "type must be a string",
+        ));
+    };
+    if !matches!(
+        type_name,
+        "object" | "string" | "number" | "integer" | "boolean" | "array" | "null"
+    ) {
+        return Err(unsupported_schema_keyword(
+            tool_name,
+            keyword_path,
+            type_name,
+        ));
+    }
+    Ok(())
+}
+
+/// `required` / `enum`：必须是数组（元素语义由下游工具实现校验）。
+fn validate_array_keyword(
+    tool_name: &str,
+    value: &Value,
+    keyword_path: &str,
+) -> Result<(), HarnessError> {
+    if !value.is_array() {
+        return Err(config_schema_error(
+            tool_name,
+            keyword_path,
+            "required/enum must be arrays",
+        ));
     }
     Ok(())
 }
@@ -2149,18 +2193,35 @@ mod tests {
     async fn worker_tool_runner_roundtrip_with_real_python() {
         // D3 真实子进程契约（py-worker fixtures，已合入 main）：
         // discover → ToolDef（含可选 timeout_ms）+ call 成功/异常/超时。
+        let Some((root, tools_dir)) = real_tool_fixture() else {
+            eprintln!("skip: py-worker tool fixtures not present");
+            return;
+        };
+        let runner = WorkerToolRunner::new(real_worker_config(&root));
+        let ctx: Arc<dyn HarnessCtx> = TestCtx::new();
+        let defs = runner
+            .discover(&tools_dir, ctx.clone())
+            .await
+            .expect("discover real worker");
+        assert_discovered_tools(&defs);
+        assert_real_tool_calls(&runner, &defs, &tools_dir, ctx).await;
+    }
+
+    /// 真实子进程 fixture：返回 `(repo 根, tools_dir)`；fixtures 缺失 → `None`（调用方跳过）。
+    fn real_tool_fixture() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .expect("repo root");
         let tools_dir = root.join("tests/fixtures/workers/tools/tools_ok/tools");
-        if !tools_dir.is_dir() {
-            eprintln!("skip: py-worker tool fixtures not present");
-            return;
-        }
-        let python = std::env::var("ZGRAPH_PYTHON").unwrap_or_else(|_| "python3".to_string());
-        let config = zgraph_worker::WorkerConfig {
-            program: python,
+        tools_dir.is_dir().then_some((root, tools_dir))
+    }
+
+    /// 真实 `python -m zgraph_worker.runtime` 的工具执行后端配置。
+    fn real_worker_config(root: &std::path::Path) -> zgraph_worker::WorkerConfig {
+        let program = std::env::var("ZGRAPH_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        zgraph_worker::WorkerConfig {
+            program,
             args: vec![
                 "-m".to_string(),
                 crate::constants::WORKER_RUNTIME_MODULE.to_string(),
@@ -2169,18 +2230,16 @@ mod tests {
                 "PYTHONPATH".to_string(),
                 root.join("python").display().to_string(),
             )],
-            cwd: Some(root.clone()),
+            cwd: Some(root.to_path_buf()),
             timeout: Duration::from_secs(30),
             hello_timeout: Duration::from_secs(5),
             exit_grace: Duration::from_secs(1),
             max_stderr_bytes: 8 * 1024,
-        };
-        let runner = WorkerToolRunner::new(config);
-        let ctx: Arc<dyn HarnessCtx> = TestCtx::new();
-        let defs = runner
-            .discover(&tools_dir, ctx.clone())
-            .await
-            .expect("discover real worker");
+        }
+    }
+
+    /// discover 结果的工具名集合与 `timeout_ms` 采纳语义。
+    fn assert_discovered_tools(defs: &[ToolDef]) {
         let names: Vec<&str> = defs.iter().map(|tool| tool.name.as_str()).collect();
         for expected in ["add", "echo", "explode", "sleepy", "now"] {
             assert!(
@@ -2196,18 +2255,24 @@ mod tests {
             .find(|tool| tool.name == "sleepy")
             .expect("sleepy");
         assert_eq!(sleepy.timeout_ms, 300, "declared timeout_ms is adopted");
+    }
 
-        let module_of = |name: &str| {
-            defs.iter()
-                .find(|tool| tool.name == name)
-                .map(|tool| tool.source.clone())
-                .expect("tool discovered")
-        };
+    /// 真实子进程 call 成功/异常/超时三条路径。
+    async fn assert_real_tool_calls(
+        runner: &WorkerToolRunner,
+        defs: &[ToolDef],
+        tools_dir: &std::path::Path,
+        ctx: Arc<dyn HarnessCtx>,
+    ) {
         let request = |name: &str, args: Value, timeout_ms: u64| ToolCallRequest {
             call_id: "c1".to_string(),
             tool_name: name.to_string(),
-            module: module_of(name),
-            tools_dir: tools_dir.clone(),
+            module: defs
+                .iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| tool.source.clone())
+                .expect("tool discovered"),
+            tools_dir: tools_dir.to_path_buf(),
             args,
             timeout_ms,
         };

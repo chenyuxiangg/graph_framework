@@ -637,20 +637,45 @@ async fn execute_tool(
             elapsed_ms: run.node_timeout_ms,
         });
     }
-    // 05 §5.6.5：min(ToolDef.timeout_ms, DEFAULT_TOOL_TIMEOUT_MS, 剩余 deadline)。
-    let timeout_ms = tool
-        .timeout_ms
+    let timeout_ms = tool_call_timeout_ms(tool, remaining);
+    let request = tool_call_request(tool, call, run.tools_dir, timeout_ms);
+    let outcome = run_tool_call(run, request, timeout_ms).await?;
+    finish_tool_call(tool, timeout_ms, outcome)
+}
+
+/// 05 §5.6.5：`min(ToolDef.timeout_ms, DEFAULT_TOOL_TIMEOUT_MS, 剩余 deadline)`，至少 1ms。
+fn tool_call_timeout_ms(tool: &ToolDef, remaining_ms: u64) -> u64 {
+    tool.timeout_ms
         .min(DEFAULT_TOOL_TIMEOUT_MS)
-        .min(remaining)
-        .max(1);
-    let request = ToolCallRequest {
+        .min(remaining_ms)
+        .max(1)
+}
+
+/// 组装一次工具调用请求（D3：worker 子进程载荷）。
+fn tool_call_request(
+    tool: &ToolDef,
+    call: &ToolCall,
+    tools_dir: &Path,
+    timeout_ms: u64,
+) -> ToolCallRequest {
+    ToolCallRequest {
         call_id: call.call_id.clone(),
         tool_name: call.name.clone(),
         module: tool.source.clone(),
-        tools_dir: run.tools_dir.to_path_buf(),
+        tools_dir: tools_dir.to_path_buf(),
         args: call.args.clone(),
         timeout_ms,
-    };
+    }
+}
+
+/// 工具调用与取消竞争：`None` = 超时（stop-waiting），`Some(result)` = 完成。
+///
+/// 超时后不再等待（D3：worker 进程组由 `ToolRunner` 回收）。
+async fn run_tool_call(
+    run: &AgentRun<'_>,
+    request: ToolCallRequest,
+    timeout_ms: u64,
+) -> Result<Option<Result<Value, ToolFailure>>, RunFailure> {
     let call_future = run.tool_runner.call(request, run.ctx.clone());
     let mut cancel_check = Box::pin(wait_cancelled(&run.ctx));
     let mut timed = Box::pin(tokio::time::timeout(
@@ -660,30 +685,43 @@ async fn execute_tool(
     let outcome = tokio::select! {
         biased;
         _ = &mut cancel_check => return Err(RunFailure::Cancelled),
-        result = &mut timed => result,
+        result = &mut timed => result.ok(),
     };
+    Ok(outcome)
+}
+
+/// 工具调用终态 → `(ok, 喂回 LLM 的内容)`；任何工具级失败都转为错误 JSON。
+fn finish_tool_call(
+    tool: &ToolDef,
+    timeout_ms: u64,
+    outcome: Option<Result<Value, ToolFailure>>,
+) -> Result<(bool, String), RunFailure> {
     match outcome {
-        // stop-waiting：超时后不再等待（D3：worker 进程组由 ToolRunner 回收）。
-        Err(_elapsed) => Ok((
+        None => Ok((
             false,
-            tool_error_content(&ToolFailure {
-                reason: "timeout".to_string(),
-                message: format!("tool '{}' timed out after {timeout_ms} ms", tool.name),
-                error_type: None,
-                traceback: None,
-                timeout_ms: Some(timeout_ms),
-            }),
+            tool_error_content(&tool_timeout_failure(tool, timeout_ms)),
         )),
-        Ok(Err(failure)) => {
+        Some(Ok(value)) => match serialize_tool_result(&value) {
+            Ok(content) => Ok((true, content)),
+            Err(failure) => Ok((false, tool_error_content(&failure))),
+        },
+        Some(Err(failure)) => {
             if failure.reason == "cancelled" {
                 return Err(RunFailure::Cancelled);
             }
             Ok((false, tool_error_content(&failure)))
         }
-        Ok(Ok(value)) => match serialize_tool_result(&value) {
-            Ok(content) => Ok((true, content)),
-            Err(failure) => Ok((false, tool_error_content(&failure))),
-        },
+    }
+}
+
+/// 超时失败载荷（D3：stop-waiting，worker 进程组由 `ToolRunner` 回收）。
+fn tool_timeout_failure(tool: &ToolDef, timeout_ms: u64) -> ToolFailure {
+    ToolFailure {
+        reason: "timeout".to_string(),
+        message: format!("tool '{}' timed out after {timeout_ms} ms", tool.name),
+        error_type: None,
+        traceback: None,
+        timeout_ms: Some(timeout_ms),
     }
 }
 
@@ -750,7 +788,7 @@ mod tests {
     use crate::config::{AgentConfig, ModelConfig};
     use crate::llm::{FakeLlmProvider, ProviderKind, SecretString};
     use crate::record::{LlmCallRecorder, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
-    use crate::test_support::{CapturingRecorder, TestCtx};
+    use crate::test_support::{CapturingRecorder, RecordedCall, TestCtx};
     use crate::tools::{FakeToolBehavior, FakeToolRunner, ToolRegistry};
 
     fn tool_def(name: &str, parameters: Value, timeout_ms: u64) -> ToolDef {
@@ -1511,8 +1549,13 @@ mod tests {
         assert_eq!(calls[0].instance_id, "test-instance");
         assert!(calls.iter().all(|call| call.status == LLM_CALL_STATUS_OK));
 
-        // 请求快照：05 §5.3.2 可观测字段齐备。
-        let request = &calls[0].request;
+        assert_request_snapshot(&calls[0]);
+        assert_response_snapshots(&calls);
+    }
+
+    /// 请求快照：05 §5.3.2 可观测字段齐备且**已脱敏**（无 api_key 字段/明文）。
+    fn assert_request_snapshot(call: &RecordedCall) {
+        let request = &call.request;
         assert_eq!(request["model"]["provider"], json!("deepseek"));
         assert_eq!(request["model"]["name"], json!("deepseek-chat"));
         assert_eq!(request["model"]["base_url"], Value::Null);
@@ -1522,7 +1565,6 @@ mod tests {
         assert!(request["timeout_ms"].is_number());
         assert_eq!(request["tools"][0]["name"], json!("now"));
         assert_eq!(request["messages"][0]["role"], json!("system"));
-        // 脱敏：不得出现 api_key 字段或测试密钥明文。
         assert!(
             !request
                 .as_object()
@@ -1530,13 +1572,15 @@ mod tests {
                 .contains_key("api_key"),
             "request snapshot must not carry api_key"
         );
-        let request_text = calls[0].request_text();
+        let request_text = call.request_text();
         assert!(
             !request_text.contains("test-key"),
             "request snapshot leaked api key: {request_text}"
         );
+    }
 
-        // 成功响应快照：聚合字段（content/tool_calls/stop_reason/usage/attempts）。
+    /// 成功响应快照：聚合字段（content/tool_calls/stop_reason/usage/attempts）。
+    fn assert_response_snapshots(calls: &[RecordedCall]) {
         let first = calls[0].response.as_ref().expect("first response");
         assert_eq!(first["stop_reason"], json!("ToolCalls"));
         assert_eq!(first["tool_calls"][0]["call_id"], json!("c1"));
