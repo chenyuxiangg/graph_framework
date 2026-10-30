@@ -386,11 +386,12 @@ fn assert_self_loop_attempts(reader: &zgraph_trace::TraceReader, run_id: &str) {
         .map(|row| (row.attempt, row.status.as_str().to_string()))
         .collect();
     attempts.sort_unstable();
-    // 已知内核缺陷（REV-015 #3，登记 ISSUE，e2e 不改 `crates/**`）：
-    // `run.rs::apply_publish` 在 gate 求值**之前**调用 `resolve_target`，被 gate 拦截的
-    // 自环投递仍会创建 attempt+1（Pending→Skipped 幻影实例）；当该 attempt 序号达到
-    // `retry.max_attempts` 时会把本应 Completed 的 run 误判 `NODE_INTERNAL`。
-    // 这里只固化真实执行的两个 attempt，不把幻影实例当验收期望。
+    // ISSUE-061 已由 kernel REV-026 修复：`apply_publish` 先 emit GateResult，仅
+    // passed 才 `resolve_target`/`buffer_write`；被 gate 拦截的自环投递不再创建
+    // attempt+1 幻影实例，也不会因 attempt 序号达到 `retry.max_attempts` 把本应
+    // Completed 的 run 误判 `NODE_INTERNAL`。
+    // 本断言保留为**回归保护**：真实执行的 attempt 0/1 均 Completed，且不出现
+    // Crashed/TimedOut（断言不变，仅更新过期注释；REV-032）。
     assert!(
         attempts.contains(&(0, "Completed".to_string()))
             && attempts.contains(&(1, "Completed".to_string())),

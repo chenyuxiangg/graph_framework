@@ -13,7 +13,8 @@
 //!   → zgraph_cli::bridge::TraceBridge → zgraph-trace SQLite（**10 run 同库**）
 //!   → WorkerExecutor（真 python3 -m zgraph_worker.runtime 子进程）
 //!   → 含 agent_call 的 2 个 run 走 RoutingExecutor: HarnessExecutor（fake LLM）
-//!     + WorkerToolRunner（工具 = 真 Python worker 子进程）
+//!     + WorkerToolRunner（工具 = 真 Python worker 子进程；其并发走 harness 独立的
+//!       进程级 tool semaphore，不受下面 `with_limits` 约束——ISSUE-079，M6 统一）
 //!   → TraceReader 逐 run 查询
 //! ```
 //!
@@ -25,9 +26,14 @@
 //!   fake LLM（AC-08 fixture 脚本）+ 工具 `add` 走真 worker 子进程；覆盖「完整栈」
 //!   并发（kernel + Harness + worker + trace 同时多 run）。
 //! - **DB 形态**：10 个 run 全部写同一个 SQLite 文件（同 db 不同 run_id，AC 允许的
-//!   更强形态）；每个 run 的叶子 reader 与最终共享 reader 都验证 run 级隔离。
+//!   更强形态）；全部写端关闭后打开**最终共享 reader**，逐 run 查询验证 run 级隔离
+//!   （`stats.db_runs == 10` + 逐 run 行/实例/事件归属）。
 //! - 全局/每 run 上限：`WorkerExecutor::with_limits(4, 2)`；峰值用**真实进程区间**
 //!   度量（fixture 把 start/end 墙钟追加到共享日志，按 run_tag 分组求峰值）。
+//!   **口径边界（ISSUE-079）**：本测试的峰值 = `WorkerExecutor` 的 python 节点子进程
+//!   （8×a/b/c 分支 + 2×echo）；agent 的工具 `add` 由 Harness 的 `WorkerToolRunner`
+//!   执行，使用独立进程级信号量，**不计入** `with_limits` 全局/每 run 统计（M6 统一）。
+//!   因此实测全局峰值是「节点进程并发」的下界，不代表全栈所有 worker 子进程。
 //!
 //! # 实测基线（本机 macOS / Rust 1.99.1 / Python 3.13，2026-10-30 连跑 3 次）
 //!
@@ -60,8 +66,8 @@ use zgraph_harness::{
     FakeLlmProvider, HarnessExecutor, HarnessSettings, LlmMessage, LlmProvider, WorkerToolRunner,
 };
 use zgraph_kernel::{
-    CompiledGraph, CompiledHandler, NodeError, NodeExecution, NodeExecutor, RunOptions, RunSpec,
-    RunStatus,
+    CompiledGraph, CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor,
+    RunOptions, RunSpec, RunStatus,
 };
 use zgraph_trace::{InstanceStatus as TraceInstanceStatus, TraceReader};
 use zgraph_worker::WorkerExecutor;
@@ -291,6 +297,17 @@ impl NodeExecutor for RoutingExecutor {
             self.worker.execute(execution)
         }
     }
+
+    /// ISSUE-076：转发内层 `timeout_hint`，避免包装层默认 `None` 截断 harness 的
+    /// `AgentConfig.node_timeout_ms` 回退（本文件 agent 节点在 DSL 声明了 timeout_ms，
+    /// 转发仍是包装层的正确语义；端到端回退用例见 `harness_ac08.rs`）。
+    fn timeout_hint(&self, node: &CompiledNode) -> Option<u64> {
+        if matches!(&node.handler, CompiledHandler::Agent { .. }) {
+            self.harness.timeout_hint(node)
+        } else {
+            self.worker.timeout_hint(node)
+        }
+    }
 }
 
 /// AC-08 fixture 根目录（agent 资产 + tools + fake LLM 脚本）。
@@ -449,6 +466,11 @@ fn assert_runs_isolated(runs: &[FinishedRun], shared_db: &Path) {
 }
 
 /// 单 run 的完整 trace 断言，返回形状摘要供跨 run 比较。
+///
+/// **读法**：`TraceReader` 的查询本身已按 `run_id` 过滤，因此下面各处
+/// `row.run_id == run.run_id` 是**防御性一致性检查**，不承担隔离职责；真正的隔离
+/// 证据是逐 run 的精确计数（实例/gate/区间）、跨 run `instance_id` 互斥，以及同
+/// kind run 的 events 形状逐项一致。
 fn assert_run_trace(reader: &TraceReader, run: &FinishedRun) -> TraceShape {
     assert_run_identity(reader, run);
     let instance_ids = assert_run_instances(reader, run);
@@ -774,6 +796,10 @@ fn assert_agent_outputs(runs: &[FinishedRun]) {
 // ---------------------------------------------------------------------------
 
 /// 真实进程区间峰值：全局 ≤ with_limits 全局上限；每 run ≤ 每 run 上限；记录耗时比。
+///
+/// 口径边界（ISSUE-079）：区间只覆盖 `WorkerExecutor` 的 python 节点子进程
+/// （分支/echo）；agent 工具子进程走 Harness 的 `WorkerToolRunner` 独立信号量，不在
+/// 此统计内（M6 统一后再扩展）。峰值是节点进程并发的下界，断言仍对配置上限有效。
 fn assert_worker_limits(
     log_file: &Path,
     runs: &[FinishedRun],
@@ -808,7 +834,8 @@ fn assert_worker_limits(
         ratio < ELAPSED_RATIO_LIMIT,
         "10 run 总耗时/单 run = {ratio:.2} 超过宽松上限 {ELAPSED_RATIO_LIMIT}"
     );
-    // 基线记录（不参与断言）：本机实测 total≈3.5–4.5s、baseline≈0.9–1.2s、比值≈3–4。
+    // 基线记录（不参与断言）：本机实测 baseline≈0.79–0.85s、total≈2.46–2.54s、
+    // 比值≈2.9–3.1（与文件头「实测基线」一致；机器/负载不同会有波动）。
     eprintln!(
         "[AC-12] 区间组={} 全局峰值={global_peak} 每run峰值={per_run_peaks:?} \
          单run基线={baseline:?} 10run总耗时={elapsed:?} 比值={ratio:.2}",
