@@ -1,9 +1,16 @@
-//! 单写线程、批量事务与流式聚合（M2）。
+//! 单写线程、批量事务与流式聚合（M2 起；M6 拆回双通道）。
 //!
 //! 公开面只有 [`TraceWriter`] 与 [`TraceHandle`]；写连接只属于写线程。
 //!
-//! 通道为 M2 单通道简化（06 §6.4.1 双通道的等价语义）：`sync_channel(8192)` 一条，
-//! 无损事件用阻塞 `send`，流式事件用 `try_send`（满则丢弃并计数）。
+//! 通道拓扑与 06 §6.4.1 一致（**双通道**）：
+//! - 无损通道 `sync_channel(TRACE_CHANNEL_CAP = 8192)`：[`TraceHandle::send`] 阻塞发送，
+//!   满载时生产者等待（背压）；
+//! - 流式通道 `sync_channel(STREAMING_CHANNEL_CAP = 1024)`：[`TraceHandle::send_streaming`]
+//!   用 `try_send`，满/断开即丢弃并累计 `streaming_dropped`（I6 可丢语义）。
+//!
+//! 两条通道由同一写线程消费：每条数据消息携带**发送序号**，写线程按序号合并两条
+//! 通道（先入队的先处理），因此同一发送端先发出的流式事件不会被其后的无损事件越过
+//! （见 `thread` 模块）。
 
 mod recovery;
 mod stream;
@@ -19,17 +26,28 @@ use std::thread::JoinHandle;
 use crate::error::TraceError;
 use crate::model::TraceInput;
 use crate::recovery::{InterruptedCandidate, RecoveredRun};
-use crate::schema::{self, TRACE_CHANNEL_CAP};
+use crate::schema::{self, STREAMING_CHANNEL_CAP, TRACE_CHANNEL_CAP};
 
-/// 写线程消息：数据与控制消息共用同一 FIFO（保证 barrier 语义）。
+/// 无损通道消息：数据与控制消息共用同一 FIFO（保证 barrier 语义）。
+///
+/// `Input` 携带发送序号，供写线程与流式通道按到达顺序合并消费。
 pub(crate) enum WriterMsg {
-    Input(Box<TraceInput>),
+    Input {
+        seq: u64,
+        input: Box<TraceInput>,
+    },
     Flush(SyncSender<Result<(), TraceError>>),
     Shutdown(SyncSender<Result<(), TraceError>>),
     /// 中止标定候选查询（SELECT，走写线程自己的连接）。
     InterruptedCandidates(SyncSender<Result<Vec<InterruptedCandidate>, TraceError>>),
     /// 中止标定（单事务 UPDATE）；装箱以保持 `WriterMsg` 尺寸与通道开销不变。
     MarkInterrupted(Box<MarkInterruptedRequest>),
+}
+
+/// 可丢流式通道消息：携带发送序号，写线程据此与无损通道合并排序。
+pub(crate) struct StreamingMsg {
+    pub(crate) seq: u64,
+    pub(crate) input: TraceInput,
 }
 
 /// `WriterMsg::MarkInterrupted` 的载荷（多个 run id 共用同一标定时间）。
@@ -59,17 +77,21 @@ impl TraceWriter {
         let db_path = path.as_ref().to_path_buf();
         let conn = schema::open_writer_connection(&db_path)?;
         let (sender, receiver) = mpsc::sync_channel(TRACE_CHANNEL_CAP);
+        let (streaming_sender, streaming_receiver) = mpsc::sync_channel(STREAMING_CHANNEL_CAP);
+        let next_seq = Arc::new(AtomicU64::new(0));
         let error = Arc::new(Mutex::new(None));
         let thread_error = Arc::clone(&error);
         let join = std::thread::Builder::new()
             .name("zgraph-trace-writer".to_string())
-            .spawn(move || thread::run(conn, receiver, thread_error))
+            .spawn(move || thread::run(conn, receiver, streaming_receiver, thread_error))
             .map_err(|err| {
                 TraceError::Storage(format!("failed to spawn trace writer thread: {err}"))
             })?;
         Ok(TraceWriter {
             handle: TraceHandle {
                 sender,
+                streaming: streaming_sender,
+                next_seq,
                 dropped: Arc::new(AtomicU64::new(0)),
                 error,
             },
@@ -144,28 +166,50 @@ impl TraceWriter {
 
 /// trace 写句柄（`Clone + Send + Sync`）：可被内核事件循环/多个任务共享。
 ///
-/// 顺序保证：同一发送端上的 `send` 按调用顺序进入通道；多个发送端之间不保证全局
-/// 顺序（M2 的单写者模型由上层保证）。
+/// 顺序保证：同一发送端上的 `send`/`send_streaming` 按调用顺序取号，写线程按发送序号
+/// 合并两条通道，因此同一发送端先发出的流式事件不会被其后的无损事件越过（跨发送端
+/// 不保证全局顺序，由上层单写者模型保证）。
 #[derive(Clone)]
 pub struct TraceHandle {
+    /// 无损通道发送端（[`TraceHandle::send`]，阻塞）。
     sender: SyncSender<WriterMsg>,
+    /// 可丢流式通道发送端（[`TraceHandle::send_streaming`]，`try_send`）。
+    streaming: SyncSender<StreamingMsg>,
+    /// 跨两条通道共享的发送序号（写线程据此合并排序）。
+    next_seq: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     error: Arc<Mutex<Option<String>>>,
 }
 
 impl TraceHandle {
-    /// 无损发送（阻塞；通道 cap=8192）。通道已断开时记录错误并丢弃该输入。
+    /// 无损发送（阻塞；通道 cap=`TRACE_CHANNEL_CAP`）。通道已断开时记录错误并丢弃该输入。
+    ///
+    /// 也可用于发送 `TraceInput::Streaming`：走无损通道则不可丢，且与其余事件同序
+    /// （等价于 M2 单通道行为，供需要严格因果顺序的调用方使用）。
     pub fn send(&self, input: TraceInput) {
-        if self.sender.send(WriterMsg::Input(Box::new(input))).is_err() {
+        let seq = self.take_seq();
+        let message = WriterMsg::Input {
+            seq,
+            input: Box::new(input),
+        };
+        if self.sender.send(message).is_err() {
             self.record_error("trace writer channel disconnected (send dropped)".to_string());
         }
     }
 
-    /// 可丢发送（`try_send`）：通道满/断开时计数并返回 `false`。
+    /// 可丢发送（`try_send` 到 cap=`STREAMING_CHANNEL_CAP` 的流式通道）：通道满/断开时
+    /// 计数并返回 `false`。
     ///
     /// 仅用于 `TraceInput::Streaming`；非流式事件必须用 [`TraceHandle::send`]。
+    /// 流式事件**可能**晚于其后的无损事件落库（可丢通道语义，06 §6.4.1）；同一发送端
+    /// 先流式后无损的顺序由发送序号保证。调用方 MUST 保证同一 run 的 `RunStarted`
+    /// 先于其流式事件发送（内核 `Emitter` 已保证），否则 `events.run_id` 外键会拒绝。
     pub fn send_streaming(&self, input: TraceInput) -> bool {
-        match self.sender.try_send(WriterMsg::Input(Box::new(input))) {
+        let message = StreamingMsg {
+            seq: self.take_seq(),
+            input,
+        };
+        match self.streaming.try_send(message) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -222,6 +266,11 @@ impl TraceHandle {
         receiver.recv().map_err(|_| channel_closed())?
     }
 
+    /// 取下一个发送序号（两条通道共享；`Relaxed` 足够：排序只需单发送端单调）。
+    fn take_seq(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn record_error(&self, message: String) {
         if let Ok(mut slot) = self.error.lock() {
             if slot.is_none() {
@@ -233,4 +282,93 @@ impl TraceHandle {
 
 fn channel_closed() -> TraceError {
     TraceError::Storage("trace writer thread is closed".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    //! 双通道容量/丢弃/背压语义（不启动写线程与数据库，直接检查通道）。
+
+    use std::sync::mpsc::{self, Receiver};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::model::StreamingEvent;
+
+    fn streaming_input(run_id: &str) -> TraceInput {
+        TraceInput::Streaming {
+            run_id: run_id.to_string(),
+            instance_id: "inst".to_string(),
+            node_id: None,
+            event: StreamingEvent::TokenDelta {
+                text: "x".to_string(),
+            },
+            at: "2026-10-30T00:00:00.000Z".to_string(),
+        }
+    }
+
+    /// 构造不与写线程连接的句柄：保留两条通道的接收端以便观察容量。
+    fn detached_handle() -> (TraceHandle, Receiver<WriterMsg>, Receiver<StreamingMsg>) {
+        let (sender, lossless_rx) = mpsc::sync_channel(TRACE_CHANNEL_CAP);
+        let (streaming, streaming_rx) = mpsc::sync_channel(STREAMING_CHANNEL_CAP);
+        let handle = TraceHandle {
+            sender,
+            streaming,
+            next_seq: Arc::new(AtomicU64::new(0)),
+            dropped: Arc::new(AtomicU64::new(0)),
+            error: Arc::new(Mutex::new(None)),
+        };
+        (handle, lossless_rx, streaming_rx)
+    }
+
+    #[test]
+    fn streaming_channel_capacity_is_1024_and_drops_are_counted() {
+        let (handle, _lossless_rx, _streaming_rx) = detached_handle();
+        for _ in 0..STREAMING_CHANNEL_CAP {
+            assert!(
+                handle.send_streaming(streaming_input("run-cap")),
+                "容量内必须全部接收"
+            );
+        }
+        assert_eq!(handle.streaming_dropped(), 0);
+        for expected in 1..=3_u64 {
+            assert!(!handle.send_streaming(streaming_input("run-cap")));
+            assert_eq!(handle.streaming_dropped(), expected);
+        }
+    }
+
+    #[test]
+    fn lossless_send_blocks_when_channel_full() {
+        let (handle, lossless_rx, _streaming_rx) = detached_handle();
+        for _ in 0..TRACE_CHANNEL_CAP {
+            handle.send(streaming_input("run-bp"));
+        }
+        let (done, done_rx) = mpsc::channel();
+        let blocking = handle.clone();
+        let sender_thread = std::thread::spawn(move || {
+            blocking.send(streaming_input("run-bp"));
+            let _ = done.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "无损通道满时 send 必须阻塞（背压）"
+        );
+        lossless_rx.recv().expect("drain one to make room");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("腾出容量后 send 应解除阻塞");
+        sender_thread.join().expect("sender thread");
+    }
+
+    #[test]
+    fn disconnected_channels_record_error_and_count_streaming_drops() {
+        let (handle, lossless_rx, streaming_rx) = detached_handle();
+        drop(lossless_rx);
+        drop(streaming_rx);
+
+        handle.send(streaming_input("run-closed"));
+        assert!(handle.take_error().is_some(), "无损通道断开应记录错误");
+        assert!(!handle.send_streaming(streaming_input("run-closed")));
+        assert_eq!(handle.streaming_dropped(), 1);
+    }
 }

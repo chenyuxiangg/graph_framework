@@ -113,11 +113,6 @@ pub(crate) struct Aggregator {
 }
 
 impl Aggregator {
-    /// 当前是否有未落库的 delta 缓冲。
-    pub(crate) fn is_empty(&self) -> bool {
-        self.buffers.is_empty()
-    }
-
     /// 记录实例 → 节点映射（snapshot/transition 路由时调用，供 node_id 回填）。
     pub(crate) fn note_instance(&mut self, instance_id: &str, node_id: &str) {
         self.node_ids

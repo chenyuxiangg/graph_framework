@@ -26,8 +26,11 @@ pub const DB_WRITE_RETRY: u32 = 3;
 /// 每次 busy 重试的等待间隔（毫秒，06 §6.2.1）。
 pub const DB_WRITE_RETRY_INTERVAL_MS: u64 = 50;
 
-/// 无损/流式统一通道容量（M2 单通道简化，06 §6.4.1；M5 可拆双通道）。
+/// 无损事件通道容量（06 §6.4.1 / 03 §3.12 `TRACE_CHANNEL_CAP`）。
 pub const TRACE_CHANNEL_CAP: usize = 8_192;
+
+/// 可丢流式事件通道容量（06 §6.4.1 / 00 §0.5 `STREAMING_CHANNEL_CAP`）。
+pub const STREAMING_CHANNEL_CAP: usize = 1_024;
 
 /// 单批最大 events 行数（00 §0.5 `TRACE_BATCH_ROWS`）。
 pub const TRACE_BATCH_ROWS: usize = 256;

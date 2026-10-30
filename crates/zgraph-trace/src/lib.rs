@@ -1,4 +1,4 @@
-//! `zgraph-trace`：trace 持久层（M2）。
+//! `zgraph-trace`：trace 持久层（M2 起；M6 拆回 06 §6.4.1 双通道）。
 //!
 //! 语义基准：`doc/spec-v1.2/06-存储与可观测.md`（DDL/seq/写路径/聚合/CLI 只读
 //! 约定/fail-stop/恢复）与 `doc/architecture-v2.md` §5.2/§8（D1/D9 的 v2 增量）。
@@ -6,8 +6,9 @@
 //! # 架构
 //!
 //! ```text
-//! 内核事件 ──(TraceInput)──> TraceHandle ──> 单写线程 ──> SQLite(WAL)
-//!                                              │
+//! 无损 send（cap 8192 / 阻塞）──────────┐
+//! 流式 send_streaming（cap 1024 / 可丢）┴──> TraceHandle ──> 单写线程 ──> SQLite(WAL)
+//!
 //! `zgraph trace` ──> TraceReader（?:mode=ro，只读，不迁移/不标定）
 //! ```
 //!
@@ -23,12 +24,18 @@
 //!   [`TraceWriter::flush`]/[`TraceWriter::close`] 的错误暴露；fail-stop 的 run
 //!   生命周期接线由 M3/M5 负责（本里程碑记录 ISSUE）。
 //!
-//! # 对 06 分册的 M2 简化
+//! # 通道拓扑（06 §6.4.1）
 //!
-//! 通道拓扑：06 §6.4.1 规定**双通道**（无损 8192 + 流式 1024）。M2 为简化与保证
-//! 全序，使用**单通道 `sync_channel(cap=8192)`**：[`TraceHandle::send`] 阻塞发送、
-//! [`TraceHandle::send_streaming`] `try_send` 失败即丢弃计数——**可丢/无损语义不变**，
-//! 容量统一为 8192；M5 可拆回双通道而不改公开 API。
+//! 双通道有界队列，均由同一写线程消费：
+//! - **无损通道** `TRACE_CHANNEL_CAP = 8192`：[`TraceHandle::send`] 阻塞发送，满载时
+//!   生产者等待（背压）；不可丢事件走这里。
+//! - **可丢流式通道** `STREAMING_CHANNEL_CAP = 1024`：[`TraceHandle::send_streaming`]
+//!   用 `try_send`，满/断开即丢弃并累计 [`TraceHandle::streaming_dropped`]
+//!   （`RunMetrics.streaming_dropped`）。
+//!
+//! 写线程按**发送序号**合并两条通道（先入队的先处理），因此同一发送端先发出的流式
+//! 事件不会被其后的无损事件越过；`TraceWriter::flush`/`close` 的屏障同时覆盖两条
+//! 通道（关停不丢已入队的流式事件）。
 //!
 //! # 未覆盖（留待后续里程碑）
 //!
@@ -95,8 +102,8 @@ pub use reader::{
 pub use recovery::{InterruptedCandidate, RecoveredRun, INTERRUPTED_ERROR_MESSAGE};
 pub use schema::{
     DB_BUSY_TIMEOUT_MS, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, HEARTBEAT_INTERVAL_MS,
-    STREAM_SEGMENT_MAX_BYTES, STREAM_SEGMENT_MAX_CHARS, STREAM_TOKEN_AGGREGATE_MS,
-    TRACE_BATCH_INTERVAL_MS, TRACE_BATCH_ROWS, TRACE_CHANNEL_CAP, TRACE_PAYLOAD_MAX_BYTES,
-    TRACE_SCHEMA_VERSION, WAL_CHECKPOINT_INTERVAL_MS,
+    STREAMING_CHANNEL_CAP, STREAM_SEGMENT_MAX_BYTES, STREAM_SEGMENT_MAX_CHARS,
+    STREAM_TOKEN_AGGREGATE_MS, TRACE_BATCH_INTERVAL_MS, TRACE_BATCH_ROWS, TRACE_CHANNEL_CAP,
+    TRACE_PAYLOAD_MAX_BYTES, TRACE_SCHEMA_VERSION, WAL_CHECKPOINT_INTERVAL_MS,
 };
 pub use writer::{TraceHandle, TraceWriter};

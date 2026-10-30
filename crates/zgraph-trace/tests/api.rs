@@ -2,7 +2,7 @@
 
 use zgraph_trace::{
     InstanceStatus, RecordMode, RunStatus, TraceError, TraceHandle, TraceWriter,
-    TRACE_SCHEMA_VERSION,
+    STREAMING_CHANNEL_CAP, TRACE_CHANNEL_CAP, TRACE_SCHEMA_VERSION,
 };
 
 fn assert_send_sync<T: Send + Sync>() {}
@@ -15,6 +15,12 @@ fn frozen_api_types_are_shareable_across_tasks() {
     assert_clone::<TraceHandle>();
     assert_send::<TraceWriter>();
     assert_eq!(TRACE_SCHEMA_VERSION, 2);
+}
+
+#[test]
+fn channel_capacities_match_spec_6_4_1() {
+    assert_eq!(TRACE_CHANNEL_CAP, 8_192, "无损通道 06 §6.4.1");
+    assert_eq!(STREAMING_CHANNEL_CAP, 1_024, "流式通道 00 §0.5");
 }
 
 #[test]
