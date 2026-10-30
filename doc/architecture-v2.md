@@ -172,7 +172,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 - 新表 `recorded_outputs(run_id, instance_id, node_id, attempt, output_hash, output_json NULL, recorded_at)`。
 - 新表 `llm_calls(run_id, instance_id, call_index, request_json, response_json, status, recorded_at)`。
 - `events`/`transitions`/`gate_results` 沿用 spec 06。
-- **M5 写入口径（REV-028/REV-030，回写 spec 06 §6.2.13）**：`recorded_outputs` 由 CLI 组合执行器的外层包装在节点成功执行后写，键 `(run_id, instance_id, attempt)`，`output_hash = blake3(canonical_json(output))` 全 64 hex；`--record=none` 不写、`hash` 只写 hash、`full` 写全文。`llm_calls` 由 CLI 实现 Harness `LlmCallRecorder` seam 写入，**仅 `--record=full`**；每轮一次、`status` 取 `ok`/`error`、请求快照脱敏。`runs.worker_versions_json`/`model_params_json` 随同一接线写入（REV-030）。
+- **M5 写入口径（REV-028/REV-030，回写 spec 06 §6.2.13）**：`recorded_outputs` 由 CLI 组合执行器的外层包装在节点成功执行后写，键 `(run_id, instance_id, attempt)`，`output_hash = blake3(canonical_json(output))` 全 64 hex；`--record=none` 不写、`hash` 只写 hash、`full` 写全文。`llm_calls` 由 CLI 实现 Harness `LlmCallRecorder` seam 写入，**仅 `--record=full`**；每轮一次、`status` 取 `ok`/`error`、请求快照脱敏。`runs.worker_versions_json`/`model_params_json` **仍未写入**（M5 结束时保持 NULL，ISSUE-082 部分修、留 M6）。
 
 ### 5.3 CLI 契约（与 spec 06 §6.10 对齐的增量）
 
@@ -185,7 +185,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 
 > `--dry-run` **不实现**（v1 明确不支持外部副作用预演）。
 >
-> **M5 replay 退出码（DR-002 §3.3，回写 spec 06 §6.10.5/§6.10.7）**：`--mode=events` 默认 L1，复用 `zgraph trace` 只读回放、不重跑不写库；`--mode=outputs` 仅支持原始 run `Completed` 且 `record_mode=full`，用 RecordedExecutor 重跑（不启动 worker/LLM），输出不一致 → `REPLAY_OUTPUT_MISMATCH` exit 1；记录缺失/原始 run 非 Completed/记录 hash 损坏（`REPLAY_RECORD_MISSING`/`REPLAY_RUN_NOT_COMPLETED`/`REPLAY_RECORD_CORRUPT`）→ exit 3；run 不存在/存储错误 → exit 4。全部 `REPLAY_*` 属 CLI 命名空间、不写 `runs.error_code`。
+> **M5 replay 退出码（DR-002 §3.3，回写 spec 06 §6.10.5/§6.10.7；REV-030 已实现、REV-032 e2e）**：`--mode=events` 默认 L1，复用 `zgraph trace` 只读回放、不重跑不写库；`--mode=outputs` 仅支持原始 run `Completed` 且 `record_mode=full`，用 RecordedExecutor 重跑（不启动 worker/LLM），输出不一致 → `REPLAY_OUTPUT_MISMATCH` exit 1；记录缺失/原始 run 非 Completed/记录 hash 损坏（`REPLAY_RECORD_MISSING`/`REPLAY_RUN_NOT_COMPLETED`/`REPLAY_RECORD_CORRUPT`）→ exit 3；run 不存在/存储错误 → exit 4。全部 `REPLAY_*` 属 CLI 命名空间、不写 `runs.error_code`。
 
 ### 5.4 复现边界（诚实声明）
 

@@ -139,6 +139,6 @@ zgraph replay --run <run_id> [--mode=events|outputs] [--db <path>] [--json]
 | 7 | AC-12 M5 实测口径 | 07 AC-12 | 10 run/同库/峰值与耗时基线；工具并发未纳入全局上限（ISSUE-079 注记）；SQLITE_BUSY 实测结论 |
 | 8 | legacy 归档 | architecture §6.1、doc/index、legacy/README | 记录"冻结只读、不物理删除、物理归档交用户"决策 |
 | 9 | M6 排除项 | architecture §6.1、06 §6.4/§6.8 | ISSUE-033/036/073/059 保留 M6 注记（不删除原条目） |
-| 10 | 崩溃标定/中断恢复（ISSUE-084） | 06 §6.8.1/§6.8.3、§6.10.3、07 §7.3 #6 | wave2 实现 trace 标定 API + CLI 启动调用 + `recovered[]`；06 注记实现口径（owner pid 存活判定、事务化标定、退出码不受影响） |
-| 11 | CLI pre-existing 偏差（REV-028 #5） | 06 §6.10.1 | clap 未采用（沿用 M1/M2 手写解析）、无 `-v`、`--version` 格式与 `NO_COLOR` 行为随 M6；M5 docs 注记现状，不改变 M5 契约 |
-| 12 | ISSUE-081 扩展清单 | architecture §2.2 | 注记「M5 已拆 5 个目标函数；剩余既有 >60 行函数与新增 74 行测试随 M6」，避免误认为 architecture §2.2 已全量收敛 |
+| 10 | 崩溃标定/中断恢复（ISSUE-084） | 06 §6.8.1/§6.8.3、§6.10.3、07 §7.3 #6 | **已实现（REV-034 trace 原语 + REV-030 CLI 调用 + REV-032 真 SIGKILL e2e）**——trace 标定 API + CLI 启动调用 + `recovered[]`；06 注记实现口径（owner pid 存活判定、事务化标定、退出码不受影响）。ISSUE-084 因多机/EPERM/host 判定边界（REV-030 #2/#3/#4/#5）保持 open，留 M6 加固 |
+| 11 | CLI pre-existing 偏差（REV-028 #6） | 06 §6.10.1 | clap 未采用（沿用 M1/M2 手写解析）、无 `-v`、`--version` 格式与 `NO_COLOR` 行为随 M6；M5 docs 注记现状，不改变 M5 契约 |
+| 12 | ISSUE-081 扩展清单 | architecture §2.2 | 注记「M5 已拆 5 个目标函数；剩余既有 >60 行函数（含 cli `parse` 79 / `run_in_runtime` 91）与新增 >60 行测试随 M6」，避免误认为 architecture §2.2 已全量收敛 |

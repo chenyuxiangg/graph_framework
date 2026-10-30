@@ -214,7 +214,7 @@ Memory 检索/写入（stub 返回空）、KB 检索（stub 返回空）、多�
 
 > 节点级 `max_iterations`（DSL 可选字段）覆盖 AgentConfig 的规则由 02/04 分册定义；本分册只定义"被解析出的最终有效值"如何被 loop 使用。
 >
-> **M5 口径（ISSUE-076，REV-026/REV-033）**：内核 `CompiledNode` 记录 `declared_timeout_ms`（区分「未声明」与「显式默认值」，历史 `timeout_ms` 已折叠默认值、不能用于判定）；`NodeExecutor` 新增**对象安全**的默认方法 `timeout_hint(&CompiledNode) -> Option<u64>`（默认 `None`），派发超时链 = **test-hooks force > declared > executor hint > `DEFAULT_NODE_TIMEOUT_MS`（180s）**。Harness 的 `timeout_hint` **仅对 `agent_call`** 返回 `Some`，内部用同步轻量函数 `peek_agent_node_timeout` 只读 `<assets_dir>/agents/*.json`、按文件内 `id` 命中并校验 `node_timeout_ms` 值域（**不查工具表/密钥/prompt**；失败/缺失返回 `None`，权威加载仍由 Loading 报 `HARNESS_CONFIG_LOAD`），并复用同一解析顺序计算 elapsed。**CLI 组合执行器（`RoutingExecutor`/`RecordingExecutor`）转发 `timeout_hint` 随 REV-030 合并后端到端生效**；e2e `RoutingExecutor` 当前未覆写，AC-08/AC-12 的 agent 节点显式声明 `timeout_ms`（declared 优先）不受影响。ISSUE-076 在 REV-030 前为**部分修**。
+> **M5 口径（ISSUE-076，REV-026/REV-033）**：内核 `CompiledNode` 记录 `declared_timeout_ms`（区分「未声明」与「显式默认值」，历史 `timeout_ms` 已折叠默认值、不能用于判定）；`NodeExecutor` 新增**对象安全**的默认方法 `timeout_hint(&CompiledNode) -> Option<u64>`（默认 `None`），派发超时链 = **test-hooks force > declared > executor hint > `DEFAULT_NODE_TIMEOUT_MS`（180s）**。Harness 的 `timeout_hint` **仅对 `agent_call`** 返回 `Some`，内部用同步轻量函数 `peek_agent_node_timeout` 只读 `<assets_dir>/agents/*.json`、按文件内 `id` 命中并校验 `node_timeout_ms` 值域（**不查工具表/密钥/prompt**；失败/缺失返回 `None`，权威加载仍由 Loading 报 `HARNESS_CONFIG_LOAD`），并复用同一解析顺序计算 elapsed。**CLI 组合执行器（`RoutingExecutor`/`RecordingExecutor`）已转发 `timeout_hint`（REV-030）；e2e `RoutingExecutor` 同步转发（REV-032）**，端到端用例（AgentConfig=1800ms + 10s 慢 fake → `Failed/NODE_TIMEOUT`）已覆盖。ISSUE-076 在 kernel/harness/CLI 三层均落地，**M5 已修**。
 
 ### 5.2.7 `detail` 统一形态
 
@@ -1404,7 +1404,7 @@ pub trait AgentProvider: Send + Sync {
 
 | # | 限制 | 影响 | 建议 / ISSUE 归属 |
 |---|---|---|---|
-| L1 | **已修（部分）**：M4 时 `AgentConfig.node_timeout_ms` 未生效；M5 已由 kernel `declared_timeout_ms` + `NodeExecutor::timeout_hint`（REV-026）与 harness `timeout_hint`/`peek_agent_node_timeout`（REV-033）打通，优先级见 §5.2.6 | 剩余：CLI 组合执行器转发随 REV-030 合并后端到端生效 | **ISSUE-076（部分修）**；口径见 §5.2.6 |
+| L1 | **已修**：M4 时 `AgentConfig.node_timeout_ms` 未生效；M5 由 kernel `declared_timeout_ms` + `NodeExecutor::timeout_hint`（REV-026）、harness `timeout_hint`/`peek_agent_node_timeout`（REV-033）、CLI 组合执行器转发（REV-030）打通，优先级见 §5.2.6 | 无（端到端 e2e 由 REV-032 覆盖） | **ISSUE-076 fixed**（M5，REV-026/033/030/032）；口径见 §5.2.6 |
 | L2 | prompt/constraints 路径安全为**词法归一化**（拒绝 `..`），未 `canonicalize` | 符号链接可绕过资产根白名单（本地资产场景风险低） | M5 加 `canonicalize` 后重新校验 + 测试；**ISSUE-077**（REV-020 #13） |
 | L3 | `futures-util` 为 harness 直接依赖（genai `ChatStream` 取流所需），未提升 workspace；genai 默认 features 带入重依赖 | 依赖治理分散、`Cargo.lock` 增大 | process 统一提升 `[workspace.dependencies]` 并评估 `default-features`；**ISSUE-078**（REV-020 #12） |
 | L4 | **已修（REV-027）**：工具结果改**结构感知截断**（输出必定合法 JSON 且 ≤8 KiB）；`traceback` 单独 ≤8 KiB；`preview`/`last_content_summary` 严格上界 ≤256/≤512（含省略号） | 无（§5.6.5/§5.8.5 已同步） | **ISSUE-074 fixed**（REV-027，commit `9137fd6`） |
@@ -1413,8 +1413,8 @@ pub trait AgentProvider: Send + Sync {
 | L7 | 工具并发 = **独立**进程级 `Semaphore(CPU×2)`，未与 `WorkerExecutor` 全局 `max_workers` 共享 | 工具子进程 + Python 节点子进程可各自达到 CPU×2，超出 D4 全局上限语义 | M5 统一为共享全局上限；**ISSUE-079**（REV-020 #7） |
 | L8 | 5 个生产函数 >60 行（`run_agent` 139、`parse_model` 124、`parse_discover_output` 75、`parse_call` 66、`map_webc_error` 64），违反 architecture §2.2 等价约束 | 维护成本；纯重构不阻塞 | **部分修（REV-027）**：5 个目标函数已拆分（`run_agent` 21 / `parse_model` 31 / `parse_discover_output` 30 / `parse_call` 29 / `map_webc_error` 59，另 `invoke_with_retry`→50）；**剩余既有 >60 行随 M6**：`parse_agent_config` 113、`validate_schema_node` 105、`transport::chat_stream` 86、`fake::chat_stream` 75、`executor::execute` 71→78、`parse_base_url` 64、`execute_tool` 63、cli `parse` 79 / `run_in_runtime` 70、新增 74 行测试；**ISSUE-081**（REV-020 #11） |
 | L9 | discover/call 失败 `reason` 为**扩展超集**（§5.2.7 已文档化），超出 v1.2 闭集 | 跨模块 reason 表需同步（py-worker REV-019 §7.3） | 保留诊断价值，文档化即可；**ISSUE-080**（REV-020 #9） |
-| L10 | `llm_calls` / `worker_versions_json` 等 L2 记录表已在 06/architecture 定义，M4 未接线（Harness 未写 `llm_calls`） | L2（recorded outputs）重放依赖这些记录，M4 只能做 L1 | **部分修**：Harness 侧 `LlmCallRecorder` seam 已交付（REV-027）；CLI 写 `llm_calls` 落库、`runs.worker_versions_json/model_params_json` 与 L2 replay 随 REV-030；**ISSUE-082（部分修）** |
+| L10 | `llm_calls` / `worker_versions_json` 等 L2 记录表已在 06/architecture 定义，M4 未接线（Harness 未写 `llm_calls`） | L2（recorded outputs）重放依赖这些记录，M4 只能做 L1 | **M5 部分修**：Harness `LlmCallRecorder` seam（REV-027）+ CLI `llm_calls` 落库（REV-030，仅 `--record=full`）+ L2 replay（REV-030/032）已落地；`runs.worker_versions_json/model_params_json` 仍未写入（ISSUE-082 保持部分修） |
 
 > 以上 **ISSUE-073..082** 由 Lead 在 M4 收尾（REV-024）统一开号登记（编号以 `doc/issues.md` 最终为准）。上述限制不影响 M4 验收结论（AC-08a 必过 / AC-08b 手动）；偏差表 D13–D21 只记录**语义级**落地口径，L1–L10 属已知限制。
 >
-> **M5 状态（REV-035）**：L1 由 REV-026/REV-033 落地（CLI 转发待 REV-030）；L4 已修（REV-027）；L8 的 5 个目标函数已拆（REV-027），剩余清单随 M6；L10 的 seam 已交付（REV-027），落库待 REV-030；L2/L3/L5/L6/L7/L9 与 ISSUE-075/077/079/080 留 M6。M6 排除项与依据见 `doc/decisions/DR-002-m5-cli-replay-recording.md` §7。
+> **M5 状态（REV-035）**：L1 已修（REV-026/033/030 + e2e REV-032）；L4 已修（REV-027）；L8 的 5 个目标函数已拆（REV-027），剩余清单随 M6；L10 的 seam（REV-027）与 `llm_calls` 落库/L2 replay（REV-030/032）已交付，版本列仍 NULL（ISSUE-082 部分修）；L2/L3/L5/L6/L7/L9 与 ISSUE-075/077/079/080 留 M6。M6 排除项与依据见 `doc/decisions/DR-002-m5-cli-replay-recording.md` §7。

@@ -178,4 +178,4 @@ PYTHON_BIN=/Users/zyzs/lczyzs/code/zgraph/.venv/bin/python \
 bash scripts/dev/merge.sh feat/cli-m5-run --dry-run
 ```
 
-（结果待填）
+> **回填（2026-10-30，REV-035）**：评审人本地 `merge.sh --dry-run` **三次环境阻断**（共享 target 被并行 worktree 的 cargo 构建竞争污染，非分支缺陷；同类环境问题见 REV-030/REV-032 评审记录），未取得可用 dry-run 结果。**合并门禁由 Lead 在 main `3eff14b` 实跑通过**，随后本分支由 `merge.sh` 合入 main。本记录不再重跑 dry-run。

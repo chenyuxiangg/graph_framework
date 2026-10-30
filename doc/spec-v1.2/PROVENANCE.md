@@ -37,7 +37,7 @@
    - **C4 SDK 名称/基类**：04 §4.3.3/§4.3.4/§4.5.3 的 Python 异常/包名统一为 `zgraph_worker.*`（`WorkerCancelled`/`BusinessError`/`ReturnNotDictError`/`ProtocolError`），`ProtocolError` 基类改为 `Exception`（**不是** `ValueError`），未捕获 → worker `error` 帧 `NODE_WORKER_PROTOCOL` → `NodeWorker{Protocol}`；`GateCtx` 改为预留名 `zgraph_worker.GateCtx`。
    - **建议项**：#5 `config.exec_class` 标 D4 v2 忽略；#6「派发前」统一为「run 启动后、实例创建前」（ISSUE-046）；#7 修复 04 §4.6.2 粗体不配对；#8 01 `RunState.killed_workers` → `u64`（对齐实现/00）；#9 `ctx` 只读表述改为「公有属性 + 约定只读，SDK 不做写入保护」。
    - **复审 R1–R5**（2026-10-30，复审提交 `07ce558`）：R1 `04 §4.7.4` 汇总行补 python_node 格式非法与 `node_id` 定位；R2 `04 §4.3.1` 示例改 `from zgraph_worker import BusinessError`；R3 `04 §4.3.1` 删除“`zgraph` 由框架提供”表述、明确不提供兼容包；R4 `04 §4.3.3` `log` 失败列改实现口径（SDK 不做类型校验）；R5 `02 §2.5.4` expected/actual 改实现真实形状（python_node `format` / gate `allowed`）。
-   - 本次改动后按 `shasum -a 256 0*.md` / `wc -l 0*.md` 重新实测并更新 §3（合计 **5530 行**）与 README 行数表。
+   - 本次改动后按 `shasum -a 256 0*.md` / `wc -l 0*.md` 重新实测并更新 §3（合计 **5949 行**）与 README 行数表。
 6. **后续修订规则**：任何对 spec 的修改**必须**同步本文件 §3 的 SHA-256/行数、在 §2 追加修订记录（日期 + 范围 + 关联 ISSUE/REV），并在评审记录中引用。
 7. **M4 Harness 回写批次**（2026-10-30，ISSUE-067/070；分支 `docs/docs-m4-spec-writeback`，评审 REV-023，提交见该分支 git log）：
    - **对应已合并代码**：kernel `ce491de`（`TOOL_ERROR` 统一 + `HarnessErrorKind::ContextOverflow` 第 8 值，REV-018）；py-worker `e099927` + `c463a49`（`zgraph_worker/tool_runner.py` discover/call + 可选 `timeout_ms`，REV-019）；worker `94e1f8a`（`WorkerFailure::Worker` 装箱消除 genai `preserve_order` 引发的 clippy 回归，REV-021）；harness `4781dd7` + `344b73d`（M4 Harness 主体 + C2 工具可见性，REV-020）；e2e `fda996c`（`tests/e2e/harness_ac08.rs` + `tests/fixtures/graphs/harness_ac08/`，AC-08a fake 必过/AC-08b 手动，REV-022）。本批次评审时 base = `origin/main` `fda996c`；合并时 rebase 至 `12ab2f6`（REV-023 评审记录提交）。
@@ -59,23 +59,33 @@
    - **04**：§4.3.6 解释器优先级回写为 `--python` > `PYO3_PYTHON` > `ZGRAPH_PYTHON`（仅测试覆盖）> `python3`（REV-028）。
    - **08**：只追加 **§8.7 M5 注记**（ISSUE-061/074 `fixed`；076/081/082 部分修；048/084 wave2；033/036/059/073/075/077/079/080/085 留 M6），**不改** 8.0–8.6 历史快照。
    - **architecture**：§5.2 L2 写入口径、§5.3 replay 退出码、§6.1 legacy 归档（冻结只读、不物理删除）、§8.2 补 3 个 `REPLAY_*` 码。
-   - **索引/归档**：`doc/reviews/README.md` 补 REV-025–029/033/034/038（已合并）并标注未合并编号；`doc/index.md` 与 `legacy/README.md` 标「已归档、无维护、不得新增代码」（DR-002 §8）；根 `README.md` 更新 M5 收尾状态。本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **5938 行**）。
+   - **索引/归档**：`doc/reviews/README.md` 补 REV-025–029/033/034/038（已合并）并标注未合并编号；`doc/index.md` 与 `legacy/README.md` 标「已归档、无维护、不得新增代码」（DR-002 §8）；根 `README.md` 更新 M5 收尾状态。本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **5949 行**）。
+
+9. **M5 wave2 回写批次**（2026-10-30，REV-035 第二批；分支 `docs/docs-m5-writeback`，base 已 rebase 到含 REV-030/REV-032 的本地 `main`）：
+   - **来源**：REV-030（cli replay/L2、`llm_calls`、启动中止标定、`timeout_hint` 转发）与 REV-032（e2e AC-01/L2/崩溃标定/ISSUE-076，e2e 37 passed）；REV-031（ISSUE-066）尚未合并，signal/exit 载荷留第三个小 commit。
+   - **06**：§6.2.4/§6.2.13 更新 L2 实现状态（`recorded_outputs` + `llm_calls` 已接线；`worker_versions_json`/`model_params_json` 仍 NULL，ISSUE-082 部分修）；§6.8.1 回写标定实际接线（trace 两段原语 + CLI 判活/`recovered[]`/warning/仅改 runs）与残余风险（REV-030 #2/#3/#4/#5，ISSUE-084 保持 open）；§6.8.3 `trace` pid 提示/截断已实现；§6.10.6 补 replay `--json` 实际字段；§6.10.7 按 REV-030 实现校准（events 逐字节复用 trace；outputs 仅 Completed+full、完整性/hash 预检、RecordedExecutor 按 `(node_id,attempt)`、内存 sink、比较 status/error/output、不写新 run/不改原 trace、`global_vars` 空 map 边界）并附 REV-032 e2e 证据。
+   - **07**：AC-01 补 `--assets-dir` 与 REV-032 e2e 实测口径（3 用例、坏图/坏入口不产生 run、e2e 37 passed）；AC-12 更正「wave2 补 10×同图」为「REV-032 仅收敛 Nits、未新增该用例」；§7.3 #6 补真 SIGKILL e2e 与 ISSUE-084 剩余风险。
+   - **05**：§5.2.6/§5.13.3 L1/L10 更新 ISSUE-076 已修、ISSUE-082 部分修（版本列仍 NULL）。
+   - **00/architecture**：`REPLAY_*` 标已实现（REV-030）；architecture §5.2 更正版本列「仍未写入」。
+   - **08**：§8.7 更新 ISSUE-048/076 已修、082 部分、084 实现完成但保持 open；补 REV-032 #1 kernel `fail_timeout` 未落 `instances.error_code` 的台账待办（待 Lead 登记 ISSUE）。
+   - **索引/评审**：`doc/reviews/README.md` 补 REV-030/032 行（未合并：REV-031/035/036；REV-037 未开始）；`doc/index.md` reviews 范围同步；REV-028 §8.4 dry-run 回填（评审人三次环境阻断，Lead 在 main `3eff14b` 实跑通过）；DR-002 §9 #10 标已实现、#11 `REV-028 #6` 编号修正、#12 cli 函数清单同步（`doc/issues.md` 的两处交叉引用由 Lead 维护）。
+   - 本批次后按 §3 重新实测并更新（00–08 合计 **5949 行**）。
 
 ## 3. 文件清单（SHA-256 + 行数）
 
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | db96ee54f6b2daa7c1678da256e67c8e3e39f19c300b32620e0db5b1ee6388a7 | 294 |
+| `00-总纲.md` | a414f809f6e90b5ec2430edefbcc827ee8cac6e3011b6502400659932e466e9e | 294 |
 | `01-领域模型与状态机.md` | accb0e481fbd101a00a03a8a95518862b6f6232745667959e4bb646fbe28c283 | 302 |
 | `02-DSL与校验.md` | 506f058fa68b816c2e1b5e4d2cded718007e9cda8b14be6cace387d254933eb5 | 913 |
 | `03-调度器与生命周期.md` | 5f6c91bb45f6677a55f6e8d9b25c178a958c9adf7c96bbb2ca04401c5e47f002 | 388 |
 | `04-节点接口与扩展点.md` | 2d4a5ce95523b534273945f619fe3d40c32a969a1468c3b9d4600ad586221ccd | 895 |
-| `05-AgentHarness.md` | c71fe19f80d93af1f65e0539d64c6c0b065204b72ed3e349a62b2c384142785a | 1420 |
-| `06-存储与可观测.md` | 15a50415dc6eec51656a84506d523e89bfa03fcbe6cc1247cf3864581a6d499b | 1059 |
-| `07-验收用例.md` | 7836533e4c82576a65011d48be29b53b77809763c95d201b24092e7caf116987 | 228 |
-| `08-审计关闭矩阵.md` | 27105c7ae5bd696eb6f1a8dc643e3ac39fddfaf575ae5c62f67c6af61a3779d0 | 439 |
+| `05-AgentHarness.md` | 06eb2d045ebadd271675f473d88625ec36c0acc4e47053fa170176e307e1f77d | 1420 |
+| `06-存储与可观测.md` | 3226d9831087ad6fe17fdfcfa1e6c952a8c2f9a963a9399f4908eecca5d0629d | 1066 |
+| `07-验收用例.md` | 8bc27af23fd51dbce2ae158d6e4f5fb70f9012c2ebe18fe55cddbbb90df2f8be | 230 |
+| `08-审计关闭矩阵.md` | f85d580d7a726b6adceaa3a25dbf4c655ca298bbf6c894c874eb10021eb65597 | 441 |
 
-> 00–08 合计 **5938 行**（`wc -l` 口径；2026-10-30 **M5 回写批次后**实测，分支 `docs/docs-m5-writeback`、评审 REV-035，base 为含 REV-025–029/033/034/038 的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+> 00–08 合计 **5949 行**（`wc -l` 口径；2026-10-30 **M5 wave2 回写批次后**实测，分支 `docs/docs-m5-writeback`、评审 REV-035，base 为含 REV-025–030/032–034/038 的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
 
 ## 4. 核验方式
 
@@ -90,4 +100,5 @@ wc -l 0*.md
 - 源稿与提取文本在仓库外，**不可就地复核**；本目录文件是审计与开发的实际依据。
 - **M0–M2 回写已完成（2026-10-30）**：00/01/02/03/04/06/07 正文即 v2 实现口径；`doc/architecture-v2.md` §8 的 D1–D12 与 §8.2 保留为**决策记录**，与正文冲突时以正文为准。**05 分册（Harness）的 v2 口径已于 M4 批次回写（2026-10-30，见 §2 第 7 条）**，新增 D13–D21 记录于 05 §5.13；08 为历史审计矩阵不改语义。
 - 任何对 spec 的后续修改**必须**：更新本文件的 SHA-256 与行数、在 §2 增加修订记录（日期 + 范围 + ISSUE/REV）、并在评审记录中引用。
-- **M5 回写已完成（2026-10-30，REV-035）**：00/04/05/06/07 正文与 `architecture-v2.md` §5.2/§5.3/§6.1/§8.2 已同步 M5 口径；08 只追加 §8.7 M5 注记（历史快照不改）。REV-030/031/032 合并后的第二批回写由 `docs/docs-m5-writeback` 追加提交完成并再次更新本文件 §3。
+- **M5 回写已完成（2026-10-30，REV-035）**：00/04/05/06/07 正文与 `architecture-v2.md` §5.2/§5.3/§6.1/§8.2 已同步 M5 口径；08 只追加 §8.7 M5 注记（历史快照不改）。
+- **M5 wave2 回写已完成（2026-10-30，REV-035 第二批）**：06/07/05/00/08/architecture 已按 REV-030/032 实际实现校准（replay L2、`llm_calls`、启动标定/`recovered[]`、e2e 结论）；REV-031（ISSUE-066）合并后由第三个提交补 06 §6.2.5.1 的 signal/exit 载荷与 08 注记。
