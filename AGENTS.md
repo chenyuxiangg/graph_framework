@@ -34,7 +34,7 @@
 | `worker` | `crates/zgraph-worker/**`、`schemas/worker-protocol-v1.md` |
 | `harness` | `crates/zgraph-harness/**` |
 | `cli` | `crates/zgraph-cli/**` |
-| `py-worker` | `python/zgraph_worker/**`、`python/workers/**`、`tests/fixtures/workers/**` |
+| `py-worker` | `python/zgraph_worker/**`、`python/tests/**`、`python/workers/**`、`tests/fixtures/workers/**` |
 | `e2e` | `tests/e2e/**`、`tests/fixtures/graphs/**` |
 | `docs` | `doc/**`（不含 `doc/progress.md`、`doc/issues.md` 的并发写） |
 | `process` | `Cargo.toml`、`Cargo.lock`、`.cargo/**`、`.github/**`、`pyproject.toml`、`scripts/dev/**`、`AGENTS.md`、`README.md` |
