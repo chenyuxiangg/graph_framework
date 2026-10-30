@@ -17,10 +17,12 @@ use rusqlite::Connection;
 
 use crate::error::TraceError;
 use crate::model::TraceInput;
+use crate::recovery::{InterruptedCandidate, RecoveredRun};
 use crate::schema::{
     db_err, HEARTBEAT_INTERVAL_MS, TRACE_BATCH_INTERVAL_MS, TRACE_BATCH_ROWS,
     WAL_CHECKPOINT_INTERVAL_MS,
 };
+use crate::writer::recovery;
 use crate::writer::stream::Aggregator;
 use crate::writer::tx::{self, Batch, TxContext};
 use crate::writer::WriterMsg;
@@ -97,6 +99,19 @@ impl Writer {
                 Ok(WriterMsg::Flush(reply)) => {
                     let result = self.finish_batch(&mut batch);
                     let _ = reply.send(result);
+                }
+                Ok(WriterMsg::InterruptedCandidates(reply)) => {
+                    // 先提交已入队的写入，保证 SELECT 看到 FIFO 之前的全部写入。
+                    let result = self
+                        .finish_batch(&mut batch)
+                        .and_then(|()| self.interrupted_candidates());
+                    let _ = reply.send(result);
+                }
+                Ok(WriterMsg::MarkInterrupted(request)) => {
+                    let result = self
+                        .finish_batch(&mut batch)
+                        .and_then(|()| self.mark_interrupted(&request.run_ids, &request.now));
+                    let _ = request.reply.send(result);
                 }
                 Ok(WriterMsg::Shutdown(reply)) => {
                     let _ = self.finish_batch(&mut batch);
@@ -197,6 +212,26 @@ impl Writer {
                 Ok(())
             }
             Err(err) => self.fail(err),
+        }
+    }
+
+    /// 中止标定候选查询（只读；经写线程连接保证与前序写入同序）。
+    fn interrupted_candidates(&self) -> Result<Vec<InterruptedCandidate>, TraceError> {
+        recovery::interrupted_candidates(&self.conn)
+    }
+
+    /// 中止标定（单事务 UPDATE）；SQL/IO 失败按不可恢复错误处理（06 §6.4.5）。
+    fn mark_interrupted(
+        &mut self,
+        run_ids: &[String],
+        now: &str,
+    ) -> Result<Vec<RecoveredRun>, TraceError> {
+        match recovery::mark_interrupted(&mut self.conn, run_ids, now) {
+            Ok(recovered) => Ok(recovered),
+            Err(err) => {
+                self.record_fatal(err.clone());
+                Err(err)
+            }
         }
     }
 

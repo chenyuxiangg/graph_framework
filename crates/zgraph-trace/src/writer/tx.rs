@@ -755,7 +755,7 @@ fn sql_err(err: rusqlite::Error) -> TxError {
     }
 }
 
-fn is_busy(err: &rusqlite::Error) -> bool {
+pub(crate) fn is_busy(err: &rusqlite::Error) -> bool {
     matches!(
         err,
         rusqlite::Error::SqliteFailure(inner, _)
@@ -766,11 +766,11 @@ fn is_busy(err: &rusqlite::Error) -> bool {
     )
 }
 
-fn sleep_before_retry() {
+pub(crate) fn sleep_before_retry() {
     std::thread::sleep(Duration::from_millis(DB_WRITE_RETRY_INTERVAL_MS));
 }
 
-fn busy_exhausted() -> TraceError {
+pub(crate) fn busy_exhausted() -> TraceError {
     TraceError::Storage(format!(
         "sqlite busy after {DB_WRITE_RETRY} attempts ({}ms each)",
         DB_WRITE_RETRY_INTERVAL_MS

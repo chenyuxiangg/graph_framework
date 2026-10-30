@@ -16,6 +16,9 @@
 //!   `events.seq` 由 `AUTOINCREMENT` 在写线程内分配，明细表 `seq` 1:1 关联同事务信封。
 //! - `Streaming` 在写线程按 06 §6.5 聚合：token/reasoning 各自缓冲，100 ms 窗口或
 //!   ≥4096 字符提前分段；tool_call/progress 立即成段并先 flush 同实例缓冲。
+//! - 崩溃标定（06 §6.8）是两段式原语：`TraceWriter::interrupted_candidates` 查
+//!   `Running`/`Paused` 候选，`TraceWriter::mark_interrupted` 单事务标定为
+//!   `Failed + interrupted=1`；判活（`kill(pid, 0)`/heartbeat 陈旧）由调用方负责。
 //! - 写失败（busy 重试 3×50 ms 后 / IO）通过 [`TraceHandle::take_error`] 与
 //!   [`TraceWriter::flush`]/[`TraceWriter::close`] 的错误暴露；fail-stop 的 run
 //!   生命周期接线由 M3/M5 负责（本里程碑记录 ISSUE）。
@@ -29,8 +32,9 @@
 //!
 //! # 未覆盖（留待后续里程碑）
 //!
-//! - 崩溃标定/`interrupted=1` 的写入口（06 §6.8）属 run 生命周期（M3/M5）；
-//!   本 crate 只在 schema/reader 暴露 `interrupted`/`recovered_at` 列。
+//! - 06 §6.8.1 的**判活**（`kill(pid, 0)`/`RECOVERY_HEARTBEAT_STALE_MS`）与
+//!   `zgraph run` 启动接线不在本 crate：trace 只提供候选查询与标定两段原语，
+//!   避免引入 OS/进程依赖（CLI 消费见 REV-030）。本 crate 不实现断点续跑（§6.8.4）。
 //! - `worker_versions_json`/`model_params_json` 由 M4 Harness 写入；v2 列已建好但
 //!   [`RunStartedInfo`] 暂不携带（保持冻结签名）。
 //!
@@ -74,6 +78,7 @@
 mod error;
 mod model;
 mod reader;
+mod recovery;
 mod schema;
 mod writer;
 
@@ -87,6 +92,7 @@ pub use reader::{
     EventQuery, EventRow, GateResultRow, GraphRow, InstanceRow, LlmCallRow, RecordedOutputRow,
     RunRow, RunStats, StreamingRow, TraceReader, TransitionRow,
 };
+pub use recovery::{InterruptedCandidate, RecoveredRun, INTERRUPTED_ERROR_MESSAGE};
 pub use schema::{
     DB_BUSY_TIMEOUT_MS, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, HEARTBEAT_INTERVAL_MS,
     STREAM_SEGMENT_MAX_BYTES, STREAM_SEGMENT_MAX_CHARS, STREAM_TOKEN_AGGREGATE_MS,

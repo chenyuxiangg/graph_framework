@@ -106,7 +106,7 @@ pub struct RunRow {
     pub error_code: Option<String>,
     /// 领域错误消息。
     pub error_message: Option<String>,
-    /// 是否被崩溃标定（06 §6.8；本 crate 不写，M3/M5 接线）。
+    /// 是否被中止标定（06 §6.8；由 [`crate::TraceWriter::mark_interrupted`] 写入）。
     pub interrupted: bool,
     /// 最近一次标定时间。
     pub recovered_at: Option<String>,
@@ -126,6 +126,12 @@ pub struct RunRow {
     pub seed: u64,
     /// 记录模式原始存储值（`none`/`hash`/`full`）。
     pub record_mode: Option<String>,
+    /// owner 进程号（06 §6.8.1 判活；ISSUE-048）。
+    pub owner_pid: Option<u32>,
+    /// owner 主机名（v1 恒本机；06 §6.2.4）。
+    pub owner_host: Option<String>,
+    /// 写线程最近心跳时刻（≤5 s 刷新；ISSUE-048 判活辅助）。
+    pub heartbeat_at: Option<String>,
 }
 
 /// 实例快照行（06 §6.2.5）。
@@ -366,7 +372,8 @@ impl TraceReader {
                    r.started_at, r.finished_at, r.entry_inputs, r.output_json, r.error_code, \
                    r.error_message, r.interrupted, r.recovered_at, r.last_seq, r.event_count, \
                    r.streaming_dropped, r.abandoned_tasks, r.trace_backpressure, \
-                   r.killed_workers, r.seed, r.record_mode \
+                   r.killed_workers, r.seed, r.record_mode, r.owner_pid, r.owner_host, \
+                   r.heartbeat_at \
                    FROM runs r LEFT JOIN graphs g ON g.graph_hash = r.graph_hash \
                    WHERE r.run_id = ?1";
         let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
@@ -614,6 +621,11 @@ fn to_u32(value: i64) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
 
+/// DB 可空 `owner_pid` → `Option<u32>`（越界/负值读作 `None`，不报错）。
+fn to_opt_u32(value: Option<i64>) -> Option<u32> {
+    value.and_then(|raw| u32::try_from(raw).ok())
+}
+
 fn parse_status(text: &str) -> Result<InstanceStatus, TraceError> {
     InstanceStatus::parse(text)
         .ok_or_else(|| TraceError::Storage(format!("invalid instance status in db: {text}")))
@@ -650,6 +662,9 @@ fn map_run_row(row: &rusqlite::Row<'_>) -> Result<RunRow, TraceError> {
         killed_workers: to_u64(row.get(18).map_err(db_err)?),
         seed: to_u64(row.get(19).map_err(db_err)?),
         record_mode: row.get(20).map_err(db_err)?,
+        owner_pid: to_opt_u32(row.get(21).map_err(db_err)?),
+        owner_host: row.get(22).map_err(db_err)?,
+        heartbeat_at: row.get(23).map_err(db_err)?,
     })
 }
 

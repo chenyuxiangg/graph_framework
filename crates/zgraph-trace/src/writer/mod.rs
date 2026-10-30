@@ -5,6 +5,7 @@
 //! 通道为 M2 单通道简化（06 §6.4.1 双通道的等价语义）：`sync_channel(8192)` 一条，
 //! 无损事件用阻塞 `send`，流式事件用 `try_send`（满则丢弃并计数）。
 
+mod recovery;
 mod stream;
 mod thread;
 mod tx;
@@ -17,13 +18,25 @@ use std::thread::JoinHandle;
 
 use crate::error::TraceError;
 use crate::model::TraceInput;
+use crate::recovery::{InterruptedCandidate, RecoveredRun};
 use crate::schema::{self, TRACE_CHANNEL_CAP};
 
-/// 写线程消息：数据与两类控制消息共用同一 FIFO（保证 barrier 语义）。
+/// 写线程消息：数据与控制消息共用同一 FIFO（保证 barrier 语义）。
 pub(crate) enum WriterMsg {
     Input(Box<TraceInput>),
     Flush(SyncSender<Result<(), TraceError>>),
     Shutdown(SyncSender<Result<(), TraceError>>),
+    /// 中止标定候选查询（SELECT，走写线程自己的连接）。
+    InterruptedCandidates(SyncSender<Result<Vec<InterruptedCandidate>, TraceError>>),
+    /// 中止标定（单事务 UPDATE）；装箱以保持 `WriterMsg` 尺寸与通道开销不变。
+    MarkInterrupted(Box<MarkInterruptedRequest>),
+}
+
+/// `WriterMsg::MarkInterrupted` 的载荷（多个 run id 共用同一标定时间）。
+pub(crate) struct MarkInterruptedRequest {
+    pub(crate) run_ids: Vec<String>,
+    pub(crate) now: String,
+    pub(crate) reply: SyncSender<Result<Vec<RecoveredRun>, TraceError>>,
 }
 
 /// trace 写端：持有写线程与写通道发送端。
@@ -73,6 +86,40 @@ impl TraceWriter {
     /// 屏障：保证此前发送的写入（含流式缓冲）已提交并对其他连接可见。
     pub fn flush(&self) -> Result<(), TraceError> {
         self.handle.flush()
+    }
+
+    /// 查询中止标定候选（06 §6.8.1 步骤 1）：`status IN ('Running','Paused')` 的 run。
+    ///
+    /// 经写线程执行（同一连接、同一 FIFO）：调用前已入队的写入会先提交，因此结果
+    /// 与 [`TraceWriter::flush`] 后的只读查询一致。**判活不在本 crate 内做**——
+    /// `kill(pid, 0)`/heartbeat 陈旧判断由调用方按 06 §6.8.1 步骤 2 执行。
+    pub fn interrupted_candidates(&self) -> Result<Vec<InterruptedCandidate>, TraceError> {
+        self.handle.control(WriterMsg::InterruptedCandidates)
+    }
+
+    /// 把判死的 run 标定为 `Failed + interrupted=1`（06 §6.8.1 步骤 3）。
+    ///
+    /// 单事务逐 run 执行
+    /// `UPDATE runs SET status='Failed', interrupted=1, recovered_at=?, error_message=?`
+    /// `WHERE run_id=? AND status IN ('Running','Paused')`，**仅返回实际更新的行**；
+    /// 已终态/不存在的 run 被跳过。**`error_code` 保持 NULL**，不修改 `instances`，
+    /// 不写 `RunFinished`/`Transition`（06 §6.8.2）。`now` 由调用方提供
+    /// （RFC3339 毫秒 Z）；空 `run_ids` 直接返回空且不排队。
+    pub fn mark_interrupted(
+        &self,
+        run_ids: &[String],
+        now: &str,
+    ) -> Result<Vec<RecoveredRun>, TraceError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.handle.control(|reply| {
+            WriterMsg::MarkInterrupted(Box::new(MarkInterruptedRequest {
+                run_ids: run_ids.to_vec(),
+                now: now.to_string(),
+                reply,
+            }))
+        })
     }
 
     /// flush + 关闭通道 + join 写线程 + `wal_checkpoint(TRUNCATE)`。
@@ -151,6 +198,18 @@ impl TraceHandle {
         let (reply, receiver) = mpsc::sync_channel(0);
         self.sender
             .send(WriterMsg::Flush(reply))
+            .map_err(|_| channel_closed())?;
+        receiver.recv().map_err(|_| channel_closed())?
+    }
+
+    /// 控制消息的通用请求/应答：与数据消息共用同一 FIFO（barrier 语义）。
+    fn control<T>(
+        &self,
+        make: impl FnOnce(SyncSender<Result<T, TraceError>>) -> WriterMsg,
+    ) -> Result<T, TraceError> {
+        let (reply, receiver) = mpsc::sync_channel(0);
+        self.sender
+            .send(make(reply))
             .map_err(|_| channel_closed())?;
         receiver.recv().map_err(|_| channel_closed())?
     }
