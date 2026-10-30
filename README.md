@@ -10,7 +10,7 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：M4 Agent Harness 完成
+## 当前状态：M5 收尾进行中
 
 **已完成 M0–M4**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
 图内核与事件循环、trace/SQLite（L1 回放）、worker supervisor + `WorkerExecutor`（进程组 kill/取消升级/帧超时/并发上限）、
@@ -19,8 +19,10 @@
 spec v1.2 M0–M4 回写（05/00/04/07，REV-023）；AC-08 fake 真链路验收（`tests/e2e/harness_ac08.rs`）+ AC-06/07/09/10 真子进程验收；
 本地双栈测试全绿（`cargo test --workspace` 423 passed / pytest 84 passed）。CI 已配置（`.github/workflows/ci.yml`）。
 
-**尚未实现（M5）**：CLI `run`/`replay`（含 `--fake-llm`/`--real` 与 L2 记录接线）、L2 结果重放、多 run 隔离（AC-12）、
-legacy 退役决策；遗留项见 [`doc/issues.md`](doc/issues.md)（ISSUE-061/066/074/076/082 等 P2）。
+**M5 进行中（未合并）**：CLI `run`/`replay`（`--fake-llm`/`--real`/`--record`）、L2 记录与重放、AC-12 多 run 隔离、
+P2 收敛（ISSUE-061/066/074/076/082 等）、legacy 退役决策；范围与落地口径见
+[`doc/decisions/DR-002-m5-cli-replay-recording.md`](doc/decisions/DR-002-m5-cli-replay-recording.md)，进度见
+[`doc/progress.md`](doc/progress.md)，遗留项见 [`doc/issues.md`](doc/issues.md)。
 
 ## 快速开始
 

@@ -2,25 +2,21 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：M4（Harness）已完成并合并；下一里程碑 M5（CLI / replay / 多 run / legacy 退役）
+**当前阶段**：M5（收尾）进行中：CLI `run`/`replay`、L2 记录与重放、AC-12 多 run 隔离、P2 收敛、legacy 退役；口径见 [`decisions/DR-002-m5-cli-replay-recording.md`](decisions/DR-002-m5-cli-replay-recording.md)
 
 | 模块 | 状态 | 当前任务 | 负责 | 分支 / worktree | 更新 |
 |---|---|---|---|---|---|
-| process | done | M0 骨架；M2/M3 门禁；M4 依赖 genai/async-trait/tokio-util（REV-017） | lead | — | 2026-10-30 |
-| dsl | done | M1 DSL 类型/loader/R1–R14/graph_hash/validate（REV-005） | dsl-spec-writer | — | 2026-10-29 |
-| kernel | done | M2 状态机/事件循环/门控/超时/死锁；M4 `TOOL_ERROR` + `HarnessErrorKind::ContextOverflow`（REV-018） | lead | — | 2026-10-30 |
-| trace | done | M2 SQLite v2/写线程/L1 reader/L2 记录表（REV-008） | trace-dev | — | 2026-10-29 |
-| cli | done | M2 `zgraph trace` + kernel→trace 桥（REV-009）；M5 补 run/replay | cli-dev | — | 2026-10-29 |
-| worker | done | M3 supervisor/WorkerExecutor（REV-012）；M4 `WorkerFailure::Worker` 装箱消除 clippy 回归（REV-021） | lead | — | 2026-10-30 |
-| py-worker | done | M4 `zgraph_worker.tool_runner` + 工具 fixtures + 可选 timeout_ms（REV-019） | py-worker-dev | — | 2026-10-30 |
-| harness | done | M4 AgentHarness：config/llm(genai 0.7.2+fake)/budget/loop/tools/executor（REV-020） | harness-dev | — | 2026-10-30 |
-| e2e | done | M4 `tests/e2e/harness_ac08.rs`：fake LLM/token 入 trace/tool 超时/异常/未知工具（REV-022） | e2e-dev | — | 2026-10-30 |
-| docs | done | M4 spec 05/00/04/07 v2 回写 + PROVENANCE（REV-023，docs-writer）；收尾台账/索引/README（REV-024，lead） | docs-writer / lead | — | 2026-10-30 |
+| kernel | wip | ISSUE-061 gate 幻影 attempt；ISSUE-076 timeout_hint 内核侧（REV-026） | kernel-dev | `fix/kernel-m5-p2` / `.worktrees/kernel-kernel-dev` | 2026-10-30 |
+| harness | wip | `LlmCallRecorder` seam；ISSUE-074 合法 JSON 截断；ISSUE-081 拆函数（REV-027） | harness-dev | `feat/harness-m5-record` | 2026-10-30 |
+| cli | wip | `zgraph run` 全契约 + `--record` 落 `recorded_outputs`（REV-028）；wave2 replay/L2 | cli-dev | `feat/cli-m5-run` | 2026-10-30 |
+| e2e | wip | AC-12 10 run 并发隔离真链路（REV-029）；wave2 CLI/L2 链路 | e2e-dev | `test/e2e-m5-ac12` | 2026-10-30 |
+| process/docs | wip | M5 kickoff：DR-002 + 启动进度（REV-025） | lead | `docs/process-m5-kickoff` | 2026-10-30 |
+| dsl / trace / worker / py-worker | done | M1–M4 已合并；trace/worker 在 wave2 补 ISSUE-048/066 | — | — | 2026-10-30 |
 
 **下一步**
-1. M5：CLI `run`/`replay`（`--fake-llm`/`--real`）、L2 重放、AC-12 多 run 隔离、legacy 退役决策。
-2. M5 前修 P2 遗留：L2 记录接线（ISSUE-082）、工具结果截断合法 JSON（ISSUE-074）、`node_timeout_ms` 回退（ISSUE-076）、gate 幻影 attempt（ISSUE-061）、`NODE_WORKER_CRASH` 记录 signal/exit（ISSUE-066）。
-3. 其余 M4 建议项按 ISSUE-073/075/077–081 在 M5 收敛；08 审计矩阵注记随 M5 docs。
+1. 合并 wave1（REV-025–029）后开 wave2：cli `replay --mode=events|outputs` + L2 重放、harness `timeout_hint`、ISSUE-066（kernel→worker→cli）、e2e CLI/AC-12 补链。
+2. docs 回写 spec 05/06/07/00 + `PROVENANCE`；收尾台账/README/基线/评审索引。
+3. ISSUE-075/077/079/080 按容量收敛；ISSUE-033/036/073/059 留 M6（DR-002 §7）。
 
 **阻塞**
-- 无硬阻塞；M0–M4 本地测试全绿（`cargo test --workspace` 423 passed/2 ignored、pytest 84 passed）。
+- 无硬阻塞；M4 基线 `cargo test --workspace` 423 passed/2 ignored、pytest 84 passed；4 个模块 worktree 共享 `CARGO_TARGET_DIR`，等锁属正常。
