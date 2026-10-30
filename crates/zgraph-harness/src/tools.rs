@@ -30,8 +30,9 @@ use zgraph_worker::{
 
 use crate::budget::estimate_tokens;
 use crate::constants::{
-    DEFAULT_TOOL_TIMEOUT_MS, MAX_SUMMARY_PREVIEW_CHARS, MAX_TOOL_DESCRIPTION_CHARS,
-    TOOL_RESULT_MAX_BYTES, TOOL_RUNNER_MODULE,
+    DEFAULT_TOOL_TIMEOUT_MS, MAX_SUMMARY_PREVIEW_ARRAY_ITEMS, MAX_SUMMARY_PREVIEW_CHARS,
+    MAX_SUMMARY_PREVIEW_DEPTH, MAX_TOOL_DESCRIPTION_CHARS, REDACTED_PREVIEW_VALUE,
+    SENSITIVE_KEY_TOKENS, TOOL_RESULT_MAX_BYTES, TOOL_RUNNER_MODULE,
 };
 use crate::ctx::HarnessCtx;
 use crate::error::HarnessError;
@@ -680,6 +681,10 @@ fn floor_char_boundary(text: &str, max_bytes: usize) -> usize {
 }
 
 /// `ToolCallStart.args_summary`（05 §5.8.5）：**不得**放完整参数。
+///
+/// ISSUE-075：`preview` 由「参数紧凑 JSON 前缀」收紧为**结构摘要**——标量只保留
+/// 类型/尺寸，敏感键（[`SENSITIVE_KEY_TOKENS`]）值一律 `***`，最后按字符边界
+/// 截断到 [`MAX_SUMMARY_PREVIEW_CHARS`]。因此短参数不会完整出现在 trace 中。
 pub fn summarize_args(args: &Value) -> Value {
     let compact = serde_json::to_string(args).unwrap_or_default();
     let keys: Vec<Value> = args
@@ -689,24 +694,32 @@ pub fn summarize_args(args: &Value) -> Value {
     json!({
         "keys": keys,
         "bytes": compact.len(),
-        "preview": truncate_chars(&compact, MAX_SUMMARY_PREVIEW_CHARS),
+        "preview": structural_preview(args),
     })
 }
 
 /// `ToolCallEnd.result_summary`（05 §5.8.5）：成功 `{ok,keys,bytes,preview}`；
 /// 失败 `{ok:false,error:{...≤1KiB}}`。
+///
+/// ISSUE-075：成功路径的 `preview` 与 [`summarize_args`] 同口径（结构摘要 +
+/// 截断 + 敏感键脱敏）；非 JSON 结果视为字符串标量，只记录字符数。
 pub fn summarize_result(content: &str, ok: bool) -> Value {
     if ok {
-        let parsed: Value = serde_json::from_str(content).unwrap_or(Value::Null);
+        let parsed = serde_json::from_str::<Value>(content).ok();
         let keys: Vec<Value> = parsed
-            .as_object()
+            .as_ref()
+            .and_then(Value::as_object)
             .map(|object| object.keys().cloned().map(Value::from).collect())
             .unwrap_or_default();
+        let preview = match &parsed {
+            Some(value) => structural_preview(value),
+            None => structural_preview(&Value::String(content.to_string())),
+        };
         json!({
             "ok": true,
             "keys": keys,
             "bytes": content.len(),
-            "preview": truncate_chars(content, MAX_SUMMARY_PREVIEW_CHARS),
+            "preview": preview,
         })
     } else {
         let parsed: Value = serde_json::from_str(content).unwrap_or(Value::Null);
@@ -715,6 +728,64 @@ pub fn summarize_result(content: &str, ok: bool) -> Value {
             "ok": false,
             "error": truncate_json_value(&error, 1024),
         })
+    }
+}
+
+/// 敏感键判定：键名归一化（小写 + 去非字母数字）后包含敏感词即命中。
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    SENSITIVE_KEY_TOKENS
+        .iter()
+        .any(|token| normalized.contains(token))
+}
+
+/// preview 结构摘要的紧凑 JSON 文本（≤ [`MAX_SUMMARY_PREVIEW_CHARS`] 字符）。
+fn structural_preview(value: &Value) -> String {
+    let compact = serde_json::to_string(&preview_value(value, 0)).unwrap_or_default();
+    truncate_chars(&compact, MAX_SUMMARY_PREVIEW_CHARS)
+}
+
+/// 递归渲染结构摘要：对象保留键、值降级为类型/尺寸；敏感键值 → `***`。
+fn preview_value(value: &Value, depth: usize) -> Value {
+    match value {
+        Value::Object(map) => {
+            if depth >= MAX_SUMMARY_PREVIEW_DEPTH {
+                return Value::from(format!("object({} keys)", map.len()));
+            }
+            let mut rendered = Map::new();
+            for (key, child) in map {
+                let child = if is_sensitive_key(key) {
+                    Value::from(REDACTED_PREVIEW_VALUE)
+                } else {
+                    preview_value(child, depth + 1)
+                };
+                rendered.insert(key.clone(), child);
+            }
+            Value::Object(rendered)
+        }
+        Value::Array(items) => {
+            if depth >= MAX_SUMMARY_PREVIEW_DEPTH {
+                return Value::from(format!("array({} items)", items.len()));
+            }
+            let shown = items.len().min(MAX_SUMMARY_PREVIEW_ARRAY_ITEMS);
+            let mut rendered: Vec<Value> = items
+                .iter()
+                .take(shown)
+                .map(|item| preview_value(item, depth + 1))
+                .collect();
+            if items.len() > shown {
+                rendered.push(Value::from(format!("…(+{} more)", items.len() - shown)));
+            }
+            Value::Array(rendered)
+        }
+        Value::String(text) => Value::from(format!("string({} chars)", text.chars().count())),
+        Value::Number(_) => Value::from("number"),
+        Value::Bool(_) => Value::from("boolean"),
+        Value::Null => Value::from("null"),
     }
 }
 
@@ -1775,9 +1846,14 @@ mod tests {
         let summary = summarize_args(&args);
         assert_eq!(summary["keys"], json!(["secret_token"]));
         assert_eq!(summary["bytes"], args.to_string().len());
-        // ISSUE-074：preview 严格 ≤ MAX_SUMMARY_PREVIEW_CHARS 个字符（含 `…`）。
+        // ISSUE-074/075：preview 严格 ≤ MAX_SUMMARY_PREVIEW_CHARS 个字符（含 `…`），
+        // 且不再包含完整参数值。
         let preview = summary["preview"].as_str().expect("preview");
         assert!(preview.chars().count() <= MAX_SUMMARY_PREVIEW_CHARS);
+        assert!(
+            !preview.contains("abcdefghij"),
+            "sensitive value leaked: {preview}"
+        );
         let long = summarize_result(&format!("{{\"a\":\"{}\"}}", "x".repeat(2_000)), true);
         assert!(
             long["preview"].as_str().expect("preview").chars().count() <= MAX_SUMMARY_PREVIEW_CHARS
@@ -1792,6 +1868,101 @@ mod tests {
         let failed = summarize_result(&content, false);
         assert_eq!(failed["ok"], false);
         assert_eq!(failed["error"]["reason"], "exception");
+    }
+
+    /// ISSUE-075：敏感键的值**不得**出现在 preview（结构摘要 + 脱敏）。
+    #[test]
+    fn args_summary_redacts_sensitive_keys_and_values() {
+        let args = json!({
+            "api_key": "sk-live-abc123",
+            "Authorization": "Bearer tok-999",
+            "client_secret": "s3cr3t-value",
+            "password": "hunter2",
+            "query": "full user prompt text",
+            "nested": {"accessToken": "nested-token-value", "count": 3},
+            "items": [{"session_id": "sess-xyz"}, "plain item"]
+        });
+        let summary = summarize_args(&args);
+        let rendered = summary.to_string();
+        for leaked in [
+            "sk-live-abc123",
+            "tok-999",
+            "s3cr3t-value",
+            "hunter2",
+            "full user prompt text",
+            "nested-token-value",
+            "sess-xyz",
+            "plain item",
+        ] {
+            assert!(
+                !rendered.contains(leaked),
+                "preview leaked {leaked}: {rendered}"
+            );
+        }
+        // 结构摘要仍保留：键名在 keys 中，敏感值一律 `***`。
+        assert_eq!(
+            summary["keys"],
+            json!([
+                "api_key",
+                "Authorization",
+                "client_secret",
+                "password",
+                "query",
+                "nested",
+                "items"
+            ])
+        );
+        let preview = summary["preview"].as_str().expect("preview");
+        assert_eq!(
+            preview.matches(REDACTED_PREVIEW_VALUE).count(),
+            5,
+            "preview={preview}"
+        );
+        assert!(preview.chars().count() <= MAX_SUMMARY_PREVIEW_CHARS);
+    }
+
+    /// ISSUE-075：超大参数的结构摘要也必须严格 ≤256 字符（字符边界截断）。
+    #[test]
+    fn args_summary_preview_is_bounded_for_large_payloads() {
+        let fields: Map<String, Value> = (0..200)
+            .map(|index| (format!("key{index}"), json!("v".repeat(50))))
+            .collect();
+        let args = Value::Object(fields);
+        let summary = summarize_args(&args);
+        let preview = summary["preview"].as_str().expect("preview");
+        assert!(preview.chars().count() <= MAX_SUMMARY_PREVIEW_CHARS);
+        assert!(preview.ends_with('…'), "truncation marker expected");
+        assert!(!preview.contains(&"v".repeat(20)), "values must not leak");
+    }
+
+    /// ISSUE-075：`result_summary.preview` 同口径脱敏；非 JSON 结果只记尺寸。
+    #[test]
+    fn result_summary_preview_redacts_sensitive_values() {
+        let content = json!({
+            "api_key": "res-key-123",
+            "value": "RESULT-VALUE",
+            "tokens": 42
+        })
+        .to_string();
+        let summary = summarize_result(&content, true);
+        let rendered = summary.to_string();
+        assert!(!rendered.contains("res-key-123"), "{rendered}");
+        assert!(!rendered.contains("RESULT-VALUE"), "{rendered}");
+        assert_eq!(summary["keys"], json!(["api_key", "value", "tokens"]));
+        assert!(
+            summary["preview"]
+                .as_str()
+                .expect("preview")
+                .contains(REDACTED_PREVIEW_VALUE),
+            "preview={}",
+            summary["preview"]
+        );
+        // 非 JSON 结果：只记录字符数，正文不进入 preview。
+        let raw = "raw tool text SECRET-BODY";
+        let text_result = summarize_result(raw, true);
+        assert!(!text_result.to_string().contains("SECRET-BODY"));
+        assert_eq!(text_result["keys"], json!([]));
+        assert_eq!(text_result["bytes"], raw.len());
     }
 
     #[test]

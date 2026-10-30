@@ -59,6 +59,32 @@ pub const MAX_TOOL_DESCRIPTION_CHARS: usize = 1_024;
 /// `args_summary`/`result_summary` 的 preview 字符上限（05 §5.8.5）。
 pub const MAX_SUMMARY_PREVIEW_CHARS: usize = 256;
 
+/// preview 结构摘要的最大嵌套深度（超出降级为类型/尺寸标记；ISSUE-075）。
+pub const MAX_SUMMARY_PREVIEW_DEPTH: usize = 2;
+
+/// preview 结构摘要中每个数组最多展开的元素数（其余折叠为计数；ISSUE-075）。
+pub const MAX_SUMMARY_PREVIEW_ARRAY_ITEMS: usize = 4;
+
+/// 敏感键在 preview 中的脱敏占位符（05 §5.8.5；ISSUE-075）。
+pub const REDACTED_PREVIEW_VALUE: &str = "***";
+
+/// 敏感键词表（键名归一化后包含任一词即脱敏；05 §5.8.5 / ISSUE-075）。
+///
+/// 归一化 = 小写 + 去掉非字母数字（`_`/`-`/`.`/空格等），因此
+/// `api_key`、`API-KEY`、`clientSecret` 均命中。
+pub const SENSITIVE_KEY_TOKENS: &[&str] = &[
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "passwd",
+    "privatekey",
+    "secret",
+    "session",
+    "token",
+];
+
 /// `HARNESS_MAX_ITERATIONS.detail.last_content_summary` 字符上限（05 §5.7.4）。
 pub const MAX_LAST_CONTENT_SUMMARY_CHARS: usize = 512;
 

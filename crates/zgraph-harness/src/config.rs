@@ -815,8 +815,12 @@ fn read_prompt(
 /// V16：`role_prompt_file`/`constraints_file` 路径解析与逃逸拒绝。
 ///
 /// - 相对路径相对**AgentConfig 文件所在目录**；允许绝对路径；
-/// - 词法归一化后必须落在资产根或 CWD 之内；
-/// - 符号链接不在 v1 词法检查范围内（未 canonicalize；登记为已知限制）。
+/// - 先做词法归一化（拒绝 `..` 越界），保留 `path_escape` 的快速判定；
+/// - 再 `canonicalize`（解析**全部符号链接**）后用真实路径重新做前缀校验：
+///   必须落在规范化后的资产根或 CWD 之内，否则同样 → `path_escape`
+///   （ISSUE-077，05 §5.2.1 路径安全）；
+/// - 目标不存在/不可解析（`canonicalize` 失败）时退回词法路径，由
+///   [`read_bounded`] 按**既有契约**报 `file_missing`/`file_unreadable`。
 fn resolve_asset_file(
     agent_dir: &Path,
     assets_root: &Path,
@@ -837,7 +841,21 @@ fn resolve_asset_file(
     if !normalized.starts_with(&assets_root) && !normalized.starts_with(&cwd) {
         return Err(path_escape_error(agent_dir, raw, json_path));
     }
-    Ok(normalized)
+    let Ok(canonical) = std::fs::canonicalize(&normalized) else {
+        // 目标缺失/不可解析：保持既有错误码（read_bounded → file_missing/file_unreadable）。
+        return Ok(normalized);
+    };
+    if !canonical.starts_with(&canonical_or_lexical(&assets_root))
+        && !canonical.starts_with(&canonical_or_lexical(&cwd))
+    {
+        return Err(path_escape_error(agent_dir, raw, json_path));
+    }
+    Ok(canonical)
+}
+
+/// 真实路径（解析符号链接）；不可解析时退回调用方给定的（已归一化）路径。
+fn canonical_or_lexical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn path_escape_error(agent_dir: &Path, raw: &str, json_path: &str) -> HarnessError {
@@ -1432,6 +1450,74 @@ mod tests {
         let error =
             load_agent(dir.path(), "parser", &registry(&["echo"]), true).expect_err("escape");
         assert_eq!(error.detail["reason"], "path_escape");
+    }
+
+    /// 用指定 `role_prompt_file` 写一份合法 Agent 资产，返回 assets_dir。
+    fn agent_with_role_file(role_prompt_file: &str) -> TempDir {
+        let mut agent = valid_agent();
+        agent
+            .as_object_mut()
+            .expect("object")
+            .insert("role_prompt_file".to_string(), json!(role_prompt_file));
+        asset_dir(&agent, "role", None)
+    }
+
+    /// ISSUE-077：符号链接指向资产根**外**的真实文件 → `path_escape`。
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_prompt_escaping_assets_root_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let outside = TempDir::new().expect("outside");
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, "TOP-SECRET").expect("secret");
+        let dir = agent_with_role_file("../prompts/leak.md");
+        symlink(&secret, dir.path().join("prompts").join("leak.md")).expect("symlink");
+
+        let error = load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+            .expect_err("symlink escape");
+        assert_eq!(error.detail["reason"], "path_escape");
+    }
+
+    /// ISSUE-077：**中间目录**为符号链接时同样拦截（词法路径仍在根内）。
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_escaping_assets_root_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let outside = TempDir::new().expect("outside");
+        std::fs::write(outside.path().join("leak.md"), "TOP-SECRET").expect("secret");
+        let dir = agent_with_role_file("../linked/leak.md");
+        symlink(outside.path(), dir.path().join("linked")).expect("symlink dir");
+
+        let error = load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+            .expect_err("symlink dir escape");
+        assert_eq!(error.detail["reason"], "path_escape");
+    }
+
+    /// ISSUE-077 正例：链接目标仍在资产根内时不得误杀。
+    #[cfg(unix)]
+    #[test]
+    fn symlink_inside_assets_root_is_allowed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = agent_with_role_file("../prompts/alias.md");
+        let real = dir.path().join("prompts").join("real.md");
+        std::fs::write(&real, "inside prompt").expect("real");
+        symlink(&real, dir.path().join("prompts").join("alias.md")).expect("symlink");
+
+        let loaded = load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+            .expect("symlink inside assets root must load");
+        assert_eq!(loaded.role_prompt, "inside prompt");
+    }
+
+    /// ISSUE-077：`canonicalize` 失败（目标不存在）时保持既有 `file_missing` 契约。
+    #[test]
+    fn missing_prompt_file_keeps_file_missing_reason() {
+        let dir = agent_with_role_file("../prompts/absent.md");
+        let error = load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+            .expect_err("missing prompt");
+        assert_eq!(error.detail["reason"], "file_missing");
     }
 
     #[test]
