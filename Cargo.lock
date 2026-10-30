@@ -2656,13 +2656,17 @@ dependencies = [
 name = "zgraph-cli"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "chrono",
  "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",
  "zgraph-dsl",
+ "zgraph-harness",
  "zgraph-kernel",
  "zgraph-trace",
+ "zgraph-worker",
 ]
 
 [[package]]

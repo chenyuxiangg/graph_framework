@@ -103,7 +103,8 @@ fn print_json(report: &ValidationReport) {
     }
 }
 
-fn print_errors(file: &str, report: &ValidationReport) {
+/// 人类可读错误输出（`run` 的图加载失败复用同一格式）。
+pub(crate) fn print_errors(file: &str, report: &ValidationReport) {
     for error in &report.errors {
         let locator = locator(&error.location);
         if locator.is_empty() {

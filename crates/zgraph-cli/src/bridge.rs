@@ -31,18 +31,36 @@ use serde_json::{json, Map, Value};
 use zgraph_kernel as kernel;
 use zgraph_trace as trace;
 
+/// 运行期流式观察者：每条内核流式事件在落库**之外**再回调一次。
+///
+/// `zgraph run --stream` 用它把 `TokenDelta`/`ReasoningDelta` 文本实时写到 stderr
+/// （06 §6.10.3）；回调**不改变** trace 语义（观察者不得影响 run，故签名无返回值）。
+pub type StreamingObserver = Arc<dyn Fn(&kernel::StreamingEvent) + Send + Sync>;
+
 /// kernel `TraceSink` 的 trace 写端适配器。
 ///
 /// 每次 sink 调用映射为一条 [`trace::TraceInput`]；`streaming` 使用可丢发送，
 /// 返回 `false` 让内核累计 `streaming_dropped`。
 pub struct TraceBridge {
     handle: trace::TraceHandle,
+    observer: Option<StreamingObserver>,
 }
 
 impl TraceBridge {
     /// 用 trace 写句柄构造桥接器（句柄可继续克隆给其他生产者，但 M2 只有本桥）。
     pub fn new(handle: trace::TraceHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            observer: None,
+        }
+    }
+
+    /// 构造带流式观察者的桥接器（`--stream` 用；观察者与落库互不影响）。
+    pub fn with_observer(handle: trace::TraceHandle, observer: StreamingObserver) -> Self {
+        Self {
+            handle,
+            observer: Some(observer),
+        }
     }
 
     /// 底层写句柄（诊断/错误检查用）。
@@ -104,6 +122,9 @@ impl kernel::TraceSink for TraceBridge {
         event: kernel::StreamingEvent,
         at: String,
     ) -> bool {
+        if let Some(observer) = &self.observer {
+            observer(&event);
+        }
         self.handle.send_streaming(trace::TraceInput::Streaming {
             run_id: run_id.clone(),
             instance_id: instance_id.clone(),
@@ -257,8 +278,26 @@ pub fn start_traced_run(
     db_path: impl AsRef<Path>,
 ) -> Result<TracedRun, BridgeError> {
     let writer = trace::TraceWriter::open(db_path.as_ref())?;
+    start_traced_run_with_writer(writer, spec, executor, None)
+}
+
+/// 用**已打开**的 trace 写端启动 run（`zgraph run` 的启动顺序：先开库/迁移，
+/// 再做图加载与入口校验，最后才建 run；06 §6.10.3）。
+///
+/// `observer` 用于 `--stream`（见 [`StreamingObserver`]）；语义与
+/// [`start_traced_run`] 完全相同。
+pub fn start_traced_run_with_writer(
+    writer: trace::TraceWriter,
+    spec: kernel::RunSpec,
+    executor: Arc<dyn kernel::NodeExecutor>,
+    observer: Option<StreamingObserver>,
+) -> Result<TracedRun, BridgeError> {
     let trace_handle = writer.handle();
-    let sink: Arc<dyn kernel::TraceSink> = Arc::new(TraceBridge::new(trace_handle.clone()));
+    let bridge = match observer {
+        Some(observer) => TraceBridge::with_observer(trace_handle.clone(), observer),
+        None => TraceBridge::new(trace_handle.clone()),
+    };
+    let sink: Arc<dyn kernel::TraceSink> = Arc::new(bridge);
     let handle = match kernel::start_run(None, spec, executor, sink) {
         Ok(handle) => handle,
         Err(error) => {
