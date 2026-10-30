@@ -202,10 +202,26 @@ pub fn run(options: &TraceOptions) -> ExitCode {
         Ok(truncated) => truncated,
         Err(error) => return report_storage_error(&error),
     };
+    print_in_progress_note(&run);
     if options.stats {
         run_stats(&reader, options, &run, truncated)
     } else {
         run_timeline(&reader, options, &run, truncated)
+    }
+}
+
+/// 06 §6.8.3：`Running`/`Paused` 且 owner pid 仍活 → stderr 提示（stdout 保持纯数据）。
+///
+/// 诊断走 stderr（与 `--json` NDJSON 的 stdout 契约一致）；退出码按原语义 0。
+fn print_in_progress_note(run: &RunRow) {
+    if !matches!(run.status, RunStatus::Running | RunStatus::Paused) {
+        return;
+    }
+    let Some(pid) = run.owner_pid else {
+        return;
+    };
+    if crate::recovery::pid_alive(pid) {
+        eprintln!("run still in progress (pid {pid})");
     }
 }
 

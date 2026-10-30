@@ -60,6 +60,7 @@ use zgraph_trace::{
 use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
 use crate::bridge::{self, BridgeError, StreamingObserver, TracedRun};
+use crate::recovery;
 use crate::trace_cmd::resolve_db_path;
 use crate::{
     EXIT_ENTRY_INPUT, EXIT_INTERRUPTED, EXIT_OTHER, EXIT_STORAGE, EXIT_SUCCESS, EXIT_USAGE,
@@ -728,6 +729,17 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         Ok(writer) => writer,
         Err(error) => return report_storage_error(&error),
     };
+    // 启动中止标定（06 §6.8.1：打开/迁移 DB 后、编译/启动 run 前）。
+    let recovered = match recovery::recover_interrupted(&writer) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            close_quietly(writer);
+            return report_storage_error(&error);
+        }
+    };
+    for item in &recovered {
+        eprintln!("{}", recovery::warning_line(item));
+    }
     let assets_dir = resolve_assets_dir(args);
     let tools_dir = resolve_tools_dir(args, &assets_dir);
     let graph = match load_compiled_graph(args, &assets_dir) {
@@ -796,7 +808,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         Ok(outcome) => outcome,
         Err(code) => return code,
     };
-    finish(args, outcome, duration_ms, &db_path)
+    finish(args, outcome, duration_ms, &db_path, &recovered)
 }
 
 /// 加载并编译图；失败时打印 stderr 并返回退出码 2（不产生 run）。
@@ -940,7 +952,13 @@ fn duration_millis(started: Instant) -> u64 {
 ///
 /// `:memory:` 没有可回读的 reader：`event_count` 记 0（trace 跨进程不可读，
 /// 06 §6.9.1），其余字段全部来自内核 outcome。
-fn finish(args: &RunArgs, completion: RunCompletion, duration_ms: u64, db_path: &Path) -> ExitCode {
+fn finish(
+    args: &RunArgs,
+    completion: RunCompletion,
+    duration_ms: u64,
+    db_path: &Path,
+    recovered: &[recovery::Recovered],
+) -> ExitCode {
     let (outcome, reader) = match completion {
         RunCompletion::WithReader(outcome, reader) => (outcome, Some(reader)),
         RunCompletion::OutcomeOnly(outcome) => (outcome, None),
@@ -954,7 +972,7 @@ fn finish(args: &RunArgs, completion: RunCompletion, duration_ms: u64, db_path: 
     if args.json {
         println!(
             "{}",
-            json_payload(&outcome, event_count, duration_ms, db_path)
+            json_payload(&outcome, event_count, duration_ms, db_path, recovered)
         );
     } else {
         if !args.quiet {
@@ -990,7 +1008,13 @@ fn exit_code_for(status: RunStatus) -> u8 {
 }
 
 /// `--json` 结构（06 §6.10.6）。
-fn json_payload(outcome: &RunOutcome, event_count: i64, duration_ms: u64, db_path: &Path) -> Value {
+fn json_payload(
+    outcome: &RunOutcome,
+    event_count: i64,
+    duration_ms: u64,
+    db_path: &Path,
+    recovered: &[recovery::Recovered],
+) -> Value {
     let mut object = Map::new();
     object.insert(
         "ok".to_string(),
@@ -1022,12 +1046,24 @@ fn json_payload(outcome: &RunOutcome, event_count: i64, duration_ms: u64, db_pat
         "run_output".to_string(),
         outcome.output.clone().unwrap_or(Value::Null),
     );
-    object.insert("recovered".to_string(), json!([]));
+    object.insert(
+        "recovered".to_string(),
+        Value::Array(recovered.iter().map(recovered_json).collect()),
+    );
     object.insert("warnings".to_string(), json!([]));
     if let Some(error) = &outcome.error {
         object.insert("error".to_string(), run_error_json(error));
     }
     Value::Object(object)
+}
+
+/// 中止标定结果 → `--json.recovered[]` 元素（06 §6.8.1 / DR-002 §9 #10）。
+fn recovered_json(item: &recovery::Recovered) -> Value {
+    json!({
+        "run_id": item.run.run_id,
+        "previous_status": item.run.previous_status.as_str(),
+        "recovered_at": item.run.recovered_at,
+    })
 }
 
 /// `RunError` → `{"code","message"}`。

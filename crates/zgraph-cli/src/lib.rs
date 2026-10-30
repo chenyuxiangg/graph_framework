@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bridge;
+pub mod recovery;
 pub mod replay_cmd;
 pub mod run_cmd;
 pub mod trace_cmd;

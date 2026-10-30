@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use zgraph_trace::{RecordMode, RunStartedInfo, TraceInput, TraceWriter};
 
 // ---------------------------------------------------------------------------
 // 路径与命令辅助
@@ -247,6 +248,24 @@ fn instance_status(db: &Path, node_id: &str) -> Option<String> {
         )
         .optional()
         .expect("query instance status")
+}
+
+/// 某 run 的标定后状态：`(status, interrupted, error_code, recovered_at)`。
+fn run_state(db: &Path, run_id: &str) -> (String, bool, Option<String>, Option<String>) {
+    connect(db)
+        .query_row(
+            "SELECT status, interrupted, error_code, recovered_at FROM runs WHERE run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .unwrap_or_else(|error| panic!("run_state({run_id}): {error}"))
 }
 
 /// `llm_calls` 行：`(run_id, call_index, request 原文, response 原文, status, recorded_at)`。
@@ -1121,6 +1140,135 @@ fn run_agent_config_timeout_hint_is_forwarded_end_to_end() {
         "instance must be TimedOut, not the 180s default timeout"
     );
     assert!(event_count(&db, "NodeTimedOut") >= 1);
+}
+
+// ---------------------------------------------------------------------------
+// 4e. ISSUE-084：run 启动中止标定 + --json.recovered[]
+// ---------------------------------------------------------------------------
+
+/// 已退出并回收的进程 pid（`kill(pid, 0)` 必然失败）。
+#[cfg(unix)]
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let pid = child.id();
+    child.wait().expect("wait true");
+    pid
+}
+
+/// 在既有 DB 里写若干 `Running` run（只发 `RunStarted`，无 `RunFinished`）。
+#[cfg(unix)]
+fn seed_running_runs(db: &Path, runs: &[(String, String, u32, String)]) {
+    let writer = TraceWriter::open(db).expect("seed writer");
+    for (run_id, owner_host, owner_pid, started_at) in runs {
+        writer.handle().send(TraceInput::RunStarted(RunStartedInfo {
+            run_id: run_id.clone(),
+            graph_hash: "0123456789abcdef".to_string(),
+            graph_name: "seed".to_string(),
+            dsl_json: "{}".to_string(),
+            user_id: "local".to_string(),
+            entry_inputs: json!({}),
+            seed: 0,
+            record_mode: RecordMode::Hash,
+            owner_pid: *owner_pid,
+            owner_host: owner_host.clone(),
+            started_at: started_at.clone(),
+        }));
+    }
+    writer.flush().expect("flush seeds");
+    writer.close().expect("close seed writer");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = write_text(dir.path(), "io.json", &io_graph());
+    let db = dir.path().join("calibrate.db");
+    let host = zgraph_cli::recovery::current_host();
+    let dead = dead_pid();
+    seed_running_runs(
+        &db,
+        &[
+            // 同机 + pid 已死 → 判死。
+            (
+                "run-dead".to_string(),
+                host.clone(),
+                dead,
+                "2026-10-30T00:00:00.000Z".to_string(),
+            ),
+            // 同机 + pid 存活 → 合法并发，跳过。
+            (
+                "run-live".to_string(),
+                host.clone(),
+                std::process::id(),
+                "2026-10-30T00:00:00.000Z".to_string(),
+            ),
+            // 跨机 + heartbeat 陈旧 → 判死。
+            (
+                "run-stale".to_string(),
+                "other-host".to_string(),
+                dead,
+                "2020-01-01T00:00:00.000Z".to_string(),
+            ),
+        ],
+    );
+
+    let output = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            arg(&db),
+            "--inputs".to_string(),
+            r#"{"start":{"x":1}}"#.to_string(),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&output, 0, "run with startup calibration");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let recovered = payload["recovered"].as_array().expect("recovered array");
+    assert_eq!(
+        recovered.len(),
+        2,
+        "dead + stale runs are recovered: {payload}"
+    );
+    let ids: Vec<&str> = recovered
+        .iter()
+        .map(|entry| entry["run_id"].as_str().expect("run_id"))
+        .collect();
+    assert!(ids.contains(&"run-dead"), "{ids:?}");
+    assert!(ids.contains(&"run-stale"), "{ids:?}");
+    for entry in recovered {
+        assert_eq!(entry["previous_status"], json!("Running"));
+        assert!(
+            entry["recovered_at"]
+                .as_str()
+                .is_some_and(|at| at.ends_with('Z')),
+            "{entry}"
+        );
+    }
+    // stderr：使用 stderr 警告（06 §6.8.1 步骤 5），含判死 pid。
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("marked interrupted"), "{stderr}");
+    assert!(stderr.contains(&format!("pid {dead} gone")), "{stderr}");
+
+    // DB：只改 runs（status/interrupted/recovered_at），error_code 保持 NULL。
+    let (status, interrupted, error_code, recovered_at) = run_state(&db, "run-dead");
+    assert_eq!(status, "Failed");
+    assert!(interrupted);
+    assert_eq!(error_code, None, "interrupted is not a domain error code");
+    assert!(recovered_at.is_some());
+    let (status, interrupted, _, _) = run_state(&db, "run-stale");
+    assert_eq!(status, "Failed");
+    assert!(interrupted);
+    let (status, interrupted, _, _) = run_state(&db, "run-live");
+    assert_eq!(status, "Running", "live owner must not be calibrated");
+    assert!(!interrupted);
+    assert_eq!(runs_count(&db), 4, "3 seeded + 1 new run");
 }
 
 // ---------------------------------------------------------------------------

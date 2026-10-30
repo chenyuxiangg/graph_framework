@@ -715,3 +715,77 @@ fn db_path_priority_env_and_default() {
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert!(stdout(&output).contains("status=Completed"));
 }
+
+// ---------------------------------------------------------------------------
+// 06 §6.8.3：run still in progress (pid N)
+// ---------------------------------------------------------------------------
+
+/// 只发 `RunStarted`（无 `RunFinished`）的 in-progress 库。
+fn in_progress_fixture(owner_pid: u32, owner_host: &str) -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("trace.db");
+    let writer = TraceWriter::open(&path).expect("writer");
+    writer.handle().send(TraceInput::RunStarted(RunStartedInfo {
+        run_id: RUN_ID.to_string(),
+        graph_hash: GRAPH_HASH.to_string(),
+        graph_name: GRAPH_NAME.to_string(),
+        dsl_json: "{}".to_string(),
+        user_id: "local".to_string(),
+        entry_inputs: json!({}),
+        seed: 0,
+        record_mode: RecordMode::Hash,
+        owner_pid,
+        owner_host: owner_host.to_string(),
+        started_at: at(0),
+    }));
+    writer.flush().expect("flush");
+    writer.close().expect("close");
+    (dir, path)
+}
+
+#[test]
+fn trace_reports_run_still_in_progress_for_live_owner() {
+    let (_dir, path) = in_progress_fixture(std::process::id(), "test-host");
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&path)]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("status=Running"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "run still in progress (pid {})",
+            std::process::id()
+        )),
+        "{}",
+        stderr(&output)
+    );
+    // --json：stdout 仍是纯 NDJSON，提示走 stderr。
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&path), "--json"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(json_lines(&output).len() == 1, "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("run still in progress (pid "),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn trace_omits_progress_note_for_dead_owner_pid() {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let dead_pid = child.id();
+    child.wait().expect("wait true");
+    let (_dir, path) = in_progress_fixture(dead_pid, "test-host");
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&path)]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(
+        !stderr(&output).contains("run still in progress"),
+        "{}",
+        stderr(&output)
+    );
+}
