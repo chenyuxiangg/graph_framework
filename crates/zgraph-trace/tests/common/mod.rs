@@ -68,6 +68,7 @@ pub fn started(run_id: &str) -> TraceInput {
         dsl_json: r#"{"version":"1.0"}"#.to_string(),
         user_id: "local".to_string(),
         entry_inputs: json!({"start": {"in": 1}}),
+        global_vars: json!({}),
         seed: 42,
         record_mode: RecordMode::Hash,
         owner_pid: std::process::id(),

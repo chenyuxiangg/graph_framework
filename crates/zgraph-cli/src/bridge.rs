@@ -27,6 +27,7 @@
 //! `RunOptions::default()` 再赋值（或 `..Default::default()`），禁止穷举字段。
 //! 本模块的测试也遵循该约定。
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -69,6 +70,9 @@ pub struct BridgeObservers {
 pub struct TraceBridge {
     handle: trace::TraceHandle,
     observers: BridgeObservers,
+    /// run 级 `global_vars` 快照（ISSUE-087）：内核 `RunStartedInfo` 不带该字段，
+    /// 由 CLI 组合根在启动前注入，映射为 trace `RunStartedInfo.global_vars` 落库。
+    global_vars: Value,
 }
 
 impl TraceBridge {
@@ -77,12 +81,31 @@ impl TraceBridge {
         Self {
             handle,
             observers: BridgeObservers::default(),
+            global_vars: json!({}),
         }
     }
 
     /// 用观察者组合构造桥接器（`--stream` / human 实时生命周期；与落库互不影响）。
     pub fn with_observers(handle: trace::TraceHandle, observers: BridgeObservers) -> Self {
-        Self { handle, observers }
+        Self {
+            handle,
+            observers,
+            global_vars: json!({}),
+        }
+    }
+
+    /// 同 [`TraceBridge::with_observers`]，并注入本次 run 的 `global_vars` 快照
+    /// （`start_traced_run*` 组合根使用；ISSUE-087）。
+    pub(crate) fn with_snapshot(
+        handle: trace::TraceHandle,
+        observers: BridgeObservers,
+        global_vars: Value,
+    ) -> Self {
+        Self {
+            handle,
+            observers,
+            global_vars,
+        }
     }
 
     /// 底层写句柄（诊断/错误检查用）。
@@ -106,7 +129,10 @@ impl TraceBridge {
 
 impl kernel::TraceSink for TraceBridge {
     fn run_started(&self, info: kernel::RunStartedInfo) {
-        self.send_event(trace::TraceInput::RunStarted(map_run_started(&info)));
+        let mut mapped = map_run_started(&info);
+        // ISSUE-087：`global_vars` 不在内核 `RunStartedInfo` 中，由组合根注入。
+        mapped.global_vars = self.global_vars.clone();
+        self.send_event(trace::TraceInput::RunStarted(mapped));
     }
 
     fn instance_snapshot(&self, snapshot: kernel::InstanceSnapshot) {
@@ -383,8 +409,10 @@ fn start_traced_run_inner(
     observers: BridgeObservers,
     run_id: Option<String>,
 ) -> Result<TracedRun, BridgeError> {
+    // ISSUE-087：启动前抓取 `RunSpec.global_vars` 快照（spec 随后移交给内核）。
+    let global_vars = global_vars_json(&spec.global_vars);
     let trace_handle = writer.handle();
-    let bridge = TraceBridge::with_observers(trace_handle.clone(), observers);
+    let bridge = TraceBridge::with_snapshot(trace_handle.clone(), observers, global_vars);
     let sink: Arc<dyn kernel::TraceSink> = Arc::new(bridge);
     let handle = match kernel::start_run(run_id, spec, executor, sink) {
         Ok(handle) => handle,
@@ -414,7 +442,19 @@ pub async fn run_in_process(
 // 逐字段映射（kernel 记录 → trace 输入）
 // ---------------------------------------------------------------------------
 
+/// `RunSpec.global_vars` → JSON object 快照（ISSUE-087；写端再做 canonical 排序）。
+fn global_vars_json(vars: &HashMap<String, Value>) -> Value {
+    let mut object = Map::new();
+    for (key, value) in vars {
+        object.insert(key.clone(), value.clone());
+    }
+    Value::Object(object)
+}
+
 /// 映射 `RunStarted`。
+///
+/// `global_vars` 先给空对象：内核 `RunStartedInfo` 不携带它，由 [`TraceBridge`]
+/// 在 `run_started` 时用启动快照覆盖（ISSUE-087）。
 fn map_run_started(info: &kernel::RunStartedInfo) -> trace::RunStartedInfo {
     trace::RunStartedInfo {
         run_id: info.run_id.clone(),
@@ -423,6 +463,7 @@ fn map_run_started(info: &kernel::RunStartedInfo) -> trace::RunStartedInfo {
         dsl_json: info.dsl_json.clone(),
         user_id: info.user_id.clone(),
         entry_inputs: info.entry_inputs.clone(),
+        global_vars: json!({}),
         seed: info.seed,
         record_mode: map_record_mode(&info.record_mode),
         owner_pid: info.owner_pid,
@@ -1003,5 +1044,34 @@ mod tests {
         let executor = FakeExecutor::new();
         let result = run_in_process(spec, std::sync::Arc::new(executor), &path).await;
         assert!(matches!(result, Err(BridgeError::Start(_))));
+    }
+
+    /// ISSUE-087：组合根把 `RunSpec.global_vars` 注入 `RunStarted` 并落 `runs.global_vars_json`。
+    #[tokio::test]
+    async fn run_in_process_records_global_vars_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let mut spec = linear_spec();
+        spec.global_vars = HashMap::from([
+            ("tenant".to_string(), serde_json::json!("acme")),
+            ("threshold".to_string(), serde_json::json!(5)),
+        ]);
+        spec.options.record_mode = zgraph_kernel::RecordMode::Full;
+        let executor = FakeExecutor::new().respond("work", serde_json::json!({"ok": true}));
+        let result = run_in_process(spec, std::sync::Arc::new(executor), &path)
+            .await
+            .expect("bridge run");
+
+        let run_id = result.outcome.run_id.clone();
+        let run = result
+            .reader()
+            .run(&run_id)
+            .expect("run query")
+            .expect("row");
+        assert_eq!(
+            run.global_vars,
+            Some(serde_json::json!({"tenant": "acme", "threshold": 5})),
+            "runs.global_vars_json 必须记录启动快照"
+        );
     }
 }

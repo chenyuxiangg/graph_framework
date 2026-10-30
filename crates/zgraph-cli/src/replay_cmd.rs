@@ -15,8 +15,11 @@
 //! 自环每次投递 attempt+1；ISSUE-061 修复后被 gate 拦截的投递不创建实例）。
 //! `start`/`end` 为内核内置执行、不进入执行器，故不查记录。
 //!
-//! 已知边界：`global_vars` 未落 `runs` 表，重放以空 map 重建（依赖 global_vars 的图
-//! 可能触发 `REPLAY_OUTPUT_MISMATCH`）；`llm_calls` 仅作审计，不参与重放。
+//! `global_vars`（ISSUE-087 / schema v3）：由 `runs.global_vars_json` 重建运行环境；
+//! v3 前的历史 run 该列为 NULL → 按空 map 兼容并在 stderr 告警（旧行为；依赖
+//! `ctx.get_var` 的图可能 `REPLAY_OUTPUT_MISMATCH`）。`replay` 只读、**不迁移** schema
+//! （06 §6.6/§6.7）：v2 库需先由写端（`zgraph run`）迁移到 v3，否则按
+//! `error[STORAGE_ERROR]` 退出码 4。`llm_calls` 仅作审计，不参与重放。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -199,6 +202,7 @@ fn run_events(args: &ReplayArgs) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 /// replay 错误（CLI 命名空间码 + 退出码）。
+#[derive(Debug)]
 struct ReplayError {
     code: &'static str,
     message: String,
@@ -425,7 +429,10 @@ fn load_recorded_graph(
         .map_err(|error| ReplayError::storage(format!("cannot compile recorded graph: {error}")))
 }
 
-/// 由 `runs` 快照重建 `RunSpec`（graph/entry_inputs/user_id/seed；global_vars 为空）。
+/// 由 `runs` 快照重建 `RunSpec`（graph/entry_inputs/user_id/seed/global_vars）。
+///
+/// `global_vars` 来自 v3 的 `runs.global_vars_json`（ISSUE-087）；历史 run 无记录时
+/// 按空 map 兼容并告警（见 [`global_vars_from_run`]）。
 fn build_spec(run: &RunRow, graph: Arc<CompiledGraph>) -> Result<RunSpec, ReplayError> {
     let raw_inputs = run.entry_inputs.as_ref().ok_or_else(|| {
         ReplayError::record(
@@ -444,13 +451,40 @@ fn build_spec(run: &RunRow, graph: Arc<CompiledGraph>) -> Result<RunSpec, Replay
         graph,
         entry_inputs,
         user_id: run.user_id.clone(),
-        global_vars: HashMap::new(),
+        global_vars: global_vars_from_run(run)?,
         options: RunOptions {
             seed: run.seed,
             record_mode: zgraph_kernel::RecordMode::None,
             ..RunOptions::default()
         },
     })
+}
+
+/// 从 `runs.global_vars_json` 重建 `RunSpec.global_vars`（ISSUE-087）。
+///
+/// - v3 记录（object）→ 逐键还原；
+/// - `None`（v2→v3 迁移前的历史 run）→ 空 map 兼容 + stderr 告警（旧行为；若图依赖
+///   `ctx.get_var` 可能出现 `REPLAY_OUTPUT_MISMATCH`，与 `--record=full` 语义一致）；
+/// - 非 object → `REPLAY_RECORD_CORRUPT`（记录损坏）。
+fn global_vars_from_run(run: &RunRow) -> Result<HashMap<String, Value>, ReplayError> {
+    match &run.global_vars {
+        Some(Value::Object(map)) => Ok(map
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()),
+        Some(_) => Err(ReplayError::record(
+            CODE_REPLAY_RECORD_CORRUPT,
+            "global_vars snapshot is not a JSON object",
+        )),
+        None => {
+            eprintln!(
+                "warning: run {} has no recorded global_vars (pre-v3 record); \
+                 replaying with empty globals",
+                run.run_id
+            );
+            Ok(HashMap::new())
+        }
+    }
 }
 
 /// 比较重跑结果与原始输出并输出（DR-002 §3.3 步 4）。
@@ -552,11 +586,139 @@ fn json_text(value: Option<&Value>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, ReplayArgs, ReplayMode};
+    use super::{build_spec, parse, ReplayArgs, ReplayMode};
     use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use serde_json::{json, Value};
+    use zgraph_kernel::{
+        run_to_completion, CompiledGraph, MemoryTraceSink, NodeError, NodeExecution, NodeExecutor,
+        RunStatus,
+    };
+    use zgraph_trace::{RunRow, RunStatus as TraceRunStatus};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    const GV_GRAPH: &str = r#"{
+        "version": "1.0",
+        "metadata": {"name": "gv"},
+        "entry_points": ["start"],
+        "nodes": [
+          {"id": "start", "type": "start", "inputs": [], "config": {}},
+          {"id": "work", "type": "python_node",
+           "inputs": [{"name": "i", "type": "any", "required": true}],
+           "config": {"module": "m", "function": "f"}},
+          {"id": "end", "type": "end",
+           "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+        ],
+        "edges": [
+          {"from": "start", "to_node": "work", "to_input_port": "i"},
+          {"from": "work", "to_node": "end", "to_input_port": "r"}
+        ]
+    }"#;
+
+    fn gv_graph() -> Arc<CompiledGraph> {
+        let loaded = zgraph_dsl::load_graph(GV_GRAPH.as_bytes()).expect("graph loads");
+        CompiledGraph::compile(&loaded).expect("graph compiles")
+    }
+
+    fn sample_run(global_vars: Option<Value>) -> RunRow {
+        RunRow {
+            run_id: "run-gv".to_string(),
+            graph_hash: "0123456789abcdef".to_string(),
+            graph_name: Some("gv".to_string()),
+            status: TraceRunStatus::Completed,
+            user_id: "local".to_string(),
+            started_at: "2026-10-30T00:00:00.000Z".to_string(),
+            finished_at: Some("2026-10-30T00:00:01.000Z".to_string()),
+            entry_inputs: Some(json!({})),
+            output_json: Some(json!({"r": 5})),
+            error_code: None,
+            error_message: None,
+            interrupted: false,
+            recovered_at: None,
+            last_seq: 1,
+            event_count: 1,
+            streaming_dropped: 0,
+            abandoned_tasks: 0,
+            trace_backpressure: 0,
+            killed_workers: 0,
+            seed: 7,
+            record_mode: Some("full".to_string()),
+            owner_pid: None,
+            owner_host: None,
+            heartbeat_at: None,
+            global_vars,
+        }
+    }
+
+    /// 读取 `ctx.get_var("threshold")` 作为输出的执行器（验证重放环境重建）。
+    struct GetVarExecutor;
+
+    impl NodeExecutor for GetVarExecutor {
+        fn execute<'a>(
+            &'a self,
+            execution: NodeExecution<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Value, NodeError>> + Send + 'a>,
+        > {
+            let value = execution.ctx.get_var("threshold").cloned();
+            Box::pin(async move {
+                match value {
+                    // 节点输出直接作为 end 的输入端口值（内核把整个 output 投递到出边端口）。
+                    Some(value) => Ok(value),
+                    None => Err(NodeError::Internal {
+                        message: "threshold global var missing in replay".to_string(),
+                    }),
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn build_spec_restores_recorded_global_vars() {
+        let run = sample_run(Some(json!({"threshold": 5, "tenant": "acme"})));
+        let spec = build_spec(&run, gv_graph()).expect("build spec");
+        assert_eq!(spec.global_vars.get("threshold"), Some(&json!(5)));
+        assert_eq!(spec.global_vars.get("tenant"), Some(&json!("acme")));
+    }
+
+    #[tokio::test]
+    async fn replayed_spec_exposes_global_vars_through_ctx_get_var() {
+        let run = sample_run(Some(json!({"threshold": 5})));
+        let spec = build_spec(&run, gv_graph()).expect("build spec");
+        let outcome = run_to_completion(
+            None,
+            spec,
+            Arc::new(GetVarExecutor),
+            Arc::new(MemoryTraceSink::new()),
+        )
+        .await
+        .expect("replay run starts");
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(
+            outcome.output, run.output_json,
+            "L2 重放输出与记录一致（依赖 ctx.get_var）"
+        );
+    }
+
+    #[test]
+    fn build_spec_legacy_run_without_global_vars_falls_back_to_empty_map() {
+        let run = sample_run(None);
+        let spec = build_spec(&run, gv_graph()).expect("legacy run stays replayable");
+        assert!(spec.global_vars.is_empty());
+    }
+
+    #[test]
+    fn build_spec_rejects_corrupt_global_vars_snapshot() {
+        let run = sample_run(Some(json!(42)));
+        let error = match build_spec(&run, gv_graph()) {
+            Ok(_) => panic!("non-object global_vars snapshot must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, super::CODE_REPLAY_RECORD_CORRUPT);
     }
 
     #[test]

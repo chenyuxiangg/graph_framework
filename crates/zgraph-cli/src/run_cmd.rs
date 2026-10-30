@@ -1751,6 +1751,7 @@ mod tests {
             dsl_json: "{}".to_string(),
             user_id: "local".to_string(),
             entry_inputs: json!({}),
+            global_vars: json!({}),
             seed: 7,
             record_mode: RecordMode::Hash,
             owner_pid: 1,

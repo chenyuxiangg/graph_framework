@@ -321,6 +321,11 @@ pub struct RunStartedInfo {
     pub user_id: String,
     /// entry 输入快照（`RunSpec.entry_inputs`）。
     pub entry_inputs: Value,
+    /// run 级 `global_vars` 快照（v3 / ISSUE-087；MUST 是 JSON object）。
+    ///
+    /// 写线程落库前做 **canonical JSON**（object 键递归排序），供
+    /// `replay --mode=outputs` 重建运行环境；无 global_vars 时传 `json!({})`。
+    pub global_vars: Value,
     /// 可复现随机种子（architecture §5.1）。
     pub seed: u64,
     /// L2 记录模式。

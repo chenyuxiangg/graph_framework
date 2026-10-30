@@ -346,6 +346,105 @@ fn replay_outputs_full_record_succeeds_without_workers() {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. ISSUE-087：global_vars 记录与重放（schema v3）
+// ---------------------------------------------------------------------------
+
+/// 读 `runs.global_vars_json` 原始文本。
+fn global_vars_text(db: &Path, run_id: &str) -> Option<String> {
+    connect(db)
+        .query_row(
+            "SELECT global_vars_json FROM runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("query global_vars_json")
+}
+
+#[test]
+fn run_records_empty_global_vars_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (run_id, _, db) = create_full_run(dir.path());
+    // CLI 暂无 `--global-vars` 入口 → 记录空 object（canonical `{}`）。
+    assert_eq!(
+        global_vars_text(&db, &run_id).as_deref(),
+        Some("{}"),
+        "run must always record a global_vars snapshot"
+    );
+}
+
+#[test]
+fn replay_outputs_reads_recorded_global_vars() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (run_id, _, db) = create_full_run(dir.path());
+    // 模拟一个带 global_vars 的库（库 API 驱动的 run；CLI 当前无该入口）。
+    tamper(
+        &db,
+        "UPDATE runs SET global_vars_json = '{\"threshold\":5}'",
+    );
+
+    let replay = run_cli(
+        &replay_args(&run_id, &db, &["--json", "--mode=outputs"]),
+        dir.path(),
+    );
+    assert_exit(&replay, 0, "L2 replay with recorded global_vars");
+    let payload = json_stdout(&replay);
+    assert_eq!(payload["matched"], json!(true));
+    assert_eq!(payload["ok"], json!(true));
+}
+
+#[test]
+fn replay_outputs_legacy_run_without_global_vars_warns_and_falls_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (run_id, _, db) = create_full_run(dir.path());
+    // v2→v3 迁移前的历史 run：列为 NULL → 空 map 兼容 + stderr 告警。
+    tamper(&db, "UPDATE runs SET global_vars_json = NULL");
+
+    let replay = run_cli(
+        &replay_args(&run_id, &db, &["--json", "--mode=outputs"]),
+        dir.path(),
+    );
+    assert_exit(&replay, 0, "legacy run stays replayable");
+    assert_eq!(json_stdout(&replay)["matched"], json!(true));
+    let stderr = String::from_utf8_lossy(&replay.stderr);
+    assert!(
+        stderr.contains("has no recorded global_vars"),
+        "legacy replay must warn: {stderr}"
+    );
+}
+
+#[test]
+fn replay_outputs_rejects_non_object_global_vars_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (run_id, _, db) = create_full_run(dir.path());
+    tamper(&db, "UPDATE runs SET global_vars_json = '42'");
+
+    let replay = run_cli(&replay_args(&run_id, &db, &["--mode=outputs"]), dir.path());
+    assert_exit(&replay, 3, "corrupt global_vars snapshot");
+    let stderr = String::from_utf8_lossy(&replay.stderr);
+    assert!(
+        stderr.contains("error[REPLAY_RECORD_CORRUPT]"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn replay_outputs_requires_current_schema() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (run_id, _, db) = create_full_run(dir.path());
+    // replay 只读、不迁移（06 §6.6/§6.7）：v2 库必须先由写端迁移。
+    tamper(&db, "PRAGMA user_version = 2");
+
+    let replay = run_cli(&replay_args(&run_id, &db, &["--mode=outputs"]), dir.path());
+    assert_exit(&replay, 4, "v2 database needs writer migration first");
+    let stderr = String::from_utf8_lossy(&replay.stderr);
+    assert!(
+        stderr.contains("error[STORAGE_ERROR]") && stderr.contains("unsupported schema version=2"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 3. 记录类错误：exit 3
 // ---------------------------------------------------------------------------
 

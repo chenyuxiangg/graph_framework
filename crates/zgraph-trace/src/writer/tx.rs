@@ -241,6 +241,27 @@ fn payload_text(kind: &str, payload: &Value) -> Result<String, TxError> {
         .map_err(|err| TxError::Fatal(TraceError::Serialize(err.to_string())))
 }
 
+/// 规范化 JSON：object 键**递归排序**后重建（不依赖 `serde_json` 的
+/// `preserve_order` 特性；工作区因 genai 已打开该特性）。
+///
+/// `runs.global_vars_json` 用它落库：同一 `global_vars` 快照的存储字节稳定，
+/// 便于 L2 记录比对与审计（ISSUE-087）。
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for key in keys {
+                sorted.insert(key.clone(), canonical_json(&map[key]));
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
+}
+
 fn write_run_started(
     tx: &Transaction<'_>,
     info: &RunStartedInfo,
@@ -258,12 +279,20 @@ fn write_run_started(
     )
     .map_err(sql_err)?;
     let entry_inputs = json_req(&info.entry_inputs)?;
+    // v3（ISSUE-087）：`global_vars` 以 canonical JSON 落库（object 键递归排序），
+    // 保证同一快照的落库字节稳定、便于 L2 记录比对/审计。
+    if !info.global_vars.is_object() {
+        return Err(TxError::Fatal(TraceError::Serialize(
+            "RunStarted.global_vars must be a JSON object".to_string(),
+        )));
+    }
+    let global_vars_json = json_req(&canonical_json(&info.global_vars))?;
     let seed = i64::try_from(info.seed).unwrap_or(i64::MAX);
     tx.execute(
         "INSERT OR IGNORE INTO runs \
          (run_id, graph_hash, status, user_id, started_at, entry_inputs, owner_pid, owner_host, \
-          heartbeat_at, seed, record_mode) \
-         VALUES (?1, ?2, 'Running', ?3, ?4, ?5, ?6, ?7, ?4, ?8, ?9)",
+          heartbeat_at, seed, record_mode, global_vars_json) \
+         VALUES (?1, ?2, 'Running', ?3, ?4, ?5, ?6, ?7, ?4, ?8, ?9, ?10)",
         params![
             info.run_id,
             info.graph_hash,
@@ -273,7 +302,8 @@ fn write_run_started(
             i64::from(info.owner_pid),
             info.owner_host,
             seed,
-            info.record_mode.as_str()
+            info.record_mode.as_str(),
+            global_vars_json
         ],
     )
     .map_err(sql_err)?;

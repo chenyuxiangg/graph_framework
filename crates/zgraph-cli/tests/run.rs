@@ -1292,6 +1292,7 @@ fn seed_running_runs(db: &Path, runs: &[(String, String, u32, String)]) {
             dsl_json: "{}".to_string(),
             user_id: "local".to_string(),
             entry_inputs: json!({}),
+            global_vars: json!({}),
             seed: 0,
             record_mode: RecordMode::Hash,
             owner_pid: *owner_pid,

@@ -4,18 +4,24 @@
 //! `gate_results`/`streaming_events` + `schema_migrations`/`graphs`）
 //! + architecture §5.2 的增量：`runs` 新增 5 列与两张记录表。
 //!
-//! 版本策略：`PRAGMA user_version` 为权威；`0` = 新库（单事务建 v2），
-//! `1` = spec 06 v1 库（补列 + 补表后升到 v2），`2` = 就绪，`>2` = 拒绝。
+//! v3 = ISSUE-087（06 §6.7 / DR-003 D4）：`runs` 新增 `global_vars_json TEXT`
+//! （canonical JSON：object 键递归排序，落库字节稳定），供 `replay --mode=outputs`
+//! 重建 run 级 `global_vars` 快照。
+//!
+//! 版本策略：`PRAGMA user_version` 为权威；`0` = 新库（单事务建当前版本），
+//! `1` = spec 06 v1 库、`2` = v2 库（逐版本迁移到 v3），`3` = 就绪，`>3` = 拒绝。
+//! 迁移前 `VACUUM INTO '<db>.bak.v{old}-{ts}'` 备份；每版本一个事务；失败则恢复
+//! 备份并返回 [`TraceError::Storage`]（06 §6.7）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::TraceError;
 
-/// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2）。
-pub const TRACE_SCHEMA_VERSION: i64 = 2;
+/// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2；v3 = ISSUE-087）。
+pub const TRACE_SCHEMA_VERSION: i64 = 3;
 
 /// SQLite `busy_timeout`（毫秒，06 §6.2.1）。
 pub const DB_BUSY_TIMEOUT_MS: u32 = 5_000;
@@ -68,8 +74,11 @@ const RUNS_V2_COLUMNS: &[(&str, &str)] = &[
     ),
 ];
 
-/// v2 完整 DDL（全部 `IF NOT EXISTS`，单事务执行；06 §6.2 + v2 增量）。
-const DDL_V2: &str = r#"
+/// v2 → v3 需要补到 `runs` 的列（ISSUE-087：run 级 `global_vars` 快照，canonical JSON）。
+const RUNS_V3_COLUMNS: &[(&str, &str)] = &[("global_vars_json", "global_vars_json TEXT")];
+
+/// 当前完整 DDL（全部 `IF NOT EXISTS`，单事务执行；06 §6.2 + v2/v3 增量）。
+const DDL_CURRENT: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version     INTEGER PRIMARY KEY,
   description TEXT    NOT NULL,
@@ -110,7 +119,8 @@ CREATE TABLE IF NOT EXISTS runs (
   worker_versions_json TEXT,
   model_params_json TEXT,
   record_mode      TEXT,
-  killed_workers   INTEGER NOT NULL DEFAULT 0
+  killed_workers   INTEGER NOT NULL DEFAULT 0,
+  global_vars_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status, started_at);
@@ -271,11 +281,27 @@ pub(crate) fn open_writer_connection(path: &Path) -> Result<Connection, TraceErr
         )));
     }
     apply_writer_pragmas(&conn)?;
-    match version {
-        0 => create_v2(&mut conn),
-        1 => upgrade_v1_to_v2(&mut conn),
-        _ => Ok(()),
-    }?;
+    if version == 0 {
+        create_current(&mut conn)?;
+    } else {
+        // 逐版本迁移（06 §6.7）：每次迁移前 `VACUUM INTO` 备份；单版本单事务；
+        // 失败则恢复备份并把存储错误交给调用方（CLI 映射 exit 4）。
+        let mut current = version;
+        while current < TRACE_SCHEMA_VERSION {
+            let backup = backup_database(&conn, path, current)?;
+            if let Err(error) = migrate_step(&mut conn, current) {
+                drop(conn);
+                if let Err(restore_error) = restore_backup(&backup, path) {
+                    return Err(TraceError::Storage(format!(
+                        "migration from v{current} failed ({error}); \
+                         backup restore also failed ({restore_error})"
+                    )));
+                }
+                return Err(error);
+            }
+            current += 1;
+        }
+    }
     Ok(conn)
 }
 
@@ -322,26 +348,53 @@ pub(crate) fn db_err(err: rusqlite::Error) -> TraceError {
     TraceError::Storage(err.to_string())
 }
 
-fn create_v2(conn: &mut Connection) -> Result<(), TraceError> {
+/// 新库：单事务建当前版本 DDL，并把基线版本链写入 `schema_migrations`。
+fn create_current(conn: &mut Connection) -> Result<(), TraceError> {
     let tx = begin_immediate(conn)?;
-    tx.execute_batch(DDL_V2).map_err(db_err)?;
-    record_migration(&tx)?;
+    tx.execute_batch(DDL_CURRENT).map_err(db_err)?;
+    for version in 1..=TRACE_SCHEMA_VERSION {
+        record_migration(&tx, version)?;
+    }
     tx.commit().map_err(db_err)?;
     Ok(())
 }
 
-fn upgrade_v1_to_v2(conn: &mut Connection) -> Result<(), TraceError> {
+/// 单版本迁移（`from` → `from+1`；单事务；06 §6.7）。
+fn migrate_step(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
     let tx = begin_immediate(conn)?;
-    tx.execute_batch(DDL_V2).map_err(db_err)?;
-    let existing = table_columns(&tx, "runs")?;
-    for (name, definition) in RUNS_V2_COLUMNS {
+    match from {
+        1 => {
+            tx.execute_batch(DDL_CURRENT).map_err(db_err)?;
+            add_missing_columns(&tx, "runs", RUNS_V2_COLUMNS)?;
+            record_migration(&tx, 2)?;
+        }
+        2 => {
+            add_missing_columns(&tx, "runs", RUNS_V3_COLUMNS)?;
+            record_migration(&tx, 3)?;
+        }
+        other => {
+            return Err(TraceError::Storage(format!(
+                "no migration step from schema version {other}"
+            )))
+        }
+    }
+    tx.commit().map_err(db_err)?;
+    Ok(())
+}
+
+/// 补齐 `table` 上缺失的列（`ALTER TABLE ... ADD COLUMN`，可重复执行）。
+fn add_missing_columns(
+    tx: &Transaction<'_>,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> Result<(), TraceError> {
+    let existing = table_columns(tx, table)?;
+    for (name, definition) in columns {
         if !existing.iter().any(|column| column == name) {
-            let sql = format!("ALTER TABLE runs ADD COLUMN {definition};");
+            let sql = format!("ALTER TABLE {table} ADD COLUMN {definition};");
             tx.execute_batch(&sql).map_err(db_err)?;
         }
     }
-    record_migration(&tx)?;
-    tx.commit().map_err(db_err)?;
     Ok(())
 }
 
@@ -350,20 +403,93 @@ fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, TraceError>
         .map_err(db_err)
 }
 
-fn record_migration(tx: &Transaction<'_>) -> Result<(), TraceError> {
+/// 迁移审计行 + `user_version`（同一事务；`user_version` 随回滚撤销）。
+fn record_migration(tx: &Transaction<'_>, version: i64) -> Result<(), TraceError> {
     tx.execute(
         "INSERT OR REPLACE INTO schema_migrations (version, description, applied_at) \
          VALUES (?1, ?2, ?3)",
         params![
-            TRACE_SCHEMA_VERSION,
-            "v2: trace schema + reproducibility columns/tables",
+            version,
+            migration_description(version),
             now_rfc3339_millis()
         ],
     )
     .map_err(db_err)?;
-    // user_version 存于 DB 头，事务内写入可随回滚一起撤销。
-    tx.execute_batch(&format!("PRAGMA user_version = {TRACE_SCHEMA_VERSION};"))
+    tx.execute_batch(&format!("PRAGMA user_version = {version};"))
+        .map_err(db_err)
+}
+
+/// 版本 → `schema_migrations.description`（审计可读）。
+fn migration_description(version: i64) -> &'static str {
+    match version {
+        1 => "v1: base trace schema",
+        2 => "v2: reproducibility columns/tables",
+        3 => "v3: runs.global_vars_json (ISSUE-087)",
+        _ => "unknown migration",
+    }
+}
+
+/// 迁移前备份：`VACUUM INTO '<db>.bak.v{old}-{ts}'`（06 §6.7）。
+///
+/// 备份保留策略：不自动删除（最近 3 份之外也不清理，避免误删用户数据的唯一快照；
+/// 06 §6.7「备份保留」的清理属运维动作）。
+fn backup_database(conn: &Connection, db: &Path, old_version: i64) -> Result<PathBuf, TraceError> {
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let backup = PathBuf::from(format!(
+        "{}.bak.v{}-{}",
+        db.display(),
+        old_version,
+        timestamp
+    ));
+    if backup.exists() {
+        return Err(TraceError::Storage(format!(
+            "migration backup already exists: {}",
+            backup.display()
+        )));
+    }
+    let literal = backup.to_string_lossy().replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{literal}';"))
         .map_err(db_err)?;
+    // `VACUUM INTO` 不保证保留 DB 头里的 `user_version`；显式写回旧版本，
+    // 使备份可直接用于「恢复回旧版本」（06 §6.7 步骤 6）。
+    let backup_conn = Connection::open(&backup).map_err(db_err)?;
+    backup_conn
+        .execute_batch(&format!("PRAGMA user_version = {old_version};"))
+        .map_err(db_err)?;
+    let recorded: i64 = backup_conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(db_err)?;
+    if recorded != old_version {
+        return Err(TraceError::Storage(format!(
+            "migration backup {} has user_version={recorded}, expected {old_version}",
+            backup.display()
+        )));
+    }
+    Ok(backup)
+}
+
+/// 迁移失败：清掉半迁移库与残留 WAL/SHM，再用备份覆盖恢复（06 §6.7 步骤 6）。
+fn restore_backup(backup: &Path, db: &Path) -> Result<(), TraceError> {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", db.display()));
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TraceError::Storage(format!(
+                    "cannot remove {} during migration restore: {error}",
+                    sidecar.display()
+                )))
+            }
+        }
+    }
+    std::fs::copy(backup, db).map_err(|error| {
+        TraceError::Storage(format!(
+            "cannot restore migration backup {} to {}: {error}",
+            backup.display(),
+            db.display()
+        ))
+    })?;
     Ok(())
 }
 

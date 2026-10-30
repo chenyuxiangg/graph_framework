@@ -243,6 +243,7 @@ mod tests {
             dsl_json: "{}".to_string(),
             user_id: "local".to_string(),
             entry_inputs: serde_json::json!({}),
+            global_vars: serde_json::json!({}),
             seed: 0,
             record_mode: RecordMode::Hash,
             owner_pid,

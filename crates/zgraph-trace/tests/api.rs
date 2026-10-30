@@ -14,7 +14,10 @@ fn frozen_api_types_are_shareable_across_tasks() {
     assert_send_sync::<TraceHandle>();
     assert_clone::<TraceHandle>();
     assert_send::<TraceWriter>();
-    assert_eq!(TRACE_SCHEMA_VERSION, 2);
+    assert_eq!(
+        TRACE_SCHEMA_VERSION, 3,
+        "v3 = ISSUE-087 runs.global_vars_json"
+    );
 }
 
 #[test]

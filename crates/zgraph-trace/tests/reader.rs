@@ -6,6 +6,7 @@ use rusqlite::Connection;
 use serde_json::json;
 use zgraph_trace::{
     EventQuery, InstanceStatus, RunFinishedInfo, RunMetrics, RunStatus, TraceError, TraceInput,
+    TRACE_SCHEMA_VERSION,
 };
 
 #[test]
@@ -328,8 +329,14 @@ fn readonly_readers_observe_committed_writes_after_flush() {
     fx.flush();
     let first = fx.reader();
     let second = fx.reader();
-    assert_eq!(first.schema_version().expect("first version"), 2);
-    assert_eq!(second.schema_version().expect("second version"), 2);
+    assert_eq!(
+        first.schema_version().expect("first version"),
+        TRACE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        second.schema_version().expect("second version"),
+        TRACE_SCHEMA_VERSION
+    );
     assert_eq!(
         second
             .events("run-live", &EventQuery::default())

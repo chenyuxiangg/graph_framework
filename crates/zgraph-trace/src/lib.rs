@@ -17,6 +17,10 @@
 //!   `events.seq` 由 `AUTOINCREMENT` 在写线程内分配，明细表 `seq` 1:1 关联同事务信封。
 //! - `Streaming` 在写线程按 06 §6.5 聚合：token/reasoning 各自缓冲，100 ms 窗口或
 //!   ≥4096 字符提前分段；tool_call/progress 立即成段并先 flush 同实例缓冲。
+//! - schema 升 **v3**（ISSUE-087）：`RunStartedInfo.global_vars` 以 **canonical JSON**
+//!   （object 键递归排序）写入 `runs.global_vars_json`，供 `replay --mode=outputs`
+//!   重建 run 级全局变量；v1/v2 旧库按 06 §6.7 逐版本迁移（迁移前 `VACUUM INTO`
+//!   `.bak.v{old}-{ts}` 备份、单版本单事务、失败恢复备份）。
 //! - 崩溃标定（06 §6.8）是两段式原语：`TraceWriter::interrupted_candidates` 查
 //!   `Running`/`Paused` 候选，`TraceWriter::mark_interrupted` 单事务标定为
 //!   `Failed + interrupted=1`；判活（`kill(pid, 0)`/heartbeat 陈旧）由调用方负责。
@@ -60,6 +64,7 @@
 //!     dsl_json: "{}".to_string(),
 //!     user_id: "local".to_string(),
 //!     entry_inputs: serde_json::json!({}),
+//!     global_vars: serde_json::json!({"tenant": "demo"}),
 //!     seed: 0,
 //!     record_mode: zgraph_trace::RecordMode::Hash,
 //!     owner_pid: std::process::id(),
