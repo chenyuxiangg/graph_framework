@@ -1,6 +1,7 @@
 # 图模型驱动工作流框架 · 规格冻结 v1.2 · 分册 05：Agent Harness
 
 > **⚠ v2 落地偏差（已回写）**：本分册的进程内执行/取消/工具执行/重试编排等假设，已按 [`doc/architecture-v2.md`](../architecture-v2.md) §8 偏差表（D1–D12）与本分册 **§5.13（M4 v2 落地偏差 D13–D21）** 回写为正文（M4 批次，2026-10-30，见 PROVENANCE §2 第 7 条）；正文与偏差表冲突时以正文为准，偏差表保留为决策记录。
+> **M6 批次（2026-10-31，REV-057；已合并实现回写）**：§5.2.1 prompt/constraints 路径 `canonicalize` 安全（REV-042/ISSUE-077 fixed）、§5.8.5 preview 结构摘要 + 敏感键脱敏（REV-042/ISSUE-075 fixed）、§5.6.2/§5.6.5/§5.13.1 D13 工具并发共享 `WorkerLimits`（REV-052/ISSUE-079 fixed；e2e 适配 REV-060）、§5.6.2.1 discover failure reason 闭集冻结（REV-057/ISSUE-080 fixed）。
 > **状态**：规格冻结 v1.2 + **M4 v2 回写完成**（2026-10-30）。实现：`crates/zgraph-harness` 提供 `HarnessExecutor`（`NodeExecutor` 的 `agent_call` 实现）——LLM 流式（`genai` 0.7.2 transport）+ tool loop + 上下文预算 + fake provider；**工具执行 = worker 子进程**（D3/D13，`python/zgraph_worker/tool_runner.py`）。本分册定义 **Agent 执行壳**的字段级契约：AgentConfig、`LlmProvider`（genai transport）、上下文组装与 token 预算、Harness 状态机与 tool loop、工具注册表、错误映射、流式事件、输出契约、`AgentProvider` 扩展点。
 > **权威锚点**：[00 总纲](00-总纲.md)。本分册的枚举、错误码、默认值、不变式**一律不得偏离 00**；若发现偏差，见 §5.11 对齐检查（列出需 00 补录的常量与待裁定项）。
 > **选型前提**（`../决策记录-01-范围与Harness.md` §3）：**自研六阶段薄壳 + `genai` 0.7.2 仅作 LLM transport**；不引入任何外部 Harness（Codex / DSH 均只作参考实现）。
@@ -91,7 +92,7 @@ Memory 检索/写入（stub 返回空）、KB 检索（stub 返回空）、多�
 | 执行期加载 | **由 Harness 在 `agent_call` 实例执行时加载**：`HarnessExecutor::execute` 入口先做 Loading（读文件 + 全量校验 + 工具解析）；解析/校验失败 → `HARNESS_CONFIG_LOAD`（实例 `Crashed`）。运行期**每次实例执行都重新加载**（不在图加载期预解析） |
 | 缓存 | v1 **不缓存**（单文件解析 < 1 ms，避免热更新歧义）；v1.1 可按 `(path, mtime)` 缓存。**工具发现**属例外：结果在 Harness 进程内按工具目录缓存一次（§5.6.2） |
 | fake 模式 | `FakeLlmProvider`（§5.3.4）下**跳过 `model.api_key_env` 读取**（步 9），其余字段校验照常；否则 fake 场景需要无意义的密钥环境变量 |
-| 路径安全 | `role_prompt_file` / `constraints_file` 相对**AgentConfig 文件所在目录**解析；允许绝对路径；解析后必须落在资产根或 CWD 之内，逃逸（`..`）→ `HARNESS_CONFIG_LOAD`。**M4 实现为词法归一化（未 `canonicalize`，符号链接逃逸未拦，§5.13.3 L2）** |
+| 路径安全 | `role_prompt_file` / `constraints_file` 相对**AgentConfig 文件所在目录**解析；允许绝对路径；解析后必须落在资产根或 CWD 之内，逃逸 → `HARNESS_CONFIG_LOAD{reason:"path_escape"}`。**M6 已加固（REV-042，ISSUE-077 fixed）**：先做词法归一化（拒绝 `..` 越界，保持既有 reason），再 `canonicalize` 解析全部符号链接、用**真实路径**重新做资产根/CWD 前缀校验——symlink 文件与中间目录逃逸均 → `path_escape`；`canonicalize` 失败退回词法路径，`file_missing`/`file_unreadable`/`file_too_large` 契约不变 |
 | 文件大小上限 | AgentConfig ≤ 256 KiB；prompt/constraints 各 ≤ 1 MiB；超限 → `HARNESS_CONFIG_LOAD` |
 | 编码 | UTF-8（非法字节 → `HARNESS_CONFIG_LOAD`，`detail.reason="invalid_utf8"`） |
 
@@ -248,7 +249,9 @@ Memory 检索/写入（stub 返回空）、KB 检索（stub 返回空）、多�
 | `tool_worker_crash` | 工具 worker 异常退出（discover 阶段） |
 | `invalid_tool_timeout` | 工具声明 `timeout_ms` 类型/值域非法（1..=600000） |
 
-> 该扩展集为**超集**（诊断价值），不改变 `HARNESS_CONFIG_LOAD` 的码位与 Crashed 映射。
+> 该扩展集为**诊断扩展**（不改变 `HARNESS_CONFIG_LOAD` 的码位与 Crashed 映射）；**M6 起作为权威闭集**（见下）。
+>
+> **M6 冻结口径（REV-057，ISSUE-080 fixed）**：工具 discover 的失败 reason **闭集以此表 + §5.6.2.1 为准**，M6 已逐项复核（`zgraph-harness` 映射、`python/zgraph_worker/tool_runner.py` 载荷、§5.6.2.1 表三者一致），**冻结为 9 个 discover reason**（`tools_dir_missing` / `tool_module_import` / `duplicate_tool` / `invalid_declaration` / `tool_module_timeout` / `tool_discover_cancelled` / `tool_runner_spawn` / `tool_worker_crash` / `invalid_tool_timeout`）。后续新增 reason 必须同步本节 + §5.6.2.1 + py-worker 载荷；**不新增错误码**（仍统一映射 `HARNESS_CONFIG_LOAD`）。
 
 ---
 
@@ -943,6 +946,8 @@ Harness 不 import 用户工具代码；工具协议由固定的 worker 入口�
 
 **统一封装**：Harness 侧 `ToolRunner` 负责拼装上述 `inputs`、spawn worker、解析 `ok`、生成 `ToolDef`（`source` 取自 discover 的 `source`；`timeout_ms` 取 discover 输出中的声明值，缺省 `DEFAULT_TOOL_TIMEOUT_MS = 30000`）；发现结果按 `tools_dir` 在 Harness 进程内缓存一次。
 
+> **M6 闭集冻结（REV-057，ISSUE-080 fixed）**：本小节两张表是工具 discover/call 失败 reason 的**权威闭集**（discover 9 个：`tools_dir_missing` / `tool_module_import` / `duplicate_tool` / `invalid_declaration` + Harness 侧 `tool_module_timeout` / `tool_discover_cancelled` / `tool_runner_spawn` / `tool_worker_crash` / `invalid_tool_timeout`；call 见上表）。M6 已复核实现（`zgraph-harness` 映射、py-worker 载荷）与 §5.2.7 三处一致并冻结；后续新增/改名必须同步三处，**不新增错误码**（discover 统一 `HARNESS_CONFIG_LOAD`，call 统一 `TOOL_ERROR`）。
+
 ### 5.6.3 注册 -> 请求 tools 字段 / `AgentConfig.tools` 解析（v2）
 
 - `AgentConfig.tools = ["now", "http_get"]` → 解析为 discover 结果中的 `ToolDef`，`ToolRegistry::schemas()` 返回**仅这两个**的 `ToolSchema`，顺序与 `tools` 数组一致（保证请求字节可复现）。
@@ -966,7 +971,7 @@ Harness 不 import 用户工具代码；工具协议由固定的 worker 入口�
 | 项 | v2 规定 |
 |---|---|
 | 执行位置 | **每次工具调用 = 一个 worker 子进程**（`module=zgraph_worker.tool_runner`、`function=call`）；Harness 只 async 等待帧/退出，**不阻塞事件循环、不做进程内 Python**（D3/D13；H4） |
-| 并发 | 单实例内**串行**（§5.5.3）；跨实例**工具调用**受 Harness 进程内**全局工具信号量**约束（容量 = `default_max_workers()` = CPU×2，D4/00 §0.5 `MAX_WORKERS`）；**不占** `WorkerExecutor` 的每 run worker 许可（`MAX_WORKERS_PER_RUN`）——工具调用不携带 run 级执行上下文（D13 落地细节，见 §5.13）；不再使用 CPU=1/IO=4 解释器信号量 |
+| 并发 | 单实例内**串行**（§5.5.3）；跨实例**工具调用**与节点执行**共享同一 `WorkerLimits`**（D4/00 §0.5：全局 `MAX_WORKERS` = CPU×2、每 run `MAX_WORKERS_PER_RUN` = 8）；取许可顺序固定 **先每 run、后全局**，持有到本次工具 worker 调用结束（取消/future abort 时随 permit drop 归还）。**M6 已统一（REV-052，ISSUE-079 fixed）**：CLI 组合根把同一 `Arc<WorkerLimits>` 同时注入 `WorkerExecutor` 与 `HarnessExecutor`，工具子进程计入全局/每 run 上限；未注入路径回退 Harness 私有默认限制（容量同 D7）。不再使用「工具独立进程级信号量」旧口径，不再使用 CPU=1/IO=4 解释器信号量 |
 | 超时 | 生效值 = `min(ToolDef.timeout_ms, DEFAULT_TOOL_TIMEOUT_MS=30000, 实例 deadline 剩余)` → `run.deadline_ms`（声明可缩短超时，>30000 被裁剪）。**Harness 路径**：外层 `tokio::time::timeout` 到点 → 丢弃 `run_worker_controlled` future → `Supervisor::drop` **立即 `SIGKILL` 进程组**（`crates/zgraph-worker/src/supervisor.rs:182-186`，无残留）；`cancel`→2s→`SIGTERM`→1s→`SIGKILL` 仅是 supervisor **显式 cancel 信号**的优雅升级链（M3 协议 §4），M4 Harness 的 timeout/drop 路径**不保证走完**（e2e 实测整例 ~0.41s ≪ 3s）。本次调用返回 `TOOL_ERROR{reason:"timeout",timeout_ms}` 喂回 LLM（**不终止**实例） |
 | 工具子进程失败 | 子进程层：超时 → `timeout`；取消 → `cancelled`；spawn 失败 → `runner_spawn`；协议错误 → `worker_protocol`；异常退出 → `worker_crash`；`call` 返回的 `ok=false` 载荷 → `exception` / `result_not_dict`；均由 `ToolFailure` 归一为 `TOOL_ERROR` 喂回 LLM；**不**映射 `NodeError::NodeWorker`（工具失败是 LLM 可修正路径） |
 | 返回值 | 必须可 JSON 序列化为 object（`dict`）；非 dict → `TOOL_ERROR{reason:"result_not_dict",actual_type}` |
@@ -1151,10 +1156,12 @@ pub struct HarnessError {
 
 | 字段 | 规则 |
 |---|---|
-| `ToolCallStart.args_summary` | 参数对象的**结构摘要**：`{"keys":[...], "bytes":N, "preview":"≤256 字符"}`；`preview` 是参数**紧凑 JSON 前缀**（≤256 字符，M4 不做脱敏，见 §5.13.3 L5）。**MUST NOT** 记录 `api_key`、Authorization header、prompt 全文 |
-| `ToolCallEnd.result_summary` | **`Option<Value>`**（D13/00 §0.3）：成功 `Some({"ok":true,"keys":[...],"bytes":N,"preview":"≤256 字符"})`；失败 `Some({"ok":false,"error":{...≤1 KiB}})`；无法生成摘要时 `None`（落库为 `null`） |
+| `ToolCallStart.args_summary` | 参数对象的**结构摘要**：`{"keys":[...], "bytes":N, "preview":"≤256 字符"}`；`preview` 为**结构摘要**（M6，REV-042/ISSUE-075 fixed）：标量只给类型/尺寸（`string(N chars)`/`number`/`boolean`/`null`），对象保留键（深度 >2 降级 `object(N keys)`）、数组最多展开 4 项（余下折叠计数）、深度 >2 降级 `array(N items)`；敏感键值替换 `***`（键名小写去非字母数字后匹配 `apikey`/`authorization`/`cookie`/`credential`/`password`/`passwd`/`privatekey`/`secret`/`session`/`token`，任意深度生效）；最终按字符边界截断 ≤256 字符（含 `…`）。**MUST NOT** 记录完整参数、`api_key`、Authorization header、prompt 全文 |
+| `ToolCallEnd.result_summary` | **`Option<Value>`**（D13/00 §0.3）：成功 `Some({"ok":true,"keys":[...],"bytes":N,"preview":"≤256 字符"})`（`preview` 与上同理结构摘要 + 脱敏 + 截断）；失败 `Some({"ok":false,"error":{...≤1 KiB}})`；无法生成摘要时 `None`（落库为 `null`） |
 | 截断 | 一律按字符边界（不切 UTF-8 码点中间）；附 `…`。**严格上界**：`preview` ≤256 字符、`last_content_summary` ≤512 字符（省略号计入上限；ISSUE-074 fixed，REV-027） |
-| 敏感信息 | v1 不做脱敏（本地工具）；**MUST NOT** 记录 `api_key`、Authorization header、prompt 全文 |
+| 敏感信息 | **M6 起 preview 已脱敏（REV-042，ISSUE-075 fixed）**：敏感键（`api_key`/`token`/`password`/`secret`/`authorization`/`cookie`/`credential`/`session`/`privatekey` 等，键名归一化匹配）值一律 `***`；**仍 MUST NOT** 记录完整参数、Authorization header 原文、prompt 全文。**已知边界（ISSUE-090 pending）**：`result_summary` 失败路径的 `error.message/traceback` 文本未做脱敏 |
+
+> **M6 口径（REV-042，ISSUE-075 fixed）**：`preview` 由「参数紧凑 JSON 前缀」收紧为**结构摘要**（标量仅类型/尺寸、对象/数组降级、深度 ≤2）+ **敏感键脱敏** + ≤256 字符；短参数不再完整出现在 trace 中，有 `args_summary_redacts_sensitive_keys_and_values` / `result_summary_preview_redacts_sensitive_values` 用例守卫。§5.13.3 L5 已关闭。
 
 ---
 
@@ -1371,7 +1378,7 @@ pub trait AgentProvider: Send + Sync {
 
 | # | 05 原语义（v1.2 冻结） | M4 v2 落地 | 代码模块 | 测试 |
 |---|---|---|---|---|
-| **D13** | 工具执行在 Harness 进程内：`spawn_blocking` 调用 Python、工具模块**一次导入并进程内缓存**、工具与 Python 节点共享 CPU=1/IO=4 信号量（§5.1.2/§5.6.5） | **每次工具调用 spawn 一个 worker 子进程**（`module=zgraph_worker.tool_runner`、`function=call`）；工具模块**无跨调用缓存**；发现（`discover`）一次并在 Rust 侧缓存；超时 = Harness 外层 timeout 丢弃 worker future → `Supervisor::drop` **立即 `SIGKILL` 进程组**（`supervisor.rs:182-186`；优雅链 `cancel`→2s→SIGTERM→1s→SIGKILL 仅 supervisor 显式 cancel 路径，M4 timeout/drop 不保证走完）+ `TOOL_ERROR` 喂回 LLM；并发受 Harness 进程内**全局工具信号量**（CPU×2 = `MAX_WORKERS`）约束，**不占**每 run `MAX_WORKERS_PER_RUN` 许可（D4；Lead 已裁定接受，理由：工具调用不是节点实例、`HarnessCtx` 无 run_id）。工具协议载荷：`ToolCallRequest{call_id, tool_name, module, tools_dir, args, timeout_ms}` 由 Harness 组装；worker `run` 载荷的 `run_id`/`node_id`/`trace_id` 由 `instance_id` 合成，`global_vars={}`（Python `tool_runner` 不使用） | `crates/zgraph-harness/src/tools.rs`；`python/zgraph_worker/tool_runner.py`；复用 `crates/zgraph-worker`（`run_worker_controlled` + supervisor 进程管理/进程组 kill） | `crates/zgraph-harness/src/tools.rs` 内联单测（`#[cfg(test)]`：参数校验/截断/摘要/FakeToolRunner）；`tests/e2e/harness_ac08.rs`（真 worker 工具成功/异常/超时）；`python/tests/test_tool_runner.py` |
+| **D13** | 工具执行在 Harness 进程内：`spawn_blocking` 调用 Python、工具模块**一次导入并进程内缓存**、工具与 Python 节点共享 CPU=1/IO=4 信号量（§5.1.2/§5.6.5） | **每次工具调用 spawn 一个 worker 子进程**（`module=zgraph_worker.tool_runner`、`function=call`）；工具模块**无跨调用缓存**；发现（`discover`）一次并在 Rust 侧缓存；超时 = Harness 外层 timeout 丢弃 worker future → `Supervisor::drop` **立即 `SIGKILL` 进程组**（`supervisor.rs:182-186`；优雅链 `cancel`→2s→SIGTERM→1s→SIGKILL 仅 supervisor 显式 cancel 路径，M4 timeout/drop 不保证走完）+ `TOOL_ERROR` 喂回 LLM。**M6 修订（REV-052，ISSUE-079 fixed）**：工具并发**共享同一 `WorkerLimits`**（全局 CPU×2 + 每 run 8，先每 run 后全局，CLI 组合根注入同一实例），M4 的「独立全局工具信号量、不占每 run 许可」口径已作废（见 §5.6.5）。工具协议载荷：`ToolCallRequest{call_id, tool_name, module, tools_dir, args, timeout_ms}` 由 Harness 组装；worker `run` 载荷的 `run_id`/`node_id`/`trace_id` 由 `instance_id` 合成，`global_vars={}`（Python `tool_runner` 不使用） | `crates/zgraph-harness/src/tools.rs`；`python/zgraph_worker/tool_runner.py`；复用 `crates/zgraph-worker`（`run_worker_controlled` + supervisor 进程管理/进程组 kill） | `crates/zgraph-harness/src/tools.rs` 内联单测（`#[cfg(test)]`：参数校验/截断/摘要/FakeToolRunner）；`tests/e2e/harness_ac08.rs`（真 worker 工具成功/异常/超时）；`python/tests/test_tool_runner.py`；M6 共享上限：harness `tools.rs`/`executor.rs` 单测 + e2e AC-12 峰值（REV-060） |
 | **D14** | 取消通过 `CancelToken`（包装 `tokio-util::CancellationToken`）传给 `LlmProvider`（§5.3.1/§5.3.2/§5.3.7） | **不存在 tokio `CancellationToken`**、`NodeContext` 无 `cancel_token()`；Harness 自有 **`CancelToken` = 对 `HarnessCtx` 的只读轮询包装**（`CANCEL_POLL_INTERVAL_MS=50`，`is_cancelled()`）；取消来源 = run 级 `Arc<AtomicBool>` 快照；命中 → `LlmError{kind:Cancelled}` → `NodeError::Cancelled` | `crates/zgraph-harness/src/ctx.rs`（`HarnessCtx`/`CancelToken`）、`agent_loop.rs`、`llm/*.rs`；`crates/zgraph-kernel/src/context.rs`（只读标志） | `crates/zgraph-harness/src/{ctx,agent_loop,llm/*}.rs` 内联单测（取消覆盖 establish/streaming/tool 三个阶段、50ms 轮询）；`tests/e2e/harness_ac08.rs`；04 §4.2.2 的 `cancel_token` 不存在断言 |
 | **D15** | Harness 直接依赖 `&NodeContext`（§5.1.1 H1、§5.5.4） | 引入 **`HarnessCtx`** 最小只读投影作为测试 seam（7 方法，见 §5.3.1.1）；**生产唯一实现** = `impl HarnessCtx for NodeContext`（无独立包装类型）；fake provider 与 loop 单测用它驱动取消/截止时间 | `crates/zgraph-harness/src/ctx.rs`（`HarnessCtx`/`CancelToken`/`StreamSink`）；`crates/zgraph-harness/src/executor.rs` | `crates/zgraph-harness/src/{ctx,executor}.rs` 内联单测（内存 `HarnessCtx` 注入取消/deadline）；`tests/e2e/harness_ac08.rs`（经真内核 `start_run` 端到端）；04 §4.2 对齐：能力集是 `NodeContext` 公开只读面的子集 |
 | **D16** | 重试编排在 **provider 内部**（§5.3.5："本次调用生效值…adapter 按 §5.3.5 处理"；§5.5.4 注释"重试在 provider 内部"） | 重试编排在 **Harness 的 `Invoking`**（`invoke_with_retry`）：`LlmProvider::chat_stream` 只做**单次尝试**；`attempts` 由 Harness 填写；provider 不得内置重试（genai 0.7.2 亦不自带重试）；重试不改变状态机、不增加 iteration。**单次 LLM 超时由 Harness `tokio::time::timeout` 兜底**（adapter 不判超时；phase 由「sink 已转发增量数」判定，§5.3.6） | `crates/zgraph-harness/src/agent_loop.rs`（重试/退避）；`crates/zgraph-harness/src/llm/*.rs`（单次调用 + `LlmError` 分类） | `crates/zgraph-harness/src/agent_loop.rs` 内联单测：Establish 可重试 / Streaming 立即失败 / retry-after / deadline 冲突不重试 / attempts 计数；`tests/e2e/harness_ac08.rs` 覆盖 fake 两轮 tool loop |
@@ -1385,7 +1392,7 @@ pub trait AgentProvider: Send + Sync {
 
 | 本节 | architecture §8 | 关系 |
 |---|---|---|
-| D13 | D3（工具 = worker 子进程） | 本节为 D3 的**实现级细化**（payload 契约、缓存策略、错误映射、并发/超时落点） |
+| D13 | D3（工具 = worker 子进程） | 本节为 D3 的**实现级细化**（payload 契约、缓存策略、错误映射、并发/超时落点）；**M6 修订**：并发许可与节点执行共享 `WorkerLimits`（REV-052，见 §5.6.5），D13 原「不占每 run 许可」口径作废 |
 | D14 | D2（`cancel_token` 不存在） | D2 覆盖 Python SDK 代理；本节明确 **Rust Harness 内部**也无取消令牌，改为轮询 |
 | D15 | 无 | M4 新增（测试 seam，不改变外部语义） |
 | D16 | 无 | M4 新增（重试编排位置；v1.2 正文原已倾向"provider 内"，现统一为 Harness） |
@@ -1405,16 +1412,18 @@ pub trait AgentProvider: Send + Sync {
 | # | 限制 | 影响 | 建议 / ISSUE 归属 |
 |---|---|---|---|
 | L1 | **已修**：M4 时 `AgentConfig.node_timeout_ms` 未生效；M5 由 kernel `declared_timeout_ms` + `NodeExecutor::timeout_hint`（REV-026）、harness `timeout_hint`/`peek_agent_node_timeout`（REV-033）、CLI 组合执行器转发（REV-030）打通，优先级见 §5.2.6 | 无（端到端 e2e 由 REV-032 覆盖） | **ISSUE-076 fixed**（M5，REV-026/033/030/032）；口径见 §5.2.6 |
-| L2 | prompt/constraints 路径安全为**词法归一化**（拒绝 `..`），未 `canonicalize` | 符号链接可绕过资产根白名单（本地资产场景风险低） | M5 加 `canonicalize` 后重新校验 + 测试；**ISSUE-077**（REV-020 #13） |
+| L2 | **已修（REV-042，M6）**：prompt/constraints 路径安全在词法归一化后追加 `canonicalize`，用真实路径重新做资产根/CWD 前缀校验；symlink 文件与中间目录逃逸均 → `path_escape`，`canonicalize` 失败保留 `file_missing`/`file_unreadable`/`file_too_large` 契约（§5.2.1） | 无（符号链接逃逸已拦；仅 `agents/*.json` 索引文件本身为 symlink 指向根外未覆盖——REV-042 #2 备注，不阻塞） | **ISSUE-077 fixed**（REV-042） |
 | L3 | `futures-util` 为 harness 直接依赖（genai `ChatStream` 取流所需），未提升 workspace；genai 默认 features 带入重依赖 | 依赖治理分散、`Cargo.lock` 增大 | process 统一提升 `[workspace.dependencies]` 并评估 `default-features`；**ISSUE-078**（REV-020 #12） |
 | L4 | **已修（REV-027）**：工具结果改**结构感知截断**（输出必定合法 JSON 且 ≤8 KiB）；`traceback` 单独 ≤8 KiB；`preview`/`last_content_summary` 严格上界 ≤256/≤512（含省略号） | 无（§5.6.5/§5.8.5 已同步） | **ISSUE-074 fixed**（REV-027，commit `9137fd6`） |
-| L5 | `args_summary.preview` 为参数紧凑 JSON 前缀（≤256 字符），**未脱敏**；短参数可能完整出现（测试已改名，语义未改） | 敏感参数可能进 trace | 二选一：预览改为 `key:type`/`***` 脱敏，或产品接受并明确文档语义；**ISSUE-075**（REV-020 #3） |
+| L5 | **已修（REV-042，M6）**：`args_summary/result_summary.preview` 改为**结构摘要 + 敏感键脱敏 + ≤256 字符**（标量仅类型/尺寸、对象/数组降级、深度 ≤2、敏感键值 `***`）；短参数不再完整进入 trace（§5.8.5） | 无（失败路径 `error.message/traceback` 文本脱敏转 ISSUE-090，开放） | **ISSUE-075 fixed**（REV-042） |
 | L6 | `genai` 引入 `serde_json/preserve_order` 全局 feature（D21）：所有 crate 的 `Value` 变大、JSON 键序改变；曾触发 `zgraph-worker` `clippy::result_large_err` | CI clippy 回归（已由 worker 提交 `94e1f8a` 装箱 `WorkerFailure::Worker` 缓解，非根因） | 长期评估更换 transport 或接受；根因**ISSUE-073**（REV-020 #1/#5、REV-021） |
-| L7 | 工具并发 = **独立**进程级 `Semaphore(CPU×2)`，未与 `WorkerExecutor` 全局 `max_workers` 共享 | 工具子进程 + Python 节点子进程可各自达到 CPU×2，超出 D4 全局上限语义 | M5 统一为共享全局上限；**ISSUE-079**（REV-020 #7） |
+| L7 | **已修（REV-052，M6）**：工具调用与节点执行**共享同一 `WorkerLimits`**（全局 CPU×2 / 每 run 8；先每 run 后全局；CLI 组合根同一实例注入；工具 permit 持有至调用结束、abort 归还），AC-12 峰值断言已覆盖工具 + 节点（REV-060） | 无（未注入路径回退私有默认限制，属测试/嵌入式用法；生产 CLI 已注入） | **ISSUE-079 fixed**（REV-052 + REV-060） |
 | L8 | 5 个生产函数 >60 行（`run_agent` 139、`parse_model` 124、`parse_discover_output` 75、`parse_call` 66、`map_webc_error` 64），违反 architecture §2.2 等价约束 | 维护成本；纯重构不阻塞 | **部分修（REV-027）**：5 个目标函数已拆分（`run_agent` 21 / `parse_model` 31 / `parse_discover_output` 30 / `parse_call` 29 / `map_webc_error` 59，另 `invoke_with_retry`→50）；**剩余既有 >60 行随 M6**：`parse_agent_config` 113、`validate_schema_node` 105、`transport::chat_stream` 86、`fake::chat_stream` 75、`executor::execute` 71→78、`parse_base_url` 64、`execute_tool` 63、cli `parse` 79 / `run_in_runtime` 91（REV-030）、`replay` `build_plan` 75（REV-030）、新增 >60 行测试（74/78/88 等）；**ISSUE-081**（REV-020 #11） |
-| L9 | discover/call 失败 `reason` 为**扩展超集**（§5.2.7 已文档化），超出 v1.2 闭集 | 跨模块 reason 表需同步（py-worker REV-019 §7.3） | 保留诊断价值，文档化即可；**ISSUE-080**（REV-020 #9） |
-| L10 | `llm_calls` / `worker_versions_json` 等 L2 记录表已在 06/architecture 定义，M4 未接线（Harness 未写 `llm_calls`） | L2（recorded outputs）重放依赖这些记录，M4 只能做 L1 | **M5 部分修**：Harness `LlmCallRecorder` seam（REV-027）+ CLI `llm_calls` 落库（REV-030，仅 `--record=full`）+ L2 replay（REV-030/032）已落地；`runs.worker_versions_json/model_params_json` 仍未写入（ISSUE-082 保持部分修） |
+| L9 | **已修（REV-057，M6 复核冻结）**：discover/call 失败 `reason` 集合已在 §5.6.2.1 + §5.2.7 冻结为权威闭集（discover 9 个），与 `tool_runner` 载荷逐项一致；不新增错误码 | 无（后续新增/改名需同步三处文档） | **ISSUE-080 fixed**（REV-057） |
+| L10 | `llm_calls` / `worker_versions_json` 等 L2 记录表已在 06/architecture 定义，M4 未接线（Harness 未写 `llm_calls`） | L2（recorded outputs）重放依赖这些记录，M4 只能做 L1 | **M5 部分修**：Harness `LlmCallRecorder` seam（REV-027）+ CLI `llm_calls` 落库（REV-030，仅 `--record=full`）+ L2 replay（REV-030/032）已落地；**M6 增量**：`runs.global_vars_json` 已记录并在 replay 重建（REV-049）；`runs.worker_versions_json/model_params_json` **仍未写入（ISSUE-082 pending，本轮未合并）** |
 
 > 以上 **ISSUE-073..082** 由 Lead 在 M4 收尾（REV-024）统一开号登记（编号以 `doc/issues.md` 最终为准）。上述限制不影响 M4 验收结论（AC-08a 必过 / AC-08b 手动）；偏差表 D13–D21 只记录**语义级**落地口径，L1–L10 属已知限制。
 >
 > **M5 状态（REV-035）**：L1 已修（REV-026/033/030 + e2e REV-032）；L4 已修（REV-027）；L8 的 5 个目标函数已拆（REV-027），剩余清单随 M6；L10 的 seam（REV-027）与 `llm_calls` 落库/L2 replay（REV-030/032）已交付，版本列仍 NULL（ISSUE-082 部分修）；L2/L3/L5/L6/L7/L9 与 ISSUE-075/077/079/080 留 M6。M6 排除项与依据见 `doc/decisions/DR-002-m5-cli-replay-recording.md` §7。
+>
+> **M6 状态（REV-057）**：L2 已修（REV-042/ISSUE-077 fixed）；L5 已修（REV-042/ISSUE-075 fixed）；L7 已修（REV-052/ISSUE-079 fixed，e2e 适配 REV-060）；L9 已修（REV-057/ISSUE-080 fixed，闭集冻结）；L10 的 `global_vars` 已随 REV-049 落库/重建，仅剩版本列（ISSUE-082 **pending**，未合并）；**L3/L6/L8 与 ISSUE-081/090 仍开放**（不在本批范围）。

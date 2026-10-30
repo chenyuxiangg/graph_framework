@@ -172,7 +172,10 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 - 新表 `recorded_outputs(run_id, instance_id, node_id, attempt, output_hash, output_json NULL, recorded_at)`。
 - 新表 `llm_calls(run_id, instance_id, call_index, request_json, response_json, status, recorded_at)`。
 - `events`/`transitions`/`gate_results` 沿用 spec 06。
-- **M5 写入口径（REV-028/REV-030，回写 spec 06 §6.2.13）**：`recorded_outputs` 由 CLI 组合执行器的外层包装在节点成功执行后写，键 `(run_id, instance_id, attempt)`，`output_hash = blake3(canonical_json(output))` 全 64 hex；`--record=none` 不写、`hash` 只写 hash、`full` 写全文。`llm_calls` 由 CLI 实现 Harness `LlmCallRecorder` seam 写入，**仅 `--record=full`**；每轮一次、`status` 取 `ok`/`error`、请求快照脱敏。`runs.worker_versions_json`/`model_params_json` **仍未写入**（M5 结束时保持 NULL，ISSUE-082 部分修、留 M6）。
+- **M5 写入口径（REV-028/REV-030，回写 spec 06 §6.2.13）**：`recorded_outputs` 由 CLI 组合执行器的外层包装在节点成功执行后写，键 `(run_id, instance_id, attempt)`，`output_hash = blake3(canonical_json(output))` 全 64 hex；`--record=none` 不写、`hash` 只写 hash、`full` 写全文。`llm_calls` 由 CLI 实现 Harness `LlmCallRecorder` seam 写入，**仅 `--record=full`**；每轮一次、`status` 取 `ok`/`error`、请求快照脱敏。`runs.worker_versions_json`/`model_params_json` **仍未写入**（保持 NULL）。
+- **M6 写入口径（REV-049，回写 spec 06 §6.2.4/§6.7）**：trace schema 升至 **v3**，`runs` 追加 **`global_vars_json TEXT`**（`RunStarted.global_vars` 的 canonical JSON，对象键递归排序；非 object → 不可恢复写错误）；CLI `zgraph run` 无 `--global-vars` 参数、记录 `{}`，非空值由库 API（bridge `with_snapshot`）覆盖；`replay --mode=outputs` 从该列重建 `RunSpec.global_vars`（v3 前历史 run 为 NULL → 空 map + stderr 告警，非 object → `REPLAY_RECORD_CORRUPT` exit 3）。
+- **M6 迁移口径（REV-049）**：逐版本迁移（v1→v2→v3），每步迁移前 `VACUUM INTO '<db>.bak.v{old}-{ts}'` 备份（回写备份 `user_version` 并校验），单版本单事务，失败删 WAL/SHM + 备份覆盖恢复 + exit 4；备份**不自动清理**（保留策略为运维动作）；旧库升级不 backfill 历史 `schema_migrations` 行。
+- **ISSUE-082 pending（未合并）**：`runs.worker_versions_json`/`model_params_json` 的写入接线仍待后续分支；本文件与 spec 06 保持 pending 占位，**不写「已实现」**，待合并后回填。
 
 ### 5.3 CLI 契约（与 spec 06 §6.10 对齐的增量）
 
