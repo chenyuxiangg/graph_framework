@@ -49,12 +49,20 @@ fn run_cli(args: &[String], cwd: &Path) -> Output {
 
 /// 带额外环境变量运行 CLI（验证 `ZGRAPH_*` 默认值）。
 fn run_cli_env(args: &[String], cwd: &Path, envs: &[(&str, &str)]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_zgraph"))
+    run_cli_full(args, cwd, envs, &[])
+}
+
+/// 带额外环境变量 + 移除环境变量运行 CLI（解释器优先级测试用）。
+fn run_cli_full(args: &[String], cwd: &Path, envs: &[(&str, &str)], removed: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zgraph"));
+    command
         .args(args)
         .envs(envs.iter().copied())
-        .current_dir(cwd)
-        .output()
-        .expect("spawn zgraph binary")
+        .current_dir(cwd);
+    for name in removed {
+        command.env_remove(name);
+    }
+    command.output().expect("spawn zgraph binary")
 }
 
 /// 以文本写文件（图/脚本/Python 模块）。
@@ -259,6 +267,7 @@ fn help_lists_run_command() {
     assert!(text.contains("usage: zgraph run"), "{text}");
     assert!(text.contains("--fake-llm"), "{text}");
     assert!(text.contains("--record"), "{text}");
+    assert!(text.contains("$PYO3_PYTHON"), "{text}");
 }
 
 #[test]
@@ -809,6 +818,164 @@ fn run_uses_env_defaults_for_db_assets_and_python() {
     assert_eq!(payload["db"], json!(db_arg));
     assert!(db.exists(), "ZGRAPH_DB must be honoured");
     assert!(!recorded_outputs(&db).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// 4b. Python 解释器优先级：--python > PYO3_PYTHON > ZGRAPH_PYTHON > python3
+// ---------------------------------------------------------------------------
+
+/// 解析优先级用的 `start -> echo -> end` 参数（不含 `--python`）。
+fn echo_args(dir: &Path, db: &Path) -> Vec<String> {
+    let graph = dir.join("echo.json");
+    std::fs::write(&graph, python_graph("workers.echo", "run")).expect("write echo graph");
+    vec![
+        "run".to_string(),
+        arg(&graph),
+        "--db".to_string(),
+        arg(db),
+        "--inputs".to_string(),
+        r#"{"start":{"x":1}}"#.to_string(),
+        "--python-path".to_string(),
+        arg(&python_path()),
+        "--json".to_string(),
+    ]
+}
+
+#[test]
+fn python_flag_overrides_both_env_vars() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("flag.db");
+    let mut args = echo_args(dir.path(), &db);
+    args.insert(6, python_program());
+    args.insert(6, "--python".to_string());
+    let output = run_cli_full(
+        &args,
+        dir.path(),
+        &[
+            ("PYO3_PYTHON", "/nonexistent/pyo3-python"),
+            ("ZGRAPH_PYTHON", "/nonexistent/zgraph-python"),
+        ],
+        &[],
+    );
+    assert_exit(&output, 0, "--python must win over both env vars");
+    assert_eq!(run_status(&db), "Completed");
+}
+
+#[test]
+fn pyo3_python_env_precedes_zgraph_python_env_then_python3() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = python_program();
+
+    // a) PYO3_PYTHON 真实、ZGRAPH_PYTHON 非法 → 用 PYO3 的解释器，run 成功。
+    let a_db = dir.path().join("a.db");
+    let a = run_cli_full(
+        &echo_args(dir.path(), &a_db),
+        dir.path(),
+        &[
+            ("PYO3_PYTHON", real.as_str()),
+            ("ZGRAPH_PYTHON", "/nonexistent/zgraph-python"),
+        ],
+        &[],
+    );
+    assert_exit(&a, 0, "PYO3_PYTHON should win over ZGRAPH_PYTHON");
+
+    // b) PYO3_PYTHON 非法、ZGRAPH_PYTHON 真实 → 若 PYO3 优先，worker spawn 失败。
+    let b_db = dir.path().join("b.db");
+    let b = run_cli_full(
+        &echo_args(dir.path(), &b_db),
+        dir.path(),
+        &[
+            ("PYO3_PYTHON", "/nonexistent/pyo3-python"),
+            ("ZGRAPH_PYTHON", real.as_str()),
+        ],
+        &[],
+    );
+    assert_exit(&b, 1, "PYO3_PYTHON takes precedence (spawn fails)");
+    let payload = json_stdout(&b);
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(payload["error"]["code"], json!("NODE_WORKER_CRASH"));
+
+    // c) 两个 env 都移除 → 回退 python3（若测试机没有 python3，本测试如实失败）。
+    let c_db = dir.path().join("c.db");
+    let c = run_cli_full(
+        &echo_args(dir.path(), &c_db),
+        dir.path(),
+        &[],
+        &["PYO3_PYTHON", "ZGRAPH_PYTHON"],
+    );
+    assert_exit(&c, 0, "missing env vars fall back to python3");
+}
+
+// ---------------------------------------------------------------------------
+// 4c. `--db :memory:`（06 §6.9.1：接受并警告，跨进程不可读）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn run_memory_db_outputs_outcome_and_warns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = write_text(dir.path(), "io.json", &io_graph());
+    let json_run = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            ":memory:".to_string(),
+            "--inputs".to_string(),
+            r#"{"start":{"x":5}}"#.to_string(),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&json_run, 0, ":memory: json run");
+    let payload = json_stdout(&json_run);
+    assert_eq!(payload["ok"], json!(true));
+    assert_eq!(payload["status"], json!("Completed"));
+    assert_eq!(payload["db"], json!(":memory:"));
+    assert_eq!(payload["run_output"], json!({"r": {"x": 5}}));
+    // trace 跨进程不可读：event_count 记为 0（输出仍完整）。
+    assert_eq!(payload["event_count"], json!(0));
+    let stderr = stderr_text(&json_run);
+    assert!(stderr.contains("warning"), "{stderr}");
+    assert!(stderr.contains(":memory:"), "{stderr}");
+
+    let human_run = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            ":memory:".to_string(),
+            "--inputs".to_string(),
+            r#"{"start":{"x":6}}"#.to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&human_run, 0, ":memory: human run");
+    let stdout = String::from_utf8_lossy(&human_run.stdout);
+    let run_output: Value = serde_json::from_str(stdout.trim()).expect("stdout run_output JSON");
+    assert_eq!(run_output, json!({"r": {"x": 6}}));
+    let stderr = stderr_text(&human_run);
+    assert!(stderr.contains("warning"), "{stderr}");
+    assert!(stderr.contains("status=Completed"), "{stderr}");
+}
+
+#[test]
+fn trace_memory_db_exits_4_with_storage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = run_cli(
+        &[
+            "trace".to_string(),
+            "any-run".to_string(),
+            "--db".to_string(),
+            ":memory:".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&output, 4, "trace :memory:");
+    assert!(
+        stderr_text(&output).contains("error[STORAGE_ERROR]"),
+        "{}",
+        stderr_text(&output)
+    );
 }
 
 // ---------------------------------------------------------------------------

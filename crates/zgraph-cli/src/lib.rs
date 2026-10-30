@@ -6,7 +6,8 @@
 //!
 //! 退出码权威表：`doc/spec-v1.2/06-存储与可观测.md` §6.10.5。
 //! 注：M1 `validate` 沿用任务口径 `0/2/3`（02 §2.7.4 的「其他错误 1」并入 3），
-//! M2 `trace` 使用 `0/1/2/4`，M5 `run` 使用 `0/1/2/3/4/130`。
+//! M2 `trace` 使用 `0/1/2/4`，M5 `run` 使用 `0/1/2/3/4/130`；所有子命令的 panic
+//! 由顶层 `catch_unwind` 捕获并统一返回 **70**（不依赖 Rust 默认 101）。
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +16,7 @@ pub mod run_cmd;
 pub mod trace_cmd;
 pub mod validate;
 
+use std::any::Any;
 use std::process::ExitCode;
 
 /// CLI 版本号（来自 Cargo 包版本）。
@@ -36,6 +38,8 @@ pub const EXIT_USAGE_VALIDATE: u8 = 3;
 pub const EXIT_STORAGE: u8 = 4;
 /// 退出码 130：SIGINT 取消（128+2；run 标 `Cancelled`）。
 pub const EXIT_INTERRUPTED: u8 = 130;
+/// 退出码 70：内部错误（panic 被顶层 `catch_unwind` 捕获；06 §6.10.5）。
+pub const EXIT_INTERNAL: u8 = 70;
 
 /// 用法说明（stdout/stderr 共用）。
 pub const USAGE: &str = "\
@@ -92,15 +96,46 @@ impl CliError {
 }
 
 /// 进程入口：收集参数、分发子命令，错误时打印信息与用法并返回退出码。
+///
+/// panic 由 `run_with` 的 `catch_unwind` 捕获并映射为退出码 70（06 §6.10.5）。
 pub fn run() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match dispatch(&args) {
-        Ok(code) => code,
-        Err(error) => {
+    run_with(|| {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        dispatch(&args)
+    })
+}
+
+/// 顶层 panic 守卫：`catch_unwind` 捕获内部 panic → 退出码 70，panic 信息走 stderr。
+///
+/// 提取为独立函数是为了可重复单测覆盖（二进制层无法在不伪造失败路径的前提下安全
+/// 触发 panic；单测直接覆盖包装逻辑本身）。panic 的原始信息同时由默认 panic hook
+/// 打印到 stderr（不额外安装自定义 hook）。
+fn run_with<F>(dispatch: F) -> ExitCode
+where
+    F: FnOnce() -> Result<ExitCode, CliError> + std::panic::UnwindSafe,
+{
+    match std::panic::catch_unwind(dispatch) {
+        Ok(Ok(code)) => code,
+        Ok(Err(error)) => {
             eprintln!("{}", error.message);
             eprintln!("{USAGE}");
             ExitCode::from(error.exit_code)
         }
+        Err(payload) => {
+            eprintln!("error[INTERNAL]: {}", panic_message(payload.as_ref()));
+            ExitCode::from(EXIT_INTERNAL)
+        }
+    }
+}
+
+/// 从 panic payload 提取可读信息（`panic!("...")` 的 `&str` / `String`）。
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "panic with non-string payload".to_string()
     }
 }
 
@@ -155,7 +190,8 @@ pub fn dispatch(args: &[String]) -> Result<ExitCode, CliError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch, version_line, CliError, EXIT_USAGE, EXIT_USAGE_TRACE, EXIT_USAGE_VALIDATE,
+        dispatch, panic_message, run_with, version_line, CliError, EXIT_INTERNAL, EXIT_USAGE,
+        EXIT_USAGE_TRACE, EXIT_USAGE_VALIDATE,
     };
     use std::process::ExitCode;
 
@@ -223,5 +259,35 @@ mod tests {
         assert_eq!(CliError::validate_usage("x").exit_code, EXIT_USAGE_VALIDATE);
         assert_eq!(CliError::trace_usage("x").exit_code, EXIT_USAGE_TRACE);
         assert_eq!(CliError::run_usage("x").exit_code, EXIT_USAGE);
+    }
+
+    // 二进制层无法安全触发 panic（不能为测试加生产后门），因此覆盖 catch 包装逻辑：
+    // 捕获后必须返回 70 而不是 Rust 默认的 101（06 §6.10.5）。
+    #[test]
+    fn panic_is_caught_and_mapped_to_exit_70() {
+        let code = run_with(|| panic!("boom from run_with unit test"));
+        assert_eq!(code, ExitCode::from(EXIT_INTERNAL));
+        assert_ne!(
+            code,
+            ExitCode::from(101),
+            "must not rely on Rust default 101"
+        );
+    }
+
+    #[test]
+    fn run_with_passes_through_success_and_usage_errors() {
+        assert_eq!(run_with(|| Ok(ExitCode::SUCCESS)), ExitCode::SUCCESS);
+        let code = run_with(|| Err(CliError::run_usage("bad arguments")));
+        assert_eq!(code, ExitCode::from(EXIT_USAGE));
+    }
+
+    #[test]
+    fn panic_message_reads_str_and_string_payloads() {
+        let text: Box<dyn std::any::Any + Send> = Box::new("borrowed panic");
+        assert_eq!(panic_message(text.as_ref()), "borrowed panic");
+        let owned: Box<dyn std::any::Any + Send> = Box::new("owned panic".to_string());
+        assert_eq!(panic_message(owned.as_ref()), "owned panic");
+        let other: Box<dyn std::any::Any + Send> = Box::new(42_u32);
+        assert!(panic_message(other.as_ref()).contains("non-string"));
     }
 }

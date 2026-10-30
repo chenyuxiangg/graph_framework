@@ -222,21 +222,14 @@ impl TracedRun {
     }
 
     /// 等待 run 结束：flush/close 写端 → 返回 outcome 与 reader。
-    pub async fn wait(mut self) -> Result<BridgeOutcome, BridgeError> {
-        let outcome = self.handle.wait().await;
-        let writer = self
-            .writer
-            .take()
-            .ok_or_else(|| BridgeError::Writer("trace writer already closed".to_string()))?;
-        let db_path = writer.db_path().to_path_buf();
-        let flush_result = writer.flush();
-        let trace_error = self.trace_handle.take_error();
-        let close_result = writer.close();
-        flush_result?;
-        close_result?;
-        if let Some(message) = trace_error {
-            return Err(BridgeError::Writer(message));
-        }
+    pub async fn wait(self) -> Result<BridgeOutcome, BridgeError> {
+        let TracedRun {
+            handle,
+            trace_handle,
+            writer,
+        } = self;
+        let outcome = handle.wait().await;
+        let db_path = close_writer(writer, &trace_handle)?;
         let reader = trace::TraceReader::open_readonly(&db_path)?;
         Ok(BridgeOutcome {
             outcome,
@@ -244,6 +237,40 @@ impl TracedRun {
             db_path,
         })
     }
+
+    /// 等待 run 结束并关闭写端，但**不**打开只读 reader。
+    ///
+    /// 用于跨进程不可读的库（`:memory:`，06 §6.9.1）：run 结果由内核 outcome 直接
+    /// 提供，调用方不得再依赖 trace 查询。
+    pub async fn wait_without_reader(self) -> Result<kernel::RunOutcome, BridgeError> {
+        let TracedRun {
+            handle,
+            trace_handle,
+            writer,
+        } = self;
+        let outcome = handle.wait().await;
+        close_writer(writer, &trace_handle)?;
+        Ok(outcome)
+    }
+}
+
+/// flush + close 写端并校验写线程 fail-stop 错误；返回库路径。
+fn close_writer(
+    writer: Option<trace::TraceWriter>,
+    trace_handle: &trace::TraceHandle,
+) -> Result<PathBuf, BridgeError> {
+    let writer =
+        writer.ok_or_else(|| BridgeError::Writer("trace writer already closed".to_string()))?;
+    let db_path = writer.db_path().to_path_buf();
+    let flush_result = writer.flush();
+    let trace_error = trace_handle.take_error();
+    let close_result = writer.close();
+    flush_result?;
+    close_result?;
+    if let Some(message) = trace_error {
+        return Err(BridgeError::Writer(message));
+    }
+    Ok(db_path)
 }
 
 /// run 结束产物：内核 outcome + 已关闭写端的只读 trace 连接。

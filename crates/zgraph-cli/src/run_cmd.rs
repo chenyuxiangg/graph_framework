@@ -23,6 +23,14 @@
 //! `RecordedOutput` 只对**成功**执行发送：`full` 带 `output_json`，`hash` 只带
 //! `output_hash`，`none` 不发（architecture §5.2）。agent 节点与 python 节点同规则
 //! （agent 输出为整包四字段，05 §5.9.2）。LLM `llm_calls` 记录不在本轮（ISSUE-082）。
+//!
+//! # 解释器与特殊库
+//!
+//! - Python 解释器顺序：`--python` > `$PYO3_PYTHON` > `$ZGRAPH_PYTHON` > `python3`
+//!   （04 §4.3.6 / 06 §6.10.3 / 08 N-02）。
+//! - `--db :memory:`：接受并打 stderr 警告（跨进程不可读，06 §6.9.1）；run 结果直接
+//!   来自内核 outcome（`event_count` 记 0），不打开只读 reader。
+//! - 所有 panic 由 CLI 顶层 `catch_unwind` 捕获并返回退出码 70（见 `crate::run_with`）。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -68,7 +76,7 @@ options:
   --db <path>            trace database (default: $ZGRAPH_DB or .zgraph/trace.db)
   --assets-dir <dir>     agent asset root (default: $ZGRAPH_ASSETS or .)
   --tools-dir <dir>      tool directory (default: $ZGRAPH_TOOLS or <assets-dir>/tools)
-  --python <exe>         Python interpreter (default: $ZGRAPH_PYTHON or python3)
+  --python <exe>         Python interpreter (default: $PYO3_PYTHON > $ZGRAPH_PYTHON > python3)
   --python-path <dir>    prepend a module search path; repeatable (PYTHONPATH)
   --fake-llm[=<script>]  scripted LLM provider (bare flag = built-in default script)
   --real                 real LLM provider (mutually exclusive with --fake-llm)
@@ -84,7 +92,7 @@ pub const DEFAULT_USER_ID: &str = "local";
 /// 资产根缺省值（06 §6.10.3）。
 pub const DEFAULT_ASSETS_DIR: &str = ".";
 
-/// Python 解释器缺省值（任务口径：`ZGRAPH_PYTHON` → `python3`）。
+/// Python 解释器缺省值（`--python`/`PYO3_PYTHON`/`ZGRAPH_PYTHON` 都缺省时）。
 pub const DEFAULT_PYTHON: &str = "python3";
 
 /// 资产根环境变量（06 §6.10.1）。
@@ -93,8 +101,14 @@ pub const ASSETS_ENV: &str = "ZGRAPH_ASSETS";
 /// 工具目录环境变量（06 §6.10.1）。
 pub const TOOLS_ENV: &str = "ZGRAPH_TOOLS";
 
-/// Python 解释器环境变量（任务口径）。
+/// Python 解释器环境变量（spec 权威口径：04 §4.3.6 / 06 §6.10.3 / 08 N-02）。
+pub const PYO3_PYTHON_ENV: &str = "PYO3_PYTHON";
+
+/// Python 解释器环境变量（M3+ 任务口径，`PYO3_PYTHON` 之后、`python3` 之前）。
 pub const PYTHON_ENV: &str = "ZGRAPH_PYTHON";
+
+/// 进程内 SQLite 库（06 §6.9.1：接受但跨进程不可读，`run` 用 outcome 直接输出）。
+pub const MEMORY_DB: &str = ":memory:";
 
 /// 裸 `--fake-llm` 的内置默认脚本（05 §5.3.4：一段文本 + 一次工具调用）。
 ///
@@ -533,13 +547,31 @@ fn env_string(name: &str) -> Option<String> {
     }
 }
 
+/// 是否为进程内 SQLite 库（`--db :memory:`，06 §6.9.1）。
+fn is_memory_db(path: &Path) -> bool {
+    path == Path::new(MEMORY_DB)
+}
+
+/// `:memory:` 的 stderr 警告（06 §6.9.1：接受但跨进程不可读）。
+fn warn_memory_db() {
+    eprintln!(
+        "warning: --db {MEMORY_DB} is process-local; the trace cannot be read after this run (06 §6.9.1)"
+    );
+}
+
+/// Python 解释器解析顺序（spec 权威）：`--python` > `$PYO3_PYTHON` > `$ZGRAPH_PYTHON`
+/// > `python3`（04 §4.3.6 / 06 §6.10.3 / 08 N-02；`ZGRAPH_PYTHON` 保留给 e2e/测试覆盖）。
+fn resolve_python(args: &RunArgs) -> String {
+    args.python
+        .clone()
+        .or_else(|| env_string(PYO3_PYTHON_ENV))
+        .or_else(|| env_string(PYTHON_ENV))
+        .unwrap_or_else(|| DEFAULT_PYTHON.to_string())
+}
+
 /// 构造 Python worker 子进程配置（worker 与 tool runner 共用）。
 fn worker_config(args: &RunArgs) -> WorkerConfig {
-    let program = args
-        .python
-        .clone()
-        .or_else(|| env_string(PYTHON_ENV))
-        .unwrap_or_else(|| DEFAULT_PYTHON.to_string());
+    let program = resolve_python(args);
     let env = python_path_env(&args.python_paths)
         .map(|value| vec![("PYTHONPATH".to_string(), value)])
         .unwrap_or_default();
@@ -651,6 +683,10 @@ pub fn run(args: &RunArgs) -> ExitCode {
 /// 运行时内的主流程（启动顺序见模块文档）。
 async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     let db_path = resolve_db_path(args.db.as_deref());
+    let memory_db = is_memory_db(&db_path);
+    if memory_db {
+        warn_memory_db();
+    }
     let writer = match TraceWriter::open(&db_path) {
         Ok(writer) => writer,
         Err(error) => return report_storage_error(&error),
@@ -707,7 +743,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         );
     }
     let started = Instant::now();
-    let outcome = wait_for_run(traced).await;
+    let outcome = wait_for_run(traced, memory_db).await;
     let duration_ms = duration_millis(started);
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -784,8 +820,16 @@ fn build_executor(
     ))
 }
 
+/// run 结束产物：常规库带只读 reader；`:memory:` 只有内核 outcome（06 §6.9.1）。
+enum RunCompletion {
+    /// 落盘库：可回读 events/instances（生命周期行与 event_count 来源）。
+    WithReader(RunOutcome, TraceReader),
+    /// 进程内库：reader 不可用，输出只用 outcome（event_count 记 0）。
+    OutcomeOnly(RunOutcome),
+}
+
 /// 等待 run 结束（SIGINT → cancel → 退出码 130）。
-async fn wait_for_run(traced: TracedRun) -> Result<(RunOutcome, TraceReader), ExitCode> {
+async fn wait_for_run(traced: TracedRun, memory_db: bool) -> Result<RunCompletion, ExitCode> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let signal_task = tokio::spawn(watch_interrupt(Arc::clone(&interrupted)));
     while !traced.status().is_terminal() {
@@ -794,11 +838,19 @@ async fn wait_for_run(traced: TracedRun) -> Result<(RunOutcome, TraceReader), Ex
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let outcome = traced.wait().await;
+    let completion = if memory_db {
+        traced
+            .wait_without_reader()
+            .await
+            .map(RunCompletion::OutcomeOnly)
+    } else {
+        traced.wait().await.map(|outcome| {
+            let (outcome, reader) = outcome.into_parts();
+            RunCompletion::WithReader(outcome, reader)
+        })
+    };
     signal_task.abort();
-    outcome
-        .map(|outcome| outcome.into_parts())
-        .map_err(|error| report_bridge_error(&error))
+    completion.map_err(|error| report_bridge_error(&error))
 }
 
 /// 监听 SIGINT：只置位标志，取消在 run 循环里执行（避免早到信号丢语义）。
@@ -818,17 +870,18 @@ fn duration_millis(started: Instant) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// 输出 run 结果并返回退出码。
-fn finish(
-    args: &RunArgs,
-    (outcome, reader): (RunOutcome, TraceReader),
-    duration_ms: u64,
-    db_path: &Path,
-) -> ExitCode {
+///
+/// `:memory:` 没有可回读的 reader：`event_count` 记 0（trace 跨进程不可读，
+/// 06 §6.9.1），其余字段全部来自内核 outcome。
+fn finish(args: &RunArgs, completion: RunCompletion, duration_ms: u64, db_path: &Path) -> ExitCode {
+    let (outcome, reader) = match completion {
+        RunCompletion::WithReader(outcome, reader) => (outcome, Some(reader)),
+        RunCompletion::OutcomeOnly(outcome) => (outcome, None),
+    };
     let run_id = outcome.run_id.clone();
     let event_count = reader
-        .run(&run_id)
-        .ok()
-        .flatten()
+        .as_ref()
+        .and_then(|reader| reader.run(&run_id).ok().flatten())
         .map_or(0, |row| row.event_count);
     let exit_code = exit_code_for(outcome.status);
     if args.json {
@@ -838,7 +891,9 @@ fn finish(
         );
     } else {
         if !args.quiet {
-            print_lifecycle(&reader, &run_id);
+            if let Some(reader) = &reader {
+                print_lifecycle(reader, &run_id);
+            }
         }
         println!("{}", run_output_text(&outcome));
         if !args.quiet {
@@ -1085,9 +1140,12 @@ fn close_quietly(writer: TraceWriter) {
 
 #[cfg(test)]
 mod tests {
-    use super::{output_hash, parse, resolve_entry_inputs, FakeLlmMode, RunArgs, DEFAULT_USER_ID};
+    use super::{
+        is_memory_db, output_hash, parse, resolve_entry_inputs, FakeLlmMode, RunArgs,
+        DEFAULT_USER_ID,
+    };
     use serde_json::json;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use zgraph_kernel::CompiledGraph;
     use zgraph_trace::RecordMode;
 
@@ -1284,5 +1342,17 @@ mod tests {
             quiet: false,
         };
         assert_eq!(args.clone(), args);
+    }
+
+    #[test]
+    fn memory_db_path_is_recognised() {
+        assert!(is_memory_db(Path::new(":memory:")));
+        assert!(!is_memory_db(Path::new("./:memory:")));
+        assert!(!is_memory_db(Path::new("trace.db")));
+        // CLI 解析层把 :memory: 当作普通路径值接受（不做非法路径拒绝）。
+        let parsed = parse(&args(&["g.json", "--inputs", "{}", "--db", ":memory:"]))
+            .expect("parse")
+            .expect("not help");
+        assert_eq!(parsed.db, Some(PathBuf::from(":memory:")));
     }
 }
