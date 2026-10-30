@@ -107,3 +107,12 @@ git ls-tree -r --name-only HEAD tests/fixtures/graphs/harness_ac08 | grep -E "py
 - **Lead 合并备注**：#4 `Cargo.lock` +1 行为 process 模块跨模块改动（最小、无版本变化），建议合并记录确认授权（AGENTS §2）。
 - **可选加固**：#3 timeout 用例的 worker 进程组 kill 直接断言（pid 文件模式，参考 M3）；当前独立 `pgrep` 验证已无残留，不阻塞。
 - 本评审未修改任何代码/测试/台账；REV-022 记录为本分支唯一新增文档。
+
+## 6. 修订（2026-10-30，reviewer-b，rebase 后 HEAD `fda996c`）
+
+> 本分支按 Lead 要求在 REV-022 记录合并入 main 后 rebase 到最新 `origin/main`（`97531fe`），新 HEAD **`fda996c`**。按 AGENTS §6 追加本节，原 §1–§5 结论与证据不删。
+
+- **内容一致性核对**：`git diff --stat 76bbe05 fda996c -- tests Cargo.lock` **为空**——测试/fixtures/`Cargo.toml`/`Cargo.lock` 与评审对象 `76bbe05` **逐字节一致**；两提交差异仅在 main 上的 `doc/reviews` 文档（rebase 带入）。rebase 后范围仍为 `97531fe..fda996c` = **10 files changed, 811 insertions(+), 1 deletion(-)**（与评审时相同）。
+- **rebase 后复验**：`git status` clean；`cargo test -p zgraph-e2e --test harness_ac08 --quiet` → **4 passed / 0 failed / 1 ignored（0.38s）**（干净 target `/tmp/rev022-target`）；`check.sh` 由作者复跑 PASS（本评审前次已验证，rebase 未改任何被检文件）。
+- **结论不变：通过**（§3 的 #1–#5 状态不变；#4 `Cargo.lock` 跨模块授权仍请 Lead 合并时按 §5 确认）。
+- 可合并性：分支基于最新 `origin/main`（`97531fe`）、worktree clean、评审记录结论「通过」→ 满足 `merge.sh` 前置。
