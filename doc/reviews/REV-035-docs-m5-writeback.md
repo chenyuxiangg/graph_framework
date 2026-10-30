@@ -142,3 +142,80 @@ bash scripts/dev/check.sh                # CHECK PASSED（身份/冻结文件/�
 - 发现 C1/C2/C3 三项重要问题（均可在同一分支小改关闭），其余 8 条建议/Nit；无阻塞性设计缺陷。
 - **结论：有条件通过**（C1/C2/C3 关闭后转「通过」；条件关闭时在本记录追加「修订/复审/条件关闭」段并更新结论，原段保留）。
 - 评审人：`reviewer-a`（非作者）；评审时间：2026-10-30。
+
+## 8. 修订与复审（C1/C2/C3 条件关闭，2026-10-30）
+
+> 本章为评审人 `reviewer-a` 的**追加复审段**（AGENTS §6：不删改 §1–§7，原「有条件通过」结论与证据保留）。复审对象：作者修订 commit **`16a9a69`**（同一分支、未 amend 本记录；`git diff 7cedd60..16a9a69` = **10 files changed, +37/−24**，全部 `doc/**` + 根 `README.md`）。
+
+### 8.1 C1 关闭（README 状态段）
+
+修订后 `README.md:24-26`：
+
+- 「已交付并合并到 main」加入 **REV-030**（`zgraph replay` L1/L2、`llm_calls` 落库、CLI 启动中止标定/`--json.recovered[]`/`trace` 进行中提示）、**REV-032**（e2e AC-01/L2/崩溃标定/ISSUE-076 端到端），并把 **ISSUE-061/074/066/076** 统一为「M5 已修」；保留 REV-028/029/034/025/038；
+- **REV-035 移入「本批待合并」**，不再自称「已合并到 main」；
+- 待交付仅「**REV-036 收尾**（issues/progress/README/评审索引/baseline）→ **REV-037**（process 依赖治理）→ **M6 排除项**（DR-002 §7）」。
+
+与 main `438822b` 的事实核对：REV-030（`64f110a`）、REV-031（`438822b`）、REV-032（`58239fc`）均已合并；ISSUE-061/074 已 fixed，ISSUE-066/076 实现已合并（台账由 REV-036 收口）——**C1 关闭**（台账同步作为 §8.6 残留 #2，不阻塞）。
+
+### 8.2 C2 关闭（AC-01 命令可执行）
+
+`07-验收用例.md:57-63` 的 `run` 命令已补：
+
+```bash
+--python-path python \
+--python-path tests/fixtures/graphs/customer_ticket/py \
+```
+
+并注明「`--python-path` 是命令的一部分；等价设置 `PYTHONPATH=python:tests/fixtures/graphs/customer_ticket/py`；与 `tests/e2e/cli_support/mod.rs::ac01_run_args` 一致，可直接执行」。评审人**逐字复跑**修订后命令：`run` exit 0、`status="Completed"`、`event_count=30`、`run_output.result` 四字段且 `content` 二次解析出 `answer="可以退款"`/`need_human=false`；`validate` exit 0（`✓ graph valid: 6 nodes, 6 edges, 0 subgraphs`）——**C2 关闭**。
+
+### 8.3 C3 关闭（PROVENANCE 历史留痕）
+
+`PROVENANCE.md` §3 现同时保留：
+
+- 当前实测：表内 9 文件 SHA-256/行数（合计 **5958** 行）；
+- 历史留痕（不覆盖）：**「M4 Harness 回写批次后 00–08 合计 5818 行；base `origin/main` `fda996c`；合并 rebase `12ab2f6`」**；§2 第 1–7 条历史批次条目未改，仅追加第 11 条修订说明。
+
+独立实测：`wc -l` 00–08 = **5958**；`shasum -a 256` 与 §3 **逐项一致**（00 `a9b12764…`、05 `405aaa99…`、06 `8f3613b6…`、07 `38d2e56c…`、08 `4378d379…`；01/02/03/04 未变）——**C3 关闭**。
+
+### 8.4 建议收敛核对（§3 #4–#11）
+
+| 建议 | 修订结果 |
+|---|---|
+| #4 05 L8 / 08 ISSUE-081 数字 | L8 改为 `run_in_runtime` **91**（REV-030）、新增 `replay build_plan` 75、新增 >60 行测试 74/78/88 等；08:426 同步为 91/build_plan 75/74/78/88 等 ✅（74 为 REV-028 期旧值，「等」已限定，见 §8.6 #3） |
+| #5 AC-12 基线 | 07:211 改为 **0.79–0.85s**，与 `tests/e2e/ac12.rs:40-42`/REV-029 #4 一致 ✅ |
+| #6 06 §6.10 replay | §6.10 一句话结论改「四个子命令 validate/run/replay/trace」；§6.10.1 `--db`（run/replay/trace）；06 头部状态行同步 ✅ |
+| #7 RECORD_CORRUPT 描述 | 00:212、06:906/§6.10.5、architecture:188/279 统一为「记录损坏：hash 复核失败/重复/缺 `output_json`/`entry_inputs` 非法」，与 06:960/964 及 `replay_cmd.rs` 一致 ✅ |
+| #8 prompt 路径 | 07:18 改为 `agents/prompt.md` ✅ |
+| #9 spec README 批次 | README:10/61 改为「M5 批次见 §2 第 **8–10** 条」✅ |
+| #11 doc/index 范围 | 改为「REV-000–REV-034 与 REV-038；REV-035/036 待合并/收尾后补」✅ |
+
+### 8.5 复审命令与结果
+
+| 命令 | 结果 |
+|---|---|
+| `git diff 7cedd60..16a9a69` | 10 files changed, +37/−24；全部 `doc/**` + `README.md`（无代码/台账/进度/CLAUDE） |
+| `bash scripts/dev/check.sh` | **CHECK PASSED** |
+| `wc -l 00–08` + `shasum -a 256` | 合计 **5958** 行；SHA 与 PROVENANCE §3 逐项一致 |
+| `zgraph run …`（07 AC-01 修订后原文命令） | **exit 0 / Completed**（`event_count=30`，`run_output.result` 四字段） |
+| `zgraph validate tests/fixtures/graphs/customer_ticket.json` | exit 0（6 nodes/6 edges/0 subgraphs） |
+| `merge.sh docs/docs-m5-writeback --dry-run`（隔离 target `/tmp/rev035b-target`，先清理工作区成员） | 结果见 §8.5.1 |
+
+#### 8.5.1 merge dry-run（结论翻「通过」后实跑）
+
+- **实跑（全新隔离 target `/tmp/rev035b-target`；`cargo clean -p` 工作区成员为 no-op；load avg≈6.5）**：评审记录校验通过（脚本输出 `评审记录 -> 通过`）→ `INFO: cargo test 通过` → pytest 失败 **0** / 基线 **0**（无新增）→ `INFO: dry-run 结束，检查全部通过`（exit 0）。
+- 本次 dry-run 未出现 AC-09 时序/worker 握手 flake；`git fetch origin main` 未报错（merge.sh 未因 fetch 中止）。
+
+### 8.6 残留（不阻塞，交 REV-036）
+
+1. **时点语句**：`README.md:25`「待关闭评审 C1–C3 后合并」与 `PROVENANCE.md` §2 第 11 条末句「等待 reviewer-a 复审翻「通过」」在本次复审后已成历史时点描述；建议 REV-036 顺手改为完成态（不阻塞合并）。
+2. **台账同步（原 §3 #10）**：`doc/issues.md` 的 ISSUE-048/066/076 仍 open/部分修、ISSUE-082/081 保持部分、ISSUE-084 保持 open；REV-036 需按实现事实转 fixed/open 并在 08 引用新登记的 kernel `fail_timeout` ISSUE（ISSUE-086）——同时统一 README/05/08 措辞。
+3. **Nit**：05 L8「74/78/88 等」中的 74 为 REV-028 期旧值（当前 `tests/run.rs:625` 为 68 行，REV-030 #10 明确 78/88），因有「等」且 91/build_plan 75 已正确，不阻塞；REV-036 可顺手精确化。
+
+### 8.7 复审结论
+
+- C1/C2/C3 **全部关闭**；§3 建议 #4–#11 已同批收敛；修订未引入新的事实错误（README 状态、AC-01 命令、PROVENANCE 指纹/历史留痕、四子命令、REPLAY 错误码描述、索引范围均复核通过）；`check.sh` PASS、AC-01 命令可逐字执行、workspace 全量 dry-run 通过。
+- 残留仅为 REV-036 收尾事项（台账同步/时点语句/Nit），不阻塞本分支合并。
+
+**结论：通过**
+
+- 评审人：`reviewer-a`（非作者）；复审时间：2026-10-30；原 §1–§7 保留不变。
