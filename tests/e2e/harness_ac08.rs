@@ -23,6 +23,8 @@
 //! - [`tool_timeout_is_fed_back_and_run_continues`]：工具声明 `timeout_ms=300` 超时后杀进程组，
 //!   `TOOL_ERROR{reason:"timeout"}` 喂回，run 继续且整个用例 < 15s；
 //! - [`unknown_tool_crashes_instance`]：LLM 调用未注册工具 → `HARNESS_UNKNOWN_TOOL` → Crashed；
+//! - [`agent_config_node_timeout_hint_backs_off_when_dsl_omits_timeout`]：ISSUE-076 回退链 +
+//!   ISSUE-086 实例级超时错误（TimedOut、`instances.error_code=NODE_TIMEOUT`、error JSON 非 NULL）；
 //! - [`ac08b_real_llm_manual`]：`#[ignore]`，真实 DeepSeek 手动验收（AC-08 真实模型部分）。
 //!
 //! 手动执行真实模型用例：
@@ -736,26 +738,61 @@ fn assert_timeout_hint_elapsed(elapsed: Duration) {
     );
 }
 
-/// ISSUE-076 trace 断言：实例 TimedOut + `NodeTimedOut` 恰一次（落库口径见注释）。
+/// 实例级超时错误（ISSUE-086 / 06 §6.2.5 + §6.2.5.1）：TimedOut + `NODE_TIMEOUT` + NodeError JSON。
+///
+/// ISSUE-086（REV-040）后 Harness 自报 `NodeError::Timeout` 经内核 `fail_timeout()`
+/// 也会回填实例错误，与 watchdog 路径同口径；e2e 以**实例级** `error_code`/`error`
+/// 为权威证据（只看 run 级会漏掉两条路径落库不一致）。
+fn assert_timeout_instance_error(reader: &TraceReader, run_id: &str) -> Value {
+    let instance = common::instance(reader, run_id, "worker");
+    assert_eq!(
+        instance.status,
+        TraceInstanceStatus::TimedOut,
+        "agent_call 实例应 TimedOut"
+    );
+    assert_eq!(
+        instance.error_code.as_deref(),
+        Some("NODE_TIMEOUT"),
+        "ISSUE-086：instances.error_code 必须与 watchdog 路径同口径落库"
+    );
+    let error = instance
+        .error
+        .as_ref()
+        .expect("ISSUE-086：instances.error 不得为 NULL");
+    assert_eq!(error["code"], json!("NODE_TIMEOUT"));
+    assert_eq!(error["kind"], json!("Timeout"));
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "instances.error.message 非空：{error}"
+    );
+    error.clone()
+}
+
+/// ISSUE-076 trace 断言：实例 TimedOut + 实例级 `NODE_TIMEOUT` 落库 + `NodeTimedOut` 恰一次。
 fn assert_timeout_hint_trace(reader: &TraceReader, run_id: &str) {
     common::assert_lifecycle_shape(reader, run_id);
     let run = common::run_row(reader, run_id);
     assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
     assert_eq!(run.error_code.as_deref(), Some("NODE_TIMEOUT"));
+    let instance_error = assert_timeout_instance_error(reader, run_id);
     // agent_call 没有常驻 worker 子进程：超时由内核 abort harness 任务（工具 discover
     // 的短命 worker 已退出），因此 `killed_workers` 对 agent 节点不适用（D1 口径只覆盖
-    // `WorkerExecutor` 的 python 节点）。节点超时由下面的 TimedOut + NodeTimedOut 证明。
-    let instance = common::instance(reader, run_id, "worker");
-    assert_eq!(instance.status, TraceInstanceStatus::TimedOut);
-    // agent_call 的超时由 Harness 自报 `NodeError::Timeout`（LLM 调用超时取剩余 deadline）
-    // 或内核 watchdog 先到；自报路径当前不落 instances.error_code（内核 `fail_timeout`
-    // 未 set_instance_error，属 crates/** 既有行为，e2e 不改）。落库口径以 run
-    // error_code + NodeTimedOut 事件为准；已报告 Lead 供 kernel 侧评估。
+    // `WorkerExecutor` 的 python 节点）；节点超时以实例级错误 + NodeTimedOut 事件为准。
     let events = common::events(reader, run_id);
     assert_eq!(
         common::count_kind(&events, "NodeTimedOut"),
         1,
         "NodeTimedOut 恰一次"
+    );
+    let timed_out = events
+        .into_iter()
+        .find(|event| event.kind == "NodeTimedOut")
+        .expect("NodeTimedOut event");
+    assert_eq!(
+        instance_error["elapsed_ms"], timed_out.payload["elapsed_ms"],
+        "实例错误与 NodeTimedOut 事件的 elapsed_ms 必须同源（同一条超时路径）"
     );
 }
 

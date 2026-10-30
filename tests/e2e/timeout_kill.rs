@@ -59,6 +59,14 @@ fn assert_timeout_trace(reader: &zgraph_trace::TraceReader, run_id: &str, node_i
         "节点 {node_id} 应迁移到 TimedOut"
     );
     assert_eq!(instance.error_code.as_deref(), Some("NODE_TIMEOUT"));
+    // 06 §6.2.5：watchdog 路径同样要落实例级 `NodeError` JSON；与 agent_call 自报
+    // 超时路径（harness_ac08）同口径，两条路径都由 ISSUE-086 统一回填。
+    let error = instance
+        .error
+        .as_ref()
+        .expect("06 §6.2.5：instances.error 不得为 NULL");
+    assert_eq!(error["code"], "NODE_TIMEOUT");
+    assert_eq!(error["kind"], "Timeout");
 
     let all = common::events(reader, run_id);
     assert_eq!(

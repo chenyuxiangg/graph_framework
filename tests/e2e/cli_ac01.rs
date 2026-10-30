@@ -3,6 +3,9 @@
 //! 语义基准：`doc/spec-v1.2/07-验收用例.md` AC-01、06 §6.10.3/§6.10.5/§6.10.6
 //! （参数/退出码/`--json` 结构）、05 §5.9.2（agent 输出四字段）。
 //!
+//! 另补 M6 收口的最小回归点：`zgraph validate` 退出码（06 §6.10.5；
+//! 0 合法 / 2 DSL·资产·用法 / 1 IO 不可读；REV-043 记录 e2e 此前无该断言）。
+//!
 //! 本文件用**真实 `zgraph` 二进制**（见 `cli_support` 的发现顺序）执行：
 //!
 //! ```text
@@ -42,8 +45,8 @@ use serde_json::{json, Value};
 use zgraph_trace::{InstanceStatus as TraceInstanceStatus, TraceReader};
 
 use cli_support::{
-    ac01_dir, ac01_run_args, arg, assert_exit, json_stdout, repo_root, run_cli, runs_count,
-    stderr_text,
+    ac01_dir, ac01_graph, ac01_run_args, arg, assert_exit, json_stdout, repo_root, run_cli,
+    runs_count, stderr_text,
 };
 
 /// AC-01 入口输入（07 AC-01 步骤）。
@@ -249,4 +252,27 @@ fn ac01_bad_entry_input_exits_3_without_creating_run() {
         "stderr 应带 RUN_ENTRY_* 错误码: {}",
         stderr_text(&output)
     );
+}
+
+// ---------------------------------------------------------------------------
+// M6 收口：`zgraph validate` 退出码（06 §6.10.5；REV-043 / ISSUE-059）
+// ---------------------------------------------------------------------------
+
+/// `zgraph validate` 退出码口径：0 合法 / 2 DSL·资产·用法 / 1 IO 不可读（06 §6.10.5）。
+///
+/// REV-043 遗留备注「e2e 无 validate 退出码断言」；M6 W3 用真二进制补最小回归点
+/// （不涉及 worker/fake LLM，只覆盖 CLI 参数解析与文件路径分类）。
+#[test]
+fn validate_exit_codes_match_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let valid = run_cli(&["validate".to_string(), arg(&ac01_graph())], dir.path());
+    assert_exit(&valid, 0, "合法图 validate");
+
+    let bad_graph = repo_root().join("tests/fixtures/graphs/bad_version.json");
+    let bad = run_cli(&["validate".to_string(), arg(&bad_graph)], dir.path());
+    assert_exit(&bad, 2, "坏图 validate");
+
+    let missing = dir.path().join("not_exists.json");
+    let unreadable = run_cli(&["validate".to_string(), arg(&missing)], dir.path());
+    assert_exit(&unreadable, 1, "文件不可读 validate");
 }

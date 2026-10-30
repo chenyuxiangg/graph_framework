@@ -645,6 +645,10 @@ fn assert_hint_timeout(output: &Output, elapsed: Duration) -> Value {
 }
 
 /// ISSUE-076 trace 断言：实例 TimedOut / `NodeTimedOut` 恰一次 / run NODE_TIMEOUT。
+///
+/// 同时覆盖 ISSUE-086（06 §6.2.5）：CLI 端到端走 Harness 自报超时路径时，
+/// `instances.error_code` 必须为 `NODE_TIMEOUT`、`instances.error` 必须非 NULL
+/// （kernel `fail_timeout` 已与 watchdog 同口径回填，e2e 做 CLI 层回归）。
 fn assert_hint_trace(db: &Path, run_id: &str) {
     let reader = TraceReader::open_readonly(db).expect("open trace");
     let row = common::run_row(&reader, run_id);
@@ -652,6 +656,17 @@ fn assert_hint_trace(db: &Path, run_id: &str) {
     assert_eq!(row.error_code.as_deref(), Some("NODE_TIMEOUT"));
     let instance = common::instance(&reader, run_id, "worker");
     assert_eq!(instance.status, TraceInstanceStatus::TimedOut);
+    assert_eq!(
+        instance.error_code.as_deref(),
+        Some("NODE_TIMEOUT"),
+        "ISSUE-086：CLI 自报超时路径的 instances.error_code"
+    );
+    let error = instance
+        .error
+        .as_ref()
+        .expect("ISSUE-086：instances.error 不得为 NULL");
+    assert_eq!(error["code"], json!("NODE_TIMEOUT"));
+    assert_eq!(error["kind"], json!("Timeout"));
     let events = common::events(&reader, run_id);
     assert_eq!(
         common::count_kind(&events, "NodeTimedOut"),
