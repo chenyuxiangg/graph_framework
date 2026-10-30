@@ -34,7 +34,17 @@ pub struct CompiledNode {
     pub trigger: Trigger,
     /// 编译后的处理入口。
     pub handler: CompiledHandler,
-    /// 实例级超时（节点 `timeout_ms`，否则 [`DEFAULT_NODE_TIMEOUT_MS`]）。
+    /// DSL 节点显式声明的实例超时（`config.timeout_ms`；未声明为 `None`）。
+    ///
+    /// 调度阶段按 spec 05 §5.2.6 的优先级链解析最终超时：
+    /// 本值 > [`crate::NodeExecutor::timeout_hint`]（`agent_call` 的
+    /// `AgentConfig.node_timeout_ms` 回退，ISSUE-076）> [`DEFAULT_NODE_TIMEOUT_MS`]。
+    /// 保留 `None` 才能区分「未声明」与「显式声明为默认值（180000）」。
+    pub declared_timeout_ms: Option<u64>,
+    /// 实例级超时（历史语义：`declared_timeout_ms.unwrap_or(DEFAULT_NODE_TIMEOUT_MS)`）。
+    ///
+    /// 保留该字段供既有调用方读取；调度阶段以 [`Self::declared_timeout_ms`] 为准，
+    /// 否则执行器 hint 会被这里的默认值掩盖。
     pub timeout_ms: u64,
     /// 自环/重试允许的最大尝试次数（`retry.max_attempts`，否则
     /// [`DEFAULT_MAX_ATTEMPTS`]）；`attempt` 从 0 起。
@@ -213,9 +223,12 @@ fn compile_nodes(
     Ok((table, order))
 }
 
+/// `compile_handler` 的产物：handler、DSL 声明的超时、有效超时、最大尝试次数。
+type CompiledHandlerSpec = (CompiledHandler, Option<u64>, u64, u32);
+
 /// 编译单个节点。
 fn compile_node(node: &GraphNode) -> Result<CompiledNode, CompileError> {
-    let (handler, timeout_ms, max_attempts) = compile_handler(node)?;
+    let (handler, declared_timeout_ms, timeout_ms, max_attempts) = compile_handler(node)?;
     Ok(CompiledNode {
         id: node.id.clone(),
         node_type: node.node_type,
@@ -223,21 +236,28 @@ fn compile_node(node: &GraphNode) -> Result<CompiledNode, CompileError> {
         outputs: node.outputs.clone(),
         trigger: node.trigger,
         handler,
+        declared_timeout_ms,
         timeout_ms,
         max_attempts,
     })
 }
 
-/// 由节点类型 + 配置得到 handler、超时与最大尝试次数。
-fn compile_handler(node: &GraphNode) -> Result<(CompiledHandler, u64, u32), CompileError> {
+/// 由节点类型 + 配置得到 handler、DSL 声明的超时、有效超时与最大尝试次数。
+///
+/// `declared` 保留 DSL 原值（`None` = 未声明），供调度阶段按 spec 05 §5.2.6
+/// 解析（DSL > AgentConfig 回退 > 默认）；`timeout_ms` 维持既有语义
+/// `declared.unwrap_or(DEFAULT_NODE_TIMEOUT_MS)`，兼容既有调用方。
+fn compile_handler(node: &GraphNode) -> Result<CompiledHandlerSpec, CompileError> {
     match (node.node_type, &node.config) {
         (NodeType::Start, NodeConfig::StartEnd) => Ok((
             CompiledHandler::Start,
+            None,
             DEFAULT_NODE_TIMEOUT_MS,
             DEFAULT_MAX_ATTEMPTS,
         )),
         (NodeType::End, NodeConfig::StartEnd) => Ok((
             CompiledHandler::End,
+            None,
             DEFAULT_NODE_TIMEOUT_MS,
             DEFAULT_MAX_ATTEMPTS,
         )),
@@ -245,6 +265,7 @@ fn compile_handler(node: &GraphNode) -> Result<(CompiledHandler, u64, u32), Comp
             let handler = compile_python_handler(config);
             Ok((
                 handler,
+                config.timeout_ms,
                 config.timeout_ms.unwrap_or(DEFAULT_NODE_TIMEOUT_MS),
                 attempts(config.retry.as_ref()),
             ))
@@ -253,6 +274,7 @@ fn compile_handler(node: &GraphNode) -> Result<(CompiledHandler, u64, u32), Comp
             let handler = compile_agent_handler(config);
             Ok((
                 handler,
+                config.timeout_ms,
                 config.timeout_ms.unwrap_or(DEFAULT_NODE_TIMEOUT_MS),
                 attempts(config.retry.as_ref()),
             ))
@@ -261,6 +283,7 @@ fn compile_handler(node: &GraphNode) -> Result<(CompiledHandler, u64, u32), Comp
             CompiledHandler::Subgraph {
                 subgraph_id: config.subgraph_id.clone(),
             },
+            None,
             DEFAULT_NODE_TIMEOUT_MS,
             DEFAULT_MAX_ATTEMPTS,
         )),

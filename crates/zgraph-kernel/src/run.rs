@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use zgraph_dsl::{NodeType, Trigger};
+use zgraph_dsl::{NodeType, Trigger, DEFAULT_NODE_TIMEOUT_MS};
 
 use crate::context::{NodeContext, NodeContextInit};
 use crate::executor::{CatchPanic, NodeExecutor};
@@ -671,7 +671,15 @@ impl RunLoop {
         node: &CompiledNode,
         inputs: &HashMap<PortName, Value>,
     ) {
-        let timeout_ms = self.force_timeout_ms.unwrap_or(node.timeout_ms);
+        // 实例超时解析（spec 05 §5.2.6；ISSUE-076）：test-hooks 强制值 >
+        // DSL 声明（`declared_timeout_ms`）> 执行器 hint（AgentConfig 回退）>
+        // 默认值。不能直接读 `node.timeout_ms`：它已把未声明折叠成默认值，
+        // 会掩盖执行器 hint。
+        let timeout_ms = self
+            .force_timeout_ms
+            .or(node.declared_timeout_ms)
+            .or_else(|| self.executor.timeout_hint(node))
+            .unwrap_or(DEFAULT_NODE_TIMEOUT_MS);
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let input_value = serde_json::to_value(inputs).unwrap_or(Value::Null);
         if let Some(record) = self.instances.get_mut(instance_id) {

@@ -122,7 +122,29 @@ fn compiles_retry_and_timeout_overrides() {
     let graph = common::compile_text(text);
     let node = graph.nodes.get("n").expect("node");
     assert_eq!(node.timeout_ms, 1_234);
+    // ISSUE-076：declared 保留"未声明"语义，`timeout_ms` 维持历史回退。
+    assert_eq!(node.declared_timeout_ms, Some(1_234));
     assert_eq!(node.max_attempts, 5);
+}
+
+/// 未声明 `timeout_ms` 的节点：`declared_timeout_ms = None`（供执行器 hint 回退），
+/// `timeout_ms` 仍为历史默认值（spec 05 §5.2.6）。
+#[test]
+fn compiles_undeclared_timeout_as_none_with_default_fallback() {
+    let graph = common::compile_fixture("customer_ticket.json");
+    for node_id in ["kb_search", "human_escalation_check", "end_success"] {
+        let node = graph.nodes.get(node_id).expect("node");
+        assert_eq!(node.declared_timeout_ms, None, "node {node_id}");
+        assert_eq!(
+            node.timeout_ms,
+            zgraph_dsl::DEFAULT_NODE_TIMEOUT_MS,
+            "node {node_id}"
+        );
+    }
+    // agent_call 显式声明 → declared 保留 DSL 原值。
+    let declared = graph.nodes.get("input_parser").expect("input_parser");
+    assert_eq!(declared.declared_timeout_ms, Some(60_000));
+    assert_eq!(declared.timeout_ms, 60_000);
 }
 
 #[test]

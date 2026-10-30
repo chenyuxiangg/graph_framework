@@ -48,6 +48,21 @@ pub trait NodeExecutor: Send + Sync {
         &'a self,
         execution: NodeExecution<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Value, NodeError>> + Send + 'a>>;
+
+    /// 派发前可选的实例超时提示（毫秒；默认 `None`）。
+    ///
+    /// 内核解析实例超时的优先级（高 → 低，spec 05 §5.2.6）：
+    /// `test-hooks.force_node_timeout_ms` > DSL 节点 `timeout_ms`
+    /// （[`CompiledNode::declared_timeout_ms`]）> 本方法返回值 >
+    /// `zgraph_dsl::DEFAULT_NODE_TIMEOUT_MS`。
+    ///
+    /// 仅 Harness 实现返回 `Some`：`agent_call` 节点在 DSL 未声明 `timeout_ms`
+    /// 时回退 `AgentConfig.node_timeout_ms`（ISSUE-076）。实现必须在**派发前**
+    /// 只依据编译产物给出提示，不得依赖执行期状态；`None` 表示不提供提示。
+    /// 该方法有默认实现，因此对既有执行器是纯增量改动（对象安全）。
+    fn timeout_hint(&self, _node: &CompiledNode) -> Option<u64> {
+        None
+    }
 }
 
 /// 捕获执行 future 内部 panic 的包装器（00 §0.7 / 04 §4.1.1 / 03 §3.15）。
