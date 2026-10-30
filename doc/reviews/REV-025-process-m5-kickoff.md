@@ -211,7 +211,7 @@ CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home CARGO_NET_OFFLINE=true CAR
 ```
 
 ```text
-(见 §7 签署前的最终复跑记录)
+（已由评审人补记实跑结果，见文末「dry-run 实际结果补记」）
 ```
 
 ## 7. 评审签署
@@ -221,3 +221,13 @@ CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home CARGO_NET_OFFLINE=true CAR
 - 可执行性：`fd936e0` 修订后的 §3.3/§4/§6 依赖均经代码核对（trace reader/schema、`MemoryTraceSink`/`run_to_completion`、`NodeExecutor::timeout_hint` 对象安全、`start_traced_run_with_writer`、`instances()`、`ac12.rs` 峰值断言）。
 - **最终结论：通过**。C1/C2 关闭后 `merge.sh --dry-run` 全门禁通过（见 §6 复跑记录），本分支允许合并。
 - 评审人：`reviewer-a`（非作者）；首轮 2026-10-30；增量复审 2026-10-30。
+
+## 8. dry-run 实际结果补记（评审人 `reviewer-a`，2026-10-30）
+
+> 本记录 §6 的 dry-run 输出块因合并时序未回填；评审人按隔离 target 实跑结果补记如下（原记录不删除）。
+
+- 结论：`通过`（首轮「有条件通过」的 C1/C2 已由 `fd936e0` 关闭，见 §6）。
+- 命令（隔离 target，避免共享 target 与其它 worktree 构建互踩）：
+  `CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/tmp/zgraph-merge-target CARGO_INCREMENTAL=0 PYTHON_BIN=/Users/zyzs/lczyzs/code/zgraph/.venv/bin/python bash scripts/dev/merge.sh docs/process-m5-kickoff --dry-run`
+- 实跑：评审记录门禁通过 → `cargo test --workspace` **424 passed / 0 failed / 2 ignored**（2 ignored = harness 真模型 smoke + e2e AC-08b 手动）→ pytest 失败 0 / 基线 0（84 passed）→ `dry-run 结束，检查全部通过`（exit 0）。
+- 环境注意（同 REV-026 补记）：共享 target 中若残留**已删除 worktree** 编译的测试二进制（`env!(CARGO_MANIFEST_DIR)` 不参与 cargo 指纹），会因陈旧路径失败；先对隔离 target 执行 `cargo clean -p` 全部 workspace 成员再跑即可（本次即如此）。

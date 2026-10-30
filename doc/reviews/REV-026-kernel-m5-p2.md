@@ -134,7 +134,7 @@ bash scripts/dev/merge.sh fix/kernel-m5-p2 --dry-run
 ```
 
 ```text
-（dry-run 结果待填）
+（已由评审人补记实跑结果，见文末「dry-run 实际结果补记」）
 ```
 
 > 注意：dry-run 只到测试门禁即返回 0，不校验 `--ff-only`；本分支 base 落后本地 main（§3 #6），**合入前必须先 rebase**。
@@ -161,3 +161,13 @@ bash scripts/dev/merge.sh fix/kernel-m5-p2 --dry-run
 - 未发现阻塞/重要项；建议/跟进项已列 §3/§5，不阻塞本分支。
 - **结论：通过**（合入前需按 §5 先 rebase 到当前 main 并复跑 `merge.sh` 全门禁）。
 - 评审人：`reviewer-a`（非作者）；评审时间：2026-10-30。
+
+## 8. dry-run 实际结果补记（评审人 `reviewer-a`，2026-10-30）
+
+> 本记录 §4.5 的 dry-run 输出块未及回填（分支随后已合并至 main `ad7fbec`）；评审人补记实测证据如下（原记录不删除）。
+
+- 结论：`通过`（REV-026 两 commit `9ddc539`/`f89ddaa` 已合并）。
+- `cargo test --workspace`：**431 passed / 0 failed / 2 ignored**（含 e2e AC-12 合并后基线；2 ignored 为既有手动项）；`cargo test -p zgraph-kernel` **86 passed**；`cargo test -p zgraph-kernel --features test-hooks` **90 passed**。
+- ISSUE-061 独立复现：仅把 `run.rs` 回退到 `a04c29d` 后 `cargo test -p zgraph-kernel --test self_loop` → **2 FAILED**（`left: [(0,Completed),(1,Skipped)]` 幻影实例；`max_attempts=2` 误报 `NODE_INTERNAL`）；恢复修复后 **3 passed**。
+- `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`scripts/dev/check.sh` 均 PASS。
+- 合并后遗留（原记录 §5 已列）：DR-002 §9 #6 增加 03 §3.4.2 / 01 §1.2.2 回写项；CLI/e2e 组合执行器转发 `timeout_hint` 留 wave2。
