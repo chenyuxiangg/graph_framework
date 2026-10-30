@@ -234,7 +234,7 @@ fn node_error_codes_match_spec() {
                 kind: HarnessErrorKind::ToolError,
                 detail: json!({}),
             },
-            "HARNESS_TOOL_ERROR",
+            "TOOL_ERROR",
         ),
         (
             NodeError::Harness {

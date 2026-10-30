@@ -102,8 +102,8 @@ pub const CODE_HARNESS_LLM_ERROR: &str = "HARNESS_LLM_ERROR";
 /// 单次 LLM 调用超时且重试耗尽。
 pub const CODE_HARNESS_LLM_TIMEOUT: &str = "HARNESS_LLM_TIMEOUT";
 
-/// 工具执行失败（喂回 LLM，不终止）。
-pub const CODE_HARNESS_TOOL_ERROR: &str = "HARNESS_TOOL_ERROR";
+/// 工具执行失败（喂回 LLM，不终止；00 §0.4 统一为 `TOOL_ERROR`）。
+pub const CODE_HARNESS_TOOL_ERROR: &str = "TOOL_ERROR";
 
 /// 记忆检索/写入失败（降级告警，不终止）。
 pub const CODE_HARNESS_MEMORY_DEGRADED: &str = "HARNESS_MEMORY_DEGRADED";
