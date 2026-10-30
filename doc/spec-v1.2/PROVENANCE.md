@@ -86,6 +86,7 @@
    - **C3**：§3 保留 00–08 当前实测合计，同时补回 M4 历史测量注记（**5818 行**；base `origin/main` `fda996c`；合并 rebase `12ab2f6`），不替换历史。
    - **建议**：05 L8 / 08 ISSUE-081 更新 `run_in_runtime` 91、`build_plan` 75、新增 >60 行测试（74/78/88 等）；07 AC-12 单 run 基线改 0.79–0.85s；06 §6.10/§6.10.1 补 replay 子命令与 `--db`（run/replay/trace）；00/06/architecture 统一 `REPLAY_RECORD_CORRUPT` 触发描述；07 §7.1 `agents/prompt.md`；spec `README.md` 引 §2 第 8–10 条；`doc/index.md` reviews 范围只列已合并（REV-000–034/038）。
    - 本批次后按 §3 重新实测并更新（00–08 合计 **5958 行**）。
+12. **REV-036 收尾批次**（2026-10-30，`docs/process-m5-wrapup`，评审 REV-036）：按 REV-035 §8.6 #2 把 ISSUE-084 状态在 06 §6.8.1 / 07 §7.3 #6 / 08 §8.7 / DR-002 §9 #10 统一为 **fixed**（残余多机/EPERM/host 边界转 **ISSUE-088**，M6）；06/07/08 仅措辞修订（行数不变），§3 对应 SHA-256 已再实测；§5 M5 完成声明不变。
 
 ## 3. 文件清单（SHA-256 + 行数）
 
@@ -97,9 +98,9 @@
 | `03-调度器与生命周期.md` | 69f33ff7e0455d3fca51716327b0cea3f3c4db770431d335e08f99934ef6921b | 390 |
 | `04-节点接口与扩展点.md` | 2d4a5ce95523b534273945f619fe3d40c32a969a1468c3b9d4600ad586221ccd | 895 |
 | `05-AgentHarness.md` | 405aaa99d61b0015480eab0cf360cf0219f509cad9dd018b347ed775a12ec0d3 | 1420 |
-| `06-存储与可观测.md` | 8f3613b657f94b026de5ee666c8b0a0291920036619b4c78d12a5b2c89a096dc | 1068 |
-| `07-验收用例.md` | 38d2e56cab35cfed508fddce51abf2c835a2178b41f82c0b14ec909b89570446 | 232 |
-| `08-审计关闭矩阵.md` | 4378d379ef83ae5ed7f9d41d3b2a9abb5f1dca538c27110a1fe5a2e2169d07a3 | 444 |
+| `06-存储与可观测.md` | da6d338ffe1f6e1e2ae539cabe6a30bf6693b07817afe733eab044d15b9403ab | 1068 |
+| `07-验收用例.md` | 8a2ba1cba053d606c448d7eea35e6d9ed8395c3f1040835cfd52fc0d6f5bcb3c | 232 |
+| `08-审计关闭矩阵.md` | 605907c974ffb542c940d307634bcf69acdae8020fbea591dbf2dfc6f7db24e7 | 444 |
 
 > 00–08 合计 **5958 行**（`wc -l` 口径；2026-10-30 **M5 全部回写批次后**实测（wave1/wave2/ISSUE-066），分支 `docs/docs-m5-writeback`、评审 REV-035，base 为含 REV-025–034/038 的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
 

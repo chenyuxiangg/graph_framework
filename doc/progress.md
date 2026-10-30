@@ -2,7 +2,7 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：M5（收尾）**已完成**：wave1/wave2 全部交付并合入 main（REV-025–038）；本分支 REV-036 收口台账/进度/索引/baseline/README。口径见 [`decisions/DR-002-m5-cli-replay-recording.md`](decisions/DR-002-m5-cli-replay-recording.md)
+**当前阶段**：M5（收尾）**已完成**：wave1/wave2 全部交付并合入 main（REV-025–036/038；REV-037 顺延 M6）；本分支 REV-036 收口台账/进度/索引/baseline/README。口径见 [`decisions/DR-002-m5-cli-replay-recording.md`](decisions/DR-002-m5-cli-replay-recording.md)
 
 | 模块 | 状态 | M5 交付 | REV |
 |---|---|---|---|
@@ -16,8 +16,8 @@
 | process/docs | done | DR-002 决策/波次/台账、M5 kickoff 与收尾 | REV-025/038/036 |
 
 **下一步（M6）**
-1. M6 排除/顺延项（DR-002 §7/§9）：ISSUE-033/036/059/073/075/077/079/080/081(剩余)/082(版本列)/085/086/087/088/089。
-2. process 依赖治理 + CI clippy 固化（ISSUE-068/078/073；原 REV-037 顺延 M6）。
+1. M6：DR-002 §7/§9 顺延（ISSUE-033/036/059/073/081 剩余/082 版本列/084→088）+ DR-002 §4 顺延（075/077/079/080）+ REV-028/030/032 新登记（085/086/087/089）。
+2. process 依赖治理 + CI clippy 固化（ISSUE-068/078/073；REV-037 顺延 M6）。
 3. AC-12「10×同图 AC-01」加强用例（REV-032 未新增，07 已注明）；`global_vars` 入 L2 记录（ISSUE-087）。
 
 **阻塞**
