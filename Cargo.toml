@@ -27,3 +27,6 @@ tempfile = "3"
 uuid = { version = "1", features = ["v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+async-trait = "0.1"
+genai = "0.7.2"
+tokio-util = { version = "0.7", features = ["rt"] }
