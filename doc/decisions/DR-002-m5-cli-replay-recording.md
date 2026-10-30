@@ -78,6 +78,8 @@ zgraph replay --run <run_id> [--mode=events|outputs] [--db <path>] [--json]
 - **ISSUE-074（截断）**：工具结果超 8 KiB 截断后仍须是**合法 JSON**（字符串值在 JSON 字符串内部截断 + `…[truncated N bytes]`；对象/数组给出合法降级）；traceback 上限 8 KiB；summary 字面 ≤512/≤256。属 M5 契约修复。
 - **ISSUE-066（`NODE_WORKER_CRASH` 记录 signal/exit）**：M5 wave2 落地。`NodeError::NodeWorker` 载荷**只增不删**（新增可选 `signal`/`exit_code`/`stderr_tail`，或伴随 detail），三模块同分支顺序 = kernel（变体/错误码/序列化）→ worker（填充 supervisor 证据）→ cli（`node_error_json` 适配）；Lead 批准跨模块，评审记录须声明第二评审。
 - **ISSUE-048（`RunRow.owner_pid`）**：M5 wave2 由 trace 补列读取 + `zgraph trace` 的 "run still in progress (pid N)" 提示；不阻塞 DoD。
+- **ISSUE-084（崩溃标定/中断恢复，REV-028 C1）**：06 §6.8.1 启动顺序的「中止标定」、§6.8.3 interrupted 截断提示与 `--json.recovered[]` 由 wave2 落地——trace 提供标定 API（扫描 `Running/Paused` 且 owner pid 已死 → `status=Failed/interrupted=1/recovered_at`，事务化），CLI `run` 启动时调用并输出 `recovered[]`/stderr；补 kill -9 故障注入测试（07 §7.3 检查单 #6）。**不列入 M6 排除**；若 wave2 未能完成则转 M6 并保留 spec 注记（台账 ISSUE-084）。
+- **ISSUE-085（human 生命周期实时性）**：06 §6.10.3 字面要求运行中逐行输出；M5 实现为结束回读（`--stream` 覆盖 token）。本轮登记台账、留 M6，不阻塞 DoD（docs 回写注明 M5 口径）。
 - **ISSUE-075/077/079/080**：按容量在 M5 收敛（各自单模块：harness 的 preview/canonicalize/信号量；docs 的 reason 闭集）；未完成则登记 M6 并保留 spec 注记，**不得**为凑 M5 降低断言。
 
 ## 5. AC-12 口径（07 AC-12 + D4/D8）
@@ -98,11 +100,12 @@ zgraph replay --run <run_id> [--mode=events|outputs] [--db <path>] [--json]
 | 1 | harness | `feat/harness-m5-record` | harness-dev | REV-027 |
 | 1 | cli | `feat/cli-m5-run` | cli-dev | REV-028 |
 | 1 | e2e | `test/e2e-m5-ac12` | e2e-dev | REV-029 |
-| 2 | cli（replay/L2 + llm_calls 接线） | `feat/cli-m5-replay` | cli-dev | REV-030 |
+| 2 | cli（replay/L2 + llm_calls 接线 + 启动中止标定/recovered[] + timeout_hint 转发） | `feat/cli-m5-replay` | cli-dev | REV-030 |
 | 2 | kernel+worker+cli（ISSUE-066，跨模块） | `fix/worker-m5-crash-detail` | worker-dev | REV-031（双评审人） |
 | 2 | e2e（CLI run/L2 链路 + ISSUE-061 回归 + parallel.rs 注释） | `test/e2e-m5-cli-replay` | e2e-dev | REV-032 |
 | 2 | harness（ISSUE-076 timeout_hint，新分支，前置 REV-027） | `fix/harness-m5-timeout` | harness-dev | REV-033 |
-| 2 | trace（ISSUE-048 owner_pid 提示，可选） | `feat/trace-m5-owner-pid` | trace-dev | REV-034 |
+| 2 | trace（ISSUE-084 中止标定 API + ISSUE-048 owner_pid 提示） | `feat/trace-m5-recovery` | trace-dev | REV-034 |
+| 2 | process/docs（ISSUE-084/085 登记 + DR-002 修订 + 进度；REV-028 C1 关闭材料） | `docs/process-m5-issue-reg` | lead | REV-038 |
 | 2 | docs（spec 回写 + 索引） | `docs/docs-m5-writeback` | docs-writer | REV-035 |
 | 3 | docs/process（收尾：进度/台账/README/评审索引/基线） | `docs/docs-m5-wrapup` | lead | REV-036 |
 | 3 | process（ISSUE-068/078 依赖治理 + CI clippy 固化） | `chore/process-m5-deps` | lead | REV-037 |
@@ -136,3 +139,6 @@ zgraph replay --run <run_id> [--mode=events|outputs] [--db <path>] [--json]
 | 7 | AC-12 M5 实测口径 | 07 AC-12 | 10 run/同库/峰值与耗时基线；工具并发未纳入全局上限（ISSUE-079 注记）；SQLITE_BUSY 实测结论 |
 | 8 | legacy 归档 | architecture §6.1、doc/index、legacy/README | 记录"冻结只读、不物理删除、物理归档交用户"决策 |
 | 9 | M6 排除项 | architecture §6.1、06 §6.4/§6.8 | ISSUE-033/036/073/059 保留 M6 注记（不删除原条目） |
+| 10 | 崩溃标定/中断恢复（ISSUE-084） | 06 §6.8.1/§6.8.3、§6.10.3、07 §7.3 #6 | wave2 实现 trace 标定 API + CLI 启动调用 + `recovered[]`；06 注记实现口径（owner pid 存活判定、事务化标定、退出码不受影响） |
+| 11 | CLI pre-existing 偏差（REV-028 #5） | 06 §6.10.1 | clap 未采用（沿用 M1/M2 手写解析）、无 `-v`、`--version` 格式与 `NO_COLOR` 行为随 M6；M5 docs 注记现状，不改变 M5 契约 |
+| 12 | ISSUE-081 扩展清单 | architecture §2.2 | 注记「M5 已拆 5 个目标函数；剩余既有 >60 行函数与新增 74 行测试随 M6」，避免误认为 architecture §2.2 已全量收敛 |
