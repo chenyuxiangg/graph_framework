@@ -747,7 +747,8 @@ fn in_progress_fixture(owner_pid: u32, owner_host: &str) -> (TempDir, PathBuf) {
 
 #[test]
 fn trace_reports_run_still_in_progress_for_live_owner() {
-    let (_dir, path) = in_progress_fixture(std::process::id(), "test-host");
+    let host = zgraph_cli::recovery::current_host();
+    let (_dir, path) = in_progress_fixture(std::process::id(), &host);
     let output = zgraph(&["trace", RUN_ID, "--db", path_str(&path)]);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert!(
@@ -782,12 +783,48 @@ fn trace_omits_progress_note_for_dead_owner_pid() {
         .expect("spawn true");
     let dead_pid = child.id();
     child.wait().expect("wait true");
-    let (_dir, path) = in_progress_fixture(dead_pid, "test-host");
+    let host = zgraph_cli::recovery::current_host();
+    let (_dir, path) = in_progress_fixture(dead_pid, &host);
     let output = zgraph(&["trace", RUN_ID, "--db", path_str(&path)]);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert!(
         !stderr(&output).contains("run still in progress"),
         "{}",
         stderr(&output)
+    );
+}
+
+/// ISSUE-088 / REV-030 #5：跨机 run 的 pid 与本机无关 → 不误报存活，只提示可能在其他主机。
+#[test]
+fn trace_notes_cross_host_owner_without_pid_verdict() {
+    let (_dir, path) = in_progress_fixture(std::process::id(), "other-host");
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&path)]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        !text.contains("run still in progress"),
+        "跨机不得误报 pid 存活: {text}"
+    );
+    assert!(
+        text.contains("run may be running on another host")
+            && text.contains("owner host other-host"),
+        "{text}"
+    );
+}
+
+/// `owner_host` 未知（旧库/缺环境变量）→ 不猜同机，同样不误报 pid 存活（ISSUE-088）。
+#[test]
+fn trace_notes_unknown_host_owner_without_pid_verdict() {
+    let (_dir, path) = in_progress_fixture(std::process::id(), "unknown");
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&path)]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        !text.contains("run still in progress"),
+        "host 未知不得误报 pid 存活: {text}"
+    );
+    assert!(
+        text.contains("run may be running on another host") && text.contains("owner host unknown"),
+        "{text}"
     );
 }

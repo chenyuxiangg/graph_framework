@@ -132,6 +132,9 @@ impl kernel::TraceSink for TraceBridge {
         let mut mapped = map_run_started(&info);
         // ISSUE-087：`global_vars` 不在内核 `RunStartedInfo` 中，由组合根注入。
         mapped.global_vars = self.global_vars.clone();
+        // ISSUE-088：内核 host 探测只读环境变量（非交互 shell 常为 `unknown`）；
+        // 桥接层运行在真实进程内，用 OS hostname 兜底，保证崩溃标定能识别本机 run。
+        mapped.owner_host = trace_owner_host(&info.owner_host);
         self.send_event(trace::TraceInput::RunStarted(mapped));
     }
 
@@ -479,6 +482,21 @@ fn global_vars_json(vars: &HashMap<String, Value>) -> Value {
         object.insert(key.clone(), value.clone());
     }
     Value::Object(object)
+}
+
+/// `RunStarted.owner_host` 的落地值（ISSUE-088）：保留调用方给定的已知主机名；
+/// kernel 的 `unknown`/空值用本机 OS hostname 兜底。
+///
+/// kernel `host_name()` 只读 `HOSTNAME`/`COMPUTERNAME` 环境变量（非交互 shell 下常缺失
+/// → `unknown`），而崩溃标定用 OS hostname 判同机；若原样落库，本机 run 会被误判为
+/// 跨机、心跳未陈旧时无法标定（kill -9 恢复路径）。桥接层是 CLI 组合边界，能拿到
+/// 真实主机名，故只在此处替换未知值，不改 kernel。
+fn trace_owner_host(kernel_host: &str) -> String {
+    let kernel_host = kernel_host.trim();
+    if crate::recovery::host_is_known(kernel_host) {
+        return kernel_host.to_string();
+    }
+    crate::recovery::current_host()
 }
 
 /// 映射 `RunStarted`。
@@ -888,6 +906,11 @@ mod tests {
         let run = reader.run("run-1").expect("run query").expect("run row");
         assert_eq!(run.status, zgraph_trace::RunStatus::Running);
         assert_eq!(run.graph_name.as_deref(), Some("demo"));
+        assert_eq!(
+            run.owner_host.as_deref(),
+            Some("test-host"),
+            "已知 host 原样落库（ISSUE-088 仅兜底 unknown）"
+        );
         let instances = reader.instances("run-1").expect("instances");
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].node_id, "n1");
@@ -987,6 +1010,16 @@ mod tests {
         );
         drop(reader);
         writer.close().expect("close writer");
+    }
+
+    #[test]
+    fn trace_owner_host_falls_back_to_os_hostname() {
+        assert_eq!(super::trace_owner_host("known-host"), "known-host");
+        assert_eq!(super::trace_owner_host("  known-host  "), "known-host");
+        let fallback = crate::recovery::current_host();
+        assert_eq!(super::trace_owner_host("unknown"), fallback);
+        assert_eq!(super::trace_owner_host(""), fallback);
+        assert_eq!(super::trace_owner_host("   "), fallback);
     }
 
     #[test]

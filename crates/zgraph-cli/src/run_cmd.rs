@@ -750,14 +750,19 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         Err(error) => return report_storage_error(&error),
     };
     // 启动中止标定（06 §6.8.1：打开/迁移 DB 后、编译/启动 run 前）。
-    let recovered = match recovery::recover_interrupted(&writer) {
-        Ok(recovered) => recovered,
+    let recovery = match recovery::recover_interrupted(&writer) {
+        Ok(recovery) => recovery,
         Err(error) => {
             close_quietly(writer);
             return report_storage_error(&error);
         }
     };
-    for item in &recovered {
+    // 跳过告警（跨机/host 未知且 heartbeat 未陈旧；06 §6.8.1 步骤 2②）与标定告警
+    // 都是 stderr 诊断行；告警同时进入 `--json.warnings[]`。
+    for warning in &recovery.warnings {
+        eprintln!("{warning}");
+    }
+    for item in &recovery.recovered {
         eprintln!("{}", recovery::warning_line(item));
     }
     let assets_dir = resolve_assets_dir(args);
@@ -857,7 +862,14 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         Ok(outcome) => outcome,
         Err(code) => return code,
     };
-    finish(args, outcome, duration_ms, &db_path, &recovered)
+    finish(
+        args,
+        outcome,
+        duration_ms,
+        &db_path,
+        &recovery.recovered,
+        &recovery.warnings,
+    )
 }
 
 /// 加载并编译图；失败时打印 stderr 并返回退出码 2（不产生 run）。
@@ -1069,6 +1081,7 @@ fn finish(
     duration_ms: u64,
     db_path: &Path,
     recovered: &[recovery::Recovered],
+    warnings: &[String],
 ) -> ExitCode {
     let (outcome, reader) = match completion {
         RunCompletion::WithReader(outcome, reader) => (outcome, Some(reader)),
@@ -1083,7 +1096,14 @@ fn finish(
     if args.json {
         println!(
             "{}",
-            json_payload(&outcome, event_count, duration_ms, db_path, recovered)
+            json_payload(
+                &outcome,
+                event_count,
+                duration_ms,
+                db_path,
+                recovered,
+                warnings,
+            )
         );
     } else {
         // 生命周期行已由实时旁路在 run 期间写到 stderr（ISSUE-085）；这里只输出结果。
@@ -1130,6 +1150,7 @@ fn json_payload(
     duration_ms: u64,
     db_path: &Path,
     recovered: &[recovery::Recovered],
+    warnings: &[String],
 ) -> Value {
     let mut object = Map::new();
     object.insert(
@@ -1166,7 +1187,7 @@ fn json_payload(
         "recovered".to_string(),
         Value::Array(recovered.iter().map(recovered_json).collect()),
     );
-    object.insert("warnings".to_string(), json!([]));
+    object.insert("warnings".to_string(), json!(warnings));
     if let Some(error) = &outcome.error {
         object.insert("error".to_string(), run_error_json(error));
     }

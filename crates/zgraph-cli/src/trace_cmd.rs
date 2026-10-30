@@ -210,9 +210,13 @@ pub fn run(options: &TraceOptions) -> ExitCode {
     }
 }
 
-/// 06 §6.8.3：`Running`/`Paused` 且 owner pid 仍活 → stderr 提示（stdout 保持纯数据）。
+/// 06 §6.8.3：`Running`/`Paused` 的进行中提示（stderr；stdout 保持纯数据）。
 ///
-/// 诊断走 stderr（与 `--json` NDJSON 的 stdout 契约一致）；退出码按原语义 0。
+/// `owner_host` 校验（ISSUE-088 / REV-030 #5）：只有**同机**才用本机 `kill(pid, 0)`
+/// 判活并打印 `run still in progress (pid N)`；跨机时本机 pid 与 owner_pid 无关，
+/// 改为提示「可能在其他主机」；`owner_host` 未知时不猜同机，同样只提示可能在其他
+/// 主机。非 Unix 无 `kill(pid, 0)`，不打印 pid 存活提示。诊断走 stderr
+/// （与 `--json` NDJSON 的 stdout 契约一致）；退出码按原语义 0。
 fn print_in_progress_note(run: &RunRow) {
     if !matches!(run.status, RunStatus::Running | RunStatus::Paused) {
         return;
@@ -220,9 +224,22 @@ fn print_in_progress_note(run: &RunRow) {
     let Some(pid) = run.owner_pid else {
         return;
     };
-    if crate::recovery::pid_alive(pid) {
-        eprintln!("run still in progress (pid {pid})");
+    if run
+        .owner_host
+        .as_deref()
+        .is_some_and(crate::recovery::is_local_host)
+    {
+        if crate::recovery::PID_PROBE_SUPPORTED && crate::recovery::pid_alive(pid) {
+            eprintln!("run still in progress (pid {pid})");
+        }
+        return;
     }
+    let owner = run
+        .owner_host
+        .as_deref()
+        .filter(|host| crate::recovery::host_is_known(host))
+        .unwrap_or("unknown");
+    eprintln!("run may be running on another host (owner host {owner}); local pid check skipped");
 }
 
 /// `interrupted=1` 且库内无 `RunFinished` → 截断（06 §6.8.3）。

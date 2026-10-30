@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use chrono::{SecondsFormat, Utc};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use zgraph_trace::{RecordMode, RunStartedInfo, TraceInput, TraceWriter};
@@ -1353,6 +1354,7 @@ fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
     let db = dir.path().join("calibrate.db");
     let host = zgraph_cli::recovery::current_host();
     let dead = dead_pid();
+    let fresh = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     seed_running_runs(
         &db,
         &[
@@ -1376,6 +1378,13 @@ fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
                 "other-host".to_string(),
                 dead,
                 "2020-01-01T00:00:00.000Z".to_string(),
+            ),
+            // 跨机 + heartbeat 新 → 跳过并告警（06 §6.8.1 步骤 2②，ISSUE-088）。
+            (
+                "run-fresh".to_string(),
+                "other-host".to_string(),
+                dead,
+                fresh,
             ),
         ],
     );
@@ -1420,6 +1429,20 @@ fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
     let stderr = stderr_text(&output);
     assert!(stderr.contains("marked interrupted"), "{stderr}");
     assert!(stderr.contains(&format!("pid {dead} gone")), "{stderr}");
+    // ISSUE-088：跨机 + 心跳未陈旧 → 跳过并告警（stderr + --json.warnings[]）。
+    assert!(stderr.contains("skipped recovery"), "{stderr}");
+    assert!(
+        stderr.contains("run-fresh") && stderr.contains("other-host"),
+        "{stderr}"
+    );
+    let warnings = payload["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1, "fresh cross-host run warns: {payload}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .is_some_and(|line| line.contains("run-fresh") && line.contains("skipped recovery")),
+        "{warnings:?}"
+    );
 
     // DB：只改 runs（status/interrupted/recovered_at），error_code 保持 NULL。
     let (status, interrupted, error_code, recovered_at) = run_state(&db, "run-dead");
@@ -1433,7 +1456,11 @@ fn run_startup_calibrates_interrupted_runs_and_reports_recovered() {
     let (status, interrupted, _, _) = run_state(&db, "run-live");
     assert_eq!(status, "Running", "live owner must not be calibrated");
     assert!(!interrupted);
-    assert_eq!(runs_count(&db), 4, "3 seeded + 1 new run");
+    // 跨机心跳未陈旧 → 跳过，不改 DB。
+    let (status, interrupted, _, _) = run_state(&db, "run-fresh");
+    assert_eq!(status, "Running", "fresh cross-host run must be skipped");
+    assert!(!interrupted);
+    assert_eq!(runs_count(&db), 5, "4 seeded + 1 new run");
 }
 
 // ---------------------------------------------------------------------------

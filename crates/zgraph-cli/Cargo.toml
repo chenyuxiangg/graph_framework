@@ -28,6 +28,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 zgraph-kernel = { path = "../zgraph-kernel", features = ["test-hooks"] }
 
-# pid 判活（`kill(pid, 0)`；06 §6.8.1/§6.8.3）。nix 与 zgraph-worker 使用同一版本/特性。
+# pid 判活（`kill(pid, 0)`）与本机主机名（`gethostname`；ISSUE-088）：
+# 06 §6.8.1/§6.8.3。nix 与 zgraph-worker 使用同一版本。
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["signal"] }
+nix = { workspace = true, features = ["signal", "hostname"] }
