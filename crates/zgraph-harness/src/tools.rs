@@ -1410,7 +1410,7 @@ mod tests {
     }
 
     #[test]
-    fn summaries_do_not_leak_full_arguments() {
+    fn args_summary_has_shape_and_limited_preview() {
         let args = json!({"secret_token": "abcdefghij"});
         let summary = summarize_args(&args);
         assert_eq!(summary["keys"], json!(["secret_token"]));

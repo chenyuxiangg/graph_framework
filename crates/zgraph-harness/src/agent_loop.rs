@@ -37,8 +37,7 @@ use crate::llm::{
 };
 use crate::tools::{
     serialize_tool_result, summarize_args, summarize_result, tool_error_content,
-    validate_tool_arguments, ToolCallRequest, ToolDef, ToolFailure, ToolRegistry, ToolRunner,
-    ToolSchema,
+    validate_tool_arguments, ToolCallRequest, ToolDef, ToolFailure, ToolRunner, ToolSchema,
 };
 
 /// `agent_call` 节点的输出契约（05 §5.9.1 / §5.9.2）。
@@ -111,10 +110,8 @@ impl From<HarnessError> for RunFailure {
 
 /// 一次 Agent 执行的全部输入（不可变；由 executor 组装）。
 pub(crate) struct AgentRun<'a> {
-    /// 已校验的 Agent（Loading 阶段产物）。
+    /// 已校验的 Agent（Loading 阶段产物；`tools` 即本 Agent 的**可见工具集**）。
     pub(crate) agent: &'a LoadedAgent,
-    /// 发现并缓存的工具注册表。
-    pub(crate) registry: &'a ToolRegistry,
     /// 工具目录（D3：worker 的 `tools_dir`）。
     pub(crate) tools_dir: &'a Path,
     /// LLM transport。
@@ -148,6 +145,11 @@ pub(crate) async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, RunFailu
         effective_input_mapping(run.declared_ports, run.node_mapping, &config.input_mapping);
     let user_json = assemble_user_json(run.declared_ports, run.inputs, &mapping);
     let mut messages = assemble_initial_messages(&system.text, &user_json);
+    // 05 §5.2.2：LLM 只能调用 `AgentConfig.tools` 列出的工具（可见工具集）。
+    // 未注册**与**已注册但未授权给本 Agent 的工具一律 `HARNESS_UNKNOWN_TOOL`。
+    let visible_tools: &[ToolDef] = &run.agent.tools;
+    let visible_tool_names: Vec<String> =
+        visible_tools.iter().map(|tool| tool.name.clone()).collect();
     let tool_schemas = run.agent.tool_schemas();
     let budget = prompt_budget(config.model.context_window_tokens, config.model.max_tokens);
     check_and_trim(&messages, &tool_schemas, budget, system.constraints_tokens)?;
@@ -248,12 +250,12 @@ pub(crate) async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, RunFailu
             tool_calls: tool_calls.clone(),
         });
         for call in &tool_calls {
-            // 未知工具立即失败（不是 TOOL_ERROR，05 §5.6.6）。
-            let Some(tool) = run.registry.get(&call.name) else {
+            // 未知/未授权工具立即失败（不是 TOOL_ERROR，05 §5.2.2/§5.6.6）。
+            let Some(tool) = visible_tools.iter().find(|tool| tool.name == call.name) else {
                 return Err(RunFailure::Harness(HarnessError::unknown_tool(
                     &call.name,
                     iteration,
-                    &run.registry.names(),
+                    &visible_tool_names,
                 )));
             };
             run.ctx.emit(StreamingEvent::ToolCallStart {
@@ -549,7 +551,7 @@ mod tests {
     use crate::config::{AgentConfig, ModelConfig};
     use crate::llm::{FakeLlmProvider, ProviderKind, SecretString};
     use crate::test_support::TestCtx;
-    use crate::tools::{FakeToolBehavior, FakeToolRunner};
+    use crate::tools::{FakeToolBehavior, FakeToolRunner, ToolRegistry};
 
     fn tool_def(name: &str, parameters: Value, timeout_ms: u64) -> ToolDef {
         ToolDef {
@@ -621,7 +623,7 @@ mod tests {
 
     async fn execute(
         agent: &LoadedAgent,
-        registry: &ToolRegistry,
+        _registry: &ToolRegistry,
         fake: &Arc<FakeLlmProvider>,
         runner: &Arc<FakeToolRunner>,
         ctx: &Arc<TestCtx>,
@@ -634,7 +636,6 @@ mod tests {
         let cancel = CancelToken::new(ctx.clone());
         run_agent(AgentRun {
             agent,
-            registry,
             tools_dir: Path::new("/tmp/tools"),
             provider: &provider,
             tool_runner: &tool_runner,
@@ -1207,6 +1208,32 @@ mod tests {
             })
             .expect("tool message");
         assert!(tool_message.contains("result_not_object"));
+    }
+
+    #[tokio::test]
+    async fn registered_but_unauthorized_tool_is_unknown_and_not_executed() {
+        // REV-020 C2：registry（发现结果）含 a/b，Agent 可见集只含 a；LLM 调 b →
+        // HARNESS_UNKNOWN_TOOL（Crashed），b 不执行，available_tools 只列可见集。
+        let fake = script(json!({
+            "calls": [tool_calls(json!([{"call_id": "c1", "name": "b", "args": {}}]))]
+        }));
+        let runner = Arc::new(FakeToolRunner::new());
+        let registry = registry(vec![no_args_tool("a"), no_args_tool("b")]);
+        let agent = loaded_agent(vec![no_args_tool("a")], 5, 1, "role");
+        let ctx = TestCtx::new();
+        let failure = execute(&agent, &registry, &fake, &runner, &ctx)
+            .await
+            .expect_err("unauthorized tool");
+        match failure {
+            RunFailure::Harness(error) => {
+                assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::UnknownTool);
+                assert_eq!(error.detail["tool"], "b");
+                assert_eq!(error.detail["available_tools"], json!(["a"]));
+            }
+            other => panic!("expected Harness(UnknownTool), got {other:?}"),
+        }
+        assert!(runner.calls().is_empty(), "未授权工具不得执行");
+        assert!(tool_events(&ctx).is_empty());
     }
 
     #[tokio::test]

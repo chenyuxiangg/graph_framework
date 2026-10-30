@@ -141,7 +141,6 @@ impl NodeExecutor for HarnessExecutor {
             let cancel = CancelToken::new(ctx.clone());
             let run = AgentRun {
                 agent: &agent,
-                registry: &registry,
                 tools_dir: &tools_dir,
                 provider: &self.settings.provider,
                 tool_runner: &self.settings.tool_runner,
