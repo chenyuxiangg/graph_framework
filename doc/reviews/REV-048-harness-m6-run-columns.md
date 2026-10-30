@@ -11,7 +11,7 @@
 
 ## 1. 结论
 
-**结论：有条件通过**（主评审通过；reviewer-a 第二评审提出 **C1**：run 元数据列写失败的退出码语义与代码注释/主评审结论不一致，需按 §6.1 口径统一并补测试后转「通过」）
+**结论：通过**（增量复审：主评审通过；reviewer-a 第二评审提出的 **C1** 已由 `86110cd`（方案 B：真正尽力写）关闭，C2/C5 建议同步落实，证据见 §6.9；首轮「有条件通过」原文保留）
 
 ## 2. 四维评审
 
@@ -52,7 +52,7 @@ cargo test -p zgraph-trace -p zgraph-worker -p zgraph-harness -p zgraph-cli --qu
 ## 6. 跨模块第二评审（reviewer-a）
 
 > **身份/范围**：`reviewer-a` 非作者；本分支跨 **harness（主）+ worker + cli + trace**，按 AGENTS §2 由 Lead 批准并指定本人作第二评审。Lead 主评审已给「通过」；本小节独立核对 4 模块接口、聚合/去重、写时点与 FIFO、失败/`:memory:` 口径、与 trace v3 兼容，并**独立实跑**关键测试。未修改任何代码，仅追加本小节（§1 结论按第二评审结果改为「有条件通过」）。
-> **第二评审结论：有条件通过**——1 项重要问题 C1（见 §6.1），其余 5 项重点通过；C1 关闭后转通过。
+> **第二评审结论：通过**（增量复审：C1 已由 `86110cd` 关闭、C2/C5 已落实，见 §6.9；首轮为「有条件通过」，其余 5 项重点通过）。
 
 ### 6.1 【重要 · C1】run 元数据列写失败的退出码语义与声明不一致（需统一并补测试）
 
@@ -120,5 +120,19 @@ $ bash scripts/dev/check.sh                                          # CHECK PAS
 3. （C1 关联）若选方案 B，建议同时给 `update_run_columns` 的 SQLITE_BUSY 加重试（06 §6.4.5 语义），避免瞬态 busy 影响元数据完整性。
 4. `base_url` 摘要是否需脱敏 userinfo/query，建议 REV-057 一并定口径。
 
-> 第二评审结论：**有条件通过**。C1（§6.1）关闭后（改注释/文档+补测试，或改为非致命写）即可转「通过」；其余重点均通过。主评审「通过」+ 本小节 → C1 关闭前不满足合并门槛。
+### 6.9 条件关闭记录与增量复审（`86110cd`，2026-10-31）
+
+**范围**：`3bd9667..86110cd`，7 files +203/−17（trace writer 2 + 测试、cli run_cmd + 测试、harness 脱敏 + 测试、worker 文档），无 schema/协议/公开签名破坏；worktree clean、`check.sh` PASS。
+
+| 条件/建议 | 关闭证据（`86110cd`） | 结论 |
+|---|---|---|
+| **C1（重要）** | ① trace 写线程 `UpdateRunColumns` 失败路径**移除 `record_fatal`**（`crates/zgraph-trace/src/writer/thread.rs:350-373`），SQL 失败仅返回 Err、写线程继续服务；`TraceWriter::update_run_columns` 文档改为尽力写（`writer/mod.rs:158-171`）。② cli `write_run_metadata` 显式忽略 Err、注释改为「不改变退出码/输出，真实损坏由 flush/close fail-stop」（`run_cmd.rs:977-990`）。③ 确定性注入测试：trace `update_run_columns_failure_is_best_effort_and_writer_survives`（trigger ABORT→Err、`take_error()=None`、flush/close 成功、数据不变、DROP trigger 后重试=1）；cli `metadata_write_failure_is_best_effort_and_run_still_exits_0`（Completed exit 0、`--json` 有 run_output、stderr 无 STORAGE_ERROR、两列 NULL）。**独立复跑**：trace `run_columns` 3 passed、cli `metadata_write_failure` 1 passed。 | ✅ **关闭（方案 B）** |
+| C2（建议） | `WorkerExecutor::worker_versions` 文档注明仅聚合节点 worker（Harness 工具 worker 无 hello、agent+tool-only run 写 `[]`）（`crates/zgraph-worker/src/executor.rs:176-184`）。 | ✅ 落实（REV-057 回写 06 §6.2.4；见下 Nit） |
+| C5（建议） | `sanitize_base_url` 去 userinfo/query/fragment（`crates/zgraph-harness/src/executor.rs:392-414`）+ `model_params_sanitize_base_url_userinfo_and_query` 测试（脱敏为 `https://example.com:8443/v1/chat`，断言不含 alice/secret/sk-live/api_key）；**独立复跑** harness `model_params` 3 passed。 | ✅ 落实 |
+| §6.8 #3 busy 重试 | 未新增（方案 B 仅移除 fatal）；瞬态 busy 仍可能使元数据静默丢失。 | 接受为残留（非阻塞；REV-057 回写时可再评估） |
+| §6.8 #2 测试覆盖 | 未新增「失败 run 保留 model_params」「RunFinished 后 update 次序」。 | 接受为后续（非阻塞） |
+| **新增 Nit** | `worker/executor.rs:183` 注释「该口径**已随** REV-057 回写 06 §6.2.4」为**提前表述**：REV-057 尚未产出，spec 06 §6.2.4/§6.2.13 仍为「仍未写入」旧口径。建议改为「随 REV-057 回写」或等 REV-057 完成后声明；不影响功能。 | 非阻塞（提醒 REV-057 对齐） |
+| 回归 | 无 schema/协议/公开签名变化；Lead 自跑 trace 61 / cli 142 / harness 146(+1 ignored) 与本次 targeted（trace/cli/harness）均通过。 | ✅ |
+
+> 第二评审结论：**通过**（增量复审 `86110cd`：C1 已关闭、C2/C5 已落实，其余重点保持通过；主评审「通过」+ 第二评审「通过」→ REV-048 生效，可合并）。
 
