@@ -2,23 +2,22 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：M5（收尾）**已完成**：wave1/wave2 全部交付并合入 main（REV-025–036/038；REV-037 顺延 M6）；本分支 REV-036 收口台账/进度/索引/baseline/README。口径见 [`decisions/DR-002-m5-cli-replay-recording.md`](decisions/DR-002-m5-cli-replay-recording.md)
+**当前阶段**：M6（进行中，2026-10-30 开工）——M5 收尾已完成并合入 main；M6 范围/波次/REV 编号见 [`decisions/DR-003-m6-scope-and-waves.md`](decisions/DR-003-m6-scope-and-waves.md)
 
-| 模块 | 状态 | M5 交付 | REV |
-|---|---|---|---|
-| kernel | done | ISSUE-061 gate 幻影 attempt；ISSUE-076 内核侧 `declared_timeout_ms`+`timeout_hint` | REV-026 |
-| harness | done | `LlmCallRecorder` seam；ISSUE-074 合法 JSON 截断；ISSUE-081 主清单拆函数；ISSUE-076 harness 侧 | REV-027/033 |
-| cli | done | `zgraph run` 全契约；`replay` L1/L2；`llm_calls`/`recorded_outputs`；启动中止标定/`recovered[]`；`timeout_hint` 转发 | REV-028/030 |
-| e2e | done | AC-12 10 run 并发隔离；AC-01 CLI/L2/崩溃标定/ISSUE-076 真链路 | REV-029/032 |
-| trace | done | ISSUE-084 中止标定原语（`interrupted_candidates`/`mark_interrupted`）；ISSUE-048 `RunRow.owner_pid` | REV-034 |
-| worker | done | ISSUE-066 `NODE_WORKER_CRASH` 记录 signal/exit/stderr_tail（跨 4 模块，双评审） | REV-031 |
-| docs | done | spec 00/04/05/06/07/08 M5 回写 + PROVENANCE/索引/README/legacy（00–08 合计 5958 行） | REV-035 |
-| process/docs | done | DR-002 决策/波次/台账、M5 kickoff 与收尾 | REV-025/038/036 |
+| 波次 | 模块 | 任务 | 状态 | REV |
+|---|---|---|---|---|
+| 0 | process/docs | M6 kickoff：DR-003 + progress/index/README | wip | REV-039 |
+| 1 | kernel | ISSUE-086 `fail_timeout` 补 `set_instance_error` | wip | REV-040 |
+| 1 | trace | ISSUE-033 双通道（8192 + 1024） | wip | REV-041 |
+| 1 | harness | ISSUE-075/077 preview 脱敏 + canonicalize | wip | REV-042 |
+| 1 | cli | ISSUE-059 退出码统一 + REV-028 #6 CLI 偏差 | wip | REV-043 |
+| 1 | e2e | ISSUE-089 测试质量 + AC-12 同图 10× | wip | REV-044 |
+| 1b | process | ISSUE-068/078/073 依赖治理 + CI clippy（REV-037 顺延） | next | REV-045 |
 
-**下一步（M6）**
-1. M6：DR-002 §7/§9 顺延（ISSUE-033/036/059/073/081 剩余/082 版本列/084→088）+ DR-002 §4 顺延（075/077/079/080）+ REV-028/030/032 新登记（085/086/087/089）。
-2. process 依赖治理 + CI clippy 固化（ISSUE-068/078/073；REV-037 顺延 M6）。
-3. AC-12「10×同图 AC-01」加强用例（REV-032 未新增，07 已注明）；`global_vars` 入 L2 记录（ISSUE-087）。
+**下一步（M6 波次 2）**
+1. 跨模块：ISSUE-036 fail-stop 接线（REV-046）、ISSUE-082 runs 版本/模型参数列（REV-047）、ISSUE-087 `global_vars`（REV-048）。
+2. cli/harness/docs：ISSUE-085 实时生命周期（REV-049）、ISSUE-080 reason 闭集（REV-050）、ISSUE-079 工具并发上限（REV-051）、ISSUE-081 函数拆分（REV-052/053）。
+3. 收口：ISSUE-086 e2e 断言（REV-054）、ISSUE-088 多机加固（REV-055）、spec 回写（REV-056）、wrapup（REV-057）。
 
 **阻塞**
-- 无硬阻塞；最终验证 `cargo test --workspace` 0 failed / 2 ignored、`pytest -q` 84 passed，基线名额 **0（全绿）**。
+- 无硬阻塞。环境：本机无 `uv`（Python 测试用 `.venv/bin/python`）；`merge.sh` 传 `PYTHON_BIN`；worktree 共用 `CARGO_TARGET_DIR=<repo>/target` 省磁盘。
