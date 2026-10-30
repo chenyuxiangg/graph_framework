@@ -42,13 +42,13 @@
 | [REV-035](REV-035-docs-m5-writeback.md) | 2026-10-30 | docs | `docs/docs-m5-writeback` | 通过（首轮有条件通过，C1–C3 关闭后复审通过；spec 00/04/05/06/07/08 M5 回写） | reviewer-a |
 | [REV-036](REV-036-docs-m5-wrapup.md) | 2026-10-30 | docs/process | `docs/process-m5-wrapup` | 通过（M5 收尾：台账/进度/评审索引/baseline/README） | reviewer-b |
 | [REV-038](REV-038-process-m5-issue-reg.md) | 2026-10-30 | docs/process | `docs/process-m5-issue-reg` | 通过（M5 台账登记 + DR-002 wave2/回写修订） | reviewer-a |
-| [REV-039](REV-039-process-m6-kickoff.md) | 2026-10-31 | process/docs | `docs/process-m6-kickoff` | 通过（首轮有条件通过，C1–C4 关闭后增量复审通过；M6 DR-003） | reviewer-a |
+| [REV-039](REV-039-process-m6-kickoff.md) | 2026-10-30 | process/docs | `docs/process-m6-kickoff` | 通过（首轮有条件通过，C1–C4 关闭后增量复审通过；M6 DR-003） | reviewer-a |
 | [REV-040](REV-040-kernel-m6-timeout-error.md) | 2026-10-31 | kernel | `fix/kernel-m6-timeout-error` | 通过（ISSUE-086 实例超时错误） | lead |
 | [REV-041](REV-041-trace-m6-dual-channel.md) | 2026-10-31 | trace | `fix/trace-m6-dual-channel` | 通过（ISSUE-033 双通道 + 发送序号有序合并） | lead |
 | [REV-042](REV-042-harness-m6-preview-canonicalize.md) | 2026-10-31 | harness | `fix/harness-m6-preview-canonicalize` | 通过（ISSUE-075/077） | lead |
 | [REV-043](REV-043-cli-m6-exit-codes.md) | 2026-10-31 | cli | `fix/cli-m6-exit-codes` | 通过（ISSUE-059 + REV-028 #6） | lead |
 | [REV-044](REV-044-e2e-m6-quality-ac12.md) | 2026-10-31 | e2e | `test/e2e-m6-quality-ac12` | 通过（ISSUE-089 + AC-12 同图 10×） | lead |
-| [REV-045](REV-045-process-m6-deps.md) | 2026-10-31 | process | `chore/process-m6-deps` | 通过（ISSUE-068/078/073 + CI `--locked`） | reviewer-a |
+| [REV-045](REV-045-process-m6-deps.md) | 2026-10-30 | process | `chore/process-m6-deps` | 通过（ISSUE-068/078/073 + CI `--locked`） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
@@ -59,4 +59,5 @@
 - M4：REV-017（process 依赖）、REV-018（kernel 错误码/ContextOverflow）、REV-021（worker 装箱）由 Lead 提交、reviewer-b 评审；REV-020/022/023 分别由 harness-dev/e2e-dev/docs-writer 提交、reviewer-b 评审；REV-024 由 Lead 提交、reviewer-b 评审。REV-020/022 含 Cargo.lock 跨模块变更，已在评审记录中声明。
 - M5（已合并到 main）：REV-025（process/docs kickoff+DR-002，lead/reviewer-a）、REV-026（kernel，kernel-dev/reviewer-a）、REV-027（harness，harness-dev/reviewer-b）、REV-028（cli，cli-dev/reviewer-a）、REV-029（e2e，e2e-dev/reviewer-b）、REV-030（cli replay/L2/标定，cli-dev/reviewer-b）、REV-031（kernel/worker/cli/harness ISSUE-066，worker-dev；reviewer-a 主审 + reviewer-b 第二评审）、REV-032（e2e CLI/L2/标定，e2e-dev/reviewer-b）、REV-033（harness，harness-dev/reviewer-b）、REV-034（trace，trace-dev/reviewer-a）、REV-035（docs spec 回写，docs-writer/reviewer-a）、REV-036（docs/process 收尾，lead/reviewer-b）、REV-038（process/docs 台账，lead/reviewer-a）。REV-028/030 含根 `Cargo.lock`、REV-025/035/036 含根 `README.md`（process）跨模块变更；REV-031 为 kernel/worker/cli/harness 跨模块（Lead 批准、双评审）；REV-032 含 e2e dev-dep `rusqlite` 根 `Cargo.lock` 机械改动。REV-037（process 依赖治理/CI）顺延 M6。
 
-- M6（进行中）：W1 已合并 REV-039（kickoff/DR-003，lead/reviewer-a）、REV-040（kernel，kernel-dev/lead）、REV-041（trace，trace-dev/lead）、REV-042（harness，harness-dev/lead）、REV-043（cli，cli-dev/lead）、REV-044（e2e，e2e-dev/lead）、REV-045（process，lead/reviewer-a）。M6 计划至 REV-058（W1 收口 REV-046；W2/W3：036/082/087/085/080/079/081/088/086-e2e、spec 回写与 wrapup）。REV-037 未创建（顺延 M6，由 REV-045 承接）。
+- M6（进行中）：W1 已合并 REV-039（kickoff/DR-003，lead/reviewer-a）、REV-040（kernel，kernel-dev/lead）、REV-041（trace，trace-dev/lead）、REV-042（harness，harness-dev/lead）、REV-043（cli，cli-dev/lead）、REV-044（e2e，e2e-dev/lead）、REV-045（process，lead/reviewer-a）。M6 计划至 REV-058（W1 收口 REV-046；W2/W3：036/082/087/085/080/079/081/088/086-e2e、spec 回写与 wrapup）
+- 编号顺延注记（REV-046）：REV-040–044 评审记录正文中的 `REV-054`（e2e 断言）/`REV-056`（spec 回写）为顺延前口径，以 `DR-003` §2 的 **REV-055/REV-057** 为准（记录不可改，仅追加注记）。。REV-037 未创建（顺延 M6，由 REV-045 承接）。
