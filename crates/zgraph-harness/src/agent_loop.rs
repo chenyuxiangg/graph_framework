@@ -35,6 +35,10 @@ use crate::llm::{
     LlmError, LlmErrorKind, LlmMessage, LlmPhase, LlmProvider, LlmRequest, LlmResponse, ModelRef,
     StopReason, ToolCall, Usage,
 };
+use crate::record::{
+    error_response_snapshot, record_safely, request_snapshot, success_response_snapshot,
+    LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK,
+};
 use crate::tools::{
     serialize_tool_result, summarize_args, summarize_result, tool_error_content,
     validate_tool_arguments, ToolCallRequest, ToolDef, ToolFailure, ToolRunner, ToolSchema,
@@ -132,130 +136,207 @@ pub(crate) struct AgentRun<'a> {
     pub(crate) ctx: Arc<dyn HarnessCtx>,
     /// 取消句柄。
     pub(crate) cancel: CancelToken,
+    /// LLM 调用记录器（ISSUE-082；可选观察者，不改变执行语义）。
+    pub(crate) recorder: Option<&'a Arc<dyn LlmCallRecorder>>,
 }
 
 /// 执行一次 Agent（05 §5.5.4 语义；Loading 由 executor 预先完成）。
+///
+/// 职责拆分为 [`LoopState`] 的小函数（ISSUE-081：本函数 ≤60 行，行为不变）。
 pub(crate) async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, RunFailure> {
-    let config = &run.agent.config;
-    let provider_name = run.provider.name();
-    let model = run.agent.model_ref();
-    // Assembling
-    let system = assemble_system(&run.agent.role_prompt, run.agent.constraints.as_deref());
-    let mapping =
-        effective_input_mapping(run.declared_ports, run.node_mapping, &config.input_mapping);
-    let user_json = assemble_user_json(run.declared_ports, run.inputs, &mapping);
-    let mut messages = assemble_initial_messages(&system.text, &user_json);
-    // 05 §5.2.2：LLM 只能调用 `AgentConfig.tools` 列出的工具（可见工具集）。
-    // 未注册**与**已注册但未授权给本 Agent 的工具一律 `HARNESS_UNKNOWN_TOOL`。
-    let visible_tools: &[ToolDef] = &run.agent.tools;
-    let visible_tool_names: Vec<String> =
-        visible_tools.iter().map(|tool| tool.name.clone()).collect();
-    let tool_schemas = run.agent.tool_schemas();
-    let budget = prompt_budget(config.model.context_window_tokens, config.model.max_tokens);
-    check_and_trim(&messages, &tool_schemas, budget, system.constraints_tokens)?;
-
-    let mut iteration: u32 = 0;
-    let mut usage_total = Usage::zero();
-    let mut last_content: Option<String> = None;
-    let mut last_pending: Vec<String> = Vec::new();
-    let mut empty_streak: u32 = 0;
-
+    let mut state = LoopState::new(&run)?;
     loop {
-        if iteration >= run.max_iterations {
+        state.check_iteration_limits(&run)?;
+        state.begin_iteration(&run)?;
+        let response = invoke_with_retry(
+            &run,
+            &state.messages,
+            &state.tool_schemas,
+            state.iteration,
+            run.provider.name(),
+            &run.agent.model_ref(),
+        )
+        .await?;
+        state.usage_total.accumulate(&response.usage);
+        if let Some(output) = state.handle_response(&run, response).await? {
+            return Ok(output);
+        }
+        // ToolExec → Invoking（下一轮 iteration）。
+    }
+}
+
+/// 循环可变状态（ISSUE-081 拆 `run_agent` 的承载结构；不改变语义）。
+struct LoopState {
+    /// 请求消息序列（system + user + assistant/tool 回填）。
+    messages: Vec<LlmMessage>,
+    /// 本 Agent 可见工具的 schema（05 §5.6.3）。
+    tool_schemas: Vec<ToolSchema>,
+    /// 当前请求的 prompt 预算（05 §5.4.5）。
+    budget: u32,
+    /// 约束段 token 估算（预算校验入参）。
+    constraints_tokens: u32,
+    /// LLM 请求轮次（05 §5.5.2）。
+    iteration: u32,
+    /// 累计 usage（只累计成功响应）。
+    usage_total: Usage,
+    /// 最近一轮正文（`max_iterations` 诊断用）。
+    last_content: Option<String>,
+    /// 最近一轮待执行的 tool_call 名（`max_iterations` 诊断用）。
+    last_pending: Vec<String>,
+    /// 连续空响应计数（05 §5.5.3）。
+    empty_streak: u32,
+}
+
+impl LoopState {
+    /// Assembling（05 §5.4）：组装 system/user 消息并做首次预算校验。
+    fn new(run: &AgentRun<'_>) -> Result<Self, RunFailure> {
+        let config = &run.agent.config;
+        let system = assemble_system(&run.agent.role_prompt, run.agent.constraints.as_deref());
+        let mapping =
+            effective_input_mapping(run.declared_ports, run.node_mapping, &config.input_mapping);
+        let user_json = assemble_user_json(run.declared_ports, run.inputs, &mapping);
+        let messages = assemble_initial_messages(&system.text, &user_json);
+        let tool_schemas = run.agent.tool_schemas();
+        let budget = prompt_budget(config.model.context_window_tokens, config.model.max_tokens);
+        check_and_trim(&messages, &tool_schemas, budget, system.constraints_tokens)?;
+        Ok(Self {
+            messages,
+            tool_schemas,
+            budget,
+            constraints_tokens: system.constraints_tokens,
+            iteration: 0,
+            usage_total: Usage::zero(),
+            last_content: None,
+            last_pending: Vec::new(),
+            empty_streak: 0,
+        })
+    }
+
+    /// 停止条件与取消/deadline 预检（05 §5.5.2 / §5.7.3；此步不发请求）。
+    fn check_iteration_limits(&self, run: &AgentRun<'_>) -> Result<(), RunFailure> {
+        if self.iteration >= run.max_iterations {
             return Err(RunFailure::Harness(HarnessError::max_iterations(
-                iteration,
+                self.iteration,
                 run.max_iterations,
-                last_content.as_deref(),
-                &last_pending,
-                &usage_total,
+                self.last_content.as_deref(),
+                &self.last_pending,
+                &self.usage_total,
             )));
         }
-        // 取消/实例 deadline 预检优先于 provider 错误（05 §5.7.3）。
         if run.cancel.is_cancelled() {
             return Err(RunFailure::Cancelled);
         }
-        let remaining_before = run.ctx.node_deadline_remaining_ms();
-        if remaining_before == 0 {
+        let remaining = run.ctx.node_deadline_remaining_ms();
+        if remaining == 0 {
             return Err(RunFailure::InstanceTimeout {
-                elapsed_ms: run.node_timeout_ms.saturating_sub(remaining_before),
+                elapsed_ms: run.node_timeout_ms.saturating_sub(remaining),
             });
         }
-        iteration = iteration.saturating_add(1);
+        Ok(())
+    }
+
+    /// Invoking 入口：iteration +1、Progress、消息序列与预算复检（05 §5.5.2 / §5.4.6）。
+    fn begin_iteration(&mut self, run: &AgentRun<'_>) -> Result<(), RunFailure> {
+        self.iteration = self.iteration.saturating_add(1);
         run.ctx.emit(StreamingEvent::Progress {
-            percent: progress_percent(iteration, run.max_iterations),
-            message: format!("llm call {iteration}/{}", run.max_iterations),
+            percent: progress_percent(self.iteration, run.max_iterations),
+            message: format!("llm call {}/{}", self.iteration, run.max_iterations),
         });
         // 消息序列合法性 fail-fast（05 §5.4.1：违反 = 框架 bug → Internal）。
-        validate_message_sequence(&messages)?;
+        validate_message_sequence(&self.messages)?;
         // 每次调用前重新检查预算（工具结果只增不减，05 §5.4.6）。
-        check_and_trim(&messages, &tool_schemas, budget, system.constraints_tokens)?;
+        Ok(check_and_trim(
+            &self.messages,
+            &self.tool_schemas,
+            self.budget,
+            self.constraints_tokens,
+        )?)
+    }
 
-        let response = invoke_with_retry(
-            &run,
-            &messages,
-            &tool_schemas,
-            iteration,
-            provider_name,
-            &model,
-        )
-        .await?;
-        usage_total.accumulate(&response.usage);
+    /// 消费一轮响应：停止判定与 tool loop（05 §5.5.2 / §5.5.3）。
+    async fn handle_response(
+        &mut self,
+        run: &AgentRun<'_>,
+        response: LlmResponse,
+    ) -> Result<Option<AgentOutput>, RunFailure> {
         let LlmResponse {
             content,
             tool_calls,
             stop_reason,
             ..
         } = response;
-        last_content = content.clone();
-        last_pending = tool_calls.iter().map(|call| call.name.clone()).collect();
-
+        self.last_content = content.clone();
+        self.last_pending = tool_calls.iter().map(|call| call.name.clone()).collect();
         if tool_calls.is_empty() {
-            let final_content = content.unwrap_or_default();
-            if final_content.is_empty() {
-                // 05 §5.5.3：空响应追加 assistant 空消息继续；连续 2 次才失败。
-                empty_streak = empty_streak.saturating_add(1);
-                messages.push(LlmMessage::Assistant {
-                    content: None,
-                    tool_calls: Vec::new(),
-                });
-                if empty_streak >= 2 {
-                    return Err(RunFailure::Harness(HarnessError::llm_reason(
-                        iteration,
-                        provider_name,
-                        &model.name,
-                        "empty_response",
-                    )));
-                }
-                continue;
-            }
-            return Ok(AgentOutput {
-                content: final_content,
-                stop_reason,
-                iterations: iteration,
-                usage: usage_total,
-            });
+            return self.finish_without_tools(run, content, stop_reason);
         }
-
-        empty_streak = 0;
+        self.empty_streak = 0;
         if tool_calls.len() > MAX_TOOL_CALLS_PER_RESPONSE {
             return Err(RunFailure::Harness(HarnessError::llm_reason(
-                iteration,
-                provider_name,
-                &model.name,
+                self.iteration,
+                run.provider.name(),
+                &run.agent.model_ref().name,
                 "too_many_tool_calls",
             )));
         }
-        messages.push(LlmMessage::Assistant {
-            content: content.clone(),
-            tool_calls: tool_calls.clone(),
+        self.run_tool_calls(run, content, &tool_calls).await?;
+        Ok(None)
+    }
+
+    /// 无 tool_call 的响应：空响应连续 2 次失败，否则返回最终输出（05 §5.5.3）。
+    fn finish_without_tools(
+        &mut self,
+        run: &AgentRun<'_>,
+        content: Option<String>,
+        stop_reason: StopReason,
+    ) -> Result<Option<AgentOutput>, RunFailure> {
+        let final_content = content.unwrap_or_default();
+        if !final_content.is_empty() {
+            return Ok(Some(AgentOutput {
+                content: final_content,
+                stop_reason,
+                iterations: self.iteration,
+                usage: self.usage_total,
+            }));
+        }
+        self.empty_streak = self.empty_streak.saturating_add(1);
+        self.messages.push(LlmMessage::Assistant {
+            content: None,
+            tool_calls: Vec::new(),
         });
-        for call in &tool_calls {
+        if self.empty_streak >= 2 {
+            return Err(RunFailure::Harness(HarnessError::llm_reason(
+                self.iteration,
+                run.provider.name(),
+                &run.agent.model_ref().name,
+                "empty_response",
+            )));
+        }
+        Ok(None)
+    }
+
+    /// ToolExec：单响应多 tool_call 串行执行，每个 emit `ToolCallStart`→`ToolCallEnd`。
+    ///
+    /// 05 §5.2.2：LLM 只能调用 `AgentConfig.tools` 列出的工具（可见工具集）；未注册
+    /// **与**已注册但未授权给本 Agent 的工具一律 `HARNESS_UNKNOWN_TOOL`。
+    async fn run_tool_calls(
+        &mut self,
+        run: &AgentRun<'_>,
+        content: Option<String>,
+        tool_calls: &[ToolCall],
+    ) -> Result<(), RunFailure> {
+        self.messages.push(LlmMessage::Assistant {
+            content,
+            tool_calls: tool_calls.to_vec(),
+        });
+        for call in tool_calls {
             // 未知/未授权工具立即失败（不是 TOOL_ERROR，05 §5.2.2/§5.6.6）。
-            let Some(tool) = visible_tools.iter().find(|tool| tool.name == call.name) else {
+            let Some(tool) = run.agent.tools.iter().find(|tool| tool.name == call.name) else {
+                let visible: Vec<String> = run.agent.tools.iter().map(|t| t.name.clone()).collect();
                 return Err(RunFailure::Harness(HarnessError::unknown_tool(
                     &call.name,
-                    iteration,
-                    &visible_tool_names,
+                    self.iteration,
+                    &visible,
                 )));
             };
             run.ctx.emit(StreamingEvent::ToolCallStart {
@@ -263,20 +344,20 @@ pub(crate) async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, RunFailu
                 tool_name: call.name.clone(),
                 args_summary: summarize_args(&call.args),
             });
-            let (ok, tool_content) = execute_tool(&run, tool, call).await?;
+            let (ok, tool_content) = execute_tool(run, tool, call).await?;
             run.ctx.emit(StreamingEvent::ToolCallEnd {
                 call_id: call.call_id.clone(),
                 tool_name: call.name.clone(),
                 ok,
                 result_summary: Some(summarize_result(&tool_content, ok)),
             });
-            messages.push(LlmMessage::Tool {
+            self.messages.push(LlmMessage::Tool {
                 tool_call_id: call.call_id.clone(),
                 name: call.name.clone(),
                 content: tool_content,
             });
         }
-        // ToolExec → Invoking（下一轮 iteration）。
+        Ok(())
     }
 }
 
@@ -287,7 +368,30 @@ fn progress_percent(iteration: u32, max_iterations: u32) -> u8 {
     u8::try_from(percent.min(99)).unwrap_or(99)
 }
 
+/// 单次尝试的结果 + 脱敏请求快照（ISSUE-082；无记录器时快照为 `None`）。
+struct AttemptResult {
+    /// `request_snapshot` 产物（记录器未挂接时不构造，避免额外序列化）。
+    snapshot: Option<Value>,
+    /// provider 聚合结果或错误（含 Harness 侧兜底超时）。
+    outcome: Result<LlmResponse, LlmError>,
+}
+
+/// 重试循环的错误处置决策（05 §5.3.5；ISSUE-081 拆 `invoke_with_retry`）。
+enum ErrorAction {
+    /// Establish 阶段可重试且预算允许 → 退避后重试。
+    Retry,
+    /// 取消（含退避期间取消）→ `NodeError::Cancelled`。
+    Cancelled,
+    /// 实例 deadline 用尽 → `NodeError::Timeout`。
+    Timeout,
+    /// 不可重试或重试预算用尽 → `HarnessError`。
+    Fail,
+}
+
 /// 单次 LLM 调用 + Establish 阶段重试编排（05 §5.3.5；重试不消耗 iteration）。
+///
+/// ISSUE-082：每轮（`call_index = iteration - 1`）在**终态**记录一次；重试期间
+/// 不记录中间失败。调用前的取消/deadline 预检不发请求，因此不产生记录。
 async fn invoke_with_retry(
     run: &AgentRun<'_>,
     messages: &[LlmMessage],
@@ -298,89 +402,184 @@ async fn invoke_with_retry(
 ) -> Result<LlmResponse, RunFailure> {
     let config = &run.agent.config;
     let max_attempts = config.llm_max_retries.saturating_add(1);
+    let call_index = iteration.saturating_sub(1);
     let mut attempt: u32 = 0;
     loop {
-        if run.cancel.is_cancelled() {
-            return Err(RunFailure::Cancelled);
-        }
-        let remaining = run.ctx.node_deadline_remaining_ms();
-        if remaining == 0 {
-            return Err(RunFailure::InstanceTimeout {
-                elapsed_ms: run.node_timeout_ms.saturating_sub(remaining),
-            });
-        }
-        let timeout_ms = config.llm_timeout_ms.min(remaining);
-        if timeout_ms < 1_000 {
-            // 05 §5.3.6：剩余 < 1000ms 不再发起新调用，直接按实例超时失败。
-            return Err(RunFailure::InstanceTimeout {
-                elapsed_ms: run.node_timeout_ms.saturating_sub(remaining),
-            });
-        }
+        let timeout_ms = preflight_call_timeout(run, config)?;
         attempt = attempt.saturating_add(1);
-        let request = LlmRequest {
-            model: model.clone(),
-            messages: messages.to_vec(),
-            tools: tool_schemas.to_vec(),
-            temperature: config.model.temperature,
-            max_tokens: config.model.max_tokens,
-            stream: true,
-            api_key: run.agent.api_key.clone(),
-            timeout_ms,
-        };
-        let mut sink = StreamSink::new(run.ctx.clone());
-        let outcome = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            run.provider.chat_stream(request, &mut sink, &run.cancel),
-        )
-        .await;
+        let request = build_llm_request(run, config, messages, tool_schemas, model, timeout_ms);
+        let AttemptResult { snapshot, outcome } = invoke_attempt(run, request, timeout_ms).await;
         let error = match outcome {
-            Ok(Ok(mut response)) => {
+            Ok(mut response) => {
                 response.attempts = attempt;
+                record_call_ok(run, call_index, snapshot.as_ref(), &response);
                 return Ok(response);
             }
-            Ok(Err(error)) => error,
-            Err(_elapsed) => {
-                // Harness 侧兜底超时：phase 由已转发增量数判定（05 §5.3.2）。
-                let streamed = sink.streamed();
-                LlmError::new(
-                    LlmErrorKind::Timeout,
-                    if sink.started() {
-                        LlmPhase::Streaming
-                    } else {
-                        LlmPhase::Establish
-                    },
-                    format!("LLM call timed out after {timeout_ms} ms"),
-                    streamed,
-                )
-            }
+            Err(error) => error,
         };
-        // 取消与实例 deadline 优先于 provider 错误分类（05 §5.7.3）。
-        if run.cancel.is_cancelled() || error.is_cancelled() {
-            return Err(RunFailure::Cancelled);
-        }
-        if run.ctx.node_deadline_remaining_ms() == 0 {
-            return Err(RunFailure::InstanceTimeout {
-                elapsed_ms: run.node_timeout_ms,
-            });
-        }
-        if error.is_retryable() && attempt < max_attempts {
-            let wait_ms = retry_wait_ms(&error, attempt);
-            if run.ctx.node_deadline_remaining_ms() > wait_ms {
-                if sleep_or_cancel(run, wait_ms).await {
-                    return Err(RunFailure::Cancelled);
-                }
-                continue;
+        match classify_error_action(run, &error, attempt, max_attempts).await {
+            ErrorAction::Retry => continue,
+            ErrorAction::Cancelled => {
+                record_call_error(run, call_index, snapshot.as_ref(), &error);
+                return Err(RunFailure::Cancelled);
+            }
+            ErrorAction::Timeout => {
+                record_call_error(run, call_index, snapshot.as_ref(), &error);
+                return Err(RunFailure::InstanceTimeout {
+                    elapsed_ms: run.node_timeout_ms,
+                });
+            }
+            ErrorAction::Fail => {
+                record_call_error(run, call_index, snapshot.as_ref(), &error);
+                return Err(RunFailure::Harness(map_invoke_error(
+                    &error,
+                    iteration,
+                    provider_name,
+                    &model.name,
+                    attempt,
+                    timeout_ms,
+                )));
             }
         }
-        return Err(RunFailure::Harness(map_invoke_error(
-            &error,
-            iteration,
-            provider_name,
-            &model.name,
-            attempt,
-            timeout_ms,
-        )));
     }
+}
+
+/// 发起调用前的取消/deadline 预检，返回本次调用生效超时（05 §5.3.6 / §5.7.3）。
+fn preflight_call_timeout(
+    run: &AgentRun<'_>,
+    config: &crate::config::AgentConfig,
+) -> Result<u64, RunFailure> {
+    if run.cancel.is_cancelled() {
+        return Err(RunFailure::Cancelled);
+    }
+    let remaining = run.ctx.node_deadline_remaining_ms();
+    let timeout_ms = config.llm_timeout_ms.min(remaining);
+    if remaining == 0 || timeout_ms < 1_000 {
+        // 05 §5.3.6：剩余 < 1000ms 不再发起新调用，直接按实例超时失败。
+        return Err(RunFailure::InstanceTimeout {
+            elapsed_ms: run.node_timeout_ms.saturating_sub(remaining),
+        });
+    }
+    Ok(timeout_ms)
+}
+
+/// 组装一次 LLM 请求（05 §5.3.2；密钥只经 `SecretString` 注入 transport）。
+fn build_llm_request(
+    run: &AgentRun<'_>,
+    config: &crate::config::AgentConfig,
+    messages: &[LlmMessage],
+    tool_schemas: &[ToolSchema],
+    model: &ModelRef,
+    timeout_ms: u64,
+) -> LlmRequest {
+    LlmRequest {
+        model: model.clone(),
+        messages: messages.to_vec(),
+        tools: tool_schemas.to_vec(),
+        temperature: config.model.temperature,
+        max_tokens: config.model.max_tokens,
+        stream: true,
+        api_key: run.agent.api_key.clone(),
+        timeout_ms,
+    }
+}
+
+/// 错误后的处置决策（取消/deadline 优先于 provider 分类；含退避等待）。
+async fn classify_error_action(
+    run: &AgentRun<'_>,
+    error: &LlmError,
+    attempt: u32,
+    max_attempts: u32,
+) -> ErrorAction {
+    if run.cancel.is_cancelled() || error.is_cancelled() {
+        return ErrorAction::Cancelled;
+    }
+    if run.ctx.node_deadline_remaining_ms() == 0 {
+        return ErrorAction::Timeout;
+    }
+    if error.is_retryable() && attempt < max_attempts {
+        let wait_ms = retry_wait_ms(error, attempt);
+        if run.ctx.node_deadline_remaining_ms() > wait_ms {
+            return if sleep_or_cancel(run, wait_ms).await {
+                ErrorAction::Cancelled
+            } else {
+                ErrorAction::Retry
+            };
+        }
+    }
+    ErrorAction::Fail
+}
+
+/// 单次 LLM 尝试：调用 provider 并做 Harness 侧兜底超时（05 §5.3.2）。
+async fn invoke_attempt(run: &AgentRun<'_>, request: LlmRequest, timeout_ms: u64) -> AttemptResult {
+    // ISSUE-082：只有挂接记录器时才构造脱敏快照（无记录时不增加序列化开销）。
+    let snapshot = run.recorder.map(|_| request_snapshot(&request));
+    let mut sink = StreamSink::new(run.ctx.clone());
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        run.provider.chat_stream(request, &mut sink, &run.cancel),
+    )
+    .await;
+    let outcome = match outcome {
+        Ok(result) => result,
+        Err(_elapsed) => Err(LlmError::new(
+            LlmErrorKind::Timeout,
+            if sink.started() {
+                LlmPhase::Streaming
+            } else {
+                LlmPhase::Establish
+            },
+            format!("LLM call timed out after {timeout_ms} ms"),
+            sink.streamed(),
+        )),
+    };
+    AttemptResult { snapshot, outcome }
+}
+
+/// 记录成功调用（ISSUE-082；观察者是外部注入实现，panic 由 [`record_safely`] 吞掉）。
+fn record_call_ok(
+    run: &AgentRun<'_>,
+    call_index: u32,
+    request: Option<&Value>,
+    response: &LlmResponse,
+) {
+    let (Some(recorder), Some(request)) = (run.recorder, request) else {
+        return;
+    };
+    let response = success_response_snapshot(response);
+    record_safely(
+        &**recorder,
+        &LlmCallSnapshot {
+            instance_id: run.ctx.instance_id(),
+            call_index,
+            request,
+            response: Some(&response),
+            status: LLM_CALL_STATUS_OK,
+        },
+    );
+}
+
+/// 记录终态失败调用（ISSUE-082）：`{"error":{kind,message,phase}}`。
+fn record_call_error(
+    run: &AgentRun<'_>,
+    call_index: u32,
+    request: Option<&Value>,
+    error: &LlmError,
+) {
+    let (Some(recorder), Some(request)) = (run.recorder, request) else {
+        return;
+    };
+    let response = error_response_snapshot(error);
+    record_safely(
+        &**recorder,
+        &LlmCallSnapshot {
+            instance_id: run.ctx.instance_id(),
+            call_index,
+            request,
+            response: Some(&response),
+            status: LLM_CALL_STATUS_ERROR,
+        },
+    );
 }
 
 /// 第 `attempt` 次失败后的等待（05 §5.3.5）：`retry_after_ms` 优先（上限 30s），
@@ -550,7 +749,8 @@ mod tests {
 
     use crate::config::{AgentConfig, ModelConfig};
     use crate::llm::{FakeLlmProvider, ProviderKind, SecretString};
-    use crate::test_support::TestCtx;
+    use crate::record::{LlmCallRecorder, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
+    use crate::test_support::{CapturingRecorder, TestCtx};
     use crate::tools::{FakeToolBehavior, FakeToolRunner, ToolRegistry};
 
     fn tool_def(name: &str, parameters: Value, timeout_ms: u64) -> ToolDef {
@@ -628,6 +828,16 @@ mod tests {
         runner: &Arc<FakeToolRunner>,
         ctx: &Arc<TestCtx>,
     ) -> Result<AgentOutput, RunFailure> {
+        execute_with_recorder(agent, fake, runner, ctx, None).await
+    }
+
+    async fn execute_with_recorder(
+        agent: &LoadedAgent,
+        fake: &Arc<FakeLlmProvider>,
+        runner: &Arc<FakeToolRunner>,
+        ctx: &Arc<TestCtx>,
+        recorder: Option<&Arc<dyn LlmCallRecorder>>,
+    ) -> Result<AgentOutput, RunFailure> {
         let provider: Arc<dyn LlmProvider> = fake.clone();
         let tool_runner: Arc<dyn ToolRunner> = runner.clone();
         let inputs = HashMap::from([("message".to_string(), json!("hi"))]);
@@ -646,6 +856,7 @@ mod tests {
             node_timeout_ms: agent.config.node_timeout_ms,
             ctx: ctx.clone(),
             cancel,
+            recorder,
         })
         .await
     }
@@ -1266,6 +1477,132 @@ mod tests {
             "tool content {} bytes",
             tool_message.len()
         );
-        assert!(tool_message.contains("truncated"));
+        // ISSUE-074：超限工具结果喂回上下文时仍是合法 JSON。
+        let parsed: Value = serde_json::from_str(&tool_message).expect("tool message is JSON");
+        let text = parsed["text"].as_str().expect("text");
+        assert!(text.contains("…[truncated "), "marker: {text}");
+    }
+
+    #[tokio::test]
+    async fn recorder_captures_one_call_per_iteration_with_desensitized_request() {
+        let fake = script(json!({
+            "chunk_chars": 64,
+            "calls": [
+                tool_calls(json!([{"call_id": "c1", "name": "now", "args": {}}])),
+                text("done")
+            ]
+        }));
+        let runner = Arc::new(
+            FakeToolRunner::new().behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let agent = loaded_agent(vec![no_args_tool("now")], 5, 1, "role");
+        let ctx = TestCtx::new();
+        let recorder = CapturingRecorder::new();
+        let recorder_dyn: Arc<dyn LlmCallRecorder> = recorder.clone();
+        let output = execute_with_recorder(&agent, &fake, &runner, &ctx, Some(&recorder_dyn))
+            .await
+            .expect("tool loop");
+        assert_eq!(output.iterations, 2);
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 2, "每轮 LLM 调用恰记录一次");
+        assert_eq!(calls[0].call_index, 0);
+        assert_eq!(calls[1].call_index, 1);
+        assert_eq!(calls[0].instance_id, "test-instance");
+        assert!(calls.iter().all(|call| call.status == LLM_CALL_STATUS_OK));
+
+        // 请求快照：05 §5.3.2 可观测字段齐备。
+        let request = &calls[0].request;
+        assert_eq!(request["model"]["provider"], json!("deepseek"));
+        assert_eq!(request["model"]["name"], json!("deepseek-chat"));
+        assert_eq!(request["model"]["base_url"], Value::Null);
+        assert_eq!(request["temperature"], json!(0.0));
+        assert_eq!(request["max_tokens"], json!(256));
+        assert_eq!(request["stream"], json!(true));
+        assert!(request["timeout_ms"].is_number());
+        assert_eq!(request["tools"][0]["name"], json!("now"));
+        assert_eq!(request["messages"][0]["role"], json!("system"));
+        // 脱敏：不得出现 api_key 字段或测试密钥明文。
+        assert!(
+            !request
+                .as_object()
+                .expect("request object")
+                .contains_key("api_key"),
+            "request snapshot must not carry api_key"
+        );
+        let request_text = calls[0].request_text();
+        assert!(
+            !request_text.contains("test-key"),
+            "request snapshot leaked api key: {request_text}"
+        );
+
+        // 成功响应快照：聚合字段（content/tool_calls/stop_reason/usage/attempts）。
+        let first = calls[0].response.as_ref().expect("first response");
+        assert_eq!(first["stop_reason"], json!("ToolCalls"));
+        assert_eq!(first["tool_calls"][0]["call_id"], json!("c1"));
+        assert_eq!(first["tool_calls"][0]["name"], json!("now"));
+        assert_eq!(first["attempts"], json!(1));
+        let second = calls[1].response.as_ref().expect("second response");
+        assert_eq!(second["content"], json!("done"));
+        assert_eq!(second["stop_reason"], json!("EndTurn"));
+        assert_eq!(second["tool_calls"], json!([]));
+        assert_eq!(second["usage"]["source"], json!("estimated"));
+        assert!(second["latency_ms"].is_number());
+        assert!(second.get("provider_request_id").is_some());
+        // 第二轮请求快照与真实请求一致：含 system/user/assistant/tool 四条消息。
+        assert_eq!(
+            calls[1].request["messages"]
+                .as_array()
+                .expect("messages")
+                .len(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn recorder_captures_final_error_only_when_retries_exhausted() {
+        let fake = script(json!({
+            "calls": [text("ok")],
+            "failures": [
+                {"call_index": 0, "attempt": 0, "phase": "establish",
+                 "kind": "ServerError", "status": 500},
+                {"call_index": 0, "attempt": 1, "phase": "establish",
+                 "kind": "ServerError", "status": 500}
+            ]
+        }));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent(vec![], 5, 1, "role");
+        let ctx = TestCtx::new();
+        let recorder = CapturingRecorder::new();
+        let recorder_dyn: Arc<dyn LlmCallRecorder> = recorder.clone();
+        let failure = execute_with_recorder(&agent, &fake, &runner, &ctx, Some(&recorder_dyn))
+            .await
+            .expect_err("retry exhausted");
+        assert!(matches!(failure, RunFailure::Harness(_)));
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1, "重试只记录最终结果（call_index 相同）");
+        assert_eq!(calls[0].call_index, 0);
+        assert_eq!(calls[0].status, LLM_CALL_STATUS_ERROR);
+        let response = calls[0].response.as_ref().expect("error response");
+        assert_eq!(response["error"]["kind"], json!("server_error"));
+        assert_eq!(response["error"]["phase"], json!("establish"));
+        assert!(response["error"]["message"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn recorder_panic_does_not_change_execution_semantics() {
+        let fake = script(json!({"calls": [text("ok")]}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent(vec![], 5, 1, "role");
+        let ctx = TestCtx::new();
+        let recorder = CapturingRecorder::panicking();
+        let recorder_dyn: Arc<dyn LlmCallRecorder> = recorder.clone();
+        let output = execute_with_recorder(&agent, &fake, &runner, &ctx, Some(&recorder_dyn))
+            .await
+            .expect("记录器 panic 不得传播");
+        assert_eq!(output.content, "ok");
+        assert_eq!(ctx.token_text(), "ok", "记录器 panic 不影响 streaming");
+        assert_eq!(recorder.len(), 0);
     }
 }

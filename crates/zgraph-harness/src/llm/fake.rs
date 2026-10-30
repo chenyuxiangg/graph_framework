@@ -30,7 +30,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::time::{sleep, Duration};
 
 use crate::budget::{estimate_messages_tokens, estimate_tokens};
@@ -378,6 +378,34 @@ fn parse_call(value: &Value, index: usize) -> Result<FakeCall, String> {
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("calls[{index}].kind is required"))?;
+    let content = parse_call_content(object, index, kind)?;
+    let stop_reason = parse_call_stop_reason(object, index, kind)?;
+    let reasoning = parse_call_reasoning(object, index)?;
+    let mut tool_calls = Vec::new();
+    if let Some(value) = object.get("tool_calls") {
+        let array = value
+            .as_array()
+            .ok_or_else(|| format!("calls[{index}].tool_calls must be an array"))?;
+        for (position, value) in array.iter().enumerate() {
+            tool_calls.push(parse_tool_call(value, index, position)?);
+        }
+    }
+    let usage = parse_call_usage(object, index)?;
+    Ok(FakeCall {
+        content,
+        reasoning,
+        tool_calls,
+        stop_reason,
+        usage,
+    })
+}
+
+/// 解析并校验 `calls[i].content`（`kind=text` 必填）。
+fn parse_call_content(
+    object: &Map<String, Value>,
+    index: usize,
+    kind: &str,
+) -> Result<Option<String>, String> {
     let content = match object.get("content") {
         None | Some(Value::Null) => None,
         Some(Value::String(text)) => Some(text.clone()),
@@ -391,50 +419,51 @@ fn parse_call(value: &Value, index: usize) -> Result<FakeCall, String> {
     if kind != "text" && kind != "tool_calls" {
         return Err(format!("calls[{index}].kind must be text|tool_calls"));
     }
-    let stop_reason = match object.get("stop_reason") {
-        Some(Value::String(raw)) => StopReason::from_literal(raw),
-        None => {
-            if kind == "tool_calls" {
-                StopReason::ToolCalls
-            } else {
-                StopReason::EndTurn
-            }
-        }
-        Some(other) => {
-            return Err(format!(
-                "calls[{index}].stop_reason must be a string: {other}"
-            ))
-        }
-    };
-    let reasoning = match object.get("reasoning") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(other) => {
-            return Err(format!(
-                "calls[{index}].reasoning must be a string: {other}"
-            ))
-        }
-    };
-    let mut tool_calls = Vec::new();
-    if let Some(value) = object.get("tool_calls") {
-        let array = value
-            .as_array()
-            .ok_or_else(|| format!("calls[{index}].tool_calls must be an array"))?;
-        for (position, value) in array.iter().enumerate() {
-            tool_calls.push(parse_tool_call(value, index, position)?);
-        }
+    Ok(content)
+}
+
+/// 解析 `calls[i].stop_reason`（缺省按 kind 推导）。
+fn parse_call_stop_reason(
+    object: &Map<String, Value>,
+    index: usize,
+    kind: &str,
+) -> Result<StopReason, String> {
+    match object.get("stop_reason") {
+        Some(Value::String(raw)) => Ok(StopReason::from_literal(raw.as_str())),
+        None => Ok(if kind == "tool_calls" {
+            StopReason::ToolCalls
+        } else {
+            StopReason::EndTurn
+        }),
+        Some(other) => Err(format!(
+            "calls[{index}].stop_reason must be a string: {other}"
+        )),
     }
-    let usage = match object.get("usage") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(parse_usage(value, index)?),
-    };
-    Ok(FakeCall {
-        content,
-        reasoning,
-        tool_calls,
-        stop_reason,
-        usage,
-    })
+}
+
+/// 解析可选的 `calls[i].reasoning`（M4 扩展字段）。
+fn parse_call_reasoning(
+    object: &Map<String, Value>,
+    index: usize,
+) -> Result<Option<String>, String> {
+    match object.get("reasoning") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(other) => Err(format!(
+            "calls[{index}].reasoning must be a string: {other}"
+        )),
+    }
+}
+
+/// 解析可选的 `calls[i].usage`。
+fn parse_call_usage(
+    object: &Map<String, Value>,
+    index: usize,
+) -> Result<Option<ScriptUsage>, String> {
+    match object.get("usage") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => Ok(Some(parse_usage(value, index)?)),
+    }
 }
 
 fn parse_tool_call(value: &Value, call_index: usize, position: usize) -> Result<ToolCall, String> {

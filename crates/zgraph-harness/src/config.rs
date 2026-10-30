@@ -380,7 +380,7 @@ fn parse_agent_config(
     })
 }
 
-/// 解析 `model` 段（V5–V11）。
+/// 解析 `model` 段（V5–V11；ISSUE-081 拆分，逐字段校验见下方子函数）。
 fn parse_model(value: &Value, path: &Path) -> Result<ModelConfig, HarnessError> {
     let empty = Map::new();
     let object = value.as_object().unwrap_or(&empty);
@@ -394,10 +394,29 @@ fn parse_model(value: &Value, path: &Path) -> Result<ModelConfig, HarnessError> 
         ));
     }
     reject_unknown(object, path, "$.model", &MODEL_KEYS, &[])?;
+    let provider = parse_provider(object, path)?;
+    let name = parse_model_name(object, path)?;
+    // V11 先于 V10：max_tokens 上限依赖 context_window_tokens。
+    let context_window_tokens = parse_context_window(object, path)?;
+    let max_tokens = parse_max_tokens(object, path, context_window_tokens)?;
+    let base_url = parse_base_url(object, path, provider)?;
+    let api_key_env = parse_api_key_env(object, path)?;
+    let temperature = parse_temperature(object, path)?;
+    Ok(ModelConfig {
+        provider,
+        name,
+        base_url,
+        api_key_env,
+        temperature,
+        max_tokens,
+        context_window_tokens,
+    })
+}
 
-    // V5：provider。
+/// V5：`model.provider`。
+fn parse_provider(object: &Map<String, Value>, path: &Path) -> Result<ProviderKind, HarnessError> {
     let provider_raw = required_string(object, "provider", path, "$.model.provider")?;
-    let provider = ProviderKind::parse(&provider_raw).ok_or_else(|| {
+    ProviderKind::parse(&provider_raw).ok_or_else(|| {
         config_error(
             "unsupported_value",
             Some(&path.display().to_string()),
@@ -406,9 +425,11 @@ fn parse_model(value: &Value, path: &Path) -> Result<ModelConfig, HarnessError> 
             Some(Value::from(provider_raw.clone())),
             format!("unsupported model provider '{provider_raw}'"),
         )
-    })?;
+    })
+}
 
-    // 模型名。
+/// 模型名格式校验（`^[A-Za-z0-9._:-]{1,128}$`）。
+fn parse_model_name(object: &Map<String, Value>, path: &Path) -> Result<String, HarnessError> {
     let name = required_string(object, "name", path, "$.model.name")?;
     if !is_model_name(&name) {
         return Err(config_error(
@@ -420,56 +441,64 @@ fn parse_model(value: &Value, path: &Path) -> Result<ModelConfig, HarnessError> 
             format!("invalid model name '{name}'"),
         ));
     }
+    Ok(name)
+}
 
-    // V11：context_window_tokens（先解析，V10 依赖它）。
-    let context_window_tokens = optional_u64(
+/// V11：`context_window_tokens`（4096..=2_000_000，默认 65536）。
+fn parse_context_window(object: &Map<String, Value>, path: &Path) -> Result<u32, HarnessError> {
+    let value = optional_u64(
         object,
         "context_window_tokens",
         path,
         "$.model.context_window_tokens",
     )?
     .unwrap_or(u64::from(DEFAULT_CONTEXT_WINDOW_TOKENS));
-    if !(4_096..=2_000_000).contains(&context_window_tokens) {
+    if !(4_096..=2_000_000).contains(&value) {
         return Err(config_error(
             "out_of_range",
             Some(&path.display().to_string()),
             Some("$.model.context_window_tokens"),
             Some(json!([4096, 2_000_000])),
-            Some(Value::from(context_window_tokens)),
+            Some(Value::from(value)),
             "context_window_tokens out of range".to_string(),
         ));
     }
-    let context_window_tokens = u32::try_from(context_window_tokens).unwrap_or(u32::MAX);
+    Ok(u32::try_from(value).unwrap_or(u32::MAX))
+}
 
-    // V10：max_tokens。
-    let max_tokens = optional_u64(object, "max_tokens", path, "$.model.max_tokens")?
+/// V10：`max_tokens`（1..=32768，且 ≤ 20% context window）。
+fn parse_max_tokens(
+    object: &Map<String, Value>,
+    path: &Path,
+    context_window_tokens: u32,
+) -> Result<u32, HarnessError> {
+    let value = optional_u64(object, "max_tokens", path, "$.model.max_tokens")?
         .unwrap_or(u64::from(DEFAULT_LLM_MAX_TOKENS));
-    if !(1..=32_768).contains(&max_tokens) {
+    if !(1..=32_768).contains(&value) {
         return Err(config_error(
             "out_of_range",
             Some(&path.display().to_string()),
             Some("$.model.max_tokens"),
             Some(json!([1, 32_768])),
-            Some(Value::from(max_tokens)),
+            Some(Value::from(value)),
             "max_tokens out of range".to_string(),
         ));
     }
-    if max_tokens.saturating_mul(5) > u64::from(context_window_tokens) {
+    if value.saturating_mul(5) > u64::from(context_window_tokens) {
         return Err(config_error(
             "out_of_range",
             Some(&path.display().to_string()),
             Some("$.model.max_tokens"),
             Some(Value::from("max_tokens <= 0.2 * context_window_tokens")),
-            Some(Value::from(max_tokens)),
+            Some(Value::from(value)),
             "max_tokens exceeds 20% of context window".to_string(),
         ));
     }
-    let max_tokens = u32::try_from(max_tokens).unwrap_or(u32::MAX);
+    Ok(u32::try_from(value).unwrap_or(u32::MAX))
+}
 
-    // V6/V7：base_url 条件必填。
-    let base_url = parse_base_url(object, path, provider)?;
-
-    // V8：api_key_env。
+/// V8：`api_key_env`（环境变量名，不内联密钥）。
+fn parse_api_key_env(object: &Map<String, Value>, path: &Path) -> Result<String, HarnessError> {
     let api_key_env = required_string(object, "api_key_env", path, "$.model.api_key_env")?;
     if !is_env_name(&api_key_env) {
         return Err(config_error(
@@ -481,8 +510,11 @@ fn parse_model(value: &Value, path: &Path) -> Result<ModelConfig, HarnessError> 
             format!("invalid api_key_env '{api_key_env}'"),
         ));
     }
+    Ok(api_key_env)
+}
 
-    // V9：temperature。
+/// V9：`temperature`（0.0..=2.0，默认 0.2）。
+fn parse_temperature(object: &Map<String, Value>, path: &Path) -> Result<f32, HarnessError> {
     let temperature = optional_f64(object, "temperature", path, "$.model.temperature")?
         .unwrap_or(f64::from(DEFAULT_LLM_TEMPERATURE));
     if !(0.0..=2.0).contains(&temperature) {
@@ -495,15 +527,7 @@ fn parse_model(value: &Value, path: &Path) -> Result<ModelConfig, HarnessError> 
             "temperature out of range".to_string(),
         ));
     }
-    Ok(ModelConfig {
-        provider,
-        name,
-        base_url,
-        api_key_env,
-        temperature: temperature as f32,
-        max_tokens,
-        context_window_tokens,
-    })
+    Ok(temperature as f32)
 }
 
 /// V6/V7：`base_url` 条件必填与格式。

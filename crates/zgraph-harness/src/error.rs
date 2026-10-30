@@ -171,7 +171,10 @@ impl HarnessError {
         detail.insert("max_iterations".to_string(), Value::from(max_iterations));
         detail.insert(
             "last_content_summary".to_string(),
-            Value::from(summarize_chars(last_content.unwrap_or(""), 512)),
+            Value::from(summarize_chars(
+                last_content.unwrap_or(""),
+                crate::constants::MAX_LAST_CONTENT_SUMMARY_CHARS,
+            )),
         );
         detail.insert(
             "pending_tool_calls".to_string(),
@@ -335,12 +338,15 @@ fn invoke_detail(
     Value::Object(detail)
 }
 
-/// 按字符边界截断并附 `…`（05 §5.7.4 / §5.8.5 的截断纪律）。
+/// 按字符边界截断并附 `…`，返回**严格 ≤ `max_chars`** 个字符（05 §5.7.4 / §5.8.5）。
 pub(crate) fn summarize_chars(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let mut out: String = text.chars().take(max_chars).collect();
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out: String = text.chars().take(max_chars - 1).collect();
     out.push('…');
     out
 }
@@ -419,7 +425,11 @@ mod tests {
         let summary = error.detail["last_content_summary"]
             .as_str()
             .expect("summary string");
-        assert_eq!(summary.chars().count(), 513, "512 chars + ellipsis");
+        assert_eq!(
+            summary.chars().count(),
+            512,
+            "严格 ≤ 512 字符（含 `…`，ISSUE-074 ±1 修正）"
+        );
         assert!(summary.ends_with('…'));
     }
 
@@ -483,7 +493,11 @@ mod tests {
         assert_eq!(summarize_chars("短文本", 10), "短文本");
         let text = "中文abc";
         let summary = summarize_chars(text, 2);
-        assert_eq!(summary.chars().count(), 3);
+        assert_eq!(
+            summary.chars().count(),
+            2,
+            "严格 ≤ max_chars（ISSUE-074 ±1 修正）"
+        );
         assert!(summary.ends_with('…'));
     }
 }

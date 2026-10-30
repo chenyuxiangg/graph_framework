@@ -12,6 +12,7 @@
 //! - [`llm`]：transport 抽象（`LlmProvider`）、类型层、`FakeLlmProvider` 与 genai 适配。
 //! - [`tools`]：工具注册表、参数校验、结果截断、`WorkerToolRunner`/`FakeToolRunner`（05 §5.6）。
 //! - [`agent_loop`]：六状态执行循环、重试、iteration 与 tool loop（05 §5.5）。
+//! - [`record`]：LLM 调用记录 seam（ISSUE-082；L2 前置，H3 不写 SQLite）。
 //! - [`executor`]：`NodeExecutor` 实现（唯一处理 `CompiledHandler::Agent`）。
 //! - [`error`]：`HarnessError` → `NodeError::Harness` 映射（05 §5.7）。
 //!
@@ -34,6 +35,9 @@
 //! `HarnessSettings`/`HarnessExecutor`/`LlmProvider`/`LlmStreamSink`/`FakeLlmProvider`/
 //! `CancelToken`/`HarnessCtx`/`ToolRunner`/`WorkerToolRunner`/`FakeToolRunner`/`AgentOutput`
 //! 为 e2e 与 M5 依赖的冻结面（任务契约）；新增项只能追加。
+//!
+//! M5 追加（ISSUE-082，只增不破）：[`LlmCallRecorder`]/[`LlmCallSnapshot`] 与
+//! `HarnessExecutor::with_llm_recorder`；[`HarnessSettings`] 字段集合**不变**。
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -47,6 +51,7 @@ mod ctx;
 mod error;
 mod executor;
 mod llm;
+mod record;
 mod tools;
 
 pub use agent_loop::{AgentOutput, RunFailure};
@@ -68,6 +73,7 @@ pub use llm::{
     LlmProvider, LlmRequest, LlmResponse, LlmStreamSink, ModelRef, ProviderKind, SecretString,
     StopReason, ToolCall, Usage, UsageSource,
 };
+pub use record::{LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
 pub use tools::{
     FakeToolBehavior, FakeToolRunner, ToolCallRequest, ToolDef, ToolFailure, ToolRegistry,
     ToolRunner, ToolSchema, WorkerToolRunner,

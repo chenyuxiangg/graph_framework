@@ -21,6 +21,7 @@ use crate::config::load_agent;
 use crate::ctx::{CancelToken, HarnessCtx};
 use crate::error::HarnessError;
 use crate::llm::LlmProvider;
+use crate::record::LlmCallRecorder;
 use crate::tools::{ToolRegistry, ToolRunner};
 
 /// Harness 执行器配置（e2e/M5 依赖的冻结面）。
@@ -53,14 +54,32 @@ pub struct HarnessExecutor {
     settings: HarnessSettings,
     /// 工具发现缓存：`tools_dir` → 进程内唯一注册表（D3；工具模块无跨调用缓存）。
     tools_cache: tokio::sync::Mutex<HashMap<PathBuf, Arc<ToolRegistry>>>,
+    /// LLM 调用记录器（ISSUE-082；可选观察者，H3：Harness 不写 SQLite）。
+    recorder: Option<Arc<dyn LlmCallRecorder>>,
 }
 
 impl HarnessExecutor {
-    /// 构造执行器。
+    /// 构造执行器（不记录 LLM 调用）。
     pub fn new(settings: HarnessSettings) -> Self {
         Self {
             settings,
             tools_cache: tokio::sync::Mutex::new(HashMap::new()),
+            recorder: None,
+        }
+    }
+
+    /// 构造执行器并挂接 LLM 调用记录器（ISSUE-082；M5 CLI/trace 写端 seam）。
+    ///
+    /// **只增不破**：保留 [`HarnessExecutor::new`] 与 [`HarnessSettings`] 的字段集合
+    /// （e2e 以结构体字面量构造 settings，冻结面不变）。
+    pub fn with_llm_recorder(
+        settings: HarnessSettings,
+        recorder: Arc<dyn LlmCallRecorder>,
+    ) -> Self {
+        Self {
+            settings,
+            tools_cache: tokio::sync::Mutex::new(HashMap::new()),
+            recorder: Some(recorder),
         }
     }
 
@@ -151,6 +170,7 @@ impl NodeExecutor for HarnessExecutor {
                 node_timeout_ms,
                 ctx: ctx.clone(),
                 cancel,
+                recorder: self.recorder.as_ref(),
             };
             run_agent(run)
                 .await
@@ -199,6 +219,8 @@ mod tests {
     };
 
     use crate::llm::{FakeLlmProvider, LlmProvider};
+    use crate::record::{LlmCallRecorder, LLM_CALL_STATUS_OK};
+    use crate::test_support::CapturingRecorder;
     use crate::tools::{FakeToolBehavior, FakeToolRunner, ToolDef, ToolRunner};
 
     use super::*;
@@ -480,5 +502,48 @@ mod tests {
             Some(InstanceStatus::Crashed)
         );
         assert!(fake.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_llm_recorder_captures_calls_with_kernel_instance_id() {
+        let dir = assets(agent_config("parser", &[]), "你是解析器。");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "ok", "stop_reason": "EndTurn"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let recorder = CapturingRecorder::new();
+        let recorder_dyn: Arc<dyn LlmCallRecorder> = recorder.clone();
+        let executor = Arc::new(HarnessExecutor::with_llm_recorder(
+            settings(dir.path(), &fake, &runner),
+            recorder_dyn,
+        ));
+        let (outcome, _) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(
+            outcome.output.as_ref().expect("output")["result"]["content"],
+            "ok"
+        );
+
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1, "一次 LLM 调用 → 一条记录");
+        assert_eq!(calls[0].call_index, 0);
+        assert_eq!(calls[0].status, LLM_CALL_STATUS_OK);
+        assert!(
+            !calls[0].instance_id.is_empty(),
+            "instance_id 应来自 NodeContext"
+        );
+        assert_eq!(calls[0].request["model"]["provider"], json!("deepseek"));
+        assert_eq!(calls[0].request["messages"][0]["role"], json!("system"));
+        assert_eq!(
+            calls[0].response.as_ref().expect("response")["content"],
+            json!("ok")
+        );
+        assert!(
+            !calls[0].request_text().contains("test-key"),
+            "记录不得泄漏密钥"
+        );
     }
 }

@@ -503,22 +503,17 @@ pub(crate) fn map_genai_error(
     }
 }
 
-/// `webc::Error` → `LlmError`（建连/DNS/TLS/HTTP/解码）。
+/// `webc::Error` → `LlmError`（建连/DNS/TLS/HTTP/解码；ISSUE-081 拆分）。
 fn map_webc_error(error: &GenaiWebcError, phase: LlmPhase, streamed_tokens: u32) -> LlmError {
     match error {
         GenaiWebcError::Reqwest(reqwest_error) => {
             let status = reqwest_error.status().map(|status| status.as_u16());
-            let kind = if reqwest_error.is_timeout() {
-                LlmErrorKind::Timeout
-            } else if reqwest_error.is_connect() {
-                LlmErrorKind::Connect
-            } else if let Some(status) = status {
-                classify_status(status)
-            } else if phase == LlmPhase::Streaming {
-                LlmErrorKind::StreamBroken
-            } else {
-                LlmErrorKind::Connect
-            };
+            let kind = classify_reqwest(
+                reqwest_error.is_timeout(),
+                reqwest_error.is_connect(),
+                status,
+                phase,
+            );
             LlmError::new(
                 kind,
                 phase,
@@ -566,6 +561,28 @@ fn map_webc_error(error: &GenaiWebcError, phase: LlmPhase, streamed_tokens: u32)
             truncate(&other.to_string(), 1024),
             streamed_tokens,
         ),
+    }
+}
+
+/// `reqwest` 传输错误的分类（超时/建连/HTTP 状态/流中断）。
+///
+/// 不直接接收 `reqwest::Error`（transitive 依赖不外露），只接收分类所需布尔/状态。
+fn classify_reqwest(
+    is_timeout: bool,
+    is_connect: bool,
+    status: Option<u16>,
+    phase: LlmPhase,
+) -> LlmErrorKind {
+    if is_timeout {
+        LlmErrorKind::Timeout
+    } else if is_connect {
+        LlmErrorKind::Connect
+    } else if let Some(status) = status {
+        classify_status(status)
+    } else if phase == LlmPhase::Streaming {
+        LlmErrorKind::StreamBroken
+    } else {
+        LlmErrorKind::Connect
     }
 }
 

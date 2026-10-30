@@ -6,8 +6,8 @@
 //!   `HARNESS_UNKNOWN_TOOL`（终止）。
 //! - 参数校验（object / required / 已声明 key 类型）在 Rust 侧完成，失败**不调用
 //!   Python**，把错误 JSON 作为 `Tool` 消息喂回（05 §5.6.4）。
-//! - 结果必须是 object；紧凑序列化 ≤ 8 KiB，超出按**字符边界**截断并附
-//!   `…[truncated N bytes]`（05 §5.6.5）。
+//! - 结果必须是 object；紧凑序列化 ≤ 8 KiB，超出走**结构感知截断**并附
+//!   `…[truncated N bytes]`，截断后仍是**合法 JSON**（05 §5.6.5 / ISSUE-074）。
 //!
 //! D3 落地：`WorkerToolRunner` 每次 `call` 都 spawn 一个全新 worker 子进程，module 固定
 //! [`TOOL_RUNNER_MODULE`]、function 为 `discover`/`call`；工具模块无跨调用缓存。工具发现
@@ -240,12 +240,10 @@ impl ToolFailure {
             object.insert("type".to_string(), Value::from(error_type.clone()));
         }
         if let Some(traceback) = &self.traceback {
+            // 05 §5.6.5 / ISSUE-074：traceback 上限统一 8 KiB（此前误用 1 MiB）。
             object.insert(
                 "traceback".to_string(),
-                Value::from(truncate_chars(
-                    traceback,
-                    crate::constants::MAX_PROMPT_BYTES as usize,
-                )),
+                Value::from(truncate_text_bytes(traceback, TOOL_RESULT_MAX_BYTES)),
             );
         }
         if let Some(timeout_ms) = self.timeout_ms {
@@ -366,7 +364,10 @@ pub fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// 序列化工具结果：必须是 object；紧凑 JSON ≤ 8 KiB，超出按字符边界截断（05 §5.6.5）。
+/// 序列化工具结果：必须是 object；紧凑 JSON ≤ 8 KiB（05 §5.6.5 / ISSUE-074）。
+///
+/// 超限时走**结构感知截断**（[`serialize_json_limited`]），保证喂回 LLM 的内容
+/// 始终是**可 `serde_json::from_str` 的合法 JSON**。
 pub fn serialize_tool_result(value: &Value) -> Result<String, ToolFailure> {
     if !value.is_object() {
         return Err(ToolFailure {
@@ -377,39 +378,293 @@ pub fn serialize_tool_result(value: &Value) -> Result<String, ToolFailure> {
             timeout_ms: None,
         });
     }
-    let compact = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    Ok(truncate_tool_content(compact))
+    Ok(serialize_json_limited(value))
 }
 
-/// 把任意工具内容限制在 [`TOOL_RESULT_MAX_BYTES`] 内（字符边界 + 截断标记）。
-pub(crate) fn truncate_tool_content(content: String) -> String {
-    if content.len() <= TOOL_RESULT_MAX_BYTES {
-        return content;
+/// 截断标记预留字节（05 §5.6.5：`…[truncated N bytes]` 预留 64 B 标记空间）。
+pub(crate) const TRUNCATION_MARKER_RESERVE: usize = 64;
+
+/// 结构降级时追加到对象上的保留键（业务结果不应使用同名键）。
+const TRUNCATED_OBJECT_KEY: &str = "_truncated";
+
+/// 单次截断的降级步数上限（防御性；正常数十步内收敛）。
+const MAX_SHRINK_STEPS: usize = 4_096;
+
+/// 把 JSON 值序列化为**合法 JSON**，且紧凑文本 ≤ [`TOOL_RESULT_MAX_BYTES`]。
+///
+/// 结构感知截断策略（05 §5.6.5 + ISSUE-074 合法 JSON 契约）：
+/// 1. 未超限：原样紧凑序列化；
+/// 2. 超限：为截断标记预留 [`TRUNCATION_MARKER_RESERVE`] 字节后，反复「单步降级」：
+///    - **字符串值**：在 JSON 字符串内部按**字符边界**截断，末尾附
+///      `…[truncated N bytes]`（N = 该字符串丢掉的 UTF-8 字节数）；
+///    - 无法靠字符串吸收时**结构降级**：对象从尾部丢属性、数组从尾部丢元素
+///      （保留前缀），最后追加 `"_truncated": "…[truncated N bytes]"` 标记
+///      （N = 原始紧凑 JSON 字节数 − 当前文本字节数）；
+/// 3. 极端情况（如键名本身超长）退化为固定「截断信封」对象（仍合法 JSON）。
+///
+/// 不变量：返回值必定可 `serde_json::from_str`，且字节数 ≤ [`TOOL_RESULT_MAX_BYTES`]。
+fn serialize_json_limited(value: &Value) -> String {
+    let compact = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    if compact.len() <= TOOL_RESULT_MAX_BYTES {
+        return compact;
     }
-    // 预留标记空间（`…[truncated <N> bytes]` 远小于 64 字节）。
-    let limit = TOOL_RESULT_MAX_BYTES.saturating_sub(64);
-    let keep = floor_char_boundary(&content, limit);
-    let truncated = content.len().saturating_sub(keep);
-    let mut output = content[..keep].to_string();
-    output.push_str(&format!("…[truncated {truncated} bytes]"));
-    output
+    let budget = TOOL_RESULT_MAX_BYTES.saturating_sub(TRUNCATION_MARKER_RESERVE);
+    let mut current = value.clone();
+    let mut structural = false;
+    for _ in 0..MAX_SHRINK_STEPS {
+        if serialized_len(&current) <= budget {
+            break;
+        }
+        if truncate_largest_string(&mut current, budget) {
+            continue;
+        }
+        if !drop_tail_item(&mut current) {
+            return fallback_envelope(&compact);
+        }
+        structural = true;
+    }
+    if serialized_len(&current) > budget {
+        return fallback_envelope(&compact);
+    }
+    if structural {
+        append_structural_marker(&mut current, &compact);
+    }
+    let output = serde_json::to_string(&current).unwrap_or_else(|_| fallback_envelope(&compact));
+    if output.len() <= TOOL_RESULT_MAX_BYTES {
+        output
+    } else {
+        fallback_envelope(&compact)
+    }
 }
 
 /// 构造喂回 LLM 的工具错误内容（`{"error": {...}}`，同样受 8 KiB 限制）。
 pub(crate) fn tool_error_content(failure: &ToolFailure) -> String {
     let payload = json!({ "error": failure.to_json() });
-    let compact = serde_json::to_string(&payload).unwrap_or_else(|_| "{\"error\":{}}".to_string());
-    truncate_tool_content(compact)
+    serialize_json_limited(&payload)
 }
 
-/// 以字符边界截断文本并附 `…`（摘要/preview 用）。
+/// 紧凑序列化长度（`Value` 恒可序列化；失败按最大值处理以触发降级）。
+fn serialized_len(value: &Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |text| text.len())
+}
+
+/// 字符串值在「结构降级标记」中的累计丢弃字节数（内部辅助）。
+///
+/// 返回 `(payload, already_dropped)`：若字符串已带 `…[truncated N bytes]` 后缀，
+/// 剥掉后缀并返回此前已丢弃的字节数，避免多次截断叠加多个标记。
+fn strip_truncation_marker(text: &str) -> (&str, usize) {
+    let Some(start) = text.rfind("…[truncated ") else {
+        return (text, 0);
+    };
+    let tail = &text[start..];
+    let Some(digits) = tail
+        .strip_prefix("…[truncated ")
+        .and_then(|rest| rest.strip_suffix(" bytes]"))
+    else {
+        return (text, 0);
+    };
+    let already = digits.parse::<usize>().unwrap_or(0);
+    (&text[..start], already)
+}
+
+/// 按「保留前 `keep_chars` 个字符 + 标记」构造字符串内容。
+fn marked_string(payload: &str, keep_chars: usize, already_dropped: usize) -> String {
+    let kept: String = payload.chars().take(keep_chars).collect();
+    let removed = payload
+        .len()
+        .saturating_sub(kept.len())
+        .saturating_add(already_dropped);
+    format!("{kept}…[truncated {removed} bytes]")
+}
+
+/// 找到序列化后最大的字符串叶子（路径 = 逐层 Object 值序 / Array 下标）。
+fn largest_string_path(value: &Value) -> Option<Vec<usize>> {
+    fn walk(value: &Value, path: &mut Vec<usize>, best: &mut Option<(usize, Vec<usize>)>) {
+        match value {
+            Value::String(text) => {
+                let len = serde_json::to_string(text).map_or(0, |text| text.len());
+                let better = best.as_ref().is_none_or(|(best_len, _)| len > *best_len);
+                if better {
+                    *best = Some((len, path.clone()));
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    path.push(index);
+                    walk(item, path, best);
+                    path.pop();
+                }
+            }
+            Value::Object(map) => {
+                for (index, (_, item)) in map.iter().enumerate() {
+                    path.push(index);
+                    walk(item, path, best);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best: Option<(usize, Vec<usize>)> = None;
+    walk(value, &mut Vec::new(), &mut best);
+    best.map(|(_, path)| path)
+}
+
+/// 按路径取可变值（路径由 [`largest_string_path`] 生成，顺序一致）。
+fn value_at_path_mut<'a>(value: &'a mut Value, path: &[usize]) -> Option<&'a mut Value> {
+    let mut current = value;
+    for &index in path {
+        current = match current {
+            Value::Array(items) => items.get_mut(index)?,
+            Value::Object(map) => map.values_mut().nth(index)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// 单步降级：把最大字符串叶子截断到「整体 ≤ budget」并附标记。
+///
+/// 返回 `false` 表示无法靠字符串吸收超限部分（没有字符串，或最大的字符串也
+/// 填不满差值），调用方转入结构降级。字符串内截断后仍是合法 JSON 字符串。
+fn truncate_largest_string(value: &mut Value, budget: usize) -> bool {
+    let total = serialized_len(value);
+    if total <= budget {
+        return false;
+    }
+    let Some(path) = largest_string_path(value) else {
+        return false;
+    };
+    let excess = total - budget;
+    let Some(Value::String(text)) = value_at_path_mut(value, &path) else {
+        return false;
+    };
+    let (payload, already_dropped) = strip_truncation_marker(text);
+    let current_len = serde_json::to_string(text).map_or(0, |text| text.len());
+    // 该字符串需让出 excess 字节且仍预留标记空间；否则由结构降级处理。
+    if current_len <= excess + TRUNCATION_MARKER_RESERVE {
+        return false;
+    }
+    let target = current_len - excess;
+    let mut low = 0usize;
+    let mut high = payload.chars().count();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let candidate = marked_string(payload, mid, already_dropped);
+        let fits = serde_json::to_string(&candidate).is_ok_and(|text| text.len() <= target);
+        if fits {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let candidate = marked_string(payload, low, already_dropped);
+    if candidate == *text {
+        return false;
+    }
+    *text = candidate;
+    true
+}
+
+/// 单步结构降级：优先下沉到「最右容器」丢其尾部元素/属性，否则丢当前容器尾部项。
+///
+/// 保留前缀语义：`{"items":[...]}` 不会整体丢 `items`，而是先缩短数组前缀。
+/// 一次至少丢掉尾部 `len / 8` 项（≥1），保证超长数组在有限步内收敛。
+fn drop_tail_item(value: &mut Value) -> bool {
+    match value {
+        Value::Array(items) => {
+            if let Some(last) = items.last_mut() {
+                if is_container(last) && drop_tail_item(last) {
+                    return true;
+                }
+            }
+            drop_tail_chunk(items)
+        }
+        Value::Object(map) => {
+            let Some(key) = map.keys().next_back().cloned() else {
+                return false;
+            };
+            if let Some(last) = map.get_mut(&key) {
+                if is_container(last) && drop_tail_item(last) {
+                    return true;
+                }
+            }
+            let drop = map.len().div_ceil(8).max(1);
+            if map.len() <= drop {
+                map.clear();
+            } else {
+                let keys: Vec<String> = map.keys().rev().take(drop).cloned().collect();
+                for key in keys {
+                    map.remove(&key);
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 数组尾部按 `len / 8`（≥1）成块丢弃，返回是否仍有内容（`false` = 已空）。
+fn drop_tail_chunk(items: &mut Vec<Value>) -> bool {
+    if items.is_empty() {
+        return false;
+    }
+    let drop = items.len().div_ceil(8).max(1);
+    let keep = items.len().saturating_sub(drop);
+    items.truncate(keep);
+    true
+}
+
+/// 数组/对象是「可继续结构降级」的容器。
+fn is_container(value: &Value) -> bool {
+    matches!(value, Value::Array(_) | Value::Object(_))
+}
+
+/// 为结构降级追加唯一标记（对象插 `_truncated` 键；数组推标记字符串）。
+fn append_structural_marker(value: &mut Value, original_compact: &str) {
+    let current_len = serialized_len(value);
+    let dropped = original_compact.len().saturating_sub(current_len);
+    let marker = Value::String(format!("…[truncated {dropped} bytes]"));
+    match value {
+        Value::Object(map) => {
+            map.insert(TRUNCATED_OBJECT_KEY.to_string(), marker);
+        }
+        Value::Array(items) => items.push(marker),
+        _ => {}
+    }
+}
+
+/// 极端兜底：无法结构降级时返回固定「截断信封」对象（合法 JSON）。
+fn fallback_envelope(original_compact: &str) -> String {
+    let mut map = Map::new();
+    map.insert(
+        TRUNCATED_OBJECT_KEY.to_string(),
+        Value::String(format!("…[truncated {} bytes]", original_compact.len())),
+    );
+    serde_json::to_string(&Value::Object(map))
+        .unwrap_or_else(|_| "{\"_truncated\":\"…[truncated]\"}".to_string())
+}
+
+/// 以字符边界截断文本并附 `…`，返回**严格 ≤ `max_chars`** 个字符（05 §5.8.5）。
 pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let mut out: String = text.chars().take(max_chars).collect();
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out: String = text.chars().take(max_chars - 1).collect();
     out.push('…');
     out
+}
+
+/// 按 UTF-8 字符边界把文本截到 ≤ `max_bytes` 字节（不切码点、不追加标记）。
+fn truncate_text_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let boundary = floor_char_boundary(text, max_bytes);
+    text[..boundary].to_string()
 }
 
 /// 向下取字符边界（不切断 UTF-8 码点）。
@@ -884,7 +1139,7 @@ impl ToolRunner for WorkerToolRunner {
     }
 }
 
-/// 解析 `discover` 的 worker 输出。
+/// 解析 `discover` 的 worker 输出（ISSUE-081 拆分：失败/声明解析见子函数）。
 fn parse_discover_output(output: &Value, tools_dir: &Path) -> Result<Vec<ToolDef>, HarnessError> {
     let Some(object) = output.as_object() else {
         return Err(HarnessError::config_load(
@@ -897,28 +1152,7 @@ fn parse_discover_output(output: &Value, tools_dir: &Path) -> Result<Vec<ToolDef
         ));
     };
     if object.get("ok").and_then(Value::as_bool) != Some(true) {
-        let error = object.get("error").cloned().unwrap_or(Value::Null);
-        let reason = error
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("tool_module_import");
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("tool discover failed")
-            .to_string();
-        let mut actual = error.clone();
-        if let Some(actual) = actual.as_object_mut() {
-            actual.remove("traceback");
-        }
-        return Err(HarnessError::config_load(
-            reason,
-            Some(&tools_dir.display().to_string()),
-            None,
-            None,
-            Some(actual),
-            message,
-        ));
+        return Err(decode_discover_error(object, tools_dir));
     }
     let Some(tools) = object.get("tools").and_then(Value::as_array) else {
         return Err(HarnessError::config_load(
@@ -932,33 +1166,69 @@ fn parse_discover_output(output: &Value, tools_dir: &Path) -> Result<Vec<ToolDef
     };
     let mut defs = Vec::with_capacity(tools.len());
     for (index, tool) in tools.iter().enumerate() {
-        let Some(tool_object) = tool.as_object() else {
-            return Err(HarnessError::config_load(
-                "invalid_declaration",
-                Some(&tools_dir.display().to_string()),
-                Some(&format!("$.tools[{index}]")),
-                Some(Value::from("object")),
-                Some(Value::from(json_type_name(tool))),
-                "tool declaration must be an object".to_string(),
-            ));
-        };
-        let name = require_str(tool_object, "name", index, tools_dir)?;
-        let description = require_str(tool_object, "description", index, tools_dir)?;
-        let source = require_str(tool_object, "source", index, tools_dir)?;
-        let parameters = tool_object
-            .get("parameters")
-            .cloned()
-            .ok_or_else(|| missing_tool_field("parameters", index, tools_dir))?;
-        let timeout_ms = parse_tool_timeout(tool_object, index, tools_dir)?;
-        defs.push(ToolDef {
-            name,
-            description,
-            parameters,
-            timeout_ms,
-            source,
-        });
+        defs.push(parse_tool_declaration(tool, index, tools_dir)?);
     }
     Ok(defs)
+}
+
+/// `discover` 的 `ok=false` 载荷 → `HARNESS_CONFIG_LOAD`（reason/message 透传）。
+fn decode_discover_error(object: &Map<String, Value>, tools_dir: &Path) -> HarnessError {
+    let error = object.get("error").cloned().unwrap_or(Value::Null);
+    let reason = error
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("tool_module_import")
+        .to_string();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("tool discover failed")
+        .to_string();
+    let mut actual = error;
+    if let Some(actual) = actual.as_object_mut() {
+        actual.remove("traceback");
+    }
+    HarnessError::config_load(
+        &reason,
+        Some(&tools_dir.display().to_string()),
+        None,
+        None,
+        Some(actual),
+        message,
+    )
+}
+
+/// 解析单条工具声明（`name`/`description`/`source`/`parameters`/`timeout_ms`）。
+fn parse_tool_declaration(
+    tool: &Value,
+    index: usize,
+    tools_dir: &Path,
+) -> Result<ToolDef, HarnessError> {
+    let Some(tool_object) = tool.as_object() else {
+        return Err(HarnessError::config_load(
+            "invalid_declaration",
+            Some(&tools_dir.display().to_string()),
+            Some(&format!("$.tools[{index}]")),
+            Some(Value::from("object")),
+            Some(Value::from(json_type_name(tool))),
+            "tool declaration must be an object".to_string(),
+        ));
+    };
+    let name = require_str(tool_object, "name", index, tools_dir)?;
+    let description = require_str(tool_object, "description", index, tools_dir)?;
+    let source = require_str(tool_object, "source", index, tools_dir)?;
+    let parameters = tool_object
+        .get("parameters")
+        .cloned()
+        .ok_or_else(|| missing_tool_field("parameters", index, tools_dir))?;
+    let timeout_ms = parse_tool_timeout(tool_object, index, tools_dir)?;
+    Ok(ToolDef {
+        name,
+        description,
+        parameters,
+        timeout_ms,
+        source,
+    })
 }
 
 /// 解析工具声明的可选 `timeout_ms`（1..=600000；缺省 30000）。
@@ -1401,12 +1671,98 @@ mod tests {
 
         let big = json!({"text": "中".repeat(5_000)});
         let content = serialize_tool_result(&big).expect("object big");
-        assert!(content.len() <= TOOL_RESULT_MAX_BYTES + 64);
         assert!(content.len() <= TOOL_RESULT_MAX_BYTES);
-        assert!(content.ends_with(" bytes]"));
-        assert!(content.contains("truncated"));
-        // 字符边界合法。
+        // ISSUE-074：截断后仍是**合法 JSON**（可在对象内部继续取字段）。
+        let parsed: Value = serde_json::from_str(&content).expect("truncated tool result is JSON");
+        let text = parsed["text"].as_str().expect("text remains a string");
+        assert!(text.contains("…[truncated "), "missing marker: {text}");
+        assert!(text.ends_with(" bytes]"), "marker tail: {text}");
+        assert!(
+            text.starts_with("中"),
+            "string value keeps original prefix（字符边界）"
+        );
+        // 字符边界合法（不存在半截码点）。
         assert!(std::str::from_utf8(content.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn oversized_ascii_string_is_truncated_inside_json_to_valid_json() {
+        let big = json!({"text": "x".repeat(20_000)});
+        let content = serialize_tool_result(&big).expect("object");
+        assert!(
+            content.len() <= TOOL_RESULT_MAX_BYTES,
+            "len={}",
+            content.len()
+        );
+        let parsed: Value = serde_json::from_str(&content).expect("valid JSON");
+        let text = parsed["text"].as_str().expect("text");
+        assert!(text.starts_with("xxxx"), "kept prefix");
+        assert!(text.ends_with(" bytes]"));
+        assert!(text.contains("…[truncated "));
+        // 标记前是纯前缀，未混入对象语法残片。
+        let marker_at = text.find("…[truncated ").expect("marker");
+        assert!(text[..marker_at].chars().all(|ch| ch == 'x'));
+    }
+
+    #[test]
+    fn oversized_utf8_string_truncation_respects_char_boundary() {
+        // 每个汉字 3 字节；保证截断点落在码点边界。
+        let big = json!({"text": "汉".repeat(8_000)});
+        let content = serialize_tool_result(&big).expect("object");
+        assert!(content.len() <= TOOL_RESULT_MAX_BYTES);
+        let parsed: Value = serde_json::from_str(&content).expect("valid JSON");
+        let text = parsed["text"].as_str().expect("text");
+        let marker_at = text.find("…[truncated ").expect("marker");
+        assert!(
+            text[..marker_at].chars().all(|ch| ch == '汉'),
+            "prefix must be whole code points"
+        );
+    }
+
+    #[test]
+    fn oversized_object_degrades_to_valid_json_with_marker() {
+        // 大量小属性：无法靠字符串吸收 → 结构降级（保留前缀 + `_truncated` 标记）。
+        let mut map = serde_json::Map::new();
+        for index in 0..2_000 {
+            map.insert(format!("k{index:04}"), json!(index));
+        }
+        let big = Value::Object(map);
+        let content = serialize_tool_result(&big).expect("object");
+        assert!(
+            content.len() <= TOOL_RESULT_MAX_BYTES,
+            "len={}",
+            content.len()
+        );
+        let parsed: Value = serde_json::from_str(&content).expect("valid JSON");
+        let object = parsed.as_object().expect("object");
+        assert!(
+            object.contains_key("_truncated"),
+            "structural degrade must mark truncation"
+        );
+        assert!(
+            object
+                .get("_truncated")
+                .and_then(Value::as_str)
+                .is_some_and(|marker| marker.ends_with(" bytes]")),
+            "marker shape"
+        );
+        // 前缀属性保留（第一个 key 仍在）。
+        assert!(object.contains_key("k0000"));
+    }
+
+    #[test]
+    fn oversized_nested_array_degrades_to_valid_json() {
+        let items: Vec<Value> = (0..5_000).map(Value::from).collect();
+        let big = json!({"items": items, "tail": {"kept": true}});
+        let content = serialize_tool_result(&big).expect("object");
+        assert!(
+            content.len() <= TOOL_RESULT_MAX_BYTES,
+            "len={}",
+            content.len()
+        );
+        let parsed: Value = serde_json::from_str(&content).expect("valid JSON");
+        assert!(parsed.is_object(), "top-level stays an object");
+        assert!(parsed.get("_truncated").is_some() || parsed.get("items").is_some());
     }
 
     #[test]
@@ -1415,7 +1771,13 @@ mod tests {
         let summary = summarize_args(&args);
         assert_eq!(summary["keys"], json!(["secret_token"]));
         assert_eq!(summary["bytes"], args.to_string().len());
-        assert!(summary["preview"].as_str().unwrap().len() <= MAX_SUMMARY_PREVIEW_CHARS + 4);
+        // ISSUE-074：preview 严格 ≤ MAX_SUMMARY_PREVIEW_CHARS 个字符（含 `…`）。
+        let preview = summary["preview"].as_str().expect("preview");
+        assert!(preview.chars().count() <= MAX_SUMMARY_PREVIEW_CHARS);
+        let long = summarize_result(&format!("{{\"a\":\"{}\"}}", "x".repeat(2_000)), true);
+        assert!(
+            long["preview"].as_str().expect("preview").chars().count() <= MAX_SUMMARY_PREVIEW_CHARS
+        );
 
         let ok_summary = summarize_result("{\"a\":1,\"b\":2}", true);
         assert_eq!(ok_summary["ok"], true);
@@ -1429,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_error_content_respects_byte_limit() {
+    fn tool_error_content_respects_byte_limit_and_stays_valid_json() {
         let failure = ToolFailure {
             reason: "exception".to_string(),
             message: "m".repeat(20_000),
@@ -1438,7 +1800,53 @@ mod tests {
             timeout_ms: None,
         };
         let content = tool_error_content(&failure);
-        assert!(content.len() <= TOOL_RESULT_MAX_BYTES);
+        assert!(
+            content.len() <= TOOL_RESULT_MAX_BYTES,
+            "len={}",
+            content.len()
+        );
+        // ISSUE-074：喂回 LLM 的错误 JSON 必须可解析。
+        let parsed: Value = serde_json::from_str(&content).expect("error content is JSON");
+        assert_eq!(parsed["error"]["reason"], json!("exception"));
+        assert_eq!(parsed["error"]["type"], json!("ValueError"));
+        // 超长 message/traceback 在字符串内截断（带标记）。
+        let message = parsed["error"]["message"].as_str().expect("message");
+        assert!(message.starts_with('m'));
+        assert!(
+            message.contains("…[truncated "),
+            "message marker: {}",
+            &message[..40]
+        );
+    }
+
+    #[test]
+    fn long_traceback_is_capped_at_eight_kib_in_tool_failure_json() {
+        let failure = ToolFailure {
+            reason: "exception".to_string(),
+            message: "boom".to_string(),
+            error_type: Some("RuntimeError".to_string()),
+            traceback: Some("汉".repeat(20_000)),
+            timeout_ms: None,
+        };
+        let json_value = failure.to_json();
+        let traceback = json_value["traceback"].as_str().expect("traceback");
+        assert!(
+            traceback.len() <= TOOL_RESULT_MAX_BYTES,
+            "traceback {} bytes > 8 KiB",
+            traceback.len()
+        );
+        // 字符边界：不切断 UTF-8 码点。
+        assert!(traceback.chars().all(|ch| ch == '汉'));
+    }
+
+    #[test]
+    fn truncate_chars_is_strict_upper_bound() {
+        let text = "中".repeat(100);
+        let summary = truncate_chars(&text, 10);
+        assert_eq!(summary.chars().count(), 10);
+        assert!(summary.ends_with('…'));
+        assert_eq!(truncate_chars(&text, 0), String::new());
+        assert_eq!(truncate_chars("短", 10), "短");
     }
 
     #[tokio::test]
