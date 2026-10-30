@@ -10,15 +10,17 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：M3 worker 完成
+## 当前状态：M4 Agent Harness 完成
 
-**已完成 M0–M3**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
-图内核与事件循环、trace/SQLite（L1 回放）、**worker supervisor + `WorkerExecutor`**（进程组 kill、
-取消升级、帧超时、并发上限）、`python/workers` 示例、spec v1.2 的 M0–M2 回写、
-`tests/e2e/**` 真子进程验收（AC-06/07/09/10 + 故障注入）；本地双栈测试全绿（`cargo test --workspace` / `pytest`），CI 已配置（`.github/workflows/ci.yml`）。
+**已完成 M0–M4**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
+图内核与事件循环、trace/SQLite（L1 回放）、worker supervisor + `WorkerExecutor`（进程组 kill/取消升级/帧超时/并发上限）、
+**Agent Harness**（`agent_call`：`genai 0.7.2` LLM 流式 + Fake provider、tool loop（每次调用一个 Python worker 子进程）、
+上下文预算/裁剪、错误映射、`HarnessExecutor`）、`python/workers` 与 `python/zgraph_worker.tool_runner`、
+spec v1.2 M0–M4 回写（05/00/04/07，REV-023）；AC-08 fake 真链路验收（`tests/e2e/harness_ac08.rs`）+ AC-06/07/09/10 真子进程验收；
+本地双栈测试全绿（`cargo test --workspace` 423 passed / pytest 84 passed）。CI 已配置（`.github/workflows/ci.yml`）。
 
-**尚未实现（M4–M5）**：Agent Harness（LLM 流式/tool/预算）、CLI `run`/`replay`、多 run 隔离（AC-12）、
-legacy 退役决策；M3 遗留项见 [`doc/issues.md`](doc/issues.md)（ISSUE-061 P2 / ISSUE-063 P3 / ISSUE-066 P2 等）。
+**尚未实现（M5）**：CLI `run`/`replay`（含 `--fake-llm`/`--real` 与 L2 记录接线）、L2 结果重放、多 run 隔离（AC-12）、
+legacy 退役决策；遗留项见 [`doc/issues.md`](doc/issues.md)（ISSUE-061/066/074/076/082 等 P2）。
 
 ## 快速开始
 
@@ -43,13 +45,13 @@ uv run pytest -q
 | `crates/zgraph-dsl/` | DSL 类型、loader、R1–R14、graph_hash（M1） |
 | `crates/zgraph-kernel/` | 状态机、事件循环、Delivery、门控、run 生命周期（M2） |
 | `crates/zgraph-trace/` | TraceEvent、SQLite、回放（M2） |
-| `crates/zgraph-worker/` | worker 协议、supervisor（进程组/取消/帧超时）、`WorkerExecutor`（M3） |
-| `crates/zgraph-harness/` | Agent Harness（M4） |
+| `crates/zgraph-worker/` | worker 协议、supervisor（进程组/取消/帧超时）、`WorkerExecutor`（M3）；M4 `WorkerFailure::Worker` 装箱 |
+| `crates/zgraph-harness/` | Agent Harness（M4）：AgentConfig/预算/LLM(fake+genai 0.7.2)/tool loop/`HarnessExecutor` |
 | `crates/zgraph-cli/` | `zgraph` 命令（M1：`validate`；M2：`trace`；`run`/`replay` 见 M5） |
-| `python/zgraph_worker/` | worker SDK：握手、ctx、运行时 |
+| `python/zgraph_worker/` | worker SDK：握手、ctx、运行时；M4 `tool_runner`（discover/call） |
 | `python/workers/` | 示例 worker：echo/slow/parallel/cycle/software_team（M3） |
 | `schemas/` | worker 协议 v1（M0 冻结，M3 检查单闭环）；DSL JSON Schema 未实现（ISSUE-029） |
-| `tests/e2e/` | 真子进程验收：AC-06/07/09/10 + 故障注入 + 并发上限（M3） |
+| `tests/e2e/` | 真链路验收：AC-06/07/09/10 + 故障注入 + 并发（M3）；AC-08 fake LLM/tool/流式（M4） |
 | `tests/fixtures/` | 图与 worker fixture |
 | `doc/` | 决策/架构/规格/评审/进度/台账 |
 | `legacy/` | 旧 Python 实现（冻结只读，见 `legacy/README.md`） |

@@ -40,7 +40,7 @@
    - 本次改动后按 `shasum -a 256 0*.md` / `wc -l 0*.md` 重新实测并更新 §3（合计 **5530 行**）与 README 行数表。
 6. **后续修订规则**：任何对 spec 的修改**必须**同步本文件 §3 的 SHA-256/行数、在 §2 追加修订记录（日期 + 范围 + 关联 ISSUE/REV），并在评审记录中引用。
 7. **M4 Harness 回写批次**（2026-10-30，ISSUE-067/070；分支 `docs/docs-m4-spec-writeback`，评审 REV-023，提交见该分支 git log）：
-   - **对应已合并代码**：kernel `ce491de`（`TOOL_ERROR` 统一 + `HarnessErrorKind::ContextOverflow` 第 8 值，REV-018）；py-worker `e099927` + `c463a49`（`zgraph_worker/tool_runner.py` discover/call + 可选 `timeout_ms`，REV-019）；worker `94e1f8a`（`WorkerFailure::Worker` 装箱消除 genai `preserve_order` 引发的 clippy 回归，REV-021）；harness `4781dd7` + `344b73d`（M4 Harness 主体 + C2 工具可见性，REV-020）；e2e `fda996c`（`tests/e2e/harness_ac08.rs` + `tests/fixtures/graphs/harness_ac08/`，AC-08a fake 必过/AC-08b 手动，REV-022）。本批次最终 base = `origin/main` `fda996c`。
+   - **对应已合并代码**：kernel `ce491de`（`TOOL_ERROR` 统一 + `HarnessErrorKind::ContextOverflow` 第 8 值，REV-018）；py-worker `e099927` + `c463a49`（`zgraph_worker/tool_runner.py` discover/call + 可选 `timeout_ms`，REV-019）；worker `94e1f8a`（`WorkerFailure::Worker` 装箱消除 genai `preserve_order` 引发的 clippy 回归，REV-021）；harness `4781dd7` + `344b73d`（M4 Harness 主体 + C2 工具可见性，REV-020）；e2e `fda996c`（`tests/e2e/harness_ac08.rs` + `tests/fixtures/graphs/harness_ac08/`，AC-08a fake 必过/AC-08b 手动，REV-022）。本批次评审时 base = `origin/main` `fda996c`；合并时 rebase 至 `12ab2f6`（REV-023 评审记录提交）。
    - **05**（Harness）：顶部 banner/状态改为「M4 已实现」并指向新增 §5.13；§5.1.1 H4 改「Python 调用一律在 worker 子进程；Harness 不在事件循环线程阻塞」；§5.1.2 组件分解改实际模块（`crates/zgraph-harness/src/*` + `python/zgraph_worker/tool_runner.py`）；§5.2.1 加载执行者改为 Harness 在 `agent_call` 实例执行时加载、fake 模式跳过 `api_key_env`；§5.3.1 trait 无 tokio `CancellationToken`、自有 `CancelToken`（轮询包装）+ `HarnessCtx` seam（D14/D15）；§5.3.2 辅助类型同步；§5.3.3 改 **genai 0.7.2 实测映射**（`exec_chat_stream` / `ChatStreamEvent` / `capture_*` / `webc::Error`）；§5.3.4 fake provider 落地说明；§5.3.5 重试编排位置改为 **Harness**（D16）；§5.3.6/§5.3.7 超时与取消改轮询/杀进程组；§5.5.1 重试位置、§5.5.3 空响应裁定（D17）、§5.5.4 执行循环伪代码改 v2、§5.5.5 措辞；§5.6 全面改为 **worker 子进程工具协议**（`discover`/`call` payload、失败 reason 封闭表、超时 = kill 进程组、无 import 缓存、全局工具信号量并发、8 KiB 截断、`AgentConfig.tools` 解析）；§5.7 `TOOL_ERROR` 唯一性 + `result_summary: Option<Value>`；§5.8 1:1 emit 实况；§5.9 `HarnessExecutor` 映射；§5.11 常量已补录与差异闭合状态；新增 **§5.13 M4 v2 落地偏差记录（D13–D21）**（工具子进程/取消轮询/HarnessCtx/重试编排+超时兜底/空响应裁定/ContextOverflow 第 8 值/`name()` 实况/input_mapping 优先级/genai `preserve_order` 依赖副作用）与 **§5.13.3 已知限制与 ISSUE-073..082**。
    - **00**：§0.3 `HarnessErrorKind` **7→8 值**（追加 `ContextOverflow`，M4/方案 A，见 05 §5.13 D18）；§0.3 `StreamingEvent::ToolCallEnd.result_summary` 改为 `Option<Value>`（nullable）；§0.4 增 `TOOL_ERROR` 唯一性注记（禁止 `HARNESS_TOOL_ERROR`，ISSUE-070）并标注 `HARNESS_CONTEXT_OVERFLOW` 映射；§0.5 增 05 §5.11.1 七常量核对注记（均已收录且数值一致）；banner 增 M4 批次说明。
    - **04**：§4.2.1 `NodeContext` 代码块补 `seed: u64`、字段来源改为 **`RunSpec.options.seed`**；§4.2.2 方法表补 `global_vars()` / `seed()`；新增 **§4.3.7 L3 幂等与外部副作用声明契约**（ISSUE-022/067）。
@@ -64,7 +64,7 @@
 | `07-验收用例.md` | 0cb84c40df0f9bcc45596ee40c3c89b3ce779fd5aa4a702b492084824b111e3d | 213 |
 | `08-审计关闭矩阵.md` | 317bc008d05bd59ce0c8f25a8991543b41a4c2b06d6205bb7263317021c2d524 | 412 |
 
-> 00–08 合计 **5818 行**（`wc -l` 口径；2026-10-30 M4 回写批次后实测，base `origin/main` `fda996c`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+> 00–08 合计 **5818 行**（`wc -l` 口径；2026-10-30 M4 回写批次后实测，评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
 
 ## 4. 核验方式
 

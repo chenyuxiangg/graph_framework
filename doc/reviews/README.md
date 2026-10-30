@@ -21,6 +21,14 @@
 | [REV-014](REV-014-docs-m3-spec-writeback.md) | 2026-10-30 | docs | `feat/docs-m3-spec-writeback` | 通过（C1–C4 / R1–R5 关闭） | reviewer-b |
 | [REV-015](REV-015-e2e-m3-acceptance.md) | 2026-10-30 | e2e | `test/e2e-m3-acceptance` | 通过（复审通过，C1 关闭；process 第二评审 reviewer-b） | reviewer-a |
 | [REV-016](REV-016-docs-m3-wrapup.md) | 2026-10-30 | docs/process | `docs/docs-m3-wrapup` | 通过 | reviewer-b |
+| [REV-017](REV-017-process-m4-deps.md) | 2026-10-30 | process | `chore/process-m4-deps` | 通过 | reviewer-b |
+| [REV-018](REV-018-kernel-m4-tool-error-code.md) | 2026-10-30 | kernel | `fix/kernel-m4-tool-error-code` | 通过（增量复审通过：`TOOL_ERROR` + `ContextOverflow` 第 8 值） | reviewer-b |
+| [REV-019](REV-019-py-worker-m4-tool-runner.md) | 2026-10-30 | py-worker | `feat/py-worker-m4-tool-runner` | 通过（增量复审通过：可选 `timeout_ms`） | reviewer-b |
+| [REV-020](REV-020-harness-m4-agent-loop.md) | 2026-10-30 | harness | `feat/harness-m4-agent-loop` | 通过（修订：原「有条件通过」，C1/C2 关闭后转通过） | reviewer-b |
+| [REV-021](REV-021-worker-m4-large-err-lint.md) | 2026-10-30 | worker | `fix/worker-m4-large-err-lint` | 通过 | reviewer-b |
+| [REV-022](REV-022-e2e-m4-ac08.md) | 2026-10-30 | e2e | `test/e2e-m4-ac08` | 通过 | reviewer-b |
+| [REV-023](REV-023-docs-m4-spec-writeback.md) | 2026-10-30 | docs | `docs/docs-m4-spec-writeback` | 通过 | reviewer-b |
+| [REV-024](REV-024-docs-m4-wrapup.md) | 2026-10-30 | docs/process | `docs/docs-m4-wrapup` | 通过 | reviewer-b |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
@@ -28,3 +36,4 @@
 - `有条件通过` 必须在对应评审记录追加条件关闭记录后再合并。
 - 评审记录不得删除；结论变更用追加「修订」段。
 - REV-012（worker 分支含 kernel 访问器与 Cargo.lock）与 REV-015（e2e 分支含根 Cargo.toml/Cargo.lock）属 Lead 批准的跨模块改动，均由 reviewer-b 追加第二评审小节。
+- M4：REV-017（process 依赖）、REV-018（kernel 错误码/ContextOverflow）、REV-021（worker 装箱）由 Lead 提交、reviewer-b 评审；REV-020/022/023 分别由 harness-dev/e2e-dev/docs-writer 提交、reviewer-b 评审；REV-024 由 Lead 提交、reviewer-b 评审。REV-020/022 含 Cargo.lock 跨模块变更，已在评审记录中声明。
