@@ -31,14 +31,24 @@
 //! - `--db :memory:`：接受并打 stderr 警告（跨进程不可读，06 §6.9.1）；run 结果直接
 //!   来自内核 outcome（`event_count` 记 0），不打开只读 reader。
 //! - 所有 panic 由 CLI 顶层 `catch_unwind` 捕获并返回退出码 70（见 `crate::run_with`）。
+//!
+//! # human 生命周期（ISSUE-085 / 06 §6.10.3）
+//!
+//! 组合根订阅 [`bridge::LifecycleObserver`] 的内存事件旁路：run **运行中**逐行把
+//! `[seq N] Kind ...` 写到 stderr，不再等 run 结束回读 trace。`--json` 不订阅
+//! （stdout 契约不变）、`-q/--quiet` 不订阅（stderr 保持静默）、`:memory:` 同样走
+//! 旁路；`--stream` 仍负责 `TokenDelta`/`ReasoningDelta` 的原始文本。
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use serde_json::{json, Map, Value};
@@ -54,12 +64,14 @@ use zgraph_kernel::{
     CODE_RUN_ENTRY_INVALID,
 };
 use zgraph_trace::{
-    EventQuery, LlmCallRecord, RecordMode, RecordedOutput, TraceError, TraceHandle, TraceInput,
-    TraceReader, TraceWriter,
+    LlmCallRecord, RecordMode, RecordedOutput, TraceError, TraceHandle, TraceInput, TraceReader,
+    TraceWriter,
 };
 use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
-use crate::bridge::{self, BridgeError, StreamingObserver, TracedRun};
+use crate::bridge::{
+    self, BridgeError, BridgeObservers, LifecycleObserver, StreamingObserver, TracedRun,
+};
 use crate::recovery;
 use crate::trace_cmd::resolve_db_path;
 use crate::{
@@ -776,7 +788,18 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         &trace_handle,
         recorder,
     );
-    let observer = args.stream.then(stream_observer);
+    // human 模式（非 --json、非 -q）订阅 bridge 内存事件旁路，实时输出生命周期行
+    // （ISSUE-085 / 06 §6.10.3）；`--json` 的 stdout 契约与 `-q` 抑制行为不变。
+    let (mut lifecycle, lifecycle_observer) = if args.json || args.quiet {
+        (None, None)
+    } else {
+        let (printer, observer) = LifecyclePrinter::new();
+        (Some(printer), Some(observer))
+    };
+    let observers = BridgeObservers {
+        streaming: args.stream.then(stream_observer),
+        lifecycle: lifecycle_observer,
+    };
     let spec = RunSpec {
         graph: Arc::clone(&graph),
         entry_inputs,
@@ -788,7 +811,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         writer,
         spec,
         executor,
-        observer,
+        observers,
         run_id.clone(),
     ) {
         Ok(traced) => traced,
@@ -800,10 +823,19 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
             "run {run_id} created (graph={} hash={})",
             graph.metadata.name, graph.graph_hash
         );
+        // 启动期产生的事件（RunStarted 等）已排队；`created` 之后再起打印线程，
+        // 行顺序与 06 §6.10.3 示例一致。
+        if let Some(printer) = lifecycle.as_mut() {
+            printer.start_printing();
+        }
     }
     let started = Instant::now();
     let outcome = wait_for_run(traced, memory_db).await;
     let duration_ms = duration_millis(started);
+    // 先收尾实时行，再输出 run 结果/摘要（stderr 行序稳定、且结果行必然最后出现）。
+    if let Some(printer) = lifecycle.take() {
+        printer.finish();
+    }
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(code) => return code,
@@ -975,11 +1007,7 @@ fn finish(
             json_payload(&outcome, event_count, duration_ms, db_path, recovered)
         );
     } else {
-        if !args.quiet {
-            if let Some(reader) = &reader {
-                print_lifecycle(reader, &run_id);
-            }
-        }
+        // 生命周期行已由实时旁路在 run 期间写到 stderr（ISSUE-085）；这里只输出结果。
         println!("{}", run_output_text(&outcome));
         if !args.quiet {
             eprintln!(
@@ -1103,99 +1131,139 @@ fn summary_line(outcome: &RunOutcome, duration_ms: u64, event_count: i64, exit_c
     )
 }
 
-/// human 模式逐事件生命周期行（06 §6.10.3 `[seq N] Kind ...`）。
+// ---------------------------------------------------------------------------
+// 实时生命周期输出（ISSUE-085 / 06 §6.10.3）
+// ---------------------------------------------------------------------------
+
+/// human 模式实时生命周期输出器（ISSUE-085）：bridge 内存事件旁路 → mpsc → 打印线程。
 ///
-/// 事件在 run 结束、写端 flush/close 之后从只读 reader 回读，因此**不是**实时进度；
-/// 实时通道是 `--stream`（`TokenDelta`/`ReasoningDelta` 即时写 stderr）。行格式稳定，
-/// 便于脚本/测试断言。
-fn print_lifecycle(reader: &TraceReader, run_id: &str) {
-    let events = match reader.events(run_id, &EventQuery::default()) {
-        Ok(events) => events,
-        Err(error) => {
-            eprintln!("error[{}]: {error}", error.code());
+/// 生命周期行原本在 run 结束、写端 close 后从 trace 回读（非实时）；现在改为组合根
+/// 订阅 bridge 旁路，运行中逐行输出。时序约定：
+///
+/// 1. [`LifecyclePrinter::new`] 在 run **启动前**建通道（`RunStarted` 可能在
+///    `start_run` 内同步产生）；
+/// 2. 启动成功、打印 `run ... created` 行之后调用
+///    [`LifecyclePrinter::start_printing`]——启动期事件先排队，行顺序仍是
+///    「created → 生命周期事件」；
+/// 3. run 结束调用 [`LifecyclePrinter::finish`]：停止哨兵 + join，保证结果行与摘要行
+///    之前生命周期行已全部写到 stderr。
+///
+/// `[seq N]` 是 **CLI 侧**生命周期序号（1 起，只对产生 `events` 行的事件递增）；
+/// 单 run 新库时与 trace `events.seq` 一致，含 `Streaming` 增量的 run 因不逐块成行
+/// 而会小于 trace 的聚合段编号（`--stream` 负责原始文本）。
+struct LifecyclePrinter {
+    sender: mpsc::Sender<Option<String>>,
+    receiver: Option<mpsc::Receiver<Option<String>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LifecyclePrinter {
+    /// 建通道并返回（输出器, 旁路观察者）；观察者只格式化 + 入队，不阻塞内核。
+    fn new() -> (Self, LifecycleObserver) {
+        let (sender, receiver) = mpsc::channel::<Option<String>>();
+        let observer_sender = sender.clone();
+        let seq = Arc::new(AtomicU64::new(1));
+        let observer: LifecycleObserver = Arc::new(move |input| {
+            let Some(detail) = lifecycle_detail(input) else {
+                return;
+            };
+            let seq = seq.fetch_add(1, Ordering::Relaxed);
+            // 打印线程未启动/已结束（或 run 启动失败）时丢弃行，不影响 run 语义。
+            let _ = observer_sender.send(Some(format!("[seq {seq}] {detail}")));
+        });
+        (
+            Self {
+                sender,
+                receiver: Some(receiver),
+                thread: None,
+            },
+            observer,
+        )
+    }
+
+    /// `created` 行之后启动打印线程：先补打已入队的启动期事件，再实时跟随。
+    fn start_printing(&mut self) {
+        let Some(receiver) = self.receiver.take() else {
             return;
+        };
+        self.thread = Some(std::thread::spawn(move || {
+            // `None` 是结束哨兵；通道断开同样退出。
+            let mut stderr = std::io::stderr();
+            while let Ok(Some(line)) = receiver.recv() {
+                // 写失败（例如 stderr 管道被对端关闭）时静默结束，不影响 run 结果。
+                if writeln!(stderr, "{line}").is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// 收尾：发送停止哨兵并 join 打印线程（保证结果/摘要行之前生命周期行已写出）。
+    fn finish(mut self) {
+        let _ = self.sender.send(None);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-    };
-    for event in &events {
-        eprintln!("{}", lifecycle_line(event));
     }
 }
 
-/// 单条事件 → 一行 stderr 文本（kind 与关键 payload 字段）。
-fn lifecycle_line(event: &zgraph_trace::EventRow) -> String {
-    let node = event.node_id.as_deref().unwrap_or("-");
-    let detail = match event.kind.as_str() {
-        "RunStarted" => format!(
-            "status={}",
-            field_str(&event.payload, "status").unwrap_or("-")
-        ),
-        "Transition" => transition_detail(&event.payload, node),
-        "GateResult" => gate_detail(&event.payload, node),
-        "NodeTimedOut" => format!(
-            "{node} elapsed_ms={}",
-            field_i64(&event.payload, "elapsed_ms")
-        ),
-        "NodeAbandoned" => node.to_string(),
-        "Streaming" => streaming_detail(&event.payload, node),
-        "RunFinished" => format!(
-            "status={}",
-            field_str(&event.payload, "status").unwrap_or("-")
-        ),
-        other => format!("{other} {node}"),
-    };
-    format!("[seq {}] {} {detail}", event.seq, event.kind)
-}
-
-/// `Transition` payload 在 `{"record": {...}}` 内（06 §6.2.12）。
-fn transition_detail(payload: &Value, node: &str) -> String {
-    let record = payload.get("record").unwrap_or(payload);
-    let from = field_str(record, "from").unwrap_or("-");
-    let to = field_str(record, "to").unwrap_or("-");
-    let reason = field_str(record, "reason").unwrap_or("-");
-    format!("{node} {from} -> {to} ({reason})")
-}
-
-/// `GateResult` payload 在 `{"record": {...}}` 内。
-fn gate_detail(payload: &Value, node: &str) -> String {
-    let record = payload.get("record").unwrap_or(payload);
-    let edge = field_i64(record, "edge_index");
-    let passed = record
-        .get("passed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let gate = field_str(record, "gate_fn").unwrap_or("-");
-    format!("{node} edge#{edge} gate={gate} passed={passed}")
-}
-
-/// `Streaming` 事件：`{variant, segment_index, ...}`。
-fn streaming_detail(payload: &Value, node: &str) -> String {
-    let variant = field_str(payload, "variant").unwrap_or("streaming");
-    let segment = field_i64(payload, "segment_index");
-    match variant {
-        "token" | "reasoning" => format!(
-            "{node} {variant}[{segment}] chars={}",
-            field_i64(payload, "chars")
-        ),
-        "tool_call_start" | "tool_call_end" => format!(
-            "{node} {variant} {}",
-            field_str(payload, "tool_name").unwrap_or("-")
-        ),
-        _ => format!(
-            "{node} progress {}% ({})",
-            field_i64(payload, "percent"),
-            field_str(payload, "message").unwrap_or("-")
-        ),
+/// 旁路事件 → 生命周期行正文（不含 `[seq N]`）；不产生 `events` 行的输入返回 `None`。
+///
+/// 覆盖 06 §6.10.3 示例的控制面事件。`Streaming` 的 token/reasoning **增量**不逐块
+/// 成行（原始文本由 `--stream` 实时写 stderr；trace 侧聚合段依赖写线程 100ms/
+/// 4096 字符聚合，旁路无法在段边界前还原），其余 Streaming 变体（progress/
+/// tool_call_start/tool_call_end）照常实时成行。
+fn lifecycle_detail(input: &TraceInput) -> Option<String> {
+    match input {
+        TraceInput::RunStarted(info) => {
+            Some(format!("RunStarted status=Running user={}", info.user_id))
+        }
+        TraceInput::Transition { record, .. } => Some(format!(
+            "Transition {} {} -> {} ({})",
+            record.node_id,
+            record.from.as_str(),
+            record.to.as_str(),
+            record.reason.as_deref().unwrap_or("-")
+        )),
+        TraceInput::GateResult(record) => Some(format!(
+            "GateResult {} edge#{} gate={} passed={}",
+            record.node_id,
+            record.edge_index,
+            record.gate_fn.as_deref().unwrap_or("-"),
+            record.passed
+        )),
+        TraceInput::NodeTimedOut { elapsed_ms, .. } => {
+            Some(format!("NodeTimedOut - elapsed_ms={elapsed_ms}"))
+        }
+        TraceInput::NodeAbandoned { .. } => Some("NodeAbandoned -".to_string()),
+        TraceInput::Streaming { node_id, event, .. } => {
+            streaming_lifecycle_detail(node_id.as_deref().unwrap_or("-"), event)
+        }
+        TraceInput::RunFinished(info) => {
+            Some(format!("RunFinished status={}", info.status.as_str()))
+        }
+        // 快照 / L2 记录 / llm_calls 都不是 `events` 行，不属于生命周期输出。
+        TraceInput::InstanceSnapshot(_)
+        | TraceInput::RecordedOutput(_)
+        | TraceInput::LlmCall(_) => None,
     }
 }
 
-/// 取 JSON 字符串字段。
-fn field_str<'a>(value: &'a Value, name: &str) -> Option<&'a str> {
-    value.get(name).and_then(Value::as_str)
-}
-
-/// 取 JSON 整数字段（缺省 0）。
-fn field_i64(value: &Value, name: &str) -> i64 {
-    value.get(name).and_then(Value::as_i64).unwrap_or(0)
+/// `Streaming` 旁路 → 生命周期行（token/reasoning 增量不逐块打印，见 [`lifecycle_detail`]）。
+fn streaming_lifecycle_detail(node: &str, event: &zgraph_trace::StreamingEvent) -> Option<String> {
+    match event {
+        zgraph_trace::StreamingEvent::TokenDelta { .. }
+        | zgraph_trace::StreamingEvent::ReasoningDelta { .. } => None,
+        zgraph_trace::StreamingEvent::ToolCallStart { tool_name, .. } => {
+            Some(format!("Streaming {node} tool_call_start {tool_name}"))
+        }
+        zgraph_trace::StreamingEvent::ToolCallEnd { tool_name, ok, .. } => Some(format!(
+            "Streaming {node} tool_call_end {tool_name} ok={ok}"
+        )),
+        zgraph_trace::StreamingEvent::Progress { percent, message } => {
+            Some(format!("Streaming {node} progress {percent}% ({message})"))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1660,6 +1728,117 @@ mod tests {
         let python_graph = compiled_graph(&python_graph_text());
         let python_node = python_graph.nodes.get("work").expect("python node");
         assert_eq!(routing.timeout_hint(python_node), None);
+    }
+
+    #[test]
+    fn lifecycle_detail_covers_realtime_events() {
+        // ISSUE-085：旁路事件 → 实时生命周期行；非 events 输入与流式增量不产生行。
+        use super::lifecycle_detail;
+        use zgraph_trace::{
+            GateResultRecord, RunFinishedInfo, RunStartedInfo, StreamingEvent, TraceInput,
+        };
+
+        let started = TraceInput::RunStarted(RunStartedInfo {
+            run_id: "r1".to_string(),
+            graph_hash: "0123456789abcdef".to_string(),
+            graph_name: "demo".to_string(),
+            dsl_json: "{}".to_string(),
+            user_id: "local".to_string(),
+            entry_inputs: json!({}),
+            seed: 7,
+            record_mode: RecordMode::Hash,
+            owner_pid: 1,
+            owner_host: "test-host".to_string(),
+            started_at: "2026-10-28T09:12:03.104Z".to_string(),
+        });
+        assert_eq!(
+            lifecycle_detail(&started).as_deref(),
+            Some("RunStarted status=Running user=local")
+        );
+
+        let gate = TraceInput::GateResult(GateResultRecord {
+            run_id: "r1".to_string(),
+            instance_id: "i1".to_string(),
+            node_id: "work".to_string(),
+            edge_index: 2,
+            to_node: "end".to_string(),
+            to_port: "r".to_string(),
+            gate_fn: Some("gates.ok".to_string()),
+            passed: false,
+            error: None,
+            ts: "2026-10-28T09:12:03.104Z".to_string(),
+        });
+        assert_eq!(
+            lifecycle_detail(&gate).as_deref(),
+            Some("GateResult work edge#2 gate=gates.ok passed=false")
+        );
+
+        let timed_out = TraceInput::NodeTimedOut {
+            run_id: "r1".to_string(),
+            instance_id: "i1".to_string(),
+            elapsed_ms: 1500,
+            at: "2026-10-28T09:12:03.104Z".to_string(),
+        };
+        assert_eq!(
+            lifecycle_detail(&timed_out).as_deref(),
+            Some("NodeTimedOut - elapsed_ms=1500")
+        );
+
+        // Streaming：progress/tool_call 实时成行；token/reasoning 增量由 `--stream` 负责。
+        let progress = TraceInput::Streaming {
+            run_id: "r1".to_string(),
+            instance_id: "i1".to_string(),
+            node_id: Some("work".to_string()),
+            event: StreamingEvent::Progress {
+                percent: 42,
+                message: "calling".to_string(),
+            },
+            at: "2026-10-28T09:12:03.104Z".to_string(),
+        };
+        assert_eq!(
+            lifecycle_detail(&progress).as_deref(),
+            Some("Streaming work progress 42% (calling)")
+        );
+
+        let tool_start = TraceInput::Streaming {
+            run_id: "r1".to_string(),
+            instance_id: "i1".to_string(),
+            node_id: Some("work".to_string()),
+            event: StreamingEvent::ToolCallStart {
+                call_id: "c1".to_string(),
+                tool_name: "now".to_string(),
+                args_summary: json!({}),
+            },
+            at: "2026-10-28T09:12:03.104Z".to_string(),
+        };
+        assert_eq!(
+            lifecycle_detail(&tool_start).as_deref(),
+            Some("Streaming work tool_call_start now")
+        );
+
+        let token = TraceInput::Streaming {
+            run_id: "r1".to_string(),
+            instance_id: "i1".to_string(),
+            node_id: Some("work".to_string()),
+            event: StreamingEvent::TokenDelta {
+                text: "he".to_string(),
+            },
+            at: "2026-10-28T09:12:03.104Z".to_string(),
+        };
+        assert_eq!(lifecycle_detail(&token), None, "token 增量不逐块成行");
+
+        let finished = TraceInput::RunFinished(RunFinishedInfo {
+            run_id: "r1".to_string(),
+            status: zgraph_trace::RunStatus::Cancelled,
+            output_summary: None,
+            error: None,
+            metrics: zgraph_trace::RunMetrics::default(),
+            at: "2026-10-28T09:12:04.104Z".to_string(),
+        });
+        assert_eq!(
+            lifecycle_detail(&finished).as_deref(),
+            Some("RunFinished status=Cancelled")
+        );
     }
 
     #[test]

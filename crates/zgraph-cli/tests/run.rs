@@ -7,7 +7,7 @@
 //! 轮询/宽松上限；真实 worker 用例通过 `--python-path <repo>/python` 注入 SDK 路径，
 //! 解释器优先取 `ZGRAPH_PYTHON`（缺省 `python3`），全程无网络。
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -1154,6 +1154,10 @@ fn run_memory_db_outputs_outcome_and_warns() {
     assert_eq!(run_output, json!({"r": {"x": 6}}));
     let stderr = stderr_text(&human_run);
     assert!(stderr.contains("warning"), "{stderr}");
+    assert!(
+        stderr.contains("[seq 1] RunStarted"),
+        ":memory: 同样走 bridge 旁路（ISSUE-085）: {stderr}"
+    );
     assert!(stderr.contains("status=Completed"), "{stderr}");
 }
 
@@ -1467,4 +1471,139 @@ fn run_sigint_cancels_and_exits_130() {
         "RunFinished must be emitted exactly once"
     );
     assert_eq!(stdout.trim(), "null", "cancelled run has no run_output");
+}
+
+// ---------------------------------------------------------------------------
+// 6. 实时生命周期输出（ISSUE-085 / 06 §6.10.3）
+// ---------------------------------------------------------------------------
+
+/// 把子进程 stderr 逐行转发到通道（测试侧边跑边读，验证「run 结束前已有行」）。
+fn stderr_line_reader(
+    stderr: std::process::ChildStderr,
+) -> (
+    std::sync::mpsc::Receiver<String>,
+    std::thread::JoinHandle<()>,
+) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    (receiver, handle)
+}
+
+/// 等待子进程退出（带超时，避免测试挂死）。
+fn wait_child(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return status;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "child did not exit within {timeout:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn run_human_lifecycle_lines_are_realtime() {
+    // ISSUE-085：慢节点（3s）尚未结束时，stderr 必须已有 created + 生命周期行——
+    // 证明生命周期行来自运行期旁路，而不是 run 结束后从 trace 回读。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = write_text(dir.path(), "sleep.json", &sleep_graph());
+    let db = dir.path().join("realtime.db");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zgraph"))
+        .args([
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            arg(&db),
+            "--inputs".to_string(),
+            r#"{"start":{"seconds":3}}"#.to_string(),
+            "--python".to_string(),
+            python_program(),
+            "--python-path".to_string(),
+            arg(&python_path()),
+        ])
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn zgraph run");
+    let (lines, reader) = stderr_line_reader(child.stderr.take().expect("stderr"));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut seen: Vec<String> = Vec::new();
+    let mut saw_started = false;
+    let mut saw_transition = false;
+    while Instant::now() < deadline && !(saw_started && saw_transition) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = lines.recv_timeout(remaining) else {
+            break;
+        };
+        saw_started |= line.contains("[seq 1] RunStarted");
+        saw_transition |= line.contains("Transition");
+        seen.push(line);
+    }
+    assert!(saw_started, "run 期间应已看到 RunStarted 行: {seen:?}");
+    assert!(saw_transition, "run 期间应已看到 Transition 行: {seen:?}");
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "生命周期行必须在 run 结束前出现: {seen:?}"
+    );
+
+    let status = wait_child(&mut child, Duration::from_secs(30));
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut stdout)
+        .expect("read stdout");
+    let _ = reader.join();
+    while let Ok(line) = lines.try_recv() {
+        seen.push(line);
+    }
+    assert_eq!(status.code(), Some(0), "stderr: {seen:?}");
+    assert!(
+        seen.iter()
+            .any(|line| line.contains("ok run=") && line.contains("status=Completed")),
+        "结束摘要行应在实时生命周期行之后输出: {seen:?}"
+    );
+    // stdout 仍只输出 run_output JSON（--json 契约不变；生命周期走 stderr）。
+    let run_output: Value = serde_json::from_str(stdout.trim()).expect("stdout run_output JSON");
+    assert_eq!(run_output["r"]["slept"], json!(3.0));
+}
+
+#[test]
+fn run_json_mode_keeps_lifecycle_off_stderr() {
+    // `--json` 时 stdout 只有 JSON、stderr 不含生命周期行（与 M5 行为一致）。
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = write_text(dir.path(), "io.json", &io_graph());
+    let db = dir.path().join("json.db");
+    let output = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            arg(&db),
+            "--inputs".to_string(),
+            r#"{"start":{"x":1}}"#.to_string(),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&output, 0, "run --json");
+    assert!(!json_stdout(&output).is_null());
+    let stderr = stderr_text(&output);
+    assert!(
+        !stderr.contains("[seq "),
+        "--json 不应输出生命周期行: {stderr}"
+    );
 }

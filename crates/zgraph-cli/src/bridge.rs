@@ -9,6 +9,11 @@
 //!   [`zgraph_trace::TraceHandle::send_streaming`]（返回 `false` 时内核计入
 //!   `streaming_dropped`，I6）。
 //!
+//! 除落库外，桥接器还支持两类**只读旁路**（[`BridgeObservers`]）：`streaming`
+//! （`--stream` 的流式文本）与 `lifecycle`（human 模式实时生命周期行，ISSUE-085）。
+//! 旁路在 `send` 之前回调，顺序即内核 sink 调用顺序；它们不写库、不影响返回值，
+//! 因此 trace 落库语义不随观察者变化。
+//!
 //! # 便捷入口
 //!
 //! [`run_in_process`]：打开 `TraceWriter` → `start_run` → 等待 → flush/close →
@@ -37,13 +42,33 @@ use zgraph_trace as trace;
 /// （06 §6.10.3）；回调**不改变** trace 语义（观察者不得影响 run，故签名无返回值）。
 pub type StreamingObserver = Arc<dyn Fn(&kernel::StreamingEvent) + Send + Sync>;
 
+/// 生命周期事件观察者：每条会落 `events` 行的映射事件在写入 trace **之外**再回调一次。
+///
+/// `zgraph run`（human 模式）用它实时输出生命周期行（ISSUE-085 / 06 §6.10.3），
+/// 不必等 run 结束再从 trace 回读。回调只读、不写库、无返回值；事件顺序与内核
+/// sink 调用顺序一致（即 trace 落库顺序），但这里拿不到写线程分配的 `seq`。
+pub type LifecycleObserver = Arc<dyn Fn(&trace::TraceInput) + Send + Sync>;
+
+/// 桥接层观察者组合（`BridgeObservers` 只承载旁路，不参与落库）。
+#[derive(Default, Clone)]
+pub struct BridgeObservers {
+    /// `--stream`：流式文本实时回调。
+    pub streaming: Option<StreamingObserver>,
+    /// human 模式：实时生命周期行（ISSUE-085）。
+    pub lifecycle: Option<LifecycleObserver>,
+}
+
 /// kernel `TraceSink` 的 trace 写端适配器。
 ///
 /// 每次 sink 调用映射为一条 [`trace::TraceInput`]；`streaming` 使用可丢发送，
 /// 返回 `false` 让内核累计 `streaming_dropped`。
+///
+/// 观察者（[`BridgeObservers`]）在落库**之外**再拿到同一份映射结果：`streaming`
+/// 用于 `--stream` 文本，`lifecycle` 用于 human 模式实时生命周期行（ISSUE-085）；
+/// 两者都不写库、不影响落库语义。
 pub struct TraceBridge {
     handle: trace::TraceHandle,
-    observer: Option<StreamingObserver>,
+    observers: BridgeObservers,
 }
 
 impl TraceBridge {
@@ -51,44 +76,52 @@ impl TraceBridge {
     pub fn new(handle: trace::TraceHandle) -> Self {
         Self {
             handle,
-            observer: None,
+            observers: BridgeObservers::default(),
         }
     }
 
-    /// 构造带流式观察者的桥接器（`--stream` 用；观察者与落库互不影响）。
-    pub fn with_observer(handle: trace::TraceHandle, observer: StreamingObserver) -> Self {
-        Self {
-            handle,
-            observer: Some(observer),
-        }
+    /// 用观察者组合构造桥接器（`--stream` / human 实时生命周期；与落库互不影响）。
+    pub fn with_observers(handle: trace::TraceHandle, observers: BridgeObservers) -> Self {
+        Self { handle, observers }
     }
 
     /// 底层写句柄（诊断/错误检查用）。
     pub fn handle(&self) -> &trace::TraceHandle {
         &self.handle
     }
+
+    /// 生命周期旁路：把映射后的事件再回调一次（只读，不改变落库）。
+    fn notify_lifecycle(&self, input: &trace::TraceInput) {
+        if let Some(observer) = &self.observers.lifecycle {
+            observer(input);
+        }
+    }
+
+    /// 落一条**事件类**输入：先通知生命周期旁路，再入写端（回调顺序 = 落库顺序）。
+    fn send_event(&self, input: trace::TraceInput) {
+        self.notify_lifecycle(&input);
+        self.handle.send(input);
+    }
 }
 
 impl kernel::TraceSink for TraceBridge {
     fn run_started(&self, info: kernel::RunStartedInfo) {
-        self.handle
-            .send(trace::TraceInput::RunStarted(map_run_started(&info)));
+        self.send_event(trace::TraceInput::RunStarted(map_run_started(&info)));
     }
 
     fn instance_snapshot(&self, snapshot: kernel::InstanceSnapshot) {
+        // 快照不产生 `events` 行，也不在实时生命周期行内（只 upsert instances）。
         self.handle
             .send(trace::TraceInput::InstanceSnapshot(map_snapshot(&snapshot)));
     }
 
     fn transition(&self, record: kernel::TransitionRecord, snapshot: kernel::InstanceSnapshot) {
         let (record, snapshot) = map_transition(record, &snapshot);
-        self.handle
-            .send(trace::TraceInput::Transition { record, snapshot });
+        self.send_event(trace::TraceInput::Transition { record, snapshot });
     }
 
     fn gate_result(&self, record: kernel::GateResultRecord) {
-        self.handle
-            .send(trace::TraceInput::GateResult(map_gate_result(&record)));
+        self.send_event(trace::TraceInput::GateResult(map_gate_result(&record)));
     }
 
     fn node_timed_out(
@@ -98,7 +131,7 @@ impl kernel::TraceSink for TraceBridge {
         elapsed_ms: u64,
         at: String,
     ) {
-        self.handle.send(trace::TraceInput::NodeTimedOut {
+        self.send_event(trace::TraceInput::NodeTimedOut {
             run_id: run_id.clone(),
             instance_id: instance_id.clone(),
             elapsed_ms,
@@ -107,7 +140,7 @@ impl kernel::TraceSink for TraceBridge {
     }
 
     fn node_abandoned(&self, run_id: &kernel::RunId, instance_id: &kernel::InstanceId, at: String) {
-        self.handle.send(trace::TraceInput::NodeAbandoned {
+        self.send_event(trace::TraceInput::NodeAbandoned {
             run_id: run_id.clone(),
             instance_id: instance_id.clone(),
             at,
@@ -122,21 +155,22 @@ impl kernel::TraceSink for TraceBridge {
         event: kernel::StreamingEvent,
         at: String,
     ) -> bool {
-        if let Some(observer) = &self.observer {
+        if let Some(observer) = &self.observers.streaming {
             observer(&event);
         }
-        self.handle.send_streaming(trace::TraceInput::Streaming {
+        let input = trace::TraceInput::Streaming {
             run_id: run_id.clone(),
             instance_id: instance_id.clone(),
             node_id: Some(node_id.clone()),
             event: map_streaming_event(event),
             at,
-        })
+        };
+        self.notify_lifecycle(&input);
+        self.handle.send_streaming(input)
     }
 
     fn run_finished(&self, info: kernel::RunFinishedInfo) {
-        self.handle
-            .send(trace::TraceInput::RunFinished(map_run_finished(&info)));
+        self.send_event(trace::TraceInput::RunFinished(map_run_finished(&info)));
     }
 
     /// fail-stop 轮询（06 §6.4.5）：非阻塞取走 trace 写线程的不可恢复错误。
@@ -310,21 +344,21 @@ pub fn start_traced_run(
     db_path: impl AsRef<Path>,
 ) -> Result<TracedRun, BridgeError> {
     let writer = trace::TraceWriter::open(db_path.as_ref())?;
-    start_traced_run_with_writer(writer, spec, executor, None)
+    start_traced_run_with_writer(writer, spec, executor, BridgeObservers::default())
 }
 
 /// 用**已打开**的 trace 写端启动 run（`zgraph run` 的启动顺序：先开库/迁移，
 /// 再做图加载与入口校验，最后才建 run；06 §6.10.3）。
 ///
-/// `observer` 用于 `--stream`（见 [`StreamingObserver`]）；语义与
-/// [`start_traced_run`] 完全相同。
+/// `observers` 承载 `--stream`（[`StreamingObserver`]）与 human 实时生命周期
+/// （[`LifecycleObserver`]，ISSUE-085）；语义与 [`start_traced_run`] 完全相同。
 pub fn start_traced_run_with_writer(
     writer: trace::TraceWriter,
     spec: kernel::RunSpec,
     executor: Arc<dyn kernel::NodeExecutor>,
-    observer: Option<StreamingObserver>,
+    observers: BridgeObservers,
 ) -> Result<TracedRun, BridgeError> {
-    start_traced_run_inner(writer, spec, executor, observer, None)
+    start_traced_run_inner(writer, spec, executor, observers, None)
 }
 
 /// 同 [`start_traced_run_with_writer`]，但由调用方**预先生成** run id。
@@ -335,10 +369,10 @@ pub fn start_traced_run_with_writer_and_run_id(
     writer: trace::TraceWriter,
     spec: kernel::RunSpec,
     executor: Arc<dyn kernel::NodeExecutor>,
-    observer: Option<StreamingObserver>,
+    observers: BridgeObservers,
     run_id: String,
 ) -> Result<TracedRun, BridgeError> {
-    start_traced_run_inner(writer, spec, executor, observer, Some(run_id))
+    start_traced_run_inner(writer, spec, executor, observers, Some(run_id))
 }
 
 /// 启动 run 的公共实现（`run_id = None` 时由内核生成 uuidv7）。
@@ -346,14 +380,11 @@ fn start_traced_run_inner(
     writer: trace::TraceWriter,
     spec: kernel::RunSpec,
     executor: Arc<dyn kernel::NodeExecutor>,
-    observer: Option<StreamingObserver>,
+    observers: BridgeObservers,
     run_id: Option<String>,
 ) -> Result<TracedRun, BridgeError> {
     let trace_handle = writer.handle();
-    let bridge = match observer {
-        Some(observer) => TraceBridge::with_observer(trace_handle.clone(), observer),
-        None => TraceBridge::new(trace_handle.clone()),
-    };
+    let bridge = TraceBridge::with_observers(trace_handle.clone(), observers);
     let sink: Arc<dyn kernel::TraceSink> = Arc::new(bridge);
     let handle = match kernel::start_run(run_id, spec, executor, sink) {
         Ok(handle) => handle,
@@ -790,6 +821,99 @@ mod tests {
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].node_id, "n1");
         assert_eq!(instances[0].status, zgraph_trace::InstanceStatus::Running);
+        drop(reader);
+        writer.close().expect("close writer");
+    }
+
+    #[test]
+    fn lifecycle_observer_receives_events_before_writer_close() {
+        // ISSUE-085：旁路回调与落库解耦——事件一产生就回调（写端未 flush/close 也能收到），
+        // 且不改变 trace 行数/内容；不产生 `events` 行的快照不触发实时行。
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let seen = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let observer_seen = Arc::clone(&seen);
+        let observer: super::LifecycleObserver = Arc::new(move |input| {
+            let kind = match input {
+                zgraph_trace::TraceInput::RunStarted(_) => "RunStarted",
+                zgraph_trace::TraceInput::InstanceSnapshot(_) => "InstanceSnapshot",
+                zgraph_trace::TraceInput::Transition { .. } => "Transition",
+                zgraph_trace::TraceInput::GateResult(_) => "GateResult",
+                zgraph_trace::TraceInput::NodeTimedOut { .. } => "NodeTimedOut",
+                zgraph_trace::TraceInput::NodeAbandoned { .. } => "NodeAbandoned",
+                zgraph_trace::TraceInput::Streaming { .. } => "Streaming",
+                zgraph_trace::TraceInput::RunFinished(_) => "RunFinished",
+                zgraph_trace::TraceInput::RecordedOutput(_) => "RecordedOutput",
+                zgraph_trace::TraceInput::LlmCall(_) => "LlmCall",
+            };
+            observer_seen.lock().expect("lock").push(kind);
+        });
+        let bridge = TraceBridge::with_observers(
+            writer.handle(),
+            super::BridgeObservers {
+                streaming: None,
+                lifecycle: Some(observer),
+            },
+        );
+        bridge.run_started(zgraph_kernel::RunStartedInfo {
+            run_id: "run-1".to_string(),
+            graph_hash: "0123456789abcdef".to_string(),
+            graph_name: "demo".to_string(),
+            dsl_json: "{}".to_string(),
+            user_id: "local".to_string(),
+            entry_inputs: serde_json::json!({}),
+            seed: 7,
+            record_mode: "hash".to_string(),
+            owner_pid: std::process::id(),
+            owner_host: "test-host".to_string(),
+            started_at: "2026-10-28T09:12:03.104Z".to_string(),
+        });
+        bridge.instance_snapshot(InstanceSnapshot {
+            run_id: "run-1".to_string(),
+            instance_id: "inst-1".to_string(),
+            node_id: "n1".to_string(),
+            node_type: "python_node".to_string(),
+            attempt: 0,
+            status: InstanceStatus::Running,
+            input: Some(serde_json::json!({"x": 1})),
+            output: None,
+            error: None,
+            error_code: None,
+            created_at: "2026-10-28T09:12:03.104Z".to_string(),
+            started_at: None,
+            finished_at: None,
+        });
+        bridge.run_finished(zgraph_kernel::RunFinishedInfo {
+            run_id: "run-1".to_string(),
+            status: RunStatus::Completed,
+            output_summary: Some(serde_json::json!({"r": 1})),
+            error: None,
+            metrics: zgraph_kernel::RunMetrics::default(),
+            at: "2026-10-28T09:12:04.104Z".to_string(),
+        });
+
+        // 实时性：写端尚未 flush/close，回调已按事件顺序收到（快照不产生 events 行）。
+        assert_eq!(
+            seen.lock().expect("lock").as_slice(),
+            ["RunStarted", "RunFinished"]
+        );
+
+        // 落库语义不变：仍只有两条 events 行（快照只 upsert instances）。
+        writer.flush().expect("flush writer");
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        let events = reader
+            .events("run-1", &zgraph_trace::EventQuery::default())
+            .expect("events");
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["RunStarted", "RunFinished"]
+        );
         drop(reader);
         writer.close().expect("close writer");
     }
