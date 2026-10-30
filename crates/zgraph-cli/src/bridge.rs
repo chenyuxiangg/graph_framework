@@ -319,13 +319,38 @@ pub fn start_traced_run_with_writer(
     executor: Arc<dyn kernel::NodeExecutor>,
     observer: Option<StreamingObserver>,
 ) -> Result<TracedRun, BridgeError> {
+    start_traced_run_inner(writer, spec, executor, observer, None)
+}
+
+/// 同 [`start_traced_run_with_writer`]，但由调用方**预先生成** run id。
+///
+/// `zgraph run` 在启动前需要 run id 构造 `llm_calls` 记录器（`LlmCallRecorder` 快照
+/// 不含 run id），因此把 id 生成前移到 CLI；内核仍按同一 id 写 `RunStarted`。
+pub fn start_traced_run_with_writer_and_run_id(
+    writer: trace::TraceWriter,
+    spec: kernel::RunSpec,
+    executor: Arc<dyn kernel::NodeExecutor>,
+    observer: Option<StreamingObserver>,
+    run_id: String,
+) -> Result<TracedRun, BridgeError> {
+    start_traced_run_inner(writer, spec, executor, observer, Some(run_id))
+}
+
+/// 启动 run 的公共实现（`run_id = None` 时由内核生成 uuidv7）。
+fn start_traced_run_inner(
+    writer: trace::TraceWriter,
+    spec: kernel::RunSpec,
+    executor: Arc<dyn kernel::NodeExecutor>,
+    observer: Option<StreamingObserver>,
+    run_id: Option<String>,
+) -> Result<TracedRun, BridgeError> {
     let trace_handle = writer.handle();
     let bridge = match observer {
         Some(observer) => TraceBridge::with_observer(trace_handle.clone(), observer),
         None => TraceBridge::new(trace_handle.clone()),
     };
     let sink: Arc<dyn kernel::TraceSink> = Arc::new(bridge);
-    let handle = match kernel::start_run(None, spec, executor, sink) {
+    let handle = match kernel::start_run(run_id, spec, executor, sink) {
         Ok(handle) => handle,
         Err(error) => {
             // 启动校验失败不产生任何事件；仍关闭写端以释放写线程。

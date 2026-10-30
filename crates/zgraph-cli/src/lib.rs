@@ -1,17 +1,19 @@
 //! `zgraph` CLI 库：子命令解析、输出与退出码映射。
 //!
 //! 二进制入口 [`crate::run`] 只做 `std::env::args` 收集与退出码返回；各子命令的
-//! 实现位于 [`validate`]（M1）、[`trace_cmd`]（M2，L1 只读回放）与 [`run_cmd`]
-//! （M5，`zgraph run` 真实链路）。
+//! 实现位于 [`validate`]（M1）、[`trace_cmd`]（M2，L1 只读回放）、[`run_cmd`]
+//! （M5，`zgraph run` 真实链路）与 [`replay_cmd`]（M5 wave2，L1/L2 重放）。
 //!
 //! 退出码权威表：`doc/spec-v1.2/06-存储与可观测.md` §6.10.5。
 //! 注：M1 `validate` 沿用任务口径 `0/2/3`（02 §2.7.4 的「其他错误 1」并入 3），
-//! M2 `trace` 使用 `0/1/2/4`，M5 `run` 使用 `0/1/2/3/4/130`；所有子命令的 panic
+//! M2 `trace` 使用 `0/1/2/4`，M5 `run` 使用 `0/1/2/3/4/130`，`replay` 使用
+//! `0/1/2/3/4`（L2 记录类错误 `REPLAY_*` 退出 3，不写 `runs.error_code`）；所有子命令的 panic
 //! 由顶层 `catch_unwind` 捕获并统一返回 **70**（不依赖 Rust 默认 101）。
 
 #![forbid(unsafe_code)]
 
 pub mod bridge;
+pub mod replay_cmd;
 pub mod run_cmd;
 pub mod trace_cmd;
 pub mod validate;
@@ -47,6 +49,7 @@ usage: zgraph <command>
 
 commands:
   run <graph.json> --inputs <json|@file> [options]       run a graph (M5)
+  replay --run <run_id> [--mode=events|outputs]          replay a run (L1 events / L2 outputs)
   validate <graph.json> [--json] [--assets-dir <dir>]   validate a graph definition
   trace <run_id> [options]                               replay a run trace (L1)
   --version, -V                                          print version
@@ -88,6 +91,14 @@ impl CliError {
 
     /// `run` 用法错误（退出码 2，06 §6.10.5）。
     pub fn run_usage(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            exit_code: EXIT_USAGE,
+        }
+    }
+
+    /// `replay` 用法错误（退出码 2，DR-002 §3.3）。
+    pub fn replay_usage(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             exit_code: EXIT_USAGE,
@@ -167,6 +178,16 @@ pub fn dispatch(args: &[String]) -> Result<ExitCode, CliError> {
                 Some(options) => Ok(run_cmd::run(&options)),
                 None => {
                     println!("{}", run_cmd::RUN_USAGE);
+                    Ok(ExitCode::SUCCESS)
+                }
+            }
+        }
+        "replay" => {
+            let parsed = replay_cmd::parse(&args[1..]).map_err(CliError::replay_usage)?;
+            match parsed {
+                Some(options) => Ok(replay_cmd::run(&options)),
+                None => {
+                    println!("{}", replay_cmd::REPLAY_USAGE);
                     Ok(ExitCode::SUCCESS)
                 }
             }
@@ -251,6 +272,22 @@ mod tests {
         ])
         .expect_err("conflict");
         assert!(error.message.contains("--real conflicts"));
+        assert_eq!(error.exit_code, EXIT_USAGE);
+    }
+
+    #[test]
+    fn replay_usage_errors_exit_2() {
+        let error = dispatch(&["replay".to_string()]).expect_err("missing --run");
+        assert_eq!(error.exit_code, EXIT_USAGE);
+        let error = dispatch(&[
+            "replay".to_string(),
+            "--run".to_string(),
+            "r1".to_string(),
+            "--mode".to_string(),
+            "all".to_string(),
+        ])
+        .expect_err("invalid mode");
+        assert!(error.message.contains("invalid --mode"));
         assert_eq!(error.exit_code, EXIT_USAGE);
     }
 

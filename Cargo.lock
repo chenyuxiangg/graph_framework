@@ -2662,6 +2662,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
  "zgraph-dsl",
  "zgraph-harness",
  "zgraph-kernel",

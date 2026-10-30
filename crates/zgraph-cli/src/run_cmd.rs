@@ -45,17 +45,17 @@ use serde_json::{json, Map, Value};
 
 use zgraph_dsl::{load_graph_with_options, LoadOptions, LoadedGraph, ValidationReport};
 use zgraph_harness::{
-    FakeLlmProvider, GenaiLlmProvider, HarnessExecutor, HarnessSettings, LlmProvider,
-    WorkerToolRunner,
+    FakeLlmProvider, GenaiLlmProvider, HarnessExecutor, HarnessSettings, LlmCallRecorder,
+    LlmCallSnapshot, LlmProvider, WorkerToolRunner,
 };
 use zgraph_kernel::{
-    CompiledGraph, CompiledHandler, NodeError, NodeExecution, NodeExecutor, RunError, RunOptions,
-    RunOutcome, RunSpec, RunStatus, StreamingEvent, CODE_RUN_ENTRY_INPUT_MISSING,
+    CompiledGraph, CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunError,
+    RunOptions, RunOutcome, RunSpec, RunStatus, StreamingEvent, CODE_RUN_ENTRY_INPUT_MISSING,
     CODE_RUN_ENTRY_INVALID,
 };
 use zgraph_trace::{
-    EventQuery, RecordMode, RecordedOutput, TraceError, TraceHandle, TraceInput, TraceReader,
-    TraceWriter,
+    EventQuery, LlmCallRecord, RecordMode, RecordedOutput, TraceError, TraceHandle, TraceInput,
+    TraceReader, TraceWriter,
 };
 use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
@@ -423,6 +423,15 @@ impl NodeExecutor for RoutingExecutor {
             self.worker.execute(execution)
         }
     }
+
+    /// 转发 Harness 的 `timeout_hint`（ISSUE-076；否则包装层默认 `None` 会截断）。
+    fn timeout_hint(&self, node: &CompiledNode) -> Option<u64> {
+        if matches!(&node.handler, CompiledHandler::Agent { .. }) {
+            self.harness.timeout_hint(node)
+        } else {
+            None
+        }
+    }
 }
 
 /// 在真实执行器外再包一层：每次**成功**执行发送一条 `RecordedOutput`。
@@ -467,6 +476,34 @@ impl NodeExecutor for RecordingExecutor {
             );
             Ok(output)
         })
+    }
+
+    /// 透明转发内层执行器的 `timeout_hint`（ISSUE-076；包装层不得截断）。
+    fn timeout_hint(&self, node: &CompiledNode) -> Option<u64> {
+        self.inner.timeout_hint(node)
+    }
+}
+
+/// `llm_calls` 写端：把 harness `LlmCallRecorder` 快照转成 `TraceInput::LlmCall`。
+///
+/// 仅 `--record=full` 时挂接（DR-002 §3.2）；request 已由 harness 脱敏（无 `api_key`）。
+/// 记录器只做内存 `send`（不阻塞、不做 DB IO），符合 harness seam 的纪律。
+struct LlmCallTraceRecorder {
+    handle: TraceHandle,
+    run_id: String,
+}
+
+impl LlmCallRecorder for LlmCallTraceRecorder {
+    fn record_llm_call(&self, call: &LlmCallSnapshot<'_>) {
+        self.handle.send(TraceInput::LlmCall(LlmCallRecord {
+            run_id: self.run_id.clone(),
+            instance_id: call.instance_id.to_string(),
+            call_index: call.call_index,
+            request_json: call.request.clone(),
+            response_json: call.response.cloned(),
+            status: call.status.to_string(),
+            recorded_at: now_rfc3339(),
+        }));
     }
 }
 
@@ -715,6 +752,9 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         }
     };
     let trace_handle = writer.handle();
+    // run id 由 CLI 预生成：`llm_calls` 记录器在启动前就需要 run_id（快照不含 run）。
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let recorder = llm_call_recorder(args, &trace_handle, &run_id);
     let executor = build_executor(
         args,
         &assets_dir,
@@ -722,6 +762,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         provider,
         fake_mode,
         &trace_handle,
+        recorder,
     );
     let observer = args.stream.then(stream_observer);
     let spec = RunSpec {
@@ -731,11 +772,17 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         global_vars: HashMap::new(),
         options: run_options(args.record),
     };
-    let traced = match bridge::start_traced_run_with_writer(writer, spec, executor, observer) {
+    let traced = match bridge::start_traced_run_with_writer_and_run_id(
+        writer,
+        spec,
+        executor,
+        observer,
+        run_id.clone(),
+    ) {
         Ok(traced) => traced,
         Err(error) => return report_bridge_error(&error),
     };
-    let run_id = traced.run_id().to_string();
+    debug_assert_eq!(traced.run_id(), run_id);
     if !args.json && !args.quiet {
         eprintln!(
             "run {run_id} created (graph={} hash={})",
@@ -792,6 +839,21 @@ fn entry_input_exit(error: &EntryInputError) -> ExitCode {
     ExitCode::from(EXIT_ENTRY_INPUT)
 }
 
+/// `--record=full` 时挂接 `llm_calls` 记录器（DR-002 §3.2：hash/none 不写）。
+fn llm_call_recorder(
+    args: &RunArgs,
+    trace_handle: &TraceHandle,
+    run_id: &str,
+) -> Option<Arc<dyn LlmCallRecorder>> {
+    if args.record != RecordMode::Full {
+        return None;
+    }
+    Some(Arc::new(LlmCallTraceRecorder {
+        handle: trace_handle.clone(),
+        run_id: run_id.to_string(),
+    }))
+}
+
 /// 组合执行器：Recording → Routing（Harness / Worker）。
 fn build_executor(
     args: &RunArgs,
@@ -800,18 +862,23 @@ fn build_executor(
     provider: Arc<dyn LlmProvider>,
     fake_mode: bool,
     trace_handle: &TraceHandle,
+    recorder: Option<Arc<dyn LlmCallRecorder>>,
 ) -> Arc<dyn NodeExecutor> {
     let config = worker_config(args);
     let worker = Arc::new(WorkerExecutor::new(SupervisorConfig::from_worker(
         config.clone(),
     )));
-    let harness = Arc::new(HarnessExecutor::new(HarnessSettings {
+    let settings = HarnessSettings {
         assets_dir: assets_dir.to_path_buf(),
         tools_dir: tools_dir.to_path_buf(),
         provider,
         fake_mode,
         tool_runner: Arc::new(WorkerToolRunner::new(config)),
-    }));
+    };
+    let harness = match recorder {
+        Some(recorder) => Arc::new(HarnessExecutor::with_llm_recorder(settings, recorder)),
+        None => Arc::new(HarnessExecutor::new(settings)),
+    };
     let routing: Arc<dyn NodeExecutor> = Arc::new(RoutingExecutor { harness, worker });
     Arc::new(RecordingExecutor::new(
         routing,
@@ -1141,13 +1208,18 @@ fn close_quietly(writer: TraceWriter) {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_memory_db, output_hash, parse, resolve_entry_inputs, FakeLlmMode, RunArgs,
-        DEFAULT_USER_ID,
+        is_memory_db, llm_call_recorder, output_hash, parse, resolve_entry_inputs, FakeLlmMode,
+        RecordingExecutor, RunArgs, DEFAULT_USER_ID,
     };
     use serde_json::json;
+    use std::future::Future;
     use std::path::{Path, PathBuf};
-    use zgraph_kernel::CompiledGraph;
-    use zgraph_trace::RecordMode;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use zgraph_kernel::{
+        CompiledGraph, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunStatus,
+    };
+    use zgraph_trace::{RecordMode, TraceWriter};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -1354,5 +1426,89 @@ mod tests {
             .expect("parse")
             .expect("not help");
         assert_eq!(parsed.db, Some(PathBuf::from(":memory:")));
+    }
+
+    /// 只用于 `timeout_hint` 转发的内层执行器（不真正执行）。
+    struct HintExecutor {
+        hint: Option<u64>,
+    }
+
+    impl NodeExecutor for HintExecutor {
+        fn execute<'a>(
+            &'a self,
+            _execution: NodeExecution<'a>,
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, NodeError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Err(NodeError::Internal {
+                    message: "unused".to_string(),
+                })
+            })
+        }
+
+        fn timeout_hint(&self, _node: &CompiledNode) -> Option<u64> {
+            self.hint
+        }
+    }
+
+    fn temp_writer() -> (tempfile::TempDir, TraceWriter) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = TraceWriter::open(&path).expect("writer");
+        (dir, writer)
+    }
+
+    #[test]
+    fn recording_executor_forwards_timeout_hint_to_inner() {
+        let (dir, writer) = temp_writer();
+        let handle = writer.handle();
+        let graph = compiled_graph(&graph_text());
+        let node = graph.nodes.get("start").expect("start node");
+        let recording = RecordingExecutor::new(
+            Arc::new(HintExecutor { hint: Some(42) }),
+            handle.clone(),
+            RecordMode::None,
+        );
+        assert_eq!(
+            recording.timeout_hint(node),
+            Some(42),
+            "ISSUE-076: wrapper must not truncate the inner timeout hint"
+        );
+        let no_hint = RecordingExecutor::new(
+            Arc::new(HintExecutor { hint: None }),
+            handle,
+            RecordMode::None,
+        );
+        assert_eq!(no_hint.timeout_hint(node), None);
+        writer.close().expect("close writer");
+        drop(dir);
+    }
+
+    #[test]
+    fn llm_call_recorder_is_attached_only_in_full_mode() {
+        let (dir, writer) = temp_writer();
+        let handle = writer.handle();
+        let full = parse(&args(&["g.json", "--inputs", "{}", "--record", "full"]))
+            .expect("parse")
+            .expect("not help");
+        assert!(llm_call_recorder(&full, &handle, "run-1").is_some());
+        for mode in ["hash", "none"] {
+            let parsed = parse(&args(&["g.json", "--inputs", "{}", "--record", mode]))
+                .expect("parse")
+                .expect("not help");
+            assert!(
+                llm_call_recorder(&parsed, &handle, "run-1").is_none(),
+                "llm_calls must only be written with --record=full (mode={mode})"
+            );
+        }
+        writer.close().expect("close writer");
+        drop(dir);
+    }
+
+    #[test]
+    fn exit_code_mapping_matches_spec() {
+        assert_eq!(super::exit_code_for(RunStatus::Completed), 0);
+        assert_eq!(super::exit_code_for(RunStatus::Failed), 1);
+        assert_eq!(super::exit_code_for(RunStatus::Cancelled), 130);
     }
 }

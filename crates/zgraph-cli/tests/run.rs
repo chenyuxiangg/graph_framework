@@ -237,6 +237,30 @@ fn recorded_outputs(db: &Path) -> Vec<(String, i64, String, Option<String>)> {
     rows.map(|row| row.expect("recorded_outputs row")).collect()
 }
 
+/// `llm_calls` 行：`(run_id, call_index, request 原文, response 原文, status, recorded_at)`。
+fn llm_calls(db: &Path) -> Vec<(String, i64, String, Option<String>, String, String)> {
+    let conn = connect(db);
+    let mut stmt = conn
+        .prepare(
+            "SELECT run_id, call_index, request_json, response_json, status, recorded_at \
+             FROM llm_calls ORDER BY instance_id ASC, call_index ASC",
+        )
+        .expect("prepare llm_calls");
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .expect("query llm_calls");
+    rows.map(|row| row.expect("llm_calls row")).collect()
+}
+
 /// 某节点最后一个实例的 output JSON。
 fn instance_output(db: &Path, node_id: &str) -> Option<Value> {
     let text: Option<String> = connect(db)
@@ -728,6 +752,7 @@ fn run_ac08_record_full_stores_agent_output_json() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (output, db) = run_ac08(dir.path(), &["--json", "--record=full"]);
     assert_exit(&output, 0, "AC-08 record full");
+    let payload = json_stdout(&output);
     let agent_output = instance_output(&db, "answer_writer").expect("agent output_json");
     for key in ["content", "stop_reason", "iterations", "usage"] {
         assert!(
@@ -752,6 +777,30 @@ fn run_ac08_record_full_stores_agent_output_json() {
         agent_row.1 == 0,
         "single successful attempt starts at attempt 0: {agent_row:?}"
     );
+    // llm_calls：fake 脚本两轮（tool_calls + final text）→ 迭代 2 次 → 2 行。
+    let calls = llm_calls(&db);
+    assert_eq!(
+        calls.len(),
+        2,
+        "one llm_calls row per LLM iteration: {calls:?}"
+    );
+    assert_eq!(calls[0].1, 0, "call_index starts at 0");
+    assert_eq!(calls[1].1, 1);
+    let expected_run_id = payload["run_id"].as_str().expect("run_id");
+    for (run_id, _, request, response, status, recorded_at) in &calls {
+        assert_eq!(run_id, expected_run_id, "llm_calls.run_id");
+        assert_eq!(status, "ok");
+        assert!(response.is_some(), "successful call records the response");
+        assert!(recorded_at.ends_with('Z'), "recorded_at is RFC3339 ms Z");
+        assert!(
+            !request.contains("api_key"),
+            "request snapshot must be sanitized: {request}"
+        );
+        // request 是合法 JSON 且含脱敏后的 model/messages 结构。
+        let request: Value = serde_json::from_str(request).expect("request_json is JSON");
+        assert!(request["model"]["name"].is_string());
+        assert!(request["messages"].is_array());
+    }
 }
 
 #[test]
