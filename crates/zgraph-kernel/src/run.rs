@@ -910,6 +910,9 @@ impl RunLoop {
         let owner = instance_id.to_string();
         self.emitter
             .node_timed_out(&self.run_id, &owner, elapsed_ms, now_rfc3339());
+        // 与 watchdog 路径（check_timeouts）同口径：迁移前回填实例错误，否则
+        // instances.error/error_code 落库为 NULL（ISSUE-086 / 06 §6.2.5）。
+        self.set_instance_error(instance_id, NodeError::Timeout { elapsed_ms });
         if !self.transition_or_fail(instance_id, InstanceStatus::TimedOut, "timeout") {
             return;
         }
