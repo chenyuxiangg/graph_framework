@@ -80,21 +80,30 @@
    - **索引**：`doc/reviews/README.md` 补 REV-031 行（跨模块双评审），未合并仅 REV-035/036（REV-037 未开始）；`doc/index.md` reviews 范围更新为 REV-025–034/038；DR-002 §4 ISSUE-066 标 REV-031 已合并。
    - 本批次后按 §3 重新实测并更新（00–08 合计 **5956 行**）。
 
+11. **REV-035 评审条件修正批次**（2026-10-30，同一分支追加 commit，不改写 REV-035 评审记录；reviewer-a 结论「有条件通过」）：
+   - **C1**：根 `README.md` 状态段按 main `438822b` 事实重写——REV-030/031/032、CLI 启动标定/`recovered[]`、ISSUE-066/076 移入「已合并」；REV-035 标「本批待合并」；待交付仅 REV-036 收尾 → REV-037 → M6。
+   - **C2**：07 AC-01 `run` 命令补 `--python-path python --python-path tests/fixtures/graphs/customer_ticket/py`（与 `tests/e2e/cli_support/mod.rs::ac01_run_args` 一致），并注明等价 `PYTHONPATH`。
+   - **C3**：§3 保留 00–08 当前实测合计，同时补回 M4 历史测量注记（**5818 行**；base `origin/main` `fda996c`；合并 rebase `12ab2f6`），不替换历史。
+   - **建议**：05 L8 / 08 ISSUE-081 更新 `run_in_runtime` 91、`build_plan` 75、新增 >60 行测试（74/78/88 等）；07 AC-12 单 run 基线改 0.79–0.85s；06 §6.10/§6.10.1 补 replay 子命令与 `--db`（run/replay/trace）；00/06/architecture 统一 `REPLAY_RECORD_CORRUPT` 触发描述；07 §7.1 `agents/prompt.md`；spec `README.md` 引 §2 第 8–10 条；`doc/index.md` reviews 范围只列已合并（REV-000–034/038）。
+   - 本批次后按 §3 重新实测并更新（00–08 合计 **5958 行**）。
+
 ## 3. 文件清单（SHA-256 + 行数）
 
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | a414f809f6e90b5ec2430edefbcc827ee8cac6e3011b6502400659932e466e9e | 294 |
+| `00-总纲.md` | a9b12764821a8476d965f5351d6d9a1d274c8d47b603a2e641fcb8f54fdd12aa | 294 |
 | `01-领域模型与状态机.md` | accb0e481fbd101a00a03a8a95518862b6f6232745667959e4bb646fbe28c283 | 302 |
 | `02-DSL与校验.md` | 506f058fa68b816c2e1b5e4d2cded718007e9cda8b14be6cace387d254933eb5 | 913 |
 | `03-调度器与生命周期.md` | 69f33ff7e0455d3fca51716327b0cea3f3c4db770431d335e08f99934ef6921b | 390 |
 | `04-节点接口与扩展点.md` | 2d4a5ce95523b534273945f619fe3d40c32a969a1468c3b9d4600ad586221ccd | 895 |
-| `05-AgentHarness.md` | 06eb2d045ebadd271675f473d88625ec36c0acc4e47053fa170176e307e1f77d | 1420 |
-| `06-存储与可观测.md` | 72f18d2aa945564657944ccec689e67e18e8d757580332fd56b0122a57744f8d | 1068 |
-| `07-验收用例.md` | 8bc27af23fd51dbce2ae158d6e4f5fb70f9012c2ebe18fe55cddbbb90df2f8be | 230 |
-| `08-审计关闭矩阵.md` | 6689444728cede32694011328902bdc41cf3b58995237f1c9fc6cb6c0efd6559 | 444 |
+| `05-AgentHarness.md` | 405aaa99d61b0015480eab0cf360cf0219f509cad9dd018b347ed775a12ec0d3 | 1420 |
+| `06-存储与可观测.md` | 8f3613b657f94b026de5ee666c8b0a0291920036619b4c78d12a5b2c89a096dc | 1068 |
+| `07-验收用例.md` | 38d2e56cab35cfed508fddce51abf2c835a2178b41f82c0b14ec909b89570446 | 232 |
+| `08-审计关闭矩阵.md` | 4378d379ef83ae5ed7f9d41d3b2a9abb5f1dca538c27110a1fe5a2e2169d07a3 | 444 |
 
-> 00–08 合计 **5956 行**（`wc -l` 口径；2026-10-30 **M5 全部回写批次后**实测（wave1/wave2/ISSUE-066），分支 `docs/docs-m5-writeback`、评审 REV-035，base 为含 REV-025–034/038 的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+> 00–08 合计 **5958 行**（`wc -l` 口径；2026-10-30 **M5 全部回写批次后**实测（wave1/wave2/ISSUE-066），分支 `docs/docs-m5-writeback`、评审 REV-035，base 为含 REV-025–034/038 的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+
+> **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）。
 
 ## 4. 核验方式
 
@@ -112,3 +121,4 @@ wc -l 0*.md
 - **M5 回写已完成（2026-10-30，REV-035）**：00/04/05/06/07 正文与 `architecture-v2.md` §5.2/§5.3/§6.1/§8.2 已同步 M5 口径；08 只追加 §8.7 M5 注记（历史快照不改）。
 - **M5 wave2 回写已完成（2026-10-30，REV-035 第二批）**：06/07/05/00/08/architecture 已按 REV-030/032 实际实现校准（replay L2、`llm_calls`、启动标定/`recovered[]`、e2e 结论）；REV-031（ISSUE-066）合并后由第三个提交补 06 §6.2.5.1 的 signal/exit 载荷与 08 注记。
 - **M5 ISSUE-066 回写已完成（2026-10-30，REV-035 第三批）**：03 §3.15 / 06 §6.2.5.1 / architecture §8.2 已回写 `NODE_WORKER_CRASH` 的 `signal`/`exit_code`/`stderr_tail` 证据字段与边界；08 §8.7 记 ISSUE-066 fixed（REV-031）；台账状态由 Lead 收口。
+- **REV-035 评审条件已关闭（2026-10-30）**：C1/C2/C3 + 建议已在同一分支追加提交（未改写评审记录）；等待 reviewer-a 复审翻「通过」。

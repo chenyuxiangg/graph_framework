@@ -21,8 +21,9 @@ spec v1.2 M0–M4 回写（05/00/04/07，REV-023）；AC-08 fake 真链路验收
 
 **M5 收尾进行中**：
 
-- **已交付并合并到 main**：`zgraph run` 真链路（`--fake-llm[=<script>]` / `--real` / `--record=none|hash|full` / `--json` / 退出码 / `:memory:` / SIGINT，REV-028）；AC-12 多 run 并发隔离真链路（10 run 同库，REV-029）；ISSUE-061（gate 幻影 attempt，REV-026）与 ISSUE-074（结构感知截断，输出合法 JSON ≤8 KiB，REV-027）`fixed`；ISSUE-076 内核 `declared_timeout_ms` + `NodeExecutor::timeout_hint` + Harness 接入（REV-026/REV-033，部分修）；trace 中止标定原语（`interrupted_candidates`/`mark_interrupted`）与 `RunRow.owner_pid`（REV-034）；DR-002 决策/波次/台账（REV-025/REV-038）；spec v1.2 M5 回写（REV-035）。
-- **待交付（wave2，未合并）**：`zgraph replay` L1/L2 与 `llm_calls` 落库（REV-030）、CLI 启动中止标定 / `--json.recovered[]`、ISSUE-066（`NODE_WORKER_CRASH` 记录 signal/exit）、e2e CLI/L2/崩溃标定（REV-032）；M6 排除项见 DR-002 §7。
+- **已交付并合并到 main**：`zgraph run` 真链路（`--fake-llm[=<script>]` / `--real` / `--record=none|hash|full` / `--json` / 退出码 / `:memory:` / SIGINT，REV-028）；`zgraph replay` L1/L2 与 `llm_calls` 落库（REV-030）；CLI 启动中止标定 / `--json.recovered[]` / `trace` 进行中提示（REV-030）；AC-12 多 run 并发隔离真链路（10 run 同库，REV-029）；e2e AC-01 CLI / L2 replay / 崩溃标定 / ISSUE-076 端到端（REV-032）；ISSUE-061（gate 幻影 attempt，REV-026）、ISSUE-074（结构感知截断，合法 JSON ≤8 KiB，REV-027）、ISSUE-066（worker crash 记录 signal/exit/stderr_tail，REV-031）、ISSUE-076（`declared_timeout_ms` + `timeout_hint` + CLI 转发，REV-026/033/030）均 **M5 已修**；trace 中止标定原语（`interrupted_candidates`/`mark_interrupted`）与 `RunRow.owner_pid`（REV-034）；DR-002 决策/波次/台账（REV-025/REV-038）。
+- **本批待合并**：spec v1.2 M5 回写（REV-035，本分支；待关闭评审 C1–C3 后合并）。
+- **后续**：REV-036 收尾（issues/progress/README/评审索引/baseline）→ REV-037（process 依赖治理）→ M6 排除项（见 DR-002 §7）。
 - 范围与落地口径：[`doc/decisions/DR-002-m5-cli-replay-recording.md`](doc/decisions/DR-002-m5-cli-replay-recording.md)；进度：[`doc/progress.md`](doc/progress.md)；遗留项：[`doc/issues.md`](doc/issues.md)。
 
 ## 快速开始

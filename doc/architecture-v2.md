@@ -185,7 +185,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 
 > `--dry-run` **不实现**（v1 明确不支持外部副作用预演）。
 >
-> **M5 replay 退出码（DR-002 §3.3，回写 spec 06 §6.10.5/§6.10.7；REV-030 已实现、REV-032 e2e）**：`--mode=events` 默认 L1，复用 `zgraph trace` 只读回放、不重跑不写库；`--mode=outputs` 仅支持原始 run `Completed` 且 `record_mode=full`，用 RecordedExecutor 重跑（不启动 worker/LLM），输出不一致 → `REPLAY_OUTPUT_MISMATCH` exit 1；记录缺失/原始 run 非 Completed/记录 hash 损坏（`REPLAY_RECORD_MISSING`/`REPLAY_RUN_NOT_COMPLETED`/`REPLAY_RECORD_CORRUPT`）→ exit 3；run 不存在/存储错误 → exit 4。全部 `REPLAY_*` 属 CLI 命名空间、不写 `runs.error_code`。
+> **M5 replay 退出码（DR-002 §3.3，回写 spec 06 §6.10.5/§6.10.7；REV-030 已实现、REV-032 e2e）**：`--mode=events` 默认 L1，复用 `zgraph trace` 只读回放、不重跑不写库；`--mode=outputs` 仅支持原始 run `Completed` 且 `record_mode=full`，用 RecordedExecutor 重跑（不启动 worker/LLM），输出不一致 → `REPLAY_OUTPUT_MISMATCH` exit 1；记录缺失/原始 run 非 Completed/记录损坏（hash 不符/重复/缺 `output_json`/`entry_inputs` 非法）（`REPLAY_RECORD_MISSING`/`REPLAY_RUN_NOT_COMPLETED`/`REPLAY_RECORD_CORRUPT`）→ exit 3；run 不存在/存储错误 → exit 4。全部 `REPLAY_*` 属 CLI 命名空间、不写 `runs.error_code`。
 
 ### 5.4 复现边界（诚实声明）
 
@@ -276,7 +276,7 @@ doc/                 # 现有文档 + spec-v1.2 + analysis + 本蓝图
 | `NODE_WORKER_CRASH` | 运行期 | worker 被信号杀死 / 非约定 exit code | Crashed（`NodeError::NodeWorker{kind:Crash, signal, exit_code, stderr_tail}`；三项仅 supervisor 观察到的进程退出路径有值，stderr_tail ≤1 KiB、不脱敏——ISSUE-066/REV-031） |
 | `REPLAY_RECORD_MISSING` | CLI | `replay --mode=outputs` 但运行期未 `--record=full`，或已执行非内置实例缺记录 | CLI 退出码 3（不写 `runs.error_code`；DR-002 §3.3） |
 | `REPLAY_RUN_NOT_COMPLETED` | CLI | `replay --mode=outputs` 但原始 run 非 `Completed` | CLI 退出码 3（不写 `runs.error_code`；REV-030） |
-| `REPLAY_RECORD_CORRUPT` | CLI | `recorded_outputs.output_json` 重算 hash ≠ `output_hash`（记录损坏） | CLI 退出码 3（不写 `runs.error_code`；REV-030） |
+| `REPLAY_RECORD_CORRUPT` | CLI | 记录损坏：`recorded_outputs.output_json` 重算 hash ≠ `output_hash` / 重复记录 / 缺 `output_json` / `entry_inputs` 非法 | CLI 退出码 3（不写 `runs.error_code`；REV-030） |
 | `REPLAY_OUTPUT_MISMATCH` | CLI | L2 重跑输出 ≠ 原始 `runs.output_json` | CLI 退出码 1（不写 `runs.error_code`；REV-030） |
 | `NodeAbandoned` | 事件 | **v2 不产生**（D1）；enum 保留兼容，文档标 deprecated | — |
 | `RunMetrics.killed_workers` | 指标 | 因超时/取消被 kill 的 worker 数 | 替代 `abandoned_tasks`（后者恒 0） |
