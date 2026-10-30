@@ -10,20 +10,20 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：M5 收尾进行中
+## 当前状态：M5 收尾完成
 
-**已完成 M0–M4**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
+**已完成 M0–M5**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
 图内核与事件循环、trace/SQLite（L1 回放）、worker supervisor + `WorkerExecutor`（进程组 kill/取消升级/帧超时/并发上限）、
 **Agent Harness**（`agent_call`：`genai 0.7.2` LLM 流式 + Fake provider、tool loop（每次调用一个 Python worker 子进程）、
 上下文预算/裁剪、错误映射、`HarnessExecutor`）、`python/workers` 与 `python/zgraph_worker.tool_runner`、
 spec v1.2 M0–M4 回写（05/00/04/07，REV-023）；AC-08 fake 真链路验收（`tests/e2e/harness_ac08.rs`）+ AC-06/07/09/10 真子进程验收；
 本地双栈测试全绿（M4 收尾基线 `cargo test --workspace` 423 passed / pytest 84 passed）。CI 已配置（`.github/workflows/ci.yml`）。
 
-**M5 收尾进行中**：
+**M5 收尾完成**（DoD 全部达成；口径见 [`doc/decisions/DR-002-m5-cli-replay-recording.md`](doc/decisions/DR-002-m5-cli-replay-recording.md)）：
 
-- **已交付并合并到 main**：`zgraph run` 真链路（`--fake-llm[=<script>]` / `--real` / `--record=none|hash|full` / `--json` / 退出码 / `:memory:` / SIGINT，REV-028）；`zgraph replay` L1/L2 与 `llm_calls` 落库（REV-030）；CLI 启动中止标定 / `--json.recovered[]` / `trace` 进行中提示（REV-030）；AC-12 多 run 并发隔离真链路（10 run 同库，REV-029）；e2e AC-01 CLI / L2 replay / 崩溃标定 / ISSUE-076 端到端（REV-032）；ISSUE-061（gate 幻影 attempt，REV-026）、ISSUE-074（结构感知截断，合法 JSON ≤8 KiB，REV-027）、ISSUE-066（worker crash 记录 signal/exit/stderr_tail，REV-031）、ISSUE-076（`declared_timeout_ms` + `timeout_hint` + CLI 转发，REV-026/033/030）均 **M5 已修**；trace 中止标定原语（`interrupted_candidates`/`mark_interrupted`）与 `RunRow.owner_pid`（REV-034）；DR-002 决策/波次/台账（REV-025/REV-038）。
-- **本批待合并**：spec v1.2 M5 回写（REV-035，本分支；待关闭评审 C1–C3 后合并）。
-- **后续**：REV-036 收尾（issues/progress/README/评审索引/baseline）→ REV-037（process 依赖治理）→ M6 排除项（见 DR-002 §7）。
+- **已交付并合并到 main**：`zgraph run` 真链路（`--fake-llm[=<script>]` / `--real` / `--record=none|hash|full` / `--json` / 退出码 / `:memory:` / SIGINT，REV-028）；`zgraph replay` L1/L2 与 `llm_calls` 落库（REV-030）；CLI 启动中止标定 / `--json.recovered[]` / `trace` 进行中提示（REV-030）；AC-12 多 run 并发隔离真链路（10 run 同库，REV-029）；e2e AC-01 CLI / L2 replay / 崩溃标定 / ISSUE-076 端到端（REV-032）；ISSUE-061（gate 幻影 attempt，REV-026）、ISSUE-074（结构感知截断，合法 JSON ≤8 KiB，REV-027）、ISSUE-066（worker crash 记录 signal/exit/stderr_tail，REV-031）、ISSUE-076（`declared_timeout_ms` + `timeout_hint` + CLI 转发，REV-026/033/030）、ISSUE-048（终态 pid 提示，REV-034/030）、ISSUE-084（崩溃中止标定 + `recovered[]`，REV-034/030/032）均 **M5 已修**；spec v1.2 M5 回写（00/04/05/06/07/08 + `PROVENANCE`，REV-035）。
+- **本批（REV-036 收尾，已合入）**：台账/进度/README/评审索引/`test-baseline` 收口；最终 `cargo test --workspace` 0 failed、`pytest -q` 84 passed。
+- **后续（M6）**：DR-002 §7/§9 排除/顺延项（REV-037 process 依赖治理；ISSUE-033/036/059/073/075/077/079/080/081/082 版本列/085/086/087/088/089）。
 - 范围与落地口径：[`doc/decisions/DR-002-m5-cli-replay-recording.md`](doc/decisions/DR-002-m5-cli-replay-recording.md)；进度：[`doc/progress.md`](doc/progress.md)；遗留项：[`doc/issues.md`](doc/issues.md)。
 
 ## 快速开始

@@ -80,7 +80,7 @@
    - **索引**：`doc/reviews/README.md` 补 REV-031 行（跨模块双评审），未合并仅 REV-035/036（REV-037 未开始）；`doc/index.md` reviews 范围更新为 REV-025–034/038；DR-002 §4 ISSUE-066 标 REV-031 已合并。
    - 本批次后按 §3 重新实测并更新（00–08 合计 **5956 行**）。
 
-11. **REV-035 评审条件修正批次**（2026-10-30，同一分支追加 commit，不改写 REV-035 评审记录；reviewer-a 结论「有条件通过」）：
+11. **REV-035 评审条件修正批次**（2026-10-30，同一分支追加 commit，不改写 REV-035 评审记录；reviewer-a 首轮结论「有条件通过」，C1–C3 关闭后复审「通过」（REV-035 §8，`a21c523`），本批已合入 main）：
    - **C1**：根 `README.md` 状态段按 main `438822b` 事实重写——REV-030/031/032、CLI 启动标定/`recovered[]`、ISSUE-066/076 移入「已合并」；REV-035 标「本批待合并」；待交付仅 REV-036 收尾 → REV-037 → M6。
    - **C2**：07 AC-01 `run` 命令补 `--python-path python --python-path tests/fixtures/graphs/customer_ticket/py`（与 `tests/e2e/cli_support/mod.rs::ac01_run_args` 一致），并注明等价 `PYTHONPATH`。
    - **C3**：§3 保留 00–08 当前实测合计，同时补回 M4 历史测量注记（**5818 行**；base `origin/main` `fda996c`；合并 rebase `12ab2f6`），不替换历史。
