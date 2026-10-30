@@ -10,10 +10,9 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：M6 进行中（M0–M5 已完成）
+## 当前状态：M6 完成（M0–M6 全部交付）
 
-**M6（进行中，2026-10-30 开工）**：范围 = M5 顺延的 17 个 ISSUE + REV-037 依赖/CI 治理 + AC-12「同一图 10 并发 run」加强用例；波次、分支与 REV 编号见 [`doc/decisions/DR-003-m6-scope-and-waves.md`](doc/decisions/DR-003-m6-scope-and-waves.md)，实时状态见 [`doc/progress.md`](doc/progress.md)。
-**M6 W1 已交付（REV-039–045）**：DR-003、ISSUE-033/059/068/073/075/077/078/086/089、REV-037 依赖治理（`nix`/`blake3`/`futures-util` 提升 + CI `--locked`）、AC-12「同一图 10 并发 run」加强用例；W2/W3（ISSUE-036/079/080/081/082/085/087/088 + spec 回写）待推进。
+**M6 已交付（2026-10-31，REV-039–061）**：范围 = M5 顺延的 17 个 ISSUE + REV-037 依赖/CI 治理 + AC-12「同一图 10 并发 run」加强用例；波次、分支与 REV 编号见 [`doc/decisions/DR-003-m6-scope-and-waves.md`](doc/decisions/DR-003-m6-scope-and-waves.md)，状态见 [`doc/progress.md`](doc/progress.md)。关键交付：trace 双通道（033）、fail-stop 接线（036）、CLI 退出码统一（059）、依赖治理 + CI `--locked`（068/073/078）、harness 安全（075/077）、实例超时错误码（086）、e2e 质量 + AC-12 同图 10 并发（089）、工具并发共享全局上限（079）、runs 版本/模型参数列（082）、`global_vars` schema v3（087）、human 生命周期实时（085）、函数拆分（081）、主机/EPERM 加固（088）、spec 00–08 回写（057）、merge 门禁 clippy + CLI bin（058/061）。**M0–M6 全部完成**，遗留项见 [`doc/issues.md`](doc/issues.md)。
 
 **已完成 M0–M5**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
 图内核与事件循环、trace/SQLite（L1 回放）、worker supervisor + `WorkerExecutor`（进程组 kill/取消升级/帧超时/并发上限）、

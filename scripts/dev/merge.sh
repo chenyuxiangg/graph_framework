@@ -75,6 +75,10 @@ fi
 # 6b) Python 测试：不得新增失败（对照 main 的 doc/test-baseline.txt）
 if [ -f "${branch_wt}/Cargo.toml" ]; then
   command -v cargo >/dev/null 2>&1 || die "未找到 cargo（Rust 工程必须可测试）"
+  # 6a0) 先构建 CLI 裸二进制：e2e 依赖 <target>/debug/zgraph，cargo test 不保证重建（ISSUE-096）
+  info "执行 cargo build -p zgraph-cli --bin zgraph --locked"
+  ( cd "${branch_wt}" && cargo build -p zgraph-cli --bin zgraph --locked ) \
+    || die "cargo build (zgraph bin) 失败"
   info "执行 cargo test --workspace"
   ( cd "${branch_wt}" && cargo test --workspace --quiet ) || die "cargo test 失败"
   info "cargo test 通过"

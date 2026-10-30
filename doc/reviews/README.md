@@ -49,6 +49,20 @@
 | [REV-043](REV-043-cli-m6-exit-codes.md) | 2026-10-31 | cli | `fix/cli-m6-exit-codes` | 通过（ISSUE-059 + REV-028 #6） | lead |
 | [REV-044](REV-044-e2e-m6-quality-ac12.md) | 2026-10-31 | e2e | `test/e2e-m6-quality-ac12` | 通过（ISSUE-089 + AC-12 同图 10×） | lead |
 | [REV-045](REV-045-process-m6-deps.md) | 2026-10-30 | process | `chore/process-m6-deps` | 通过（ISSUE-068/078/073 + CI `--locked`） | reviewer-a |
+| [REV-046](REV-046-docs-m6-wave1.md) | 2026-10-31 | docs/process | `docs/docs-m6-wave1` | 通过（W1 状态收口；首轮有条件通过 C1–C4 关闭后增量复审通过） | reviewer-a |
+| [REV-047](REV-047-trace-m6-failstop.md) | 2026-10-31 | trace/kernel/cli | `fix/trace-m6-failstop` | 通过（ISSUE-036 fail-stop 接线；跨模块主审+第二评审） | lead + reviewer-a |
+| [REV-048](REV-048-harness-m6-run-columns.md) | 2026-10-31 | harness/worker/cli/trace | `feat/harness-m6-run-columns` | 通过（ISSUE-082 runs 版本/模型参数列；C1「尽力写」关闭后通过） | lead + reviewer-a |
+| [REV-049](REV-049-trace-m6-global-vars.md) | 2026-10-31 | trace/cli | `feat/trace-m6-global-vars` | 通过（ISSUE-087 schema v3 + global_vars；schema 专项第二评审） | lead + reviewer-a |
+| [REV-050](REV-050-cli-m6-human-realtime.md) | 2026-10-31 | cli | `fix/cli-m6-human-realtime` | 通过（ISSUE-085 human 生命周期实时） | lead |
+| [REV-052](REV-052-harness-m6-tool-limits.md) | 2026-10-31 | harness/worker/cli | `fix/harness-m6-tool-limits` | 通过（ISSUE-079 工具并发共享 WorkerLimits；跨模块双评审） | lead + reviewer-a |
+| [REV-053](REV-053-harness-m6-split.md) | 2026-10-31 | harness | `chore/harness-m6-split` | 通过（ISSUE-081 harness 侧拆分，最大 46 行） | lead |
+| [REV-054](REV-054-cli-m6-cli-split.md) | 2026-10-31 | cli | `refactor/cli-m6-cli-split` | 通过（ISSUE-081 cli 侧拆分 13→0） | lead |
+| [REV-055](REV-055-e2e-m6-final-asserts.md) | 2026-10-31 | e2e | `test/e2e-m6-final-asserts` | 通过（ISSUE-086 实例 error_code + validate 退出码回归） | reviewer-a |
+| [REV-056](REV-056-cli-m6-host-hardening.md) | 2026-10-31 | cli | `fix/cli-m6-host-hardening` | 通过（ISSUE-088 多机/EPERM/host 加固） | lead |
+| [REV-057](REV-057-docs-m6-writeback.md) | 2026-10-31 | docs | `docs/docs-m6-writeback` | 通过（M6 spec 回写 05/06/07/08 + architecture + PROVENANCE；C1–C3 关闭后通过） | reviewer-a |
+| [REV-058](REV-058-process-m6-ci-clippy.md) | 2026-10-31 | process/cli/docs | `chore/process-m6-ci-clippy` | 通过（merge 门禁 clippy + cli lint + refactor 前缀 + ISSUE-094） | reviewer-a |
+| [REV-060](REV-060-e2e-m6-tool-limits.md) | 2026-10-31 | e2e | `test/e2e-m6-tool-limits` | 通过（e2e 工具+节点共享上限适配） | lead |
+| [REV-061](REV-061-process-m6-wrapup.md) | 2026-10-31 | process/docs | `docs/process-m6-wrapup` | 通过（M6 收口：台账/进度/索引/baseline/ISSUE-096/097、AC-12 10 次重跑） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
@@ -59,5 +73,4 @@
 - M4：REV-017（process 依赖）、REV-018（kernel 错误码/ContextOverflow）、REV-021（worker 装箱）由 Lead 提交、reviewer-b 评审；REV-020/022/023 分别由 harness-dev/e2e-dev/docs-writer 提交、reviewer-b 评审；REV-024 由 Lead 提交、reviewer-b 评审。REV-020/022 含 Cargo.lock 跨模块变更，已在评审记录中声明。
 - M5（已合并到 main）：REV-025（process/docs kickoff+DR-002，lead/reviewer-a）、REV-026（kernel，kernel-dev/reviewer-a）、REV-027（harness，harness-dev/reviewer-b）、REV-028（cli，cli-dev/reviewer-a）、REV-029（e2e，e2e-dev/reviewer-b）、REV-030（cli replay/L2/标定，cli-dev/reviewer-b）、REV-031（kernel/worker/cli/harness ISSUE-066，worker-dev；reviewer-a 主审 + reviewer-b 第二评审）、REV-032（e2e CLI/L2/标定，e2e-dev/reviewer-b）、REV-033（harness，harness-dev/reviewer-b）、REV-034（trace，trace-dev/reviewer-a）、REV-035（docs spec 回写，docs-writer/reviewer-a）、REV-036（docs/process 收尾，lead/reviewer-b）、REV-038（process/docs 台账，lead/reviewer-a）。REV-028/030 含根 `Cargo.lock`、REV-025/035/036 含根 `README.md`（process）跨模块变更；REV-031 为 kernel/worker/cli/harness 跨模块（Lead 批准、双评审）；REV-032 含 e2e dev-dep `rusqlite` 根 `Cargo.lock` 机械改动。REV-037（process 依赖治理/CI）顺延 M6。
 
-- M6（进行中）：W1 已合并 REV-039（kickoff/DR-003，lead/reviewer-a）、REV-040（kernel，kernel-dev/lead）、REV-041（trace，trace-dev/lead）、REV-042（harness，harness-dev/lead）、REV-043（cli，cli-dev/lead）、REV-044（e2e，e2e-dev/lead）、REV-045（process，lead/reviewer-a）。M6 计划至 REV-058（W1 收口 REV-046；W2/W3：036/082/087/085/080/079/081/088/086-e2e、spec 回写与 wrapup）
-- 编号顺延注记（REV-046）：REV-040–044 评审记录正文中的 `REV-054`（e2e 断言）/`REV-056`（spec 回写）为顺延前口径，以 `DR-003` §2 的 **REV-055/REV-057** 为准（记录不可改，仅追加注记）。。REV-037 未创建（顺延 M6，由 REV-045 承接）。
+- M6（已全部合并到 main，2026-10-31）：REV-039（kickoff/DR-003）、REV-040–045（W1）、REV-046（W1 收口）、REV-047–056（W2/W3：fail-stop、runs 两列、global_vars、human 实时、079 共享限流、081 拆分、086 e2e、088 主机加固）、REV-057（spec 回写）、REV-058（merge 门禁 clippy，计划外）、REV-060（e2e 工具共享上限适配，计划外）、REV-061（wrapup）。**REV-051、REV-059 未创建**（ISSUE-080 并入 REV-057；059 编号未使用）。跨模块：REV-047/048/049/052 为多模块（Lead 批准 + 第二评审 reviewer-a）；REV-057/058/061 为 docs/process。

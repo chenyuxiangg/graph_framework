@@ -38,7 +38,7 @@ badfiles="$(echo "${staged}" | grep -E '(^|/)(\.venv|__pycache__|\.worktrees|log
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 case "${BRANCH}" in
   main) ok "当前在 main（bootstrap/流程提交允许；代码改动禁止直接提交 main）" ;;
-  feat/*|fix/*|test/*|docs/*|chore/*) ok "分支命名: ${BRANCH}" ;;
+  feat/*|fix/*|test/*|docs/*|chore/*|refactor/*) ok "分支命名: ${BRANCH}" ;;
   *) bad "分支名不符合 <type>/<module>-<slug>: ${BRANCH}" ;;
 esac
 

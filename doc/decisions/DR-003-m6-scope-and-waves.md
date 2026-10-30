@@ -49,16 +49,18 @@
 | 2 | `feat/harness-m6-run-columns` | harness+cli+trace | REV-048 | ISSUE-082（跨模块，双评审） |
 | 2 | `feat/trace-m6-global-vars` | trace+cli | REV-049 | ISSUE-087（schema v3，单独评审） |
 | 2 | `fix/cli-m6-human-realtime` | cli | REV-050 | ISSUE-085 |
-| 2 | `docs/docs-m6-reason-closed-set` | docs | REV-051 | ISSUE-080 |
+| 2 | （未创建） | docs | REV-051 | ISSUE-080 并入 REV-057（未单独建分支） |
 | 2 | `fix/harness-m6-tool-limits` | harness(+cli) | REV-052 | ISSUE-079 |
 | 2 | `refactor/harness-m6-split` | harness | REV-053 | ISSUE-081 harness 侧 |
 | 2 | `refactor/cli-m6-split` | cli | REV-054 | ISSUE-081 cli 侧 |
 | 3 | `test/e2e-m6-final-asserts` | e2e | REV-055 | ISSUE-086 实例 error_code e2e + 回归 |
 | 3 | `fix/cli-m6-host-hardening` | cli(+trace) | REV-056 | ISSUE-088 |
 | 3 | `docs/docs-m6-writeback` | docs | REV-057 | spec 05/06/07/08 + architecture §5.2 + PROVENANCE 回写 |
-| 3 | `docs/process-m6-wrapup` | process/docs | REV-058 | 台账/进度/README/index/评审索引/基线收口 |
+| 3 | `chore/process-m6-ci-clippy` | process/cli/docs | REV-058 | merge 门禁 clippy + cli lint + refactor 前缀 + ISSUE-094（计划外插入） |
+| 3 | `test/e2e-m6-tool-limits` | e2e | REV-060 | e2e 工具+节点共享上限适配（计划外插入；REV-059 未使用） |
+| 3 | `docs/process-m6-wrapup` | process/docs | REV-061 | 台账/进度/README/index/评审索引/基线 + ISSUE-096/097 + AC-12 连续 10 次重跑 |
 
-> REV-037 从未创建（M5 顺延 M6）；M6 起评审编号从 **REV-039** 连续分配（REV-038 已用；W1 收口用 REV-046，W2/W3 顺延至 REV-058）。上表编号为预留，若某分支合并顺序变化**不改编号**，以实际评审记录为准。
+> REV-037 从未创建（M5 顺延 M6）；M6 起评审编号从 **REV-039** 连续分配（REV-038 已用）。上表编号为预留；实际执行中 **REV-046**（W1 收口）、**REV-058**（merge 门禁 clippy）、**REV-060**（e2e 工具共享上限适配）为计划外插入，**REV-051**（ISSUE-080 并入 REV-057）与 **REV-059** 未创建，wrapup 顺延为 **REV-061**。M6 收口结果：全部计划项已交付（详见 `README.md` 状态段与 `doc/reviews/README.md`）。
 
 ## 3. 关键决策（spec 未写死或 M5 遗留口径）
 
