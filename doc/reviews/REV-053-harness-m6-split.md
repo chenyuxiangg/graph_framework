@@ -1,6 +1,7 @@
 # REV-053 · harness · ISSUE-081 剩余 >60 行函数拆分（纯重构）
 
-- **分支**：`chore/harness-m6-split`（DR-003 计划名 `refactor/harness-m6-split`；`scripts/dev/worktree.sh` 的 type 白名单无 `refactor`，实际用 `chore`，语义为重构、无行为变化）
+- **分支**：`chore/harness-m6-split`
+  （DR-003 计划名 `refactor/harness-m6-split`；`scripts/dev/worktree.sh` 的 type 白名单无 `refactor`，实际用 `chore`，语义为重构、无行为变化）
 - **作者**：`harness-dev`（提交 `34d0c54`）
 - **评审人**：`lead`（**≠ 作者**；独立评审）
 - **变更范围**：`main(67bc49b)..34d0c54`，6 文件（`crates/zgraph-harness/src/**`，+655/−380）；worktree clean
