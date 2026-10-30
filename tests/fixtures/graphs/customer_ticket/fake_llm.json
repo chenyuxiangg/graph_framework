@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "chunk_chars": 3,
+  "chunk_delay_ms": 0,
+  "calls": [
+    {
+      "kind": "text",
+      "content": "{\"parsed_query\": \"退款政策\", \"user_id\": \"u1\", \"kb_result\": {\"hits\": 1}, \"answer\": \"可以退款\", \"need_human\": false}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 12
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"parsed_query\": \"退款政策\", \"user_id\": \"u1\", \"kb_result\": {\"hits\": 1}, \"answer\": \"可以退款\", \"need_human\": false}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 12
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"parsed_query\": \"退款政策\", \"user_id\": \"u1\", \"kb_result\": {\"hits\": 1}, \"answer\": \"可以退款\", \"need_human\": false}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 12
+      }
+    }
+  ],
+  "failures": []
+}
