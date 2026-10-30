@@ -191,9 +191,57 @@ def test_discover_returns_tools_in_file_then_declaration_order() -> None:
         "tools.single",
         "tools.slow",
     ]
-    assert all(set(tool) == {"name", "description", "parameters", "source"} for tool in tools)
+    assert all(set(tool) >= {"name", "description", "parameters", "source"} for tool in tools)
+    allowed_keys: set[str] = {"name", "description", "parameters", "source", "timeout_ms"}
+    assert all(set(tool) <= allowed_keys for tool in tools)
     assert all(tool["description"] for tool in tools)
     assert all(tool["parameters"]["type"] == "object" for tool in tools)
+
+
+def test_discover_passes_through_optional_timeout_ms() -> None:
+    tools: dict[str, dict[str, Any]] = {
+        tool["name"]: tool for tool in _discover(TOOLS_OK)["tools"]
+    }
+    assert tools["add"]["timeout_ms"] == 30000
+    assert tools["sleepy"]["timeout_ms"] == 300
+    assert "timeout_ms" not in tools["now"]
+    assert "timeout_ms" not in tools["echo"]
+
+
+@pytest.mark.parametrize(
+    "timeout_ms",
+    [0, -1, 600001, True, "300", 1.5, None],
+    ids=["zero", "negative", "too_large", "bool", "string", "float", "null"],
+)
+def test_discover_invalid_timeout_ms_is_rejected(tmp_path: Path, timeout_ms: Any) -> None:
+    tools_dir: Path = tmp_path / "tools_timeout"
+    declaration: dict[str, Any] = {
+        "name": "ok",
+        "description": "d",
+        "parameters": VALID_TOOL["parameters"],
+        "timeout_ms": timeout_ms,
+    }
+    source: str = MODULE_HEADER + "TOOL = " + repr(declaration) + "\n" + _call_definition()
+    _write_module(tools_dir, "tool", source)
+    result: dict[str, Any] = _discover(tools_dir)
+    assert result["ok"] is False
+    assert result["error"]["reason"] == ERROR_INVALID_DECLARATION
+
+
+def test_discover_accepts_timeout_ms_boundaries(tmp_path: Path) -> None:
+    for index, timeout_ms in enumerate((1, 600000)):
+        tools_dir: Path = tmp_path / f"tools_bound_{index}"
+        declaration: dict[str, Any] = {
+            "name": f"ok{index}",
+            "description": "d",
+            "parameters": VALID_TOOL["parameters"],
+            "timeout_ms": timeout_ms,
+        }
+        source: str = MODULE_HEADER + "TOOL = " + repr(declaration) + "\n" + _call_definition()
+        _write_module(tools_dir, "tool", source)
+        result: dict[str, Any] = _discover(tools_dir)
+        assert result["ok"] is True
+        assert result["tools"][0]["timeout_ms"] == timeout_ms
 
 
 def test_discover_is_deterministic_and_does_not_duplicate_sys_path() -> None:

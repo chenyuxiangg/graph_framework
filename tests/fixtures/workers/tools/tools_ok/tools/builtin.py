@@ -19,6 +19,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
             "required": ["a", "b"],
         },
+        "timeout_ms": 30000,
     },
 ]
 

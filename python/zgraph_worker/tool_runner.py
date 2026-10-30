@@ -24,6 +24,8 @@ from .ctx import WorkerContext
 TOOL_NAME_PATTERN: re.Pattern[str] = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_DESCRIPTION_CHARS: int = 1024
 MAX_TRACEBACK_BYTES: int = 8 * 1024
+MIN_TOOL_TIMEOUT_MS: int = 1
+MAX_TOOL_TIMEOUT_MS: int = 600_000
 
 DECLARATION_TOOLS: str = "TOOLS"
 DECLARATION_TOOL: str = "TOOL"
@@ -118,8 +120,25 @@ def _require_call(module: ModuleType, module_name: str) -> Any:
     return call_fn
 
 
+def _timeout_ms_value(raw: dict[str, Any], location: str) -> int | None:
+    """校验可选 ``timeout_ms``；缺省返回 ``None``，非法值 → ``invalid_declaration``。"""
+    if "timeout_ms" not in raw:
+        return None
+    timeout_ms: Any = raw["timeout_ms"]
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int):
+        raise ToolDeclarationError(
+            ERROR_INVALID_DECLARATION, f"{location}: timeout_ms must be an integer"
+        )
+    if not MIN_TOOL_TIMEOUT_MS <= timeout_ms <= MAX_TOOL_TIMEOUT_MS:
+        raise ToolDeclarationError(
+            ERROR_INVALID_DECLARATION,
+            f"{location}: timeout_ms must be in [{MIN_TOOL_TIMEOUT_MS}, {MAX_TOOL_TIMEOUT_MS}]",
+        )
+    return timeout_ms
+
+
 def _validate_tool(raw: Any, module_name: str, index: int | None) -> dict[str, Any]:
-    """校验单个工具声明，返回 ``{name, description, parameters}``。"""
+    """校验单个工具声明，返回 ``{name, description, parameters[, timeout_ms]}``。"""
     location: str = module_name if index is None else f"{module_name}[{index}]"
     if not isinstance(raw, dict):
         raise ToolDeclarationError(
@@ -153,7 +172,15 @@ def _validate_tool(raw: Any, module_name: str, index: int | None) -> dict[str, A
         raise ToolDeclarationError(
             ERROR_INVALID_DECLARATION, f"{location}: parameters.properties must be an object"
         )
-    return {"name": name, "description": description, "parameters": parameters}
+    tool: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "parameters": parameters,
+    }
+    timeout_ms: int | None = _timeout_ms_value(raw, location)
+    if timeout_ms is not None:
+        tool["timeout_ms"] = timeout_ms
+    return tool
 
 
 def _tool_definitions(module: ModuleType, module_name: str) -> list[dict[str, Any]]:
@@ -238,6 +265,7 @@ def discover(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
     ``ctx`` 为 worker 协议统一签名的一部分，本函数不使用。
 
     返回 ``{"ok": true, "tools": [{"name", "description", "parameters", "source"}]}``；
+    声明中存在可选 ``timeout_ms``（int，1..=600000）时对应工具项额外携带该键；
     失败返回带 ``reason`` / ``message`` / ``traceback`` 的 ``{"ok": false, "error": {...}}``。
     """
     tools_dir: Path | None = _opt_tools_dir(inputs)

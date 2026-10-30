@@ -1,4 +1,4 @@
-"""形式 B 工具 fixture：按参数 seconds 睡眠（用于超时/取消路径）。"""
+"""形式 B 工具 fixture：按参数 seconds 睡眠（用于超时/取消路径，声明 300ms 超时）。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ TOOL: dict[str, Any] = {
         "properties": {"seconds": {"type": "number", "minimum": 0}},
         "required": ["seconds"],
     },
+    "timeout_ms": 300,
 }
 
 
