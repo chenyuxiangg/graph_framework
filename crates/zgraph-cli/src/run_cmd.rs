@@ -968,7 +968,7 @@ fn finish(
         .as_ref()
         .and_then(|reader| reader.run(&run_id).ok().flatten())
         .map_or(0, |row| row.event_count);
-    let exit_code = exit_code_for(outcome.status);
+    let exit_code = exit_code_for(&outcome);
     if args.json {
         println!(
             "{}",
@@ -997,9 +997,18 @@ fn finish(
 /// run 终态 → 退出码（06 §6.10.5）。
 ///
 /// CLI 只通过 SIGINT 取消 run，因此 `Cancelled` 一律取 130（程序化取消属库 API，
-/// 不在 CLI 范围内）。
-fn exit_code_for(status: RunStatus) -> u8 {
-    match status {
+/// 不在 CLI 范围内）。**存储 fail-stop**（内核内存态携带 `STORAGE_ERROR`）取 4
+/// （06 §6.4.5 / §6.10.5「存储故障取消 → Failed（若可写）+ 4」）。
+fn exit_code_for(outcome: &RunOutcome) -> u8 {
+    if outcome.status == RunStatus::Failed
+        && outcome
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == zgraph_kernel::CODE_STORAGE_ERROR)
+    {
+        return EXIT_STORAGE;
+    }
+    match outcome.status {
         RunStatus::Completed => EXIT_SUCCESS,
         RunStatus::Failed => EXIT_OTHER,
         RunStatus::Cancelled => EXIT_INTERRUPTED,
@@ -1244,8 +1253,8 @@ fn close_quietly(writer: TraceWriter) {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_memory_db, llm_call_recorder, output_hash, parse, resolve_entry_inputs, FakeLlmMode,
-        RecordingExecutor, RunArgs, DEFAULT_USER_ID,
+        exit_code_for, is_memory_db, llm_call_recorder, output_hash, parse, resolve_entry_inputs,
+        FakeLlmMode, RecordingExecutor, RunArgs, DEFAULT_USER_ID,
     };
     use serde_json::json;
     use std::future::Future;
@@ -1256,13 +1265,32 @@ mod tests {
         FakeLlmProvider, FakeToolRunner, HarnessExecutor, HarnessSettings, LlmProvider,
     };
     use zgraph_kernel::{
-        CompiledGraph, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunStatus,
+        CompiledGraph, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunError, RunMetrics,
+        RunOutcome, RunStatus, CODE_STORAGE_ERROR,
     };
     use zgraph_trace::{RecordMode, TraceWriter};
     use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// `RunOutcome` 构造器（退出码映射测试用；metric 全 0）。
+    fn outcome(status: RunStatus, error: Option<RunError>) -> RunOutcome {
+        RunOutcome {
+            run_id: "run-1".to_string(),
+            status,
+            output: None,
+            error,
+            metrics: RunMetrics {
+                streaming_dropped: 0,
+                abandoned_tasks: 0,
+                trace_backpressure: 0,
+                killed_workers: 0,
+            },
+            started_at: "2026-10-30T00:00:00.000Z".to_string(),
+            finished_at: "2026-10-30T00:00:01.000Z".to_string(),
+        }
     }
 
     fn graph_text() -> String {
@@ -1636,8 +1664,22 @@ mod tests {
 
     #[test]
     fn exit_code_mapping_matches_spec() {
-        assert_eq!(super::exit_code_for(RunStatus::Completed), 0);
-        assert_eq!(super::exit_code_for(RunStatus::Failed), 1);
-        assert_eq!(super::exit_code_for(RunStatus::Cancelled), 130);
+        assert_eq!(exit_code_for(&outcome(RunStatus::Completed, None)), 0);
+        assert_eq!(
+            exit_code_for(&outcome(
+                RunStatus::Failed,
+                Some(RunError::new("NODE_INTERNAL", "boom"))
+            )),
+            1
+        );
+        assert_eq!(exit_code_for(&outcome(RunStatus::Cancelled, None)), 130);
+        // ISSUE-036：存储 fail-stop 的**内存态** STORAGE_ERROR → 退出码 4（06 §6.4.5）。
+        assert_eq!(
+            exit_code_for(&outcome(
+                RunStatus::Failed,
+                Some(RunError::new(CODE_STORAGE_ERROR, "injected"))
+            )),
+            4
+        );
     }
 }

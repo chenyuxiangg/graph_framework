@@ -49,7 +49,7 @@ use crate::types::{
     RecordMode, RunError, RunId, RunMetrics, RunStartError, RunStatus, CODE_NODE_INTERNAL,
     CODE_NODE_TIMEOUT, CODE_NODE_TYPE_UNSUPPORTED, CODE_RUN_DEADLOCK,
     CODE_RUN_DELIVERY_TO_TERMINAL, CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID,
-    CODE_RUN_ILLEGAL_TRANSITION,
+    CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR,
 };
 
 // ---------------------------------------------------------------------------
@@ -475,6 +475,16 @@ impl RunLoop {
         loop {
             while let Ok(command) = ctrl_rx.try_recv() {
                 self.handle_control(command);
+            }
+            // fail-stop（06 §6.4.5）：trace 写端不可恢复错误 → 内存态 Failed。
+            // 终态后不再轮询，错误留给 CLI 在 flush/close 时暴露（避免被 take_error 吞掉）。
+            let storage_error = if self.status.is_terminal() {
+                None
+            } else {
+                self.emitter.take_error()
+            };
+            if let Some(message) = storage_error {
+                self.fail_run_storage(message);
             }
             if let Some(outcome) = self.final_outcome.take() {
                 return outcome;
@@ -1452,6 +1462,38 @@ impl RunLoop {
             at: finished_at,
         };
         let _ = self.emitter.finish(info);
+        self.final_outcome = Some(self.build_outcome(RunStatus::Failed, Some(error)));
+    }
+
+    /// trace 写端不可恢复错误 → fail-stop（06 §6.4.5）：
+    ///
+    /// ① 内存态 `Failed`；② 尽力写一次终态 `RunFinished{Failed}`；③ 终止在飞任务并
+    /// 取消非终态实例。**`RunFinished.error` 保持 `None`**（`runs.error_code`/
+    /// `error_message` 为 NULL；`STORAGE_ERROR` 属 CLI/storage 命名空间，06 §6.12.3 D3），
+    /// 仅内存态 `RunOutcome.error` 携带 [`CODE_STORAGE_ERROR`] 供 CLI 映射 `error[STORAGE_ERROR]`+4。
+    fn fail_run_storage(&mut self, message: String) {
+        if self.status.is_terminal() {
+            return;
+        }
+        self.cancel.store(true, Ordering::SeqCst);
+        self.set_status(RunStatus::Failed);
+        self.cancel_active_instances("trace storage failure");
+        self.ready_queue.clear();
+        self.abort_all_tasks();
+        self.run_output = None;
+        let finished_at = now_rfc3339();
+        self.finished_at = Some(finished_at.clone());
+        let info = RunFinishedInfo {
+            run_id: self.run_id.clone(),
+            status: RunStatus::Failed,
+            output_summary: None,
+            // 不写领域 error_code：storage 错误不进入 events/runs 的错误列（D3）。
+            error: None,
+            metrics: self.metrics(),
+            at: finished_at,
+        };
+        let _ = self.emitter.finish(info);
+        let error = RunError::new(CODE_STORAGE_ERROR, message);
         self.final_outcome = Some(self.build_outcome(RunStatus::Failed, Some(error)));
     }
 

@@ -594,6 +594,125 @@ fn run_storage_error_exits_4() {
     assert!(stderr_text(&output).contains("error[STORAGE_ERROR]"));
 }
 
+// ---------------------------------------------------------------------------
+// 3b. ISSUE-036 fail-stop：trace 写失败 → run 取消（内存态 Failed）→ exit 4
+// ---------------------------------------------------------------------------
+
+/// `start -> fast -> slow(5s) -> end`：fast 完成即触发注入的 trace 写失败，
+/// 内核应在 slow 跑完前 fail-stop（证明写失败会取消 run，而不是静默跑完）。
+fn failstop_graph() -> String {
+    json!({
+        "version": "1.0",
+        "metadata": {"name": "failstop"},
+        "entry_points": ["start"],
+        "nodes": [
+            {"id": "start", "type": "start",
+             "inputs": [{"name": "x", "type": "any", "required": true}], "config": {}},
+            {"id": "fast", "type": "python_node",
+             "inputs": [{"name": "x", "type": "any", "required": true}],
+             "config": {"module": "failstop", "function": "fast"}},
+            {"id": "slow", "type": "python_node",
+             "inputs": [{"name": "x", "type": "any", "required": true}],
+             "config": {"module": "failstop", "function": "slow", "timeout_ms": 60000}},
+            {"id": "end", "type": "end",
+             "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+        ],
+        "edges": [
+            {"from": "start", "to_node": "fast", "to_input_port": "x"},
+            {"from": "fast", "to_node": "slow", "to_input_port": "x"},
+            {"from": "slow", "to_node": "end", "to_input_port": "r"}
+        ]
+    })
+    .to_string()
+}
+
+/// 在既有 trace DB 上装 SQLite trigger：`fast` 的 Completed Transition 写入 ABORT
+/// （等价于磁盘写失败；06 §6.4.5 fail-stop 的确定性故障注入，不依赖真实 ENOSPC）。
+fn inject_trace_write_failure(db: &Path) {
+    let writer = TraceWriter::open(db).expect("open trace writer for injection setup");
+    writer.close().expect("close injection writer");
+    let conn = connect(db);
+    conn.execute_batch(
+        "CREATE TRIGGER inject_trace_write_failure BEFORE INSERT ON events
+           WHEN NEW.kind = 'Transition'
+            AND NEW.payload LIKE '%\"to\":\"Completed\"%'
+            AND NEW.payload LIKE '%\"node_id\":\"fast\"%'
+         BEGIN SELECT RAISE(ABORT, 'injected trace write failure'); END;",
+    )
+    .expect("create failure-injection trigger");
+}
+
+#[test]
+fn trace_write_failure_fails_run_and_exits_4() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let module = write_text(
+        dir.path(),
+        "failstop.py",
+        "import time\n\n\
+         def fast(inputs, ctx):\n    return {\"x\": inputs[\"x\"]}\n\n\
+         def slow(inputs, ctx):\n    time.sleep(5)\n    return {\"r\": inputs[\"x\"]}\n",
+    );
+    let module_dir = module.parent().expect("module dir");
+    let graph = write_text(dir.path(), "failstop.json", &failstop_graph());
+    let db = dir.path().join("failstop.db");
+    inject_trace_write_failure(&db);
+
+    let started = Instant::now();
+    let output = run_cli(
+        &[
+            "run".to_string(),
+            arg(&graph),
+            "--db".to_string(),
+            arg(&db),
+            "--inputs".to_string(),
+            r#"{"start":{"x":1}}"#.to_string(),
+            "--python".to_string(),
+            python_program(),
+            "--python-path".to_string(),
+            arg(&python_path()),
+            "--python-path".to_string(),
+            arg(module_dir),
+        ],
+        dir.path(),
+    );
+    let elapsed = started.elapsed();
+
+    assert_exit(&output, 4, "trace write failure");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("error[STORAGE_ERROR]"), "{stderr}");
+    assert!(
+        !stderr.contains("status=Completed"),
+        "fail-stop must not report a completed run: {stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "fail-stop must abort before the 5s slow node finishes (elapsed {elapsed:?})"
+    );
+
+    // 致命写失败后 run 不得显示 Completed；终态写入属"尽力"（06 §6.4.5/§6.10.5）。
+    let conn = connect(&db);
+    let status: Option<String> = conn
+        .query_row("SELECT status FROM runs", [], |row| row.get(0))
+        .optional()
+        .expect("query run status");
+    assert_ne!(
+        status.as_deref(),
+        Some("Completed"),
+        "run must not complete after trace fail-stop"
+    );
+    let finished_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind = 'RunFinished'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count RunFinished");
+    assert_eq!(
+        finished_rows, 0,
+        "fatal writer cannot persist the best-effort RunFinished"
+    );
+}
+
 #[test]
 fn run_invalid_fake_llm_script_exits_2() {
     let dir = tempfile::tempdir().expect("tempdir");

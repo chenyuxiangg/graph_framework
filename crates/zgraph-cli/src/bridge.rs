@@ -138,6 +138,11 @@ impl kernel::TraceSink for TraceBridge {
         self.handle
             .send(trace::TraceInput::RunFinished(map_run_finished(&info)));
     }
+
+    /// fail-stop 轮询（06 §6.4.5）：非阻塞取走 trace 写线程的不可恢复错误。
+    fn take_error(&self) -> Option<String> {
+        self.handle.take_error()
+    }
 }
 
 /// 桥接层错误：trace 存储 / run 启动校验 / 写线程 fail-stop。
@@ -396,15 +401,23 @@ fn map_run_started(info: &kernel::RunStartedInfo) -> trace::RunStartedInfo {
 }
 
 /// 映射 `RunFinished`（I5 恰一次由内核 Emitter 保证）。
+///
+/// `STORAGE_ERROR` 属 CLI/storage 命名空间（06 §6.12.3 D3），**不写入** `error_code` 列：
+/// 内核 fail-stop 的终态 `RunFinished` 本身已不带 `error`（见 kernel `fail_run_storage`），
+/// 这里再做一次防御性过滤，避免未来调用方把 storage 码混进领域错误列。
 fn map_run_finished(info: &kernel::RunFinishedInfo) -> trace::RunFinishedInfo {
     trace::RunFinishedInfo {
         run_id: info.run_id.clone(),
         status: map_run_status(info.status),
         output_summary: info.output_summary.clone(),
-        error: info.error.as_ref().map(|error| trace::TraceFailure {
-            code: error.code.clone(),
-            message: error.message.clone(),
-        }),
+        error: info
+            .error
+            .as_ref()
+            .filter(|error| error.code != kernel::CODE_STORAGE_ERROR)
+            .map(|error| trace::TraceFailure {
+                code: error.code.clone(),
+                message: error.message.clone(),
+            }),
         metrics: map_metrics(&info.metrics),
         at: info.at.clone(),
     }

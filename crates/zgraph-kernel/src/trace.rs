@@ -211,6 +211,16 @@ pub trait TraceSink: Send + Sync {
     ) -> bool;
     /// run 结束（生命周期内最后一条事件，恰一次）。
     fn run_finished(&self, info: RunFinishedInfo);
+
+    /// 取走 trace 写端的**不可恢复**错误文本（fail-stop 轮询；06 §6.4.5）。
+    ///
+    /// 默认 `None`（内存/no-op sink 永不失败）。生产实现（CLI 的 trace 桥）应非阻塞地
+    /// 取走写线程已记录的错误；内核事件循环据此把 run 置为**内存态** `Failed` 并终止，
+    /// 且不把该错误写入领域 `error_code`（`STORAGE_ERROR` 属 CLI/storage 命名空间，
+    /// 06 §6.12.3 D3）。
+    fn take_error(&self) -> Option<String> {
+        None
+    }
 }
 
 /// 全 no-op sink（`--no-trace` / 不关心 trace 的嵌入调用方）。
@@ -616,6 +626,17 @@ impl Emitter {
             return false;
         }
         self.sink.streaming(run_id, instance_id, node_id, event, at)
+    }
+
+    /// 取走 trace 写端不可恢复错误（fail-stop 轮询；`trace_enabled=false` 时不轮询）。
+    ///
+    /// 不持 `closed` 锁：与 sink 调用并发是允许的（底层实现用原子/互斥自行保证），
+    /// 事件循环只会在两次 sink 调用之间调用本方法。
+    pub(crate) fn take_error(&self) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        self.sink.take_error()
     }
 
     /// 关闭 sink 并发出最后一条 `RunFinished`；重复调用返回 `false`（I5 去重）。

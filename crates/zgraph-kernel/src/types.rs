@@ -57,6 +57,13 @@ pub const CODE_RUN_DEADLOCK: &str = "RUN_DEADLOCK";
 /// 用户取消。
 pub const CODE_RUN_CANCELLED: &str = "RUN_CANCELLED";
 
+/// trace 写端不可恢复错误（fail-stop，06 §6.4.5）。
+///
+/// 属 **CLI/storage 命名空间**（06 §6.12.3 D3），不是 00 §0.4 领域错误码：
+/// 只在**内存态** `RunOutcome.error` 中携带，`RunFinished.error` 与
+/// `runs.error_code` 保持 NULL（CLI 据此映射 `error[STORAGE_ERROR]` + 退出码 4）。
+pub const CODE_STORAGE_ERROR: &str = "STORAGE_ERROR";
+
 /// 实例超时（D1：kill 语义）。
 pub const CODE_NODE_TIMEOUT: &str = "NODE_TIMEOUT";
 
