@@ -6,13 +6,13 @@
 
 | 波次 | 模块 | 任务 | 状态 | REV |
 |---|---|---|---|---|
-| 0 | process/docs | M6 kickoff：DR-003 + progress/index/README | wip | REV-039 |
+| 0 | process/docs | M6 kickoff：DR-003 + progress/index/README | review | REV-039 |
 | 1 | kernel | ISSUE-086 `fail_timeout` 补 `set_instance_error` | wip | REV-040 |
 | 1 | trace | ISSUE-033 双通道（8192 + 1024） | wip | REV-041 |
 | 1 | harness | ISSUE-075/077 preview 脱敏 + canonicalize | wip | REV-042 |
 | 1 | cli | ISSUE-059 退出码统一 + REV-028 #6 CLI 偏差 | wip | REV-043 |
 | 1 | e2e | ISSUE-089 测试质量 + AC-12 同图 10× | wip | REV-044 |
-| 1b | process | ISSUE-068/078/073 依赖治理 + CI clippy（REV-037 顺延） | next | REV-045 |
+| 1b | process | ISSUE-068/078/073 依赖治理 + CI clippy（REV-037 顺延） | wip | REV-045 |
 
 **下一步（M6 波次 2）**
 1. 跨模块：ISSUE-036 fail-stop 接线（REV-046）、ISSUE-082 runs 版本/模型参数列（REV-047）、ISSUE-087 `global_vars`（REV-048）。
