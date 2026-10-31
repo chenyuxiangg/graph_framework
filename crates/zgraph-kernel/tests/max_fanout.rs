@@ -8,8 +8,9 @@
 //!（`actual` 只计 `passed`：defer 边放行计入、defer 边 gate=false 不计数但照常写
 //! `GateResult(deferred=true)`）。
 //!
-//! 阶段 1：DSL `max_fanout` 字段尚未合入本基线，全部用 inline DSL JSON +
-//! `force_max_fanout` 驱动；编译映射（DSL → `CompiledNode.max_fanout`）在阶段 2 补。
+//! 本文件聚焦**运行期**防御层（inline DSL JSON + `force_max_fanout` 反例，以及
+//! `valid_max_fanout.json` 的声明上限边界正例）；DSL `max_fanout` → `CompiledNode`
+//! 的编译映射断言在 `tests/compile.rs`。
 
 mod common;
 
@@ -341,6 +342,41 @@ async fn defer_false_side_emits_gate_result_but_is_not_counted() {
     assert!(
         blocked.deferred,
         "on_gate_false=defer 的 gate=false 必须 deferred"
+    );
+    common::assert_lifecycle_once(&sink);
+}
+
+/// 声明上限边界正例：fixture `valid_max_fanout.json`（start out-degree=2、
+/// max_fanout=2）加载期经 R16 通过；运行期 `actual == limit` → Completed。
+/// 不设 force 钩子，同时证明「有 max_fanout 但未超限」不改变 v0.1.0 行为。
+#[tokio::test]
+async fn declared_limit_at_boundary_completes() {
+    let mut spec = common::spec(
+        common::compile_fixture("valid_max_fanout.json"),
+        common::entry_inputs(&[]),
+    );
+    assert_eq!(
+        spec.graph.nodes.get("start").expect("start").max_fanout,
+        Some(2),
+        "DSL max_fanout 必须编译进 CompiledNode"
+    );
+    spec.options = common::options_with(|options| options.tick_interval_ms = 10);
+    let executor = Arc::new(FakeExecutor::new());
+    let (outcome, sink) = common::run_with_sink(spec, executor).await;
+
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "error: {:?}",
+        outcome.error
+    );
+    assert_eq!(
+        common::last_status(&sink, "start"),
+        Some(InstanceStatus::Completed)
+    );
+    assert_eq!(
+        common::last_status(&sink, "done"),
+        Some(InstanceStatus::Completed)
     );
     common::assert_lifecycle_once(&sink);
 }

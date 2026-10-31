@@ -219,3 +219,69 @@ fn compiles_on_gate_false_policy_and_defaults() {
     let graph = common::compile_text(&explicit);
     assert_eq!(graph.edges[1].on_gate_false, OnGateFalse::Settle);
 }
+
+/// W2b：DSL 节点级 `max_fanout` 原样编译进 `CompiledNode.max_fanout`；
+/// 未写该字段的节点保持 `None`（无运行期上限，v0.1.0 行为）。
+#[test]
+fn compiles_max_fanout_from_dsl() {
+    let graph = common::compile_fixture("valid_max_fanout.json");
+    // `start` 有 2 条出边且 max_fanout=2（R16 边界允许）→ 原样带出。
+    let start = graph.nodes.get("start").expect("node");
+    assert_eq!(start.max_fanout, Some(2));
+    assert_eq!(
+        graph.edge_index().outgoing_edges("start").len(),
+        2,
+        "fixture 处于 R16 边界（out-degree == max_fanout）"
+    );
+    // 未声明 max_fanout 的节点 → None。
+    for node_id in ["a", "b", "done"] {
+        let node = graph.nodes.get(node_id).expect("node");
+        assert_eq!(node.max_fanout, None, "node {node_id}");
+    }
+}
+
+/// W2b：子图节点同样编译 `max_fanout`（R16 在子图内部独立校验）。
+#[test]
+fn compiles_subgraph_node_max_fanout() {
+    let text = r#"{
+      "version": "1.0",
+      "metadata": {"name": "subgraph-max-fanout"},
+      "entry_points": ["start"],
+      "nodes": [
+        {"id": "start", "type": "start", "inputs": [], "config": {}},
+        {"id": "sub", "type": "subgraph",
+         "inputs": [{"name": "q", "type": "string", "required": true}],
+         "config": {"subgraph_id": "inner"}},
+        {"id": "done", "type": "end",
+         "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+      ],
+      "edges": [
+        {"from": "start", "to_node": "sub", "to_input_port": "q"},
+        {"from": "sub", "to_node": "done", "to_input_port": "r"}
+      ],
+      "subgraphs": [
+        {
+          "id": "inner",
+          "nodes": [
+            {"id": "pin", "type": "python_node",
+             "inputs": [{"name": "p", "type": "string", "required": true}],
+             "max_fanout": 1,
+             "config": {"module": "workers.inner", "function": "pin"}},
+            {"id": "inner_end", "type": "end",
+             "inputs": [{"name": "o", "type": "any", "required": true}], "config": {}}
+          ],
+          "edges": [
+            {"from": "pin", "to_node": "inner_end", "to_input_port": "o"}
+          ],
+          "input_mapping": {"q": "pin.p"},
+          "output_mapping": {"r": "inner_end.o"}
+        }
+      ]
+    }"#;
+    let graph = common::compile_text(text);
+    let inner = graph.subgraphs.get("inner").expect("inner subgraph");
+    assert_eq!(inner.nodes.get("pin").expect("pin").max_fanout, Some(1));
+    assert_eq!(inner.nodes.get("inner_end").expect("end").max_fanout, None);
+    // 主图 `sub` 未声明 → None（子图的 max_fanout 不冒泡到父图节点）。
+    assert_eq!(graph.nodes.get("sub").expect("sub").max_fanout, None);
+}

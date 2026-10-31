@@ -252,9 +252,9 @@ fn compile_node(node: &GraphNode) -> Result<CompiledNode, CompileError> {
         declared_timeout_ms,
         timeout_ms,
         max_attempts,
-        // W2b 阶段 1：DSL `max_fanout` 字段尚未合入本基线，接线在阶段 2 补齐；
-        // 缺省 `None` 即 v0.1.0 行为（无运行期扇出上限）。
-        max_fanout: None,
+        // W2b：DSL `max_fanout` 原样带出（`None` = 作者未声明 → 无运行期上限，
+        // v0.1.0 行为）。运行期防守见 `run::RunLoop::reject_fanout_exceeded`。
+        max_fanout: node.max_fanout,
     })
 }
 
