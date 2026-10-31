@@ -15,8 +15,8 @@ fn frozen_api_types_are_shareable_across_tasks() {
     assert_clone::<TraceHandle>();
     assert_send::<TraceWriter>();
     assert_eq!(
-        TRACE_SCHEMA_VERSION, 4,
-        "v4 = W2a gate_results deferred/attempt/verdict"
+        TRACE_SCHEMA_VERSION, 5,
+        "v5 = W3a WaitingHuman statuses + human_decisions"
     );
 }
 
@@ -32,6 +32,7 @@ fn instance_status_strings_roundtrip() {
         InstanceStatus::Pending,
         InstanceStatus::Ready,
         InstanceStatus::Running,
+        InstanceStatus::WaitingHuman,
         InstanceStatus::Completed,
         InstanceStatus::Crashed,
         InstanceStatus::TimedOut,
@@ -41,9 +42,16 @@ fn instance_status_strings_roundtrip() {
     for status in all {
         assert_eq!(InstanceStatus::parse(status.as_str()), Some(status));
     }
-    assert_eq!(InstanceStatus::parse("WaitingHuman"), None);
+    assert_eq!(
+        InstanceStatus::parse("WaitingHuman"),
+        Some(InstanceStatus::WaitingHuman)
+    );
     assert!(InstanceStatus::Completed.is_terminal());
     assert!(!InstanceStatus::Running.is_terminal());
+    assert!(
+        !InstanceStatus::WaitingHuman.is_terminal(),
+        "WaitingHuman 是非终态（DR-006 §3.1）"
+    );
 }
 
 #[test]

@@ -1,16 +1,25 @@
-//! schema 迁移与只读打开语义（06 §6.7 / §6.6；v3 = ISSUE-087）。
+//! schema 迁移与只读打开语义（06 §6.7 / §6.6；v3 = ISSUE-087、v4 = W2a、v5 = W3a）。
+//!
+//! 覆盖（DR-006 §6.2 / 06 §6.2.7 的 W3a 测试清单）：
+//! - 新库 v5：DDL/索引/`schema_migrations` 1..5/无备份；`WaitingHuman` 可写；
+//! - v1→v5 / v2→v5 / v3→v5 / v4→v5 逐版本链：每版本恰一份备份、原行逐列保留；
+//! - v4→v5 重建两表后旧数据不变、`human_decisions` 可写、旧 CHECK 拒绝 `WaitingHuman`；
+//! - 只读 `trace` 对 v4 拒绝且不迁移；迁移失败注入 → 备份恢复回 v4。
 
 mod common;
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
-use zgraph_trace::{TraceError, TraceReader, TraceWriter, TRACE_SCHEMA_VERSION};
+use zgraph_trace::{
+    EventQuery, RunStatus, TraceError, TraceReader, TraceWriter, TRACE_SCHEMA_VERSION,
+};
 
 const EXPECTED_TABLES: &[&str] = &[
     "events",
     "gate_results",
     "graphs",
+    "human_decisions",
     "instances",
     "llm_calls",
     "recorded_outputs",
@@ -27,6 +36,7 @@ const EXPECTED_INDEXES: &[&str] = &[
     "idx_gate_passed",
     "idx_gate_run_edge",
     "idx_gate_run_seq",
+    "idx_human_decisions_pending",
     "idx_instances_error_code",
     "idx_instances_run_node",
     "idx_instances_run_status",
@@ -42,6 +52,77 @@ const EXPECTED_INDEXES: &[&str] = &[
     "idx_transitions_run_seq",
     "idx_transitions_run_status",
 ];
+
+/// W3a 前的 v4 `instances`/`transitions` 表形状（status CHECK 无 `WaitingHuman`）。
+///
+/// 测试用它把「当前版本建出的库」降级成真实 v4 库（否则实例/迁移表仍带 v5 CHECK，
+/// 无法验证 v4→v5 的重建路径）。
+const V4_INSTANCES_REBUILD: &str = r#"
+CREATE TABLE instances_v4 (
+  instance_id  TEXT PRIMARY KEY,
+  run_id       TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  node_id      TEXT NOT NULL,
+  node_type    TEXT NOT NULL CHECK (node_type IN
+               ('start','end','python_node','agent_call','subgraph')),
+  attempt      INTEGER NOT NULL DEFAULT 0,
+  status       TEXT NOT NULL CHECK (status IN
+               ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  input        TEXT,
+  output_json  TEXT,
+  error        TEXT,
+  error_code   TEXT,
+  created_seq  INTEGER,
+  started_at   TEXT,
+  finished_at  TEXT,
+  finished_seq INTEGER,
+  UNIQUE (run_id, node_id, attempt)
+);
+INSERT INTO instances_v4 (
+  instance_id, run_id, node_id, node_type, attempt, status, input, output_json,
+  error, error_code, created_seq, started_at, finished_at, finished_seq
+)
+SELECT
+  instance_id, run_id, node_id, node_type, attempt, status, input, output_json,
+  error, error_code, created_seq, started_at, finished_at, finished_seq
+FROM instances;
+DROP TABLE instances;
+ALTER TABLE instances_v4 RENAME TO instances;
+CREATE INDEX IF NOT EXISTS idx_instances_run_node   ON instances(run_id, node_id);
+CREATE INDEX IF NOT EXISTS idx_instances_run_status ON instances(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_instances_error_code ON instances(error_code) WHERE error_code IS NOT NULL;
+"#;
+
+const V4_TRANSITIONS_REBUILD: &str = r#"
+CREATE TABLE transitions_v4 (
+  transition_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  seq           INTEGER NOT NULL UNIQUE REFERENCES events(seq) ON DELETE CASCADE,
+  run_id        TEXT NOT NULL,
+  instance_id   TEXT NOT NULL,
+  node_id       TEXT NOT NULL,
+  attempt       INTEGER NOT NULL,
+  from_status   TEXT NOT NULL CHECK (from_status IN
+                ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  to_status     TEXT NOT NULL CHECK (to_status IN
+                ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  reason        TEXT,
+  error_code    TEXT,
+  error         TEXT,
+  at            TEXT NOT NULL
+);
+INSERT INTO transitions_v4 (
+  transition_id, seq, run_id, instance_id, node_id, attempt,
+  from_status, to_status, reason, error_code, error, at
+)
+SELECT
+  transition_id, seq, run_id, instance_id, node_id, attempt,
+  from_status, to_status, reason, error_code, error, at
+FROM transitions;
+DROP TABLE transitions;
+ALTER TABLE transitions_v4 RENAME TO transitions;
+CREATE INDEX IF NOT EXISTS idx_transitions_run_seq    ON transitions(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_transitions_instance   ON transitions(instance_id, seq);
+CREATE INDEX IF NOT EXISTS idx_transitions_run_status ON transitions(run_id, to_status);
+"#;
 
 fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
     let mut stmt = conn
@@ -66,6 +147,87 @@ fn sqlite_names(conn: &Connection, kind: &str) -> Vec<String> {
         .query_map([kind], |row| row.get::<_, String>(0))
         .expect("query sqlite_master");
     rows.map(|row| row.expect("name")).collect()
+}
+
+/// 表内容的逐列快照（`Value` 精确比较；用于断言迁移不改历史行）。
+fn table_rows(conn: &Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut stmt = conn.prepare(sql).expect("prepare rows query");
+    let column_count = stmt.column_count();
+    let mut rows = stmt.query([]).expect("query rows");
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().expect("row") {
+        let mut values = Vec::with_capacity(column_count);
+        for index in 0..column_count {
+            values.push(
+                row.get::<_, rusqlite::types::Value>(index)
+                    .expect("column value"),
+            );
+        }
+        out.push(values);
+    }
+    out
+}
+
+fn raw_i64(value: &rusqlite::types::Value) -> i64 {
+    match value {
+        rusqlite::types::Value::Integer(value) => *value,
+        other => panic!("expected integer column: {other:?}"),
+    }
+}
+
+fn raw_text(value: &rusqlite::types::Value) -> &str {
+    match value {
+        rusqlite::types::Value::Text(value) => value.as_str(),
+        other => panic!("expected text column: {other:?}"),
+    }
+}
+
+fn raw_opt_text(value: &rusqlite::types::Value) -> Option<&str> {
+    match value {
+        rusqlite::types::Value::Null => None,
+        rusqlite::types::Value::Text(value) => Some(value.as_str()),
+        other => panic!("expected nullable text column: {other:?}"),
+    }
+}
+
+const INSTANCE_COLUMNS: &str = "instance_id, run_id, node_id, node_type, attempt, status, input, \
+     output_json, error, error_code, created_seq, started_at, finished_at, finished_seq";
+const TRANSITION_COLUMNS: &str = "transition_id, seq, run_id, instance_id, node_id, attempt, \
+     from_status, to_status, reason, error_code, error, at";
+const EVENT_COLUMNS: &str = "seq, run_id, kind, severity, at, instance_id, node_id, payload";
+
+fn instance_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    table_rows(
+        conn,
+        &format!("SELECT {INSTANCE_COLUMNS} FROM instances ORDER BY instance_id"),
+    )
+}
+
+fn transition_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    table_rows(
+        conn,
+        &format!("SELECT {TRANSITION_COLUMNS} FROM transitions ORDER BY transition_id"),
+    )
+}
+
+fn event_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    table_rows(
+        conn,
+        &format!("SELECT {EVENT_COLUMNS} FROM events ORDER BY seq"),
+    )
+}
+
+/// 断言 `INSERT` 被 CHECK 约束拒绝（旧 v4 库不应接受 `WaitingHuman`）。
+fn assert_check_rejects(conn: &Connection, sql: &str, what: &str) {
+    match conn.execute_batch(sql) {
+        Ok(()) => panic!("{what}: expected CHECK violation, insert succeeded"),
+        Err(rusqlite::Error::SqliteFailure(inner, _)) => assert_eq!(
+            inner.code,
+            rusqlite::ErrorCode::ConstraintViolation,
+            "{what}: unexpected sqlite error {inner:?}"
+        ),
+        Err(other) => panic!("{what}: unexpected error {other:?}"),
+    }
 }
 
 #[test]
@@ -128,12 +290,77 @@ fn fresh_database_migrates_to_current_version_with_all_tables_and_indexes() {
             "gate_results missing column {column}; have {gate_columns:?}"
         );
     }
+    // v5 `human_decisions` 列与 pending 部分索引（06 §6.2.14）。
+    assert_eq!(
+        table_columns(&conn, "human_decisions"),
+        vec![
+            "run_id",
+            "instance_id",
+            "decision",
+            "approver",
+            "reason",
+            "decision_id",
+            "decided_at",
+            "consumed_at",
+        ]
+    );
+    let pending_index_sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_human_decisions_pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pending index sql");
+    assert!(
+        pending_index_sql.contains("WHERE consumed_at IS NULL"),
+        "pending 索引必须是部分索引: {pending_index_sql}"
+    );
     drop(conn);
     drop(reader);
     writer.close().expect("close writer");
     assert!(
         backup_files(dir.path()).is_empty(),
         "fresh database must not create migration backups"
+    );
+}
+
+#[test]
+fn fresh_v5_database_accepts_waiting_human_status() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("trace.db");
+    let writer = TraceWriter::open(&path).expect("open writer");
+    let handle = writer.handle();
+    handle.send(common::started("run-waiting"));
+    handle.send(common::transition(
+        "run-waiting",
+        "inst-human",
+        "review",
+        zgraph_trace::InstanceStatus::Pending,
+        zgraph_trace::InstanceStatus::WaitingHuman,
+        common::ts(10),
+    ));
+    writer.flush().expect("flush");
+    writer.close().expect("close writer");
+
+    let reader = TraceReader::open_readonly(&path).expect("reader");
+    let instance = reader
+        .instances("run-waiting")
+        .expect("instances")
+        .into_iter()
+        .find(|row| row.instance_id == "inst-human")
+        .expect("human instance");
+    assert_eq!(instance.status, zgraph_trace::InstanceStatus::WaitingHuman);
+    let transition = reader
+        .transitions("run-waiting")
+        .expect("transitions")
+        .into_iter()
+        .find(|row| row.instance_id == "inst-human")
+        .expect("human transition");
+    assert_eq!(transition.to_status, instance.status);
+    assert_eq!(
+        instance.status.as_str(),
+        "WaitingHuman",
+        "存储值必须是 CamelCase 字面量"
     );
 }
 
@@ -234,6 +461,35 @@ fn readonly_reader_rejects_v1_schema_without_migrating() {
 }
 
 #[test]
+fn readonly_reader_rejects_v4_schema_without_migrating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v4.db");
+    create_v4_database(&path);
+    match TraceReader::open_readonly(&path) {
+        Ok(_) => panic!("readonly reader must reject v4 schema"),
+        Err(TraceError::Storage(message)) => assert!(
+            message.contains(&format!(
+                "unsupported schema version=4, expected {TRACE_SCHEMA_VERSION}"
+            )),
+            "unexpected message: {message}"
+        ),
+        Err(other) => panic!("expected Storage, got {other:?}"),
+    }
+    let conn = Connection::open(&path).expect("inspect after rejection");
+    assert_eq!(user_version(&conn), 4, "只读拒绝不得迁移");
+    assert!(
+        !sqlite_names(&conn, "table")
+            .iter()
+            .any(|name| name == "human_decisions"),
+        "只读拒绝不得创建 v5 表"
+    );
+    assert!(
+        backup_files(dir.path()).is_empty(),
+        "只读拒绝不得生成迁移备份"
+    );
+}
+
+#[test]
 fn readonly_open_of_file_without_trace_schema_errors_and_writes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("empty.db");
@@ -260,10 +516,7 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
     let writer = TraceWriter::open(&path).expect("upgrade v1 db");
     let handle = writer.handle();
     handle.send(common::started("run-v1"));
-    handle.send(common::finished(
-        "run-v1",
-        zgraph_trace::RunStatus::Completed,
-    ));
+    handle.send(common::finished("run-v1", RunStatus::Completed));
     writer.flush().expect("flush");
     let reader = TraceReader::open_readonly(&path).expect("reader");
     assert_eq!(
@@ -293,30 +546,35 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
     assert!(sqlite_names(&conn, "table")
         .iter()
         .any(|name| name == "llm_calls"));
+    assert!(
+        sqlite_names(&conn, "table")
+            .iter()
+            .any(|name| name == "human_decisions"),
+        "v1→v5 链必须建 human_decisions"
+    );
     drop(conn);
     drop(reader);
     writer.close().expect("close");
 
-    // 06 §6.7：每个版本迁移前各留一份备份（v1→v2、v2→v3、v3→v4）。
+    // 06 §6.7：每个版本迁移前各留一份备份（v1→v2、v2→v3、v3→v4、v4→v5）。
     let backups = backup_files(dir.path());
     assert_eq!(
         backups.len(),
-        3,
-        "expected three migration backups: {backups:?}"
+        4,
+        "expected four migration backups: {backups:?}"
     );
-    assert!(backups
-        .iter()
-        .any(|path| backup_name(path).contains(".bak.v1-")));
-    assert!(backups
-        .iter()
-        .any(|path| backup_name(path).contains(".bak.v2-")));
-    assert!(backups
-        .iter()
-        .any(|path| backup_name(path).contains(".bak.v3-")));
+    for old_version in 1..=4 {
+        assert!(
+            backups
+                .iter()
+                .any(|path| backup_name(path).contains(&format!(".bak.v{old_version}-"))),
+            "missing .bak.v{old_version}- backup: {backups:?}"
+        );
+    }
 }
 
 #[test]
-fn v2_database_is_upgraded_to_v3_with_backup_and_preserves_rows() {
+fn v2_database_is_upgraded_to_current_version_with_backup_and_preserves_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v2.db");
     create_v2_database(&path);
@@ -333,7 +591,7 @@ fn v2_database_is_upgraded_to_v3_with_backup_and_preserves_rows() {
         .run("run-v2")
         .expect("query")
         .expect("legacy run preserved");
-    assert_eq!(run.status, zgraph_trace::RunStatus::Completed);
+    assert_eq!(run.status, RunStatus::Completed);
     assert_eq!(
         run.global_vars, None,
         "pre-v3 run has no global_vars record (compat: replay falls back to empty map)"
@@ -341,6 +599,7 @@ fn v2_database_is_upgraded_to_v3_with_backup_and_preserves_rows() {
 
     // 备份 = 迁移前的 v2 快照（user_version=2、无 global_vars_json 列、含原 run 行）。
     let backups = backup_files(dir.path());
+    assert_eq!(backups.len(), 3, "v2→v5 逐版本三份备份: {backups:?}");
     let backup = backups
         .iter()
         .find(|path| backup_name(path).contains(".bak.v2-"))
@@ -360,7 +619,7 @@ fn v2_database_is_upgraded_to_v3_with_backup_and_preserves_rows() {
 }
 
 #[test]
-fn v3_database_is_upgraded_to_v4_with_gate_result_defaults() {
+fn v3_database_is_upgraded_to_v5_with_gate_result_defaults_and_backup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v3.db");
     create_v3_database(&path);
@@ -381,7 +640,7 @@ fn v3_database_is_upgraded_to_v4_with_gate_result_defaults() {
     assert_eq!(legacy_rows, 1);
     drop(conn);
 
-    // 打开写端触发 v3→v4：补列后旧行取默认值，新行写入三字段。
+    // 打开写端触发 v3→v4→v5：补列后旧行取默认值，新行写入三字段。
     let writer = TraceWriter::open(&path).expect("upgrade v3 db");
     let handle = writer.handle();
     handle.send(common::gate_with_v4(
@@ -407,7 +666,7 @@ fn v3_database_is_upgraded_to_v4_with_gate_result_defaults() {
         .run("run-v3")
         .expect("query")
         .expect("legacy run preserved");
-    assert_eq!(run.status, zgraph_trace::RunStatus::Completed);
+    assert_eq!(run.status, RunStatus::Completed);
     let gates = reader.gate_results("run-v3").expect("gates");
     assert_eq!(gates.len(), 2, "legacy row + new row");
     assert!(!gates[0].deferred, "legacy row defaults to deferred=false");
@@ -419,9 +678,9 @@ fn v3_database_is_upgraded_to_v4_with_gate_result_defaults() {
     assert_eq!(gates[1].verdict, Some(serde_json::json!({"x": 1})));
     drop(reader);
 
-    // 迁移后：v4 列存在、审计行写入、备份为迁移前的 v3 快照。
-    let conn = Connection::open(&path).expect("inspect v4");
-    assert_eq!(user_version(&conn), 4);
+    // 迁移后：v4 列存在、审计行 v4/v5 写入、备份为迁移前的 v3/v4 快照。
+    let conn = Connection::open(&path).expect("inspect v5");
+    assert_eq!(user_version(&conn), TRACE_SCHEMA_VERSION);
     let v4_columns = table_columns(&conn, "gate_results");
     for column in ["deferred", "attempt", "verdict_json"] {
         assert!(
@@ -431,18 +690,19 @@ fn v3_database_is_upgraded_to_v4_with_gate_result_defaults() {
     }
     let description: String = conn
         .query_row(
-            "SELECT description FROM schema_migrations WHERE version = 4",
+            "SELECT description FROM schema_migrations WHERE version = 5",
             [],
             |row| row.get(0),
         )
-        .expect("v4 audit row");
+        .expect("v5 audit row");
     assert!(
-        description.contains("W2a"),
-        "v4 audit description should name W2a: {description}"
+        description.contains("W3a"),
+        "v5 audit description should name W3a: {description}"
     );
     drop(conn);
 
     let backups = backup_files(dir.path());
+    assert_eq!(backups.len(), 2, "v3→v5 逐版本两份备份: {backups:?}");
     let backup = backups
         .iter()
         .find(|path| backup_name(path).contains(".bak.v3-"))
@@ -459,6 +719,251 @@ fn v3_database_is_upgraded_to_v4_with_gate_result_defaults() {
         .query_row("SELECT COUNT(*) FROM gate_results", [], |row| row.get(0))
         .expect("backup keeps gate rows");
     assert_eq!(backup_rows, 1);
+}
+
+#[test]
+fn v4_schema_rejects_waiting_human_statuses_before_migration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v4-probe.db");
+    create_v4_database(&path);
+    let conn = Connection::open(&path).expect("inspect v4");
+    assert_eq!(user_version(&conn), 4);
+    assert!(
+        !sqlite_names(&conn, "table")
+            .iter()
+            .any(|name| name == "human_decisions"),
+        "v4 库不应有 human_decisions"
+    );
+    assert_check_rejects(
+        &conn,
+        "INSERT INTO instances (instance_id, run_id, node_id, node_type, attempt, status) \
+         VALUES ('inst-probe', 'run-v4', 'probe', 'python_node', 0, 'WaitingHuman');",
+        "v4 instances CHECK",
+    );
+    // 为 transitions 造一条合法的事件信封（满足 FK），再验证 to_status CHECK。
+    conn.execute(
+        "INSERT INTO events (run_id, kind, severity, at, payload) \
+         VALUES ('run-v4', 'Transition', 'info', '2026-01-01T00:00:00.000Z', '{}')",
+        [],
+    )
+    .expect("insert probe event");
+    let probe_seq = conn.last_insert_rowid();
+    assert_check_rejects(
+        &conn,
+        &format!(
+            "INSERT INTO transitions (seq, run_id, instance_id, node_id, attempt, from_status, \
+             to_status, at) VALUES ({probe_seq}, 'run-v4', 'inst-v4', 'node-v4', 0, 'Pending', \
+             'WaitingHuman', '2026-01-01T00:00:00.000Z');"
+        ),
+        "v4 transitions CHECK",
+    );
+}
+
+#[test]
+fn v4_database_is_upgraded_to_v5_preserving_instances_transitions_and_events() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v4.db");
+    create_v4_database(&path);
+
+    // 迁移前：v4 快照（版本=4、无 human_decisions、实例/迁移/事件行）。
+    let before = {
+        let conn = Connection::open(&path).expect("inspect v4");
+        assert_eq!(user_version(&conn), 4);
+        assert!(
+            !sqlite_names(&conn, "table")
+                .iter()
+                .any(|name| name == "human_decisions"),
+            "v4 库不应有 human_decisions"
+        );
+        let snapshot = (
+            instance_rows(&conn),
+            transition_rows(&conn),
+            event_rows(&conn),
+        );
+        assert_eq!(snapshot.0.len(), 1, "seed 恰一条实例");
+        assert_eq!(snapshot.1.len(), 1, "seed 恰一条迁移");
+        assert_eq!(
+            snapshot.2.len(),
+            4,
+            "seed：RunStarted + Transition + GateResult + RunFinished"
+        );
+        snapshot
+    };
+
+    // 打开写端触发 v4→v5（备份 → 单事务重建两表 + 建 human_decisions）。
+    let writer = TraceWriter::open(&path).expect("upgrade v4 db");
+    writer.flush().expect("flush");
+
+    let reader = TraceReader::open_readonly(&path).expect("reader");
+    assert_eq!(
+        reader.schema_version().expect("version"),
+        TRACE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        reader.instances("run-v4").expect("instances").len(),
+        before.0.len()
+    );
+
+    // human_decisions 可写（v5 数据面可用；写入由 DecisionStore 负责，本测试直接 SQL 验证 DDL）。
+    let conn = Connection::open(&path).expect("inspect v5");
+    assert_eq!(user_version(&conn), TRACE_SCHEMA_VERSION);
+    assert_eq!(
+        table_rows(
+            &conn,
+            &format!("SELECT {INSTANCE_COLUMNS} FROM instances ORDER BY instance_id")
+        ),
+        before.0,
+        "v4→v5 必须逐列保留 instances"
+    );
+    assert_eq!(
+        table_rows(
+            &conn,
+            &format!("SELECT {TRANSITION_COLUMNS} FROM transitions ORDER BY transition_id")
+        ),
+        before.1,
+        "v4→v5 必须逐列保留 transitions"
+    );
+    assert_eq!(
+        table_rows(
+            &conn,
+            &format!("SELECT {EVENT_COLUMNS} FROM events ORDER BY seq")
+        ),
+        before.2,
+        "v4→v5 不得改写 events（含 payload）"
+    );
+    // trace 读取 golden：迁移后 TraceReader 的事件投影与迁移前 events 表逐字段一致。
+    let trace_events = reader
+        .events("run-v4", &EventQuery::default())
+        .expect("trace events");
+    assert_eq!(trace_events.len(), before.2.len());
+    for (event, raw) in trace_events.iter().zip(before.2.iter()) {
+        assert_eq!(event.seq, raw_i64(&raw[0]), "events.seq 不变");
+        assert_eq!(event.run_id, raw_text(&raw[1]));
+        assert_eq!(event.kind, raw_text(&raw[2]));
+        assert_eq!(event.severity, raw_text(&raw[3]));
+        assert_eq!(event.at, raw_text(&raw[4]));
+        assert_eq!(event.instance_id.as_deref(), raw_opt_text(&raw[5]));
+        assert_eq!(event.node_id.as_deref(), raw_opt_text(&raw[6]));
+        assert_eq!(
+            event.payload.to_string(),
+            raw_text(&raw[7]),
+            "trace payload 投影必须与迁移前存储一致"
+        );
+    }
+    conn.execute_batch(
+        "INSERT INTO human_decisions (run_id, instance_id, decision, approver, reason, \
+         decision_id, decided_at, consumed_at) VALUES ('run-v4', 'inst-run-v4', 'approved', \
+         'alice', 'lgtm', 'decision-1', '2026-01-01T00:00:01.000Z', NULL);",
+    )
+    .expect("v5 human_decisions accepts a row");
+    // v5 CHECK 接受 WaitingHuman（instances 与 transitions 两处）。
+    conn.execute_batch(
+        "INSERT INTO instances (instance_id, run_id, node_id, node_type, attempt, status) \
+         VALUES ('inst-waiting', 'run-v4', 'review', 'python_node', 0, 'WaitingHuman');",
+    )
+    .expect("v5 instances accepts WaitingHuman");
+    let seq: i64 = conn
+        .query_row(
+            "SELECT seq FROM events ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("last seq");
+    conn.execute(
+        "INSERT INTO transitions (seq, run_id, instance_id, node_id, attempt, from_status, \
+         to_status, at) VALUES (?1, 'run-v4', 'inst-waiting', 'review', 0, 'Pending', \
+         'WaitingHuman', '2026-01-01T00:00:01.000Z')",
+        [seq],
+    )
+    .expect("v5 transitions accepts WaitingHuman");
+    drop(conn);
+    drop(reader);
+    writer.close().expect("close writer");
+
+    // 备份恰一份 v4 快照（user_version=4、旧 CHECK、旧数据）。
+    let backups = backup_files(dir.path());
+    assert_eq!(backups.len(), 1, "v4→v5 恰一份备份: {backups:?}");
+    let backup = &backups[0];
+    assert!(backup_name(backup).contains(".bak.v4-"));
+    let backup_conn = Connection::open(backup).expect("open backup");
+    assert_eq!(user_version(&backup_conn), 4, "备份保持 v4");
+    assert!(
+        !sqlite_names(&backup_conn, "table")
+            .iter()
+            .any(|name| name == "human_decisions"),
+        "备份是 v5 建表前的快照"
+    );
+    assert_eq!(
+        table_rows(
+            &backup_conn,
+            &format!("SELECT {INSTANCE_COLUMNS} FROM instances ORDER BY instance_id")
+        ),
+        before.0,
+        "备份保留迁移前 instances 行"
+    );
+    assert_check_rejects(
+        &backup_conn,
+        "INSERT INTO instances (instance_id, run_id, node_id, node_type, attempt, status) \
+         VALUES ('inst-probe', 'run-v4', 'probe', 'python_node', 0, 'WaitingHuman');",
+        "v4 backup CHECK",
+    );
+}
+
+#[test]
+fn failed_v4_to_v5_migration_restores_backup_and_leaves_v4_untouched() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("locked.db");
+    create_v4_database(&path);
+    {
+        // 故障注入：v4→v5 迁移在写 schema_migrations 审计行时 ABORT（单事务回滚）。
+        let conn = Connection::open(&path).expect("install trigger");
+        conn.execute_batch(
+            "CREATE TRIGGER abort_schema_migration BEFORE INSERT ON schema_migrations \
+             BEGIN SELECT RAISE(ABORT, 'injected v5 migration failure'); END;",
+        )
+        .expect("create abort trigger");
+    }
+
+    let error = match TraceWriter::open(&path) {
+        Ok(_) => panic!("migration must fail under injected abort"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&error, TraceError::Storage(message) if message.contains("injected v5 migration failure")),
+        "unexpected error: {error:?}"
+    );
+
+    // 失败后：版本/表/数据都回到迁移前（恢复备份 + 事务回滚）。
+    let conn = Connection::open(&path).expect("inspect restored db");
+    assert_eq!(user_version(&conn), 4, "restored db keeps v4");
+    assert!(
+        !sqlite_names(&conn, "table")
+            .iter()
+            .any(|name| name == "human_decisions"),
+        "回滚后 v5 表必须不存在"
+    );
+    assert!(instance_rows(&conn).len() == 1, "实例行保留");
+    drop(conn);
+    assert!(
+        backup_files(dir.path())
+            .iter()
+            .any(|path| backup_name(path).contains(".bak.v4-")),
+        "failed migration must leave the v4 backup for recovery"
+    );
+
+    // 清掉故障注入后重试：同一库可正常迁移到当前版本。
+    let conn = Connection::open(&path).expect("drop trigger");
+    conn.execute_batch("DROP TRIGGER abort_schema_migration;")
+        .expect("drop trigger");
+    drop(conn);
+    let writer = TraceWriter::open(&path).expect("retry migration");
+    writer.close().expect("close writer");
+    let reader = TraceReader::open_readonly(&path).expect("reader");
+    assert_eq!(
+        reader.schema_version().expect("version"),
+        TRACE_SCHEMA_VERSION
+    );
+    assert!(reader.run("run-v4").expect("query").is_some());
 }
 
 #[test]
@@ -537,45 +1042,58 @@ fn backup_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 造一个 v2 库：先用当前版本建库并写一条 run，再降级（删 v3/v4 列与审计行、
-/// user_version=2）。
-fn create_v2_database(path: &Path) {
-    let writer = TraceWriter::open(path).expect("create current db");
-    let handle = writer.handle();
-    handle.send(common::started("run-v2"));
-    handle.send(common::finished(
-        "run-v2",
-        zgraph_trace::RunStatus::Completed,
-    ));
-    writer.flush().expect("flush");
-    writer.close().expect("close writer");
-    let conn = Connection::open(path).expect("open for downgrade");
-    conn.execute_batch(
-        "ALTER TABLE runs DROP COLUMN global_vars_json;\
-         ALTER TABLE gate_results DROP COLUMN verdict_json;\
-         ALTER TABLE gate_results DROP COLUMN attempt;\
-         ALTER TABLE gate_results DROP COLUMN deferred;\
-         DELETE FROM schema_migrations WHERE version IN (3, 4);\
-         PRAGMA user_version = 2;",
-    )
-    .expect("downgrade to v2");
-    assert_eq!(user_version(&conn), 2);
+/// 把当前 v5 库降级为**真实 v4 形状**：删 `human_decisions`、重建
+/// `instances`/`transitions`（CHECK 无 `WaitingHuman`）、删 v5 审计行、`user_version=4`。
+fn downgrade_to_v4_shape(conn: &Connection) {
+    conn.execute_batch("DROP TABLE IF EXISTS human_decisions;")
+        .expect("drop human_decisions");
+    conn.execute_batch(V4_INSTANCES_REBUILD)
+        .expect("rebuild instances to v4 shape");
+    conn.execute_batch(V4_TRANSITIONS_REBUILD)
+        .expect("rebuild transitions to v4 shape");
+    conn.execute_batch("DELETE FROM schema_migrations WHERE version = 5; PRAGMA user_version = 4;")
+        .expect("downgrade to v4");
+    assert_eq!(user_version(conn), 4);
 }
 
-/// 造一个 v3 库：先用当前版本建库并写 run + 一条默认 gate 结果，再降级
-/// （删 v4 列/审计行、user_version=3；保留 gate_results 旧行）。
-fn create_v3_database(path: &Path) {
+/// 用当前版本建库并写一条 Completed run（实例/迁移/事件/gate），再关闭写端。
+fn seed_current_database(path: &Path, run_id: &str) {
     let writer = TraceWriter::open(path).expect("create current db");
     let handle = writer.handle();
-    handle.send(common::started("run-v3"));
-    handle.send(common::gate("run-v3", "inst-p", "review", 0, false, None));
-    handle.send(common::finished(
-        "run-v3",
-        zgraph_trace::RunStatus::Completed,
+    handle.send(common::started(run_id));
+    handle.send(common::transition(
+        run_id,
+        &format!("inst-{run_id}"),
+        "node-seed",
+        zgraph_trace::InstanceStatus::Pending,
+        zgraph_trace::InstanceStatus::Completed,
+        common::ts(10),
     ));
+    handle.send(common::gate(
+        run_id,
+        &format!("inst-{run_id}"),
+        "node-seed",
+        0,
+        false,
+        None,
+    ));
+    handle.send(common::finished(run_id, RunStatus::Completed));
     writer.flush().expect("flush");
     writer.close().expect("close writer");
+}
+
+/// 造一个 v4 库：当前版本建库 + 写 `run-v4`，再降到真实 v4 表形状。
+fn create_v4_database(path: &Path) {
+    seed_current_database(path, "run-v4");
     let conn = Connection::open(path).expect("open for downgrade");
+    downgrade_to_v4_shape(&conn);
+}
+
+/// 造一个 v3 库：v4 形状再删 v4 gate 列与 v4/v5 审计行。
+fn create_v3_database(path: &Path) {
+    seed_current_database(path, "run-v3");
+    let conn = Connection::open(path).expect("open for downgrade");
+    downgrade_to_v4_shape(&conn);
     conn.execute_batch(
         "ALTER TABLE gate_results DROP COLUMN verdict_json;\
          ALTER TABLE gate_results DROP COLUMN attempt;\
@@ -585,6 +1103,23 @@ fn create_v3_database(path: &Path) {
     )
     .expect("downgrade to v3");
     assert_eq!(user_version(&conn), 3);
+}
+
+/// 造一个 v2 库：v3 库再删 `runs.global_vars_json` 与 v3 审计行。
+fn create_v2_database(path: &Path) {
+    seed_current_database(path, "run-v2");
+    let conn = Connection::open(path).expect("open for downgrade");
+    downgrade_to_v4_shape(&conn);
+    conn.execute_batch(
+        "ALTER TABLE gate_results DROP COLUMN verdict_json;\
+         ALTER TABLE gate_results DROP COLUMN attempt;\
+         ALTER TABLE gate_results DROP COLUMN deferred;\
+         ALTER TABLE runs DROP COLUMN global_vars_json;\
+         DELETE FROM schema_migrations WHERE version IN (3, 4);\
+         PRAGMA user_version = 2;",
+    )
+    .expect("downgrade to v2");
+    assert_eq!(user_version(&conn), 2);
 }
 
 fn create_v1_database(path: &Path) {

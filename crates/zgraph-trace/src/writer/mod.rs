@@ -15,7 +15,7 @@
 mod recovery;
 mod stream;
 mod thread;
-mod tx;
+pub(crate) mod tx;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

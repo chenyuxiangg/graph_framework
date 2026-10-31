@@ -15,8 +15,9 @@
 //! 1. **fixtures 静态断言**：三个 defer 图 `zgraph validate` 通过（R13/R15）且
 //!    `on_gate_false` 形状符合冻结；
 //! 2. **AC-14 h**：`tests/fixtures/trace/schema_v3_seed.sql` 建 v3 库 → 真
-//!    `zgraph run` 触发 v3→v4 迁移 → 备份/审计/旧行默认值/旧 payload 保持 v3 形态 →
-//!    `trace`/`replay --mode=events` 对照冻结 golden；只读 v3 拒绝；v4 新 run 的
+//!    `zgraph run` 触发 v3→v4→v5 逐版本迁移 → 备份/审计/旧行默认值/旧 payload 保持
+//!    历史形态 →
+//!    `trace`/`replay --mode=events` 对照冻结 golden；只读 v3 拒绝；v5 新 run 的
 //!    `deferred`/`attempt`/`verdict` 为真实运行值（REV-071 N1），并锁定超限那次
 //!    GateResult 不入库；
 //! 3. **AC-14 a/b/f/g 运行时用例**：真 kernel deferrable gate + 真 worker + 真 SQLite；
@@ -278,10 +279,11 @@ fn defer_fixtures_validate_with_r13_r15_and_expected_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. AC-14 h：v3 seed → v4 迁移 / 只读拒绝 / L1 回放
+// 2. AC-14 h：v3 seed → v5 逐版本迁移 / 只读拒绝 / L1 回放
 // ---------------------------------------------------------------------------
 
-/// h：v3 seed 由真 `zgraph run` 触发 v3→v4 迁移；备份/审计/旧行默认值/旧 payload 形态。
+/// h：v3 seed 由真 `zgraph run` 触发 v3→v4→v5 逐版本迁移；备份/审计/旧行默认值/
+/// 旧 payload 形态（W3a：v5 = WaitingHuman CHECK + human_decisions，N17 机械同步期望）。
 #[test]
 fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -299,7 +301,7 @@ fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
     assert_ne!(new_run_id, old_run_id, "迁移后的新 run 必须是新 id");
 
     let conn = cli_support::connect(&db);
-    assert_eq!(user_version(&conn), 4, "迁移后 user_version=4");
+    assert_eq!(user_version(&conn), 5, "迁移后 user_version=5");
     let versions: Vec<i64> = {
         let mut stmt = conn
             .prepare("SELECT version FROM schema_migrations ORDER BY version")
@@ -309,20 +311,20 @@ fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
             .map(|row| row.expect("version"))
             .collect()
     };
-    assert_eq!(versions, vec![1, 2, 3, 4], "schema_migrations 1..4");
+    assert_eq!(versions, vec![1, 2, 3, 4, 5], "schema_migrations 1..5");
 
-    // 备份 = 迁移前 v3 快照（user_version=3、无 v4 列）。
+    // 备份 = 逐版本迁移前快照（v3→v4 与 v4→v5 各一份；N17 机械同步期望）。
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 1, "v3→v4 恰一份备份: {backups:?}");
-    let backup_name = backups[0]
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    assert!(
-        backup_name.contains(".bak.v3-"),
-        "备份文件名应含 .bak.v3-: {backup_name}"
-    );
-    let backup_conn = rusqlite::Connection::open(&backups[0]).expect("open backup");
+    assert_eq!(backups.len(), 2, "v3→v5 逐版本两份备份: {backups:?}");
+    let backup = backups
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().contains(".bak.v3-"))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("missing .bak.v3- backup: {backups:?}"));
+    let backup_conn = rusqlite::Connection::open(backup).expect("open backup");
     assert_eq!(user_version(&backup_conn), 3, "备份保持 v3");
     assert!(
         !table_columns(&backup_conn, "gate_results")
@@ -608,8 +610,8 @@ fn v3_seed_readonly_trace_is_rejected_without_migration() {
     assert_exit(&output, 4, "只读 trace 对 v3 库应 exit 4");
     let stderr = stderr_text(&output);
     assert!(
-        stderr.contains("unsupported schema version=3, expected 4"),
-        "stderr 应说明 v3 < 4 且不迁移: {stderr}"
+        stderr.contains("unsupported schema version=3, expected 5"),
+        "stderr 应说明 v3 < 5 且不迁移: {stderr}"
     );
     let conn = cli_support::read_only_connect(&db);
     assert_eq!(user_version(&conn), 3, "只读拒绝不得迁移");

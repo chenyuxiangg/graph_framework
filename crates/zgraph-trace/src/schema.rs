@@ -12,9 +12,15 @@
 //! `deferred INTEGER NOT NULL DEFAULT 0`（0/1）、`attempt INTEGER NOT NULL DEFAULT 0`、
 //! `verdict_json TEXT`（可空 JSON），供 deferrable gate / 有限返工回放与审计。
 //!
+//! v5 = W3a（DR-006 §5/§6 + 06 §6.2.5/§6.2.7/§6.2.14）：`instances.status` 与
+//! `transitions.from_status`/`to_status` 的 CHECK 增 `WaitingHuman`（SQLite 不能
+//! `ALTER` CHECK，故两表按 12 步法重建并逐列复制）；新增 `human_decisions` 表与
+//! `idx_human_decisions_pending` 部分索引（C13 分表写者：decide INSERT / run consumer
+//! 只更新 `consumed_at`，[`crate::TraceWriter`] 不写该表）。
+//!
 //! 版本策略：`PRAGMA user_version` 为权威；`0` = 新库（单事务建当前版本），
-//! `1` = spec 06 v1 库、`2` = v2 库、`3` = v3 库（逐版本迁移到 v4），`4` = 就绪，
-//! `>4` = 拒绝。
+//! `1` = spec 06 v1 库、`2` = v2 库、`3` = v3 库、`4` = v4 库（逐版本迁移到 v5），
+//! `5` = 就绪，`>5` = 拒绝。
 //! 迁移前 `VACUUM INTO '<db>.bak.v{old}-{ts}'` 备份；每版本一个事务；失败则恢复
 //! 备份并返回 [`TraceError::Storage`]（06 §6.7）。
 
@@ -25,11 +31,18 @@ use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::TraceError;
 
-/// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2；v4 = W2a / DR-005）。
-pub const TRACE_SCHEMA_VERSION: i64 = 4;
+/// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2；
+/// v4 = W2a / DR-005，v5 = W3a / DR-006：`WaitingHuman` + `human_decisions`）。
+pub const TRACE_SCHEMA_VERSION: i64 = 5;
 
 /// SQLite `busy_timeout`（毫秒，06 §6.2.1）。
 pub const DB_BUSY_TIMEOUT_MS: u32 = 5_000;
+
+/// run decision consumer 的 RO 轮询连接 `busy_timeout`（毫秒，DR-006 §5.2 / 06 §6.6 C13）。
+///
+/// 轮询是短查询：用更小的 1 s 超时避免轮询连接在写者持锁时长时间阻塞
+/// （C13：decide INSERT / consumer UPDATE 仍用 [`DB_BUSY_TIMEOUT_MS`] = 5000 ms）。
+pub const DECISION_POLL_BUSY_TIMEOUT_MS: u32 = 1_000;
 
 /// 写线程遇 `SQLITE_BUSY` 的总尝试次数（06 §6.2.1 `DB_WRITE_RETRY`）。
 pub const DB_WRITE_RETRY: u32 = 3;
@@ -92,7 +105,11 @@ const GATE_RESULTS_V4_COLUMNS: &[(&str, &str)] = &[
     ("verdict_json", "verdict_json TEXT"),
 ];
 
-/// 当前完整 DDL（全部 `IF NOT EXISTS`，单事务执行；06 §6.2 + v2/v3/v4 增量）。
+/// 当前版本**基表** DDL（全部 `IF NOT EXISTS`，单事务执行；06 §6.2 + v2/v3/v4/v5 增量）。
+///
+/// v5 新增的 `human_decisions`/`idx_human_decisions_pending` 单独放在
+/// [`DDL_HUMAN_DECISIONS`]：新库建库与 v4→v5 迁移共用同一份 DDL，避免两处字面量漂移；
+/// 也保证 v1→v2 的中间态不提前创建 v5 表（该表在 v4→v5 步骤按 FK 顺序创建）。
 const DDL_CURRENT: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version     INTEGER PRIMARY KEY,
@@ -149,7 +166,7 @@ CREATE TABLE IF NOT EXISTS instances (
                ('start','end','python_node','agent_call','subgraph')),
   attempt      INTEGER NOT NULL DEFAULT 0,
   status       TEXT NOT NULL CHECK (status IN
-               ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+               ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
   input        TEXT,
   output_json  TEXT,
   error        TEXT,
@@ -190,9 +207,9 @@ CREATE TABLE IF NOT EXISTS transitions (
   node_id       TEXT NOT NULL,
   attempt       INTEGER NOT NULL,
   from_status   TEXT NOT NULL CHECK (from_status IN
-                ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+                ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
   to_status     TEXT NOT NULL CHECK (to_status IN
-                ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+                ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
   reason        TEXT,
   error_code    TEXT,
   error         TEXT,
@@ -281,6 +298,107 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls(run_id);
 "#;
 
+/// v5 `human_decisions` 表 + pending 部分索引（06 §6.2.14；DR-006 §5.1）。
+///
+/// 新库建库与 v4→v5 迁移共用本 DDL（`IF NOT EXISTS` 使迁移可安全重入）。
+/// 写者模型（C13）：`decide` 独立 RW 连接单事务 INSERT、run consumer 独立 RW
+/// 短事务只更新 `consumed_at`；[`crate::TraceWriter`] **不写**本表。
+const DDL_HUMAN_DECISIONS: &str = r#"
+CREATE TABLE IF NOT EXISTS human_decisions (
+  run_id       TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  instance_id  TEXT NOT NULL REFERENCES instances(instance_id) ON DELETE CASCADE,
+  decision     TEXT NOT NULL CHECK (decision IN ('approved','rejected')),
+  approver     TEXT NOT NULL,
+  reason       TEXT,
+  decision_id  TEXT NOT NULL UNIQUE,
+  decided_at   TEXT NOT NULL,
+  consumed_at  TEXT,
+  PRIMARY KEY (run_id, instance_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_decisions_pending
+  ON human_decisions(run_id, consumed_at) WHERE consumed_at IS NULL;
+"#;
+
+/// v4→v5 重建 `instances`（SQLite 12 步法；status CHECK 增 `WaitingHuman`）。
+///
+/// 列清单**显式**复制（禁止 `SELECT *`，DR-006 §6.2/06 §6.2.5）；`DROP TABLE`
+/// 后按原定义重建 3 个索引。重建在 `human_decisions` 之前完成（FK 指向新表）。
+const REBUILD_INSTANCES_V5: &str = r#"
+CREATE TABLE instances_v5 (
+  instance_id  TEXT PRIMARY KEY,
+  run_id       TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  node_id      TEXT NOT NULL,
+  node_type    TEXT NOT NULL CHECK (node_type IN
+               ('start','end','python_node','agent_call','subgraph')),
+  attempt      INTEGER NOT NULL DEFAULT 0,
+  status       TEXT NOT NULL CHECK (status IN
+               ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  input        TEXT,
+  output_json  TEXT,
+  error        TEXT,
+  error_code   TEXT,
+  created_seq  INTEGER,
+  started_at   TEXT,
+  finished_at  TEXT,
+  finished_seq INTEGER,
+  UNIQUE (run_id, node_id, attempt)
+);
+
+INSERT INTO instances_v5 (
+  instance_id, run_id, node_id, node_type, attempt, status, input, output_json,
+  error, error_code, created_seq, started_at, finished_at, finished_seq
+)
+SELECT
+  instance_id, run_id, node_id, node_type, attempt, status, input, output_json,
+  error, error_code, created_seq, started_at, finished_at, finished_seq
+FROM instances;
+
+DROP TABLE instances;
+ALTER TABLE instances_v5 RENAME TO instances;
+
+CREATE INDEX IF NOT EXISTS idx_instances_run_node   ON instances(run_id, node_id);
+CREATE INDEX IF NOT EXISTS idx_instances_run_status ON instances(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_instances_error_code ON instances(error_code) WHERE error_code IS NOT NULL;
+"#;
+
+/// v4→v5 重建 `transitions`（SQLite 12 步法；`from_status`/`to_status` CHECK 各增
+/// `WaitingHuman`）。列清单显式复制，重建 3 个索引（06 §6.2.7）。
+const REBUILD_TRANSITIONS_V5: &str = r#"
+CREATE TABLE transitions_v5 (
+  transition_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  seq           INTEGER NOT NULL UNIQUE REFERENCES events(seq) ON DELETE CASCADE,
+  run_id        TEXT NOT NULL,
+  instance_id   TEXT NOT NULL,
+  node_id       TEXT NOT NULL,
+  attempt       INTEGER NOT NULL,
+  from_status   TEXT NOT NULL CHECK (from_status IN
+                ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  to_status     TEXT NOT NULL CHECK (to_status IN
+                ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  reason        TEXT,
+  error_code    TEXT,
+  error         TEXT,
+  at            TEXT NOT NULL
+);
+
+INSERT INTO transitions_v5 (
+  transition_id, seq, run_id, instance_id, node_id, attempt,
+  from_status, to_status, reason, error_code, error, at
+)
+SELECT
+  transition_id, seq, run_id, instance_id, node_id, attempt,
+  from_status, to_status, reason, error_code, error, at
+FROM transitions;
+
+DROP TABLE transitions;
+ALTER TABLE transitions_v5 RENAME TO transitions;
+
+CREATE INDEX IF NOT EXISTS idx_transitions_run_seq    ON transitions(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_transitions_instance   ON transitions(instance_id, seq);
+CREATE INDEX IF NOT EXISTS idx_transitions_run_status ON transitions(run_id, to_status);
+"#;
+
 /// 打开（必要时创建）写库，完成版本检查与迁移并应用写连接 PRAGMA。
 pub(crate) fn open_writer_connection(path: &Path) -> Result<Connection, TraceError> {
     ensure_parent_dir(path)?;
@@ -325,6 +443,54 @@ pub(crate) fn open_writer_connection(path: &Path) -> Result<Connection, TraceErr
 
 /// 打开只读连接（`SQLITE_OPEN_READ_ONLY`；不创建、不迁移、不标定，06 §6.6）。
 pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection, TraceError> {
+    open_readonly_with_busy_timeout(path, DB_BUSY_TIMEOUT_MS)
+}
+
+/// 以指定 `busy_timeout` 打开只读连接（decision consumer 的 RO 轮询用
+/// [`DECISION_POLL_BUSY_TIMEOUT_MS`]；其余只读方用 [`DB_BUSY_TIMEOUT_MS`]）。
+pub(crate) fn open_readonly_with_busy_timeout(
+    path: &Path,
+    busy_timeout_ms: u32,
+) -> Result<Connection, TraceError> {
+    ensure_existing_file(path)?;
+    let conn =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|err| {
+            TraceError::Storage(format!("database not found: {} ({err})", path.display()))
+        })?;
+    conn.busy_timeout(Duration::from_millis(u64::from(busy_timeout_ms)))
+        .map_err(db_err)?;
+    conn.execute_batch("PRAGMA query_only = ON; PRAGMA temp_store = MEMORY;")
+        .map_err(db_err)?;
+    ensure_current_version(&conn)?;
+    ensure_trace_schema(&conn, path)?;
+    Ok(conn)
+}
+
+/// 打开**已存在**库的读写连接，**不创建、不迁移**（decision 写者用；DR-006 §5.4）。
+///
+/// 语义：`decide`/run consumer 只作为 trace 写者之外的显式第二/第三写者（C13），
+/// 迁移是 run 写端职责——版本 `<5` 明确报错（提示先 `zgraph run` 迁移），`>5`
+/// 报 [`TraceError::SchemaTooNew`]；库不存在时报错且不创建文件。
+pub(crate) fn open_existing_readwrite_connection(
+    path: &Path,
+    busy_timeout_ms: u32,
+) -> Result<Connection, TraceError> {
+    ensure_existing_file(path)?;
+    let conn =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(|err| {
+            TraceError::Storage(format!("database not found: {} ({err})", path.display()))
+        })?;
+    conn.busy_timeout(Duration::from_millis(u64::from(busy_timeout_ms)))
+        .map_err(db_err)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;")
+        .map_err(db_err)?;
+    ensure_current_version(&conn)?;
+    ensure_trace_schema(&conn, path)?;
+    Ok(conn)
+}
+
+/// 写者/decision 连接共用的「库文件必须已存在」前置检查（不创建空库）。
+fn ensure_existing_file(path: &Path) -> Result<(), TraceError> {
     let metadata = std::fs::metadata(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => {
             TraceError::Storage(format!("database not found: {}", path.display()))
@@ -337,17 +503,7 @@ pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection, TraceE
             path.display()
         )));
     }
-    let conn =
-        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|err| {
-            TraceError::Storage(format!("database not found: {} ({err})", path.display()))
-        })?;
-    conn.busy_timeout(Duration::from_millis(u64::from(DB_BUSY_TIMEOUT_MS)))
-        .map_err(db_err)?;
-    conn.execute_batch("PRAGMA query_only = ON; PRAGMA temp_store = MEMORY;")
-        .map_err(db_err)?;
-    ensure_readonly_version(&conn)?;
-    ensure_trace_schema(&conn, path)?;
-    Ok(conn)
+    Ok(())
 }
 
 /// 读取 `PRAGMA user_version`。
@@ -370,6 +526,7 @@ pub(crate) fn db_err(err: rusqlite::Error) -> TraceError {
 fn create_current(conn: &mut Connection) -> Result<(), TraceError> {
     let tx = begin_immediate(conn)?;
     tx.execute_batch(DDL_CURRENT).map_err(db_err)?;
+    tx.execute_batch(DDL_HUMAN_DECISIONS).map_err(db_err)?;
     for version in 1..=TRACE_SCHEMA_VERSION {
         record_migration(&tx, version)?;
     }
@@ -382,6 +539,8 @@ fn migrate_step(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
     let tx = begin_immediate(conn)?;
     match from {
         1 => {
+            // `DDL_CURRENT` 建当前版本的基表（v1 库缺表全量补齐）；v5 的
+            // `human_decisions` 不在这里提前创建，而由 4→5 步骤按 FK 顺序建。
             tx.execute_batch(DDL_CURRENT).map_err(db_err)?;
             add_missing_columns(&tx, "runs", RUNS_V2_COLUMNS)?;
             record_migration(&tx, 2)?;
@@ -393,6 +552,19 @@ fn migrate_step(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
         3 => {
             add_missing_columns(&tx, "gate_results", GATE_RESULTS_V4_COLUMNS)?;
             record_migration(&tx, 4)?;
+        }
+        4 => {
+            // v4→v5（DR-006 §6.2 / 06 §6.2.7）：单版本单事务内重建两表。
+            // FK 顺序：先删可能残留的 human_decisions（无 → 被引用的 instances 才可
+            // 安全 DROP），再重建 instances / transitions，最后建 human_decisions
+            // （其 FK 指向新 instances）。步骤 1→2 不再提前创建该表，这里的
+            // `DROP TABLE IF EXISTS` 仅为重入健壮性。
+            tx.execute_batch("DROP TABLE IF EXISTS human_decisions;")
+                .map_err(db_err)?;
+            tx.execute_batch(REBUILD_INSTANCES_V5).map_err(db_err)?;
+            tx.execute_batch(REBUILD_TRANSITIONS_V5).map_err(db_err)?;
+            tx.execute_batch(DDL_HUMAN_DECISIONS).map_err(db_err)?;
+            record_migration(&tx, 5)?;
         }
         other => {
             return Err(TraceError::Storage(format!(
@@ -448,6 +620,7 @@ fn migration_description(version: i64) -> &'static str {
         2 => "v2: reproducibility columns/tables",
         3 => "v3: runs.global_vars_json (ISSUE-087)",
         4 => "v4: gate_results deferred/attempt/verdict (W2a)",
+        5 => "v5: WaitingHuman statuses + human_decisions (W3a)",
         _ => "unknown migration",
     }
 }
@@ -532,8 +705,9 @@ fn apply_writer_pragmas(conn: &Connection) -> Result<(), TraceError> {
     Ok(())
 }
 
-/// 只读连接只接受当前版本：超前拒绝（06 §6.7），落后明确报错且**不迁移**。
-fn ensure_readonly_version(conn: &Connection) -> Result<(), TraceError> {
+/// 只读/decision 连接只接受**恰好**当前版本：超前拒绝（06 §6.7），落后明确报错且
+/// **不迁移**（迁移是 run 写端职责；DR-006 §5.4）。
+fn ensure_current_version(conn: &Connection) -> Result<(), TraceError> {
     let found = user_version(conn)?;
     if found > TRACE_SCHEMA_VERSION {
         return Err(TraceError::SchemaTooNew {
@@ -545,6 +719,24 @@ fn ensure_readonly_version(conn: &Connection) -> Result<(), TraceError> {
         return Err(TraceError::Storage(format!(
             "unsupported schema version={found}, expected {TRACE_SCHEMA_VERSION}"
         )));
+    }
+    Ok(())
+}
+
+/// decision 写者要求 v5 的 `human_decisions` 表存在（正常 v5 库由迁移保证；
+/// 损坏库给出明确存储错误而非运行时 "no such table"）。
+pub(crate) fn ensure_human_decisions_schema(conn: &Connection) -> Result<(), TraceError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'human_decisions'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    if count == 0 {
+        return Err(TraceError::Storage(
+            "missing human_decisions table in schema v5 database".to_string(),
+        ));
     }
     Ok(())
 }

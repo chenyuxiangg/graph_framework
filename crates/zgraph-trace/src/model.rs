@@ -17,6 +17,9 @@ pub enum InstanceStatus {
     Ready,
     /// 已派发执行。
     Running,
+    /// 输入已就绪、等待人工决策（W3a / DR-006 §3.1：非终态、非执行态；不派发
+    /// worker，run 侧视为非静默）。
+    WaitingHuman,
     /// 成功（终态）。
     Completed,
     /// 失败（终态）。
@@ -36,6 +39,7 @@ impl InstanceStatus {
             Self::Pending => "Pending",
             Self::Ready => "Ready",
             Self::Running => "Running",
+            Self::WaitingHuman => "WaitingHuman",
             Self::Completed => "Completed",
             Self::Crashed => "Crashed",
             Self::TimedOut => "TimedOut",
@@ -50,6 +54,7 @@ impl InstanceStatus {
             "Pending" => Some(Self::Pending),
             "Ready" => Some(Self::Ready),
             "Running" => Some(Self::Running),
+            "WaitingHuman" => Some(Self::WaitingHuman),
             "Completed" => Some(Self::Completed),
             "Crashed" => Some(Self::Crashed),
             "TimedOut" => Some(Self::TimedOut),

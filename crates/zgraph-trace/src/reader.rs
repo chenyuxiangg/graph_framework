@@ -11,6 +11,7 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{params_from_iter, Connection};
 use serde_json::Value;
 
+use crate::decision::HumanDecisionRow;
 use crate::error::TraceError;
 use crate::model::{parse_json, parse_json_opt, InstanceStatus, RunStatus};
 use crate::schema::{self, db_err};
@@ -518,6 +519,14 @@ impl TraceReader {
         Ok(calls)
     }
 
+    /// 查询人工决策行（schema v5 / DR-006 §6.3；按 `(decided_at, decision_id)` 升序）。
+    ///
+    /// 只读 `human_decisions`（决策**不是** `TraceEvent`，`events.kind` 不变）；
+    /// 无决策行时返回空 `Vec`（`trace` 输出层据此不追加 HumanDecision 行）。
+    pub fn human_decisions(&self, run_id: &str) -> Result<Vec<HumanDecisionRow>, TraceError> {
+        crate::decision::query_human_decisions(&self.conn, run_id, false)
+    }
+
     /// `trace --stats` 摘要（06 §6.11.2）；run 不存在返回
     /// [`TraceError::NotFound`]。
     pub fn stats(&self, run_id: &str) -> Result<RunStats, TraceError> {
@@ -648,12 +657,12 @@ fn to_opt_u32(value: Option<i64>) -> Option<u32> {
     value.and_then(|raw| u32::try_from(raw).ok())
 }
 
-fn parse_status(text: &str) -> Result<InstanceStatus, TraceError> {
+pub(crate) fn parse_status(text: &str) -> Result<InstanceStatus, TraceError> {
     InstanceStatus::parse(text)
         .ok_or_else(|| TraceError::Storage(format!("invalid instance status in db: {text}")))
 }
 
-fn parse_run_status(text: &str) -> Result<RunStatus, TraceError> {
+pub(crate) fn parse_run_status(text: &str) -> Result<RunStatus, TraceError> {
     RunStatus::parse(text)
         .ok_or_else(|| TraceError::Storage(format!("invalid run status in db: {text}")))
 }

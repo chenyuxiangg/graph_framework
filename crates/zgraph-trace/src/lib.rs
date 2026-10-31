@@ -24,6 +24,12 @@
 //! - schema 升 **v4**（W2a / DR-005）：`GateResultRecord`/`gate_results` 增
 //!   `deferred`（0/1）、`attempt`、`verdict_json`，`events.payload.record` 同步携带
 //!   `deferred`/`attempt`/`verdict` 三键；v3 旧库按同一 forward-only 框架迁移。
+//! - schema 升 **v5**（W3a / DR-006）：`instances`/`transitions` 的 status CHECK 增
+//!   `WaitingHuman`（按 SQLite 12 步法重建两表、显式列复制、索引重建），新增
+//!   `human_decisions` 表 + `idx_human_decisions_pending`；v4 旧库按同一 forward-only
+//!   框架迁移（备份 → 单事务 → 失败恢复）。C13 分表写者：`human_decisions` 由
+//!   [`DecisionStore`]（decide INSERT）与 [`DecisionConsumer`]（run 标 `consumed_at`）
+//!   写，[`TraceWriter`] 不写该表；[`TraceReader::human_decisions`] 只读。
 //! - 崩溃标定（06 §6.8）是两段式原语：`TraceWriter::interrupted_candidates` 查
 //!   `Running`/`Paused` 候选，`TraceWriter::mark_interrupted` 单事务标定为
 //!   `Failed + interrupted=1`；判活（`kill(pid, 0)`/heartbeat 陈旧）由调用方负责。
@@ -91,6 +97,7 @@
 
 #![forbid(unsafe_code)]
 
+mod decision;
 mod error;
 mod model;
 mod reader;
@@ -98,6 +105,10 @@ mod recovery;
 mod schema;
 mod writer;
 
+pub use decision::{
+    DecisionConsumer, DecisionError, DecisionPrecheck, DecisionStore, HumanDecisionRow,
+    NewHumanDecision,
+};
 pub use error::TraceError;
 pub use model::{
     GateResultRecord, InstanceSnapshot, InstanceStatus, LlmCallRecord, RecordMode, RecordedOutput,
@@ -110,9 +121,9 @@ pub use reader::{
 };
 pub use recovery::{InterruptedCandidate, RecoveredRun, INTERRUPTED_ERROR_MESSAGE};
 pub use schema::{
-    DB_BUSY_TIMEOUT_MS, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, HEARTBEAT_INTERVAL_MS,
-    STREAMING_CHANNEL_CAP, STREAM_SEGMENT_MAX_BYTES, STREAM_SEGMENT_MAX_CHARS,
-    STREAM_TOKEN_AGGREGATE_MS, TRACE_BATCH_INTERVAL_MS, TRACE_BATCH_ROWS, TRACE_CHANNEL_CAP,
-    TRACE_PAYLOAD_MAX_BYTES, TRACE_SCHEMA_VERSION, WAL_CHECKPOINT_INTERVAL_MS,
+    DB_BUSY_TIMEOUT_MS, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, DECISION_POLL_BUSY_TIMEOUT_MS,
+    HEARTBEAT_INTERVAL_MS, STREAMING_CHANNEL_CAP, STREAM_SEGMENT_MAX_BYTES,
+    STREAM_SEGMENT_MAX_CHARS, STREAM_TOKEN_AGGREGATE_MS, TRACE_BATCH_INTERVAL_MS, TRACE_BATCH_ROWS,
+    TRACE_CHANNEL_CAP, TRACE_PAYLOAD_MAX_BYTES, TRACE_SCHEMA_VERSION, WAL_CHECKPOINT_INTERVAL_MS,
 };
 pub use writer::{TraceHandle, TraceWriter};
