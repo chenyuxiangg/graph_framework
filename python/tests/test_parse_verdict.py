@@ -16,7 +16,7 @@ from workers.software_team.parse_verdict import (
 )
 
 ARTIFACT: dict[str, Any] = {"documents": {"doc/a.md": "# a\n"}, "document_paths": ["doc/a.md"]}
-ERROR_PREFIX: str = "parse_verdict_rework:"
+ERROR_PREFIX: str = "parse_verdict_rework: "
 
 
 def _review(payload: Any) -> dict[str, Any]:

@@ -26,7 +26,10 @@ from workers.echo import run as echo_run
 from workers.parallel import PARALLEL_SLEEP_S, a as parallel_a, b as parallel_b
 from workers.slow import CHECK_INTERVAL_S, DEFAULT_SECONDS, run as slow_run
 from workers.software_team.archer import run as archer_run
-from workers.software_team.parse_verdict import run as parse_verdict_run
+from workers.software_team.parse_verdict import (
+    parse_verdict_rework,
+    run as parse_verdict_run,
+)
 from workers.software_team.planer import run as planer_run
 from zgraph_worker.ctx import WorkerContext
 from zgraph_worker.errors import WorkerCancelled
@@ -57,6 +60,11 @@ WORKER_CALLABLES: tuple[tuple[str, str, Callable[..., Any]], ...] = (
     ("workers.software_team.planer", "run", planer_run),
     ("workers.software_team.archer", "run", archer_run),
     ("workers.software_team.parse_verdict", "run", parse_verdict_run),
+    (
+        "workers.software_team.parse_verdict",
+        "parse_verdict_rework",
+        parse_verdict_rework,
+    ),
 )
 
 L3_DOCSTRING_MARKERS: tuple[str, ...] = ("输入：", "输出：", "幂等性：", "外部副作用：")
