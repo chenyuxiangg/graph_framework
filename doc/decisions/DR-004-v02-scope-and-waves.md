@@ -62,19 +62,20 @@
 
 #### W2a0 · 设计冻结（docs，先行）
 
-冻结「返工边 + attempt-per-activation」语义（W2a 实现依据），至少包含：
+冻结「P 返工契约 + 返工边 + attempt-per-activation」语义（W2a 实现依据），至少包含：
 
-- **语法**：边级 `on_gate_false: "settle" | "defer"`（缺省 settle）；`defer` 边**必须位于环内**（自环或回边；DSL 校验）；
-- **重入**：deferred 边最终放行时，若目标实例已 `Completed`，按 `attempt+1` **新建实例**（attempt-per-activation），而不是 `RUN_DELIVERY_TO_TERMINAL`；仅 defer 边允许此行为；
-- **上限**：节点 `max_attempts`（缺省 3，对齐现有 `retry.max_attempts`），超限 → 实例 Crashed → run Failed；
-- **终止**：未决 deferred 边阻止静默完成；无可重入来源 → watchdog `RUN_DEADLOCK`；
-- **trace/回放**：`GateResult` 增 `deferred=true` + `attempt`；L1/L2 golden 覆盖 defer 路径；
-- **兼容**：v0.1.0 图不受影响（缺省 settle）。
+- **P v2（opt-in）**：新增 py-worker 函数 `parse_verdict_rework`（W1 的 `parse_verdict` 保持不变，SOP v1 默认行为不变）：输入 `review + artifact`，输出 `{ "verdict": "approved" | "rework", "comments", "artifact" }`；仅非法 JSON/未知 verdict 抛异常 → Failed；`rework` 是正常输出。
+- **返工图模式**：`P --gate(verdict==approved)--> 下游` 与 `P --gate(verdict==rework)--> W_work`（回边）**两条边都标 `on_gate_false: "defer"`**；false 不结算目标、不触发 Skipped；rework 放行且 W 已 Completed → attempt+1 新实例；approved 放行时回边 false 变 dormant。
+- **dormant/quiescence**：deferred 边在源/目标都终态且无后续 attempt 时视为 **dormant**，不阻塞 quiescence；目标 Pending 或源可重入时阻塞；无可重入来源 → `RUN_DEADLOCK`。
+- **语法**：边级 `on_gate_false: "settle" | "defer"`（缺省 settle）；`defer` 边**必须位于环内**（自环或回边；DSL 校验）。
+- **上限/终止**：节点 `max_attempts`（缺省 3，对齐现有 `retry.max_attempts`），超限 → 实例 Crashed → run Failed。
+- **trace/回放**：`GateResult` 增 `deferred=true` + `attempt` + `verdict`；L1/L2 golden 覆盖 defer/rework 路径。
+- **兼容**：v0.1.0 图与 SOP v1（`parse_verdict` 抛错模式）不受影响。
 
 #### W2a · opt-in deferrable gate + 有限返工（实现）
 
-- 按 W2a0 冻结的语义实现；模块：`kernel` + `dsl` + `trace` + `e2e` + `docs`；spec 01/02/03/06。
-- DoD：自环返工与一条回边返工（A→B→A）端到端通过；最终超限失败；v0.1.0 图/回放 golden 不变。
+- 按 W2a0 冻结的语义实现；模块：`kernel` + `dsl` + `trace` + `py-worker` + `e2e` + `docs`；spec 01/02/03/06（05 若 agent 输出契约受影响、07 AC）。
+- DoD：自环返工、A→B→A 回边返工、**真实 SOP v1 图 rework e2e**（使用 `parse_verdict_rework` + 回边）端到端通过；最终超限失败；v0.1.0 图/回放 golden 不变。
 
 #### W2b · 每节点最大扇出限制（两层）
 
@@ -86,10 +87,20 @@
 
 ### W3 · 人工评审（human lifecycle）
 
+#### W3a0 · 设计冻结（docs，先行）
+
+冻结 `decide/resume` 契约与 `human_decisions` 并发模型（S10）：
+
+- **表**：`human_decisions(run_id, instance_id, decision, approver, reason, decision_id, decided_at, consumed_at)`；唯一键 `(run_id, instance_id)`；migration 归属 W3a。
+- **并发**：`TraceWriter` 是唯一写连接；`zgraph decide` 用独立连接、`busy_timeout=5000ms`、单事务写；run 轮询用只读连接、`busy_timeout=1000ms`；WAL 模式。
+- **decision_id**：UUIDv7 生成；重复/冲突（同实例两次决定、非 `WaitingHuman`、run 已结束）→ 明确退出码与 `--json`。
+- **消费**：`consumed_at` 仅由 run 的 `TraceWriter` 写入；decide 不改；崩溃后未消费行的处置归 W3b。
+- **resume**：decide 自动接续 vs 显式 `resume` 在 W3a0 二选一写死。
+
 #### W3a · 人工停等 + decide/resume（v0.2 必须）
 
 - **控制通道（C7）**：`run` 进程在 `WaitingHuman` 时**保持存活**，轮询 trace DB 的 `human_decisions` 表（WAL 只读连接，`HUMAN_DECISION_POLL_MS` 缺省 200ms）；`zgraph decide <run_id> --instance <id> --decision approved|rejected --approver <id> [--reason ...]` 向该表插入决策（幂等键 `(run_id, instance_id, decision_id)`）；run 消费后记录决策事件并恢复。**不引入 HTTP/socket**；run 进程退出后无法 decide（需 W3b）。
-- **契约**：decide 幂等/冲突（重复决定、非 `WaitingHuman` 实例、已结束 run 的退出码与 `--json`）；approver 必填；拒绝去向矩阵（与 W2a 返工/终止衔接）；trace 决策事件（谁/何时/结论/理由）；`resume` 仅作为 decide 的显式续跑入口（或 decide 自动接续，W3a0 设计冻结）。
+- **契约**：按 W3a0 冻结的幂等/冲突/并发/退出码；approver 必填；拒绝去向矩阵（与 W2a 返工/终止衔接）；trace 决策事件（谁/何时/结论/理由）；`resume` 入口按 W3a0。
 - 模块：`kernel` + `cli` + `trace` + `e2e` + `docs`；spec 00/01/03/04/06/07；**不涉及 harness**。
 - DoD：run 在 human gate 暂停 → `decide approve` 后恢复；`reject` 按矩阵终止或进入 rework（W2a）；重复/冲突 decide 行为符合契约；e2e。
 
@@ -122,18 +133,18 @@
 ## 4. 波次、分支、模块与评审
 
 > 每波可有多个模块分支；**一个 worktree 只服务一个模块**；跨模块分支必须由 Lead 指定第二评审人。
-> **顺序**：`kernel`/`trace` 同一时间一个写入者，按 W2a0(docs) → W2a → W2b → W3a → W3b(可选) → W4a(docs) → W4b 串行；`docs` 同一时间一个分支，按 W2a0 → W1-docs → W2a-docs → W2b-docs → W3a-docs → W4a → W4b-docs 排队；W1（e2e/py-worker）可与 W2a0 docs 并行。
+> **顺序**：`kernel`/`trace` 同一时间一个写入者，按 W2a0(docs) → W2a → W2b → W3a0(docs) → W3a → W3b(可选) → W4a(docs) → W4b 串行；`docs` 同一时间一个分支，按 W2a0 → W1-docs → W2a-docs → W2b-docs → W3a0 → W3a-docs → W4a → W4b-docs 排队；W1（e2e/py-worker）可与 W2a0 docs 并行，但 **W1 e2e 先于 W2a e2e**（e2e 单写者）。
 
 | 波次 | 分支 | 模块 | 依赖 | 评审 |
 |---|---|---|---|---|
 | W1 | `test/e2e-software-team-v1`、`feat/py-worker-parse-verdict` | e2e / py-worker | 无 | 独立 + 跨模块第二评审 |
 | W1-docs | `docs/docs-sop-v1-ac` | docs | W1 合并后 | 独立评审 |
 | W2a0 | `docs/docs-rework-design` | docs | 无（可先做） | 独立评审 |
-| W2a | `feat/kernel-deferrable-gate`、`feat/dsl-gate-defer`、`feat/trace-gate-defer`、`test/e2e-gate-defer` | kernel / dsl / trace / e2e | W2a0 | 主审 + 第二评审 |
+| W2a | `feat/kernel-deferrable-gate`、`feat/dsl-gate-defer`、`feat/trace-gate-defer`、`feat/py-worker-parse-rework`、`test/e2e-gate-defer` | kernel / dsl / trace / py-worker / e2e | W2a0 | 主审 + 第二评审 |
 | W2a-docs | `docs/docs-gate-defer-spec` | docs | W2a | 独立评审 |
 | W2b | `feat/dsl-max-fanout`、`feat/kernel-max-fanout`、`test/e2e-max-fanout` | dsl / kernel / e2e | W2a | 主审 + 第二评审 |
 | W2b-docs | `docs/docs-fanout-spec` | docs | W2b | 独立评审 |
-| W3a0 | `docs/docs-human-design`（decide/resume 契约冻结） | docs | W2a | 独立评审 |
+| W3a0 | `docs/docs-human-design`（decide/resume + `human_decisions` 契约冻结） | docs | W2b | 独立评审 |
 | W3a | `feat/kernel-human-wait`、`feat/cli-decide`、`feat/trace-human-decisions`、`test/e2e-human-decide` | kernel / cli / trace / e2e | W2a、W3a0、W2b | 主审 + 第二评审 |
 | W3a-docs | `docs/docs-human-spec` | docs | W3a | 独立评审 |
 | W3b（可选） | 用户确认后定 | trace / kernel / cli / e2e | W3a | 主审 + 第二评审 |
@@ -147,9 +158,9 @@
 
 | # | 决策 | 内容 |
 |---|---|---|
-| D1 | 返工语义 | **opt-in deferrable gate**：边级 `on_gate_false: "settle"\|"defer"`（缺省 settle）；defer 边必须在环内；deferred 边最终放行时目标已完成 → `attempt+1` 新实例（attempt-per-activation），不报 `RUN_DELIVERY_TO_TERMINAL`；节点 `max_attempts` 缺省 3，超限 Crashed→Failed；未决 deferred 边阻止静默完成，无可重入来源 → RUN_DEADLOCK；trace 记 `deferred`+attempt；v0.1.0 golden 硬回归 |
+| D1 | 返工语义 | **opt-in deferrable gate + P v2**：`parse_verdict` 保持 v1 抛错；新增 `parse_verdict_rework` 输出 `approved/rework`；返工图模式两条 defer 边（approved 前进 / rework 回边）；defer 边必须在环内；deferred 边最终放行且目标已完成 → `attempt+1` 新实例（attempt-per-activation），不报 `RUN_DELIVERY_TO_TERMINAL`；节点 `max_attempts` 缺省 3，超限 Crashed→Failed；未决 deferred 边 dormant 规则 + 无可重入来源 → RUN_DEADLOCK；trace 记 `deferred`/attempt/verdict；v0.1.0 golden 硬回归 |
 | D2 | 扇出上限 | 节点级 `max_fanout`（缺省无上限）：加载期静态 out-degree 校验（超限 DSL 错误）+ 运行期每激活放行边数上限（超限实例 Crashed + 运行期错误码 + trace）；不静默截断 |
-| D3 | 人工接口 | trace DB `human_decisions` 作为跨进程控制通道（run 存活轮询、WAL 只读）；CLI `decide` + `resume`；幂等/冲突、approver、拒绝去向矩阵、退出码/`--json`、trace 决策事件；不做 HTTP/socket；run 退出后不可 decide（W3b） |
+| D3 | 人工接口 | trace DB `human_decisions` 作为跨进程控制通道（run 存活轮询、WAL 只读）；CLI `decide` + `resume`；W3a0 冻结表结构/并发（TraceWriter 唯一写、decide 独立连接 busy_timeout、run 只读轮询、decision_id UUIDv7、consumed_at 归属）与幂等/冲突/approver/拒绝去向/退出码；不做 HTTP/socket；run 退出后不可 decide（W3b） |
 | D4 | 动态 N | 节点级 `foreach`（语法 W4a 冻结）；来源 = entry input 或上游输出列表；item key 确定性；join = 单端口有序 item 结果列表；默认 `on_item_error=fail`；取消传播；每激活上限复用 D2；trace 记录展开；graph_hash 只随图 JSON |
 | D5 | trace 迁移 | **forward-only**（spec 06 §6.7）：新代码迁移旧库后使用；只读 `trace`/`replay` 对旧版本拒绝且不迁移（退出码 4）；迁移点：W2a（deferred/attempt 字段）、W3a（`human_decisions` 表）、W4b（item 展开）；逐版本备份 + 迁移矩阵 + 迁移测试；不承诺新代码直接读旧 schema |
 | D6 | 复现兼容 | 新增事件/状态必须通过 `replay --mode=events` 与 L2 outputs；v0.1.0 golden 为硬回归；旧 DB 迁移后可回放 |
@@ -161,14 +172,14 @@
 
 1. W1–W4 合并（W3b 视用户确认；W5 不阻塞）。
 2. 质量门禁：`cargo test --workspace`、`cargo clippy -D warnings`、pytest 全绿（基线 0）；CI 通过。
-3. **v0.1.0 兼容矩阵（C8）**：
-   - `validate`：`tests/fixtures/graphs/valid_*.json` 全部通过；`bad_*.json` 的错误码/定位/error_count 与 v0.1.0 golden 一致（不新增、不回退）；
-   - `run`：可运行子集 `customer_ticket.json`（AC-01）、`valid_parallel.json`、`harness_ac08` 图跑通；
-   - **已知例外**：`valid_cycle.json` 断言 `Failed / RUN_DEADLOCK`（ISSUE-062），`valid_subgraph.json` 断言 `Failed / NODE_TYPE_UNSUPPORTED`；
-   - `bad_*.json` 不进入 run；v0.1.0 生成的 trace DB 经 D5 迁移后 `trace`/`replay` 通过；v0.1.0 golden 事件/输出不变。
+3. **v0.1.0 兼容矩阵（C8/S9）**：
+   - `validate`：`tests/fixtures/graphs/valid_*.json` 全部通过；`bad_*.json` 的错误码/定位/error_count 以 **`crates/zgraph-dsl/tests/fixtures.rs` 的既有断言表为 golden**（v0.2 门禁直接跑该测试 + CLI 抽样），不新增/不回退；责任：dsl 模块；
+   - `run`：可运行子集 `customer_ticket.json`（AC-01）、`valid_parallel.json`、`tests/fixtures/graphs/harness_ac08/graph.json` 跑通；
+   - **已知例外**：`valid_cycle.json` 断言 `Failed / RUN_DEADLOCK`（ISSUE-062），`valid_subgraph.json` 断言 `Failed / NODE_TYPE_UNSUPPORTED`；`bad_*.json` 不进入 run；
+   - **v0.1.0 trace DB 迁移样例**：W1 用 tag `v0.1.0` 建库并导出 **`tests/fixtures/trace/schema_v3_seed.sql`**（e2e 模块，生成方式：`git worktree add` v0.1.0 → 跑 CLI 建库 → `sqlite3 .dump`）+ 期望输出 **`tests/fixtures/trace/v0.1.0_expected_trace.json`**；v0.2 门禁用该 seed 建 v3 库 → 执行 D5 迁移 → `trace`/`replay` 与期望一致；责任：W1 e2e；
 4. **性能基线（可验收）**：同机、无外部 CPU 争用、各 3 次取中位数；W1 用 SOP 设计稿 §4.1 的 N_i（60 节点/100 边，非 N=3）记录绝对基线到 `doc/perf-baseline-v0.2.txt`；发布门禁：AC-01 单 run、AC-12 10 并发 run、SOP e2e 的 duration 中位数回退 ≤ 20%。
-5. spec 回写：00/01/02/03/04/06/07/08 按波次完成 + PROVENANCE 更新；07 新增 AC 通过。
-6. trace 迁移：迁移矩阵、逐版本 `VACUUM INTO` 备份、旧版本只读拒绝、迁移后回放测试通过。
+5. spec 回写：00/01/02/03/04/06/07/08 按波次完成 + PROVENANCE 更新；07 新增 AC 通过；**W2a 另回写 `doc/design/software-team-sop-v1.md`（v1.1 返工契约）与 05（若 agent 输出契约受影响）**。
+6. trace 迁移：迁移矩阵、逐版本 `VACUUM INTO` 备份、旧版本只读拒绝、迁移后回放测试通过；迁移点固定 **W2a（deferred/attempt 字段）→ W3a（`human_decisions` 表）→ W4b（item 展开）**；v0.1.0 v3 库迁移样例见 §6.3；`human_decisions` 与 `TraceWriter` 并发契约见 W3a0（单写连接 + busy_timeout + WAL）。
 7. 文档收口：`doc/index.md`/`doc/progress.md`/DR-004 执行记录/评审索引更新；各波 worktree 与分支清理。
 8. release：notes、tag `v0.2.0`、GitHub Release。
 
@@ -179,8 +190,10 @@
 | 风险 | 应对 |
 |---|---|
 | W2a 通用返工语义（非自环回边）复杂度高 | W2a0 先冻结；仅 defer 边允许 attempt-per-activation；W2a DoD 含 A→B→A 反例 |
+| P v1/v2 双模式误用（SOP 图用错函数） | W2a0 冻结契约；codegen 显式标注使用 `parse_verdict_rework`；e2e 覆盖两种模式；v1 `parse_verdict` 缺省抛错不变 |
 | defer 边无重入来源导致死锁 | 加载期提示/运行期 RUN_DEADLOCK；W2a 写明确契约与反例测试 |
 | W3a 控制通道与 run 生命周期 | run 必须存活；trace DB 轮询（WAL）；decide 幂等/冲突契约；run 退出即不可 decide（W3b 才恢复） |
+| `human_decisions` 与 `TraceWriter` 同库并发写 | W3a0 冻结：TraceWriter 唯一写连接、decide 独立连接 busy_timeout、run 只读轮询、`consumed_at` 归 run；e2e 并发反例 |
 | durable run 滑向服务化 | W3b 单独确认；v0.2 发布条件默认只要求 W3a |
 | W4 per-item 模型复杂度/回放 | W4a 先冻结；单端口 join；graph_hash 不变；展开事实入 trace |
 | trace 多次迁移成本 | forward-only、逐版本备份、迁移测试；迁移点固定（W2a/W3a/W4b） |
@@ -209,7 +222,7 @@
 3. **人工接口**：CLI `decide`/`resume` + trace DB 轮询（无 HTTP/socket）是否够用？
 4. **动态 N**：节点级 `foreach` + 单端口有序列表 join + `on_item_error=fail` 是否覆盖你的场景？
 5. **扇出上限**：两层（加载期静态 + 运行期每激活）、缺省无上限，是否符合「每节点最大扇出限制」原意？
-6. **返工默认值**：`on_gate_false` 缺省 `settle`、`max_attempts` 缺省 3、defer 边必须在环内——是否接受？
+6. **返工 / P 契约**：SOP v1 的 `parse_verdict` 保持「非 approved 抛错 → Failed」；W2a 新增 **opt-in** `parse_verdict_rework`（`approved/rework` 正常输出）+ 两条 defer 边（approved 前进 / rework 回边）；`on_gate_false` 缺省 `settle`、`max_attempts` 缺省 3、defer 边必须在环内——是否接受？
 7. **版本/兼容**：`v0.2.0` / `M7` 命名 + v0.1.0 图/L1/L2 兼容硬条件——是否采用？
 
 ### B. 评审默认（已并入正文，无需逐项确认）
