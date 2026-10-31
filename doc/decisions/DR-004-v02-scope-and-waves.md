@@ -241,4 +241,4 @@
   - e2e：`tests/fixtures/graphs/software_team_v1/**` + `tests/e2e/software_team_v1.rs`（REV-065 通过；合并 `263b3a8`）；
   - 证据：full 60/100 `3d8d735b1d5e8a1b`；smoke 11/18 `df9341c04063b80a`；exhaust `a8e508deb9c6cf44`；approved smoke `Completed`（11 实例、3 gate passed、artifact 透传）；失败路径 `NODE_PYTHON_EXCEPTION` 与 `HARNESS_MAX_ITERATIONS`；real-LLM smoke `#[ignore]`；
   - 回归：`cargo test -p zgraph-e2e --test software_team_v1` 7 passed/1 ignored；全 e2e 46 passed/2 ignored；pytest 104 passed；`check.sh` PASSED；merge 门禁（build/test/clippy/pytest）通过。
-- **后续**：W1-docs（本节 + 07 AC-13）完成后，按 §4 顺序进入 W2a0(docs) → W2a → W2b → W3a0 → W3a → W3b(可选) → W4a → W4b。
+- **后续**：本分支（W1-docs）合并后，按 §4 顺序进入 W2a0(docs) → W2a → W2b → W3a0 → W3a → W3b(可选) → W4a → W4b。

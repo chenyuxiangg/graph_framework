@@ -102,12 +102,10 @@
     - **后续提交（ISSUE-088 回写 + ISSUE-095/096 登记，REV-056；096 引用 REV-061 wrapup）**：06 §6.8.1/§6.8.3、08 §8.8、`doc/issues.md`（088 fixed、新增 095/096）、本文件 §2 第 13 条/§3/§5；§3 行数重测。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6038 行**）。
 
-11. **W1 SOP v1 回写批次**（2026-10-31，REV-066；分支 `docs/docs-sop-v1-ac`）：
+14. **W1 SOP v1 回写批次**（2026-10-31，REV-066；分支 `docs/docs-sop-v1-ac`）：
     - **07**：新增 **AC-13**（software_team SOP v1 per-item 评审链路：full 60/100/smoke 11/18/exhaust 变体 hash、approved 链路、`NODE_PYTHON_EXCEPTION`/`HARNESS_MAX_ITERATIONS` 失败路径、real-LLM `#[ignore]` smoke）；对应已合并 REV-064（py-worker `parse_verdict`）/REV-065（e2e）。
     - **DR-004**：追加 §10 执行记录（用户 2026-10-31 确认 A1–A7「按推荐」+ W1 交付证据）；DR 不属于 spec 分册，不参与 §3 hash 清单。
-    - 其余 00–06/08 分册未改；本批次后按 §3 重新实测 07 SHA-256/行数与合计（**6050 行**）。
-
-
+    - 其余 00–06/08 分册未改；本批次后按 §3 重新实测 07 SHA-256/行数与合计（**6051 行**）。
 
 ## 3. 文件清单（SHA-256 + 行数）
 
@@ -120,10 +118,10 @@
 | `04-节点接口与扩展点.md` | 625095fff24e769f4c8e4fe019ac50d186e86657b37b6f7c3ed05d9b22d29377 | 895 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
 | `06-存储与可观测.md` | 2dc8793a3df49a0b9a4e5a04d14f3af8aa570cd02c4d89fcb237aab991279dbb | 1096 |
-| `07-验收用例.md` | a68bf34d55f50046ce1c246e0926a33d9ee0e8845b36145ad12fbd53922a49c3 | 253 |
+| `07-验收用例.md` | a02afcd5b2a42a3afcbd34a2947d7e9238632c892c0f576c982af4b06273ff92 | 254 |
 | `08-审计关闭矩阵.md` | 16e274c5b9948f5c0a843af4ceefe103727b025c83b66f9d47acbe3274d57213 | 478 |
 
-> 00–08 合计 **6050 行**（`wc -l` 口径；2026-10-31 **W1 SOP v1 回写批次后**实测（仅 07 AC-13；见 §2 第 11 条）；此前 M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+> 00–08 合计 **6051 行**（`wc -l` 口径；2026-10-31 **W1 SOP v1 回写批次后**实测（仅 07 AC-13；见 §2 第 14 条）；此前 M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
