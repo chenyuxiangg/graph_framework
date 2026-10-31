@@ -619,11 +619,15 @@ fn map_run_status(status: kernel::RunStatus) -> trace::RunStatus {
 }
 
 /// 映射实例状态。
+///
+/// W3a0（DR-006 §7.1）：kernel 与 trace 的 `InstanceStatus` 同步新增
+/// `WaitingHuman`（schema v5 CHECK 已放开），此处为机械一一映射。
 fn map_instance_status(status: kernel::InstanceStatus) -> trace::InstanceStatus {
     match status {
         kernel::InstanceStatus::Pending => trace::InstanceStatus::Pending,
         kernel::InstanceStatus::Ready => trace::InstanceStatus::Ready,
         kernel::InstanceStatus::Running => trace::InstanceStatus::Running,
+        kernel::InstanceStatus::WaitingHuman => trace::InstanceStatus::WaitingHuman,
         kernel::InstanceStatus::Completed => trace::InstanceStatus::Completed,
         kernel::InstanceStatus::Crashed => trace::InstanceStatus::Crashed,
         kernel::InstanceStatus::TimedOut => trace::InstanceStatus::TimedOut,
@@ -750,7 +754,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use super::{node_error_json, run_in_process, BridgeError, TraceBridge};
+    use super::{map_instance_status, node_error_json, run_in_process, BridgeError, TraceBridge};
     use zgraph_kernel::{
         FakeExecutor, InstanceSnapshot, InstanceStatus, NodeError, RunOptions, RunSpec, RunStatus,
         StreamingEvent, TraceSink,
@@ -790,6 +794,55 @@ mod tests {
             global_vars: HashMap::new(),
             // 必须从 default 出发：test-hooks 构建多一个字段（禁止 5 字段穷举）。
             options: RunOptions::default(),
+        }
+    }
+
+    /// W3a0：kernel `InstanceStatus` 全量 1:1 机械映射到 trace（含 `WaitingHuman`），
+    /// 保证 schema v5 的 `instance_snapshot`/`transition` 落库不丢等待态。
+    #[test]
+    fn map_instance_status_covers_all_kernel_statuses() {
+        let pairs = [
+            (
+                InstanceStatus::Pending,
+                zgraph_trace::InstanceStatus::Pending,
+            ),
+            (InstanceStatus::Ready, zgraph_trace::InstanceStatus::Ready),
+            (
+                InstanceStatus::Running,
+                zgraph_trace::InstanceStatus::Running,
+            ),
+            (
+                InstanceStatus::WaitingHuman,
+                zgraph_trace::InstanceStatus::WaitingHuman,
+            ),
+            (
+                InstanceStatus::Completed,
+                zgraph_trace::InstanceStatus::Completed,
+            ),
+            (
+                InstanceStatus::Crashed,
+                zgraph_trace::InstanceStatus::Crashed,
+            ),
+            (
+                InstanceStatus::TimedOut,
+                zgraph_trace::InstanceStatus::TimedOut,
+            ),
+            (
+                InstanceStatus::Cancelled,
+                zgraph_trace::InstanceStatus::Cancelled,
+            ),
+            (
+                InstanceStatus::Skipped,
+                zgraph_trace::InstanceStatus::Skipped,
+            ),
+        ];
+        for (kernel, trace) in pairs {
+            assert_eq!(
+                map_instance_status(kernel),
+                trace,
+                "status {}",
+                kernel.as_str()
+            );
         }
     }
 
