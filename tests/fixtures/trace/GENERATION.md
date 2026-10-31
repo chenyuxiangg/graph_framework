@@ -49,9 +49,12 @@ python3 /tmp/freeze_seed.py < /tmp/seed_v3_raw.sql > tests/fixtures/trace/schema
 1. **UUID 固定化**：按首次出现顺序把 run_id/instance_id 映射为固定 UUIDv7 形态的测试 id
    （run = `0192f0c4-7a1b-7c3d-8e4f-000000000001`，instance 依次
    `0192f0c5-7a1b-7c3d-8e4f-00000000000N`），跨表引用一致。
-2. **时间戳固定化**：RFC3339 毫秒时间戳按 **distinct 值升序**映射为
-   `2026-01-01T00:00:00.000Z` + 1ms（保持 `runs.started_at ≤ finished_at` 与
-   `events.at`/明细表 `at` 的相等关系）。
+2. **时间戳按表角色固定化**（与 v0.1.0 一次 run 内的写入毫秒抖动解耦，重生成字节稳定）：
+   `schema_migrations.applied_at` → `2026-01-01T00:00:00.000Z`；`graphs.created_at`、
+   `runs.started_at`、`RunStarted` 事件 → `…00.001Z`；`runs.finished_at/heartbeat_at`、
+   其余 `events`/`instances`/`transitions`/`gate_results`/`streaming_events` → `…00.002Z`。
+   由此保持 `started_at < finished_at`、事件信封与明细表 `at` 的相等关系；本 seed 的
+   实际落盘结果与「distinct 值升序 +1ms」等价。
 3. **易变 run 列固定化**：`owner_pid=0`、`owner_host='seed-host'`（并把
    `worker_versions_json`/`model_params_json` 置 `[]`；本 seed 本无 worker）。
 4. 末尾追加 **`PRAGMA user_version = 3;`**（`.dump` 不携带 user_version）。
