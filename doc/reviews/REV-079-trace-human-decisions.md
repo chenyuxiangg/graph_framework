@@ -112,3 +112,18 @@ PASS 未迁移（仍 v4）、未生成备份、数据未变
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（结论为 `通过`，无附加条件）。
+
+## 7. 第二评审 · e2e 跨模块机械改动（Lead 追加，2026-10-31）
+
+- **评审人**：`lead`（**≠ 作者** `trace-dev`；该跨模块改动由 Lead 批准，按 AGENTS §2「跨模块改动由 Lead 在评审记录中写明并指定第二评审人」执行）
+- **评审范围**：`tests/e2e/gate_defer.rs`（e2e 模块路径）在 v5 后必需的版本期望机械同步——`user_version 4→5`、`schema_migrations 1..4 → 1..5`、v3→v5 逐版本备份由「恰 1 份 `.bak.v3-`」改为「恰 2 份并定位 `.bak.v3-` 做 v3 快照断言」、只读拒绝 stderr `expected 4 → expected 5`，以及对应注释/测试名措辞（`..._to_v4_...` 名称保留，属 P3 可读性建议，见 REV-079 §3 N4）。
+- **核对结论（通过）**：
+  1. 改动仅限 v5 必要的版本/备份期望同步；**未放宽任何断言**——备份断言由 `len==1`+取 `[0]` 强化为 `len==2`+按文件名定位 v3 备份；golden/replay/数据保留断言原样保留。
+  2. 未改动既有测试逻辑与 fixture；未新增 ignore；`AC-14 h` 的真实迁移路径（真 CLI → 真 SQLite）不变。
+  3. 与 trace crate 的 v5 迁移实现一致（v3→v4→v5 逐版本各备份一份、`schema_migrations` 逐版本记录）。
+- **Lead 亲自验证**（worktree `.worktrees/trace-trace-dev`，`CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home`）：
+  ```bash
+  cargo test -p zgraph-e2e --test gate_defer --offline   # 8 passed / 0 failed
+  git diff 3d0e933..4cae6b9 -- tests/e2e/gate_defer.rs    # 仅版本/备份期望 + 注释
+  ```
+- **结论**：**通过（第二评审）**。该机械改动与主审结论合并生效；分支满足合并前置。
