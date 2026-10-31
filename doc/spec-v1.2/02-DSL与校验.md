@@ -608,7 +608,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | 项 | v1 裁定 |
 |---|---|
 | DSL schema | `subgraphs` 段与 `SubgraphDefinition` **完整保留**（结构、必填、递归校验） |
-| 定义校验 | R6：`id` 图内唯一、≥1 个 `end`、不得含 `start`、`input_mapping`/`output_mapping` 引用存在且指向已声明端口、递归执行 R4/R5/R8–R13 |
+| 定义校验 | R6：`id` 图内唯一、≥1 个 `end`、不得含 `start`、`input_mapping`/`output_mapping` 引用存在且指向已声明端口、递归执行 R4/R5/R8–R13、**R15、R16**（子图内 R15/R16 违规按 R6 收敛为 `DSL_SUBGRAPH_INVALID`，`location` 保留内部 `node_id`/`edge_index`） |
 | 节点使用 | 加载期：`type:"subgraph"` 是 schema 已知类型，**校验通过**（含 `subgraph_id` 必须命中 `subgraphs` 段，R6） |
 | 运行时 | **run 启动后、实例创建前整体拒绝（ISSUE-046）**：run 启动成功后在创建实例前检测到 `NodeType::Subgraph`，随即整 run `Failed`（错误码 `NODE_TYPE_UNSUPPORTED`，00 运行期域），不创建实例、不构造 handler，其余非终态实例转 `Cancelled`（00 I9 / 04 §4.4.4） |
 | 何时报 | **运行期、run 启动后且实例创建前**（不等"就绪 → 派发"）；既不是加载期，也不是"执行中"。trace 记 `node_id` + `instance_id=null`（06） |
@@ -619,7 +619,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 > **两个码的分工（本册裁定，与 04 A5 一致）**：`NODE_TYPE_UNSUPPORTED`（运行期域）= schema 已知但 v1 不执行的 `subgraph`；`DSL_UNSUPPORTED_NODE_TYPE`（加载期/DSL 域）= `type` 字符串**不在** 5 个枚举内（未知/保留类型，如 `"human_node"`）。00 §0.4 该行括号说明"如 `subgraph` 运行"需按此修订（§2.11 P-02-03）。
 
-> **as-built（W2a 实现，REV-073）**：子图定义递归校验（`nodes.rs::wrap_subgraph_errors`）对子图内**跨规则**命中**聚合**：例如同时有「无 gate 环（R13）」与「非法 defer 源（R15）」时返回 2 条 `DSL_SUBGRAPH_INVALID`（message 分别为 `subgraph '<id>': ungated data cycle …` / `… defer edge source '<u>' is not re-entrant …`，`location.node_id`/`edge_index` 保留内部定位；CLI 定位串为 `graph.json: subgraphs[i]`）。这是既有「子图内 R4/R5/R8–R13 统一聚合」口径的延续，**主图**仍按 §2.1.3 跨规则 fail-fast。
+> **as-built（W2a 实现，REV-073；W2b 扩展，REV-077）**：子图定义递归校验（`nodes.rs::wrap_subgraph_errors`）对子图内**跨规则**命中**聚合**：例如同时有「无 gate 环（R13）」与「非法 defer 源（R15）」时返回 2 条 `DSL_SUBGRAPH_INVALID`（message 分别为 `subgraph '<id>': ungated data cycle …` / `… defer edge source '<u>' is not re-entrant …`，`location.node_id`/`edge_index` 保留内部定位；CLI 定位串为 `graph.json: subgraphs[i]`）。这是既有「子图内 R4/R5/R8–R13、R15、R16 统一聚合」口径的延续（**R16 静态扇出超限**同样收敛为 `DSL_SUBGRAPH_INVALID`、保留内部 `node_id` 与 expected/actual）；**主图**仍按 §2.1.3 跨规则 fail-fast。
 
 ### 2.6.2 保留字段的 v1 行为（`outputs` / `from_output_port`）
 

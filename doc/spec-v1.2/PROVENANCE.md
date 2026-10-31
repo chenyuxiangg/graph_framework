@@ -157,20 +157,27 @@
     - **测试证据（as-built）**：`cargo test -p zgraph-dsl` **101 passed**；`cargo test -p zgraph-kernel` **110 passed**（默认不编译 `tests/max_fanout.rs`）、`--features test-hooks` **120 passed**；`cargo test -p zgraph-cli` **161 passed**；`cargo test -p zgraph-e2e` **64 passed / 0 failed / 2 ignored**（`tests/e2e/max_fanout.rs` **6/0**，未新增 ignore）；空载 `cargo test --workspace` **725 passed / 0 failed / 3 ignored**；pytest **170 passed**；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`bash scripts/dev/check.sh` 全绿。v0.1.0 回归：REV-074 对 36 个 pre-W2a fixture 做 human/`--json` 双模式 A/B（72/72 输出+退出码逐字节一致）；无 `max_fanout` 图 hash 不变。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6491 行**；00 309→317、01 346→348、02 935→950、03 489→526、06 1117→1119、07 330→372；`doc/spec-v1.2/README.md` 行数表同步）。
 
+19. **REV-077 条件修复批次**（2026-10-31，reviewer-b 复审条件 C1–C4 + P3；分支 `docs/docs-fanout-spec`，base = `ef090f2`）：
+    - **C1（06 §6.10.2）**：`zgraph validate` 规则集改 **R1–R16**、执行顺序 `R1→R13→R15→R16→R14`、`--structure-only` 含 R16，与 02 §2.1.2/§2.7.4 一致。
+    - **C2（02 §2.6.1 / 00 §0.4）**：§2.6.1「定义校验」与 as-built 注补 **R15/R16**（子图内违规收敛 `DSL_SUBGRAPH_INVALID` 并保留内部 `node_id`），与 §2.4.1 R6 行一致；00 §0.4 W2b 注记引用改为「主图见 02 §2.4.1 R16；子图递归含 R15/R16 见 02 §2.6.1 / §2.4.1 R6」，引用不再落空。
+    - **C3（03 §3.4.4 / §3.15）**：trace 证据按 as-built 改写——源节点为 **Crashed 实例快照**（`instances` 行 upsert；as-built `create_instance(..., crash)` 只 emit `instance_snapshot`，CLI 桥接层快照只写 `instances`、**不产生** `transitions`/`events` 行）；证据 = `instances` 行 + `error` JSON（`kind`/`limit`/`actual`）+ `RunFinished.error`，不按 `transitions` 查询；§3.15 矩阵同口径。
+    - **P3**：07 AC-15 d「13 个 target」→ **12**（`tests/e2e/Cargo.toml` `[[test]]`=12；64/0/2 计数不变）；03 §3.4.4 `actual` 来源措辞精确化（执行节点经 `NodeCompleted` off-loop、内置节点 `finish_builtin` in-loop）；`doc/architecture-v2.md` 顶部注记标题改 **W2a/W2b**；新增 **ISSUE-125**（03 §3.2 `TestHooks`/`RunOptions` 预存 as-built 偏差，登记后续 docs 批次校准，不改本批语义）；`doc/reviews/README.md` 补 REV-074/075/076/077 索引行与底部 **W2b** 收口段；`doc/index.md`/`doc/progress.md` 状态同步为最终态。
+    - **重测与落盘**：§3 重算 00/02/03/06/07 的 SHA-256（行数不变，00–08 合计仍 **6491 行**）；`cargo test -p zgraph-e2e --test max_fanout` **6 passed / 0 failed**；`bash scripts/dev/check.sh` PASSED；提交正文含 `Review: REV-077` + `Agent: docs-dev`。
+
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | dfe8deb69571949b86f645f03a3ebb7b0c51b6afd09e420b4f602c9b7ff636ae | 317 |
+| `00-总纲.md` | f32eba90627a75f497e8d4819e7f76d0144864fe12abff9d4bd1d4f22e827a13 | 317 |
 | `01-领域模型与状态机.md` | 3ac7a587c3136cbebb41b1d4f0210f47a387ade1c52f0c328802291474ac15c0 | 348 |
-| `02-DSL与校验.md` | f99210b753dfd7b2e19be9016157eddc4b0df46e5aae48135e3cd90389f0b6d6 | 950 |
-| `03-调度器与生命周期.md` | 60172673fae4ec26a7831cbc7eb688ee2aa4145b71549a07b2a7991070703382 | 526 |
+| `02-DSL与校验.md` | 33c7028f2dcf547b801b74732fed34924b53bfb7f7c2ae09d137b4c5a0ad21de | 950 |
+| `03-调度器与生命周期.md` | 033b87f6ee95aba68599e3b9527fe14e4a5a0a755db729ed8a9e652accd2e112 | 526 |
 | `04-节点接口与扩展点.md` | 46247060b7b9da82656773aac7b98267b2c9e5cb959a14b054ac7e98e4ead513 | 906 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | 7bb033798948a0eca3cad0357aaf580edc1814e44ea9b009f7aa9690efb2aaae | 1119 |
-| `07-验收用例.md` | 97622de193c43144d855a830dec8945ad4eae0f0a7edc5be35d8061eaa33d826 | 372 |
+| `06-存储与可观测.md` | be9ceac8a65268ea7ad27b54e7e31c4e3cd50153adcffbe25ecef8a5b5a6044a | 1119 |
+| `07-验收用例.md` | ed4371639bb9c29ee08767009ce7dd8a2f2452914429458b3321f0424fc9f5c1 | 372 |
 | `08-审计关闭矩阵.md` | 5dc763aa358fad5a7ead77a10dc995f4362433bbe237b2248b4a339234d97f04 | 524 |
 
-> 00–08 合计 **6491 行**（`wc -l` 口径；2026-10-31 **W2b spec 回写批次后**实测（REV-077；00/01/02/03/06/07 **净 +106 行**（新增 143/删除 37），见 §2 第 18 条）；此前 W2a 实现回写批次为 **6385 行**/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6788 行）。
+> 00–08 合计 **6491 行**（`wc -l` 口径；2026-10-31 **W2b spec 回写 + REV-077 条件修复批次后**实测（REV-077；00/01/02/03/06/07 **净 +106 行**（新增 143/删除 37），见 §2 第 18–19 条）；此前 W2a 实现回写批次为 **6385 行**/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6795 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
@@ -193,4 +200,4 @@ wc -l 0*.md
 - **REV-035 评审条件已关闭（2026-10-30）**：C1/C2/C3 + 建议已在同一分支追加提交（未改写评审记录）；等待 reviewer-a 复审翻「通过」。
 - **M6 回写已完成（2026-10-31，REV-057）**：05/06/07/08 正文与 `architecture-v2.md` §5.2 已同步 M6 已实现口径（REV-040/041/042/043/044/047/048/049/050/052/055/056/058/060；REV-061 属 wrapup、仅用于 ISSUE-096 登记）；03 §3.12 与 04 A7/A17/§4.2 的双通道临时口径同步撤销；08 只追加 §8.8 M6 注记（8.0–8.7 历史快照不改）。**ISSUE-082（REV-048）与 ISSUE-088（REV-056）均已合并并回写**；ISSUE-095 保持 open（kernel hostname 口径差）、ISSUE-096 仍 pending（open，待 REV-061 wrapup 合并后置 fixed）；正文无未合并实现的 pending 占位。
 - **W2a0 返工设计冻结已完成（2026-10-31，REV-067）**：00/01/02/03/04/06/07/08 已按 DR-005 冻结 deferrable gate（`on_gate_false`）、R15/`DSL_DEFER_NOT_REENTRANT`、`DeferredReceipt`/attempt-per-activation（per-port 继承 + `settled_by_node` 重置）、trace schema v4、AC-14；SOP 设计稿升 v1.1。**本批是设计冻结，不代表 W2a 实现完成**；实现偏差由 W2a-docs 回写。`doc/architecture-v2.md` 的 `R1–R14`/17 码口径未在本批同步（DR-005 §11 C-7），建议 W2a-docs/process 收口。
-- **W2b spec 回写已完成（2026-10-31，REV-077）**：00/01/02/03/06/07 已按已合并实现（REV-074 dsl / REV-075 kernel+cli / REV-076 e2e）回写 R16 静态扇出上限、`NODE_FANOUT_EXCEEDED` 运行期防御层、`CompiledNode.max_fanout`、`NodeError` canonical JSON 与 07 AC-15；`doc/architecture-v2.md` 顶部注记同步为 R1–R16（历史表述保持冻结）；默认无 `max_fanout` 的图行为/hash/错误序列与 v0.1.0 逐字节一致。台账新增 ISSUE-113–124；`doc/progress.md` 已更新为 W2b 完成、下一步 W3a0。
+- **W2b spec 回写已完成（2026-10-31，REV-077）**：00/01/02/03/06/07 已按已合并实现（REV-074 dsl / REV-075 kernel+cli / REV-076 e2e）回写 R16 静态扇出上限、`NODE_FANOUT_EXCEEDED` 运行期防御层、`CompiledNode.max_fanout`、`NodeError` canonical JSON 与 07 AC-15；`doc/architecture-v2.md` 顶部注记同步为 R1–R16（历史表述保持冻结）；默认无 `max_fanout` 的图行为/hash/错误序列与 v0.1.0 逐字节一致。台账新增 ISSUE-113–125（113–124 为 REV-074/075/076 P3，125 为 03 §3.2 预存偏差）；`doc/progress.md` 已更新为 W2b 完成、下一步 W3a0；REV-077 复审条件 C1–C4 已由条件修复批次关闭（见 §2 第 19 条）。

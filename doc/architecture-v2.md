@@ -4,7 +4,7 @@
 > 本文冻结**进程模型、跨语言协议、可复现落地、代码布局、模块迁移、验收映射、对 spec v1.2 的偏差**。
 > 与 spec 冲突时：**本文 §8 的偏差表优先**；偏差表未覆盖的，以 spec 为准。
 
-> **W2a 实现回写注记（2026-10-31，REV-073）**：本文 §2/§4 中“R1–R14 / 17 个 DSL 码”等历史表述**保持冻结不改**（D1–D12 为决策记录）；当前实现/规格以 [`spec-v1.2/02-DSL与校验.md`](spec-v1.2/02-DSL与校验.md) **R1–R16** 与 [`spec-v1.2/00-总纲.md`](spec-v1.2/00-总纲.md) §0.4 **18 个 DSL 码**为准。W2a 的 `on_gate_false`/defer 运行期/trace v4 见 DR-005 与 spec 01/03/06；**W2b（2026-10-31，REV-077）**：R15 defer 可重入、R16 静态扇出上限（复用 `DSL_PARSE_ERROR`，DSL 域仍 18 码）+ 运行期 `NODE_FANOUT_EXCEEDED`（03 §3.4.4）见 spec 02/03/07 AC-15。
+> **W2a/W2b 实现回写注记（2026-10-31，REV-073；W2b 追加 REV-077）**：本文 §2/§4 中“R1–R14 / 17 个 DSL 码”等历史表述**保持冻结不改**（D1–D12 为决策记录）；当前实现/规格以 [`spec-v1.2/02-DSL与校验.md`](spec-v1.2/02-DSL与校验.md) **R1–R16** 与 [`spec-v1.2/00-总纲.md`](spec-v1.2/00-总纲.md) §0.4 **18 个 DSL 码**为准。W2a 的 `on_gate_false`/defer 运行期/trace v4 见 DR-005 与 spec 01/03/06；**W2b（2026-10-31，REV-077）**：R15 defer 可重入、R16 静态扇出上限（复用 `DSL_PARSE_ERROR`，DSL 域仍 18 码）+ 运行期 `NODE_FANOUT_EXCEEDED`（03 §3.4.4）见 spec 02/03/07 AC-15。
 
 ## 1. 总体拓扑
 
