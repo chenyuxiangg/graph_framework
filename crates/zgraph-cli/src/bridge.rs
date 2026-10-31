@@ -27,7 +27,7 @@
 //! `RunOptions::default()` 再赋值（或 `..Default::default()`），禁止穷举字段。
 //! 本模块的测试也遵循该约定。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -60,6 +60,23 @@ pub type LifecycleObserver = Arc<dyn Fn(&trace::TraceInput) + Send + Sync>;
 /// （DR-006 §4.2/E-14）。
 pub type HumanDecisionObserver = Arc<dyn Fn(&kernel::HumanDecisionRecord) + Send + Sync>;
 
+/// human 实例 L2 `recorded_outputs` 补录配置（W3a / DR-006 §2.2、§8 L2 行）。
+///
+/// human 节点由内核**内置完成**、不经 `NodeExecutor`，因此
+/// [`crate::run_cmd`] 的 `RecordingExecutor` 无法为它写 `recorded_outputs`；本桥在
+/// `transition → Completed` 时按本配置补发一条 [`trace::TraceInput::RecordedOutput`]，
+/// 复用 CLI 既有 `record_output` 的 hash/full 口径（不在 bridge 重算一套）。
+///
+/// 仅含 human 节点且 `--record≠none` 的 run 注入本配置；`None` = 完全 no-op
+/// （无 human 图/无记录模式下 `recorded_outputs` 行集合逐字节不变）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanRecording {
+    /// 记录模式（与 run options.record_mode 同源；`None` 不注入本配置）。
+    pub mode: trace::RecordMode,
+    /// 图内 `CompiledHandler::Human` 的节点 id 集合（BTreeSet 保证诊断确定性）。
+    pub human_nodes: BTreeSet<kernel::NodeId>,
+}
+
 /// 桥接层观察者组合（`BridgeObservers` 只承载旁路，不参与落库）。
 #[derive(Default, Clone)]
 pub struct BridgeObservers {
@@ -69,6 +86,8 @@ pub struct BridgeObservers {
     pub lifecycle: Option<LifecycleObserver>,
     /// W3a0：人工决策确认转发（run decision consumer）。
     pub human_decided: Option<HumanDecisionObserver>,
+    /// W3a：human 实例 L2 `recorded_outputs` 补录（无 human 图/`--record=none` 为 `None`）。
+    pub human_recording: Option<HumanRecording>,
 }
 
 /// kernel `TraceSink` 的 trace 写端适配器。
@@ -79,8 +98,11 @@ pub struct BridgeObservers {
 /// 观察者（[`BridgeObservers`]）在落库**之外**再拿到同一份映射结果：`streaming`
 /// 用于 `--stream` 文本，`lifecycle` 用于 human 模式实时生命周期行（ISSUE-085），
 /// `human_decided` 用于 W3a0 人工决策确认（转发给 run 的 decision consumer）；
-/// 三者都不写库、不影响落库语义。**`human_decisions` 表不由本桥写**（C13：
-/// `TraceWriter` 不写决策表，decide/consumer 是独立写者）。
+/// 三者都不写库、不影响落库语义。`human_recording`（W3a）是唯一的落库扩展：
+/// human 实例由内核内完成、不经 executor，桥在 `→Completed` 时补录
+/// `recorded_outputs`（DR-006 §2.2/§8 L2），复用 CLI `record_output` 口径。
+/// **`human_decisions` 表不由本桥写**（C13：`TraceWriter` 不写决策表，
+/// decide/consumer 是独立写者）。
 pub struct TraceBridge {
     handle: trace::TraceHandle,
     observers: BridgeObservers,
@@ -134,6 +156,41 @@ impl TraceBridge {
         }
     }
 
+    /// W3a L2（DR-006 §2.2/§8）：human 实例由内核内置完成、不经 executor，故由桥在
+    /// `transition → Completed` 时按 `(node_id, attempt)` 补录一条 `recorded_outputs`。
+    ///
+    /// 复用 [`crate::run_cmd::record_output`]（hash 恒写；`full` 带 `output_json`；
+    /// `none` 不写），**不重算 hash 口径**；`snapshot.output` 由内核决策应用顺序保证
+    /// 在 transition 前写入且快照携带（DR-006 §3.2）。无配置/非 human/非 Completed
+    /// 一律 no-op（无 human 图行为逐字节不变）。
+    fn record_human_output(
+        &self,
+        record: &kernel::TransitionRecord,
+        snapshot: &kernel::InstanceSnapshot,
+    ) {
+        if record.to != kernel::InstanceStatus::Completed {
+            return;
+        }
+        let Some(recording) = &self.observers.human_recording else {
+            return;
+        };
+        if !recording.human_nodes.contains(&record.node_id) {
+            return;
+        }
+        let Some(output) = snapshot.output.as_ref() else {
+            return;
+        };
+        crate::run_cmd::record_output(
+            &self.handle,
+            recording.mode,
+            &record.run_id,
+            &record.instance_id,
+            &record.node_id,
+            record.attempt,
+            output,
+        );
+    }
+
     /// 落一条**事件类**输入：先通知生命周期旁路，再入写端（回调顺序 = 落库顺序）。
     fn send_event(&self, input: trace::TraceInput) {
         self.notify_lifecycle(&input);
@@ -159,6 +216,9 @@ impl kernel::TraceSink for TraceBridge {
     }
 
     fn transition(&self, record: kernel::TransitionRecord, snapshot: kernel::InstanceSnapshot) {
+        // W3a L2：human 实例完成时补录 recorded_outputs（在 transition 事件之前入队，
+        // 与 executor 路径「执行成功→记录输出→内核 emit transition」的顺序一致）。
+        self.record_human_output(&record, &snapshot);
         let (record, snapshot) = map_transition(record, &snapshot);
         self.send_event(trace::TraceInput::Transition { record, snapshot });
     }
@@ -775,7 +835,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use super::{map_instance_status, node_error_json, run_in_process, BridgeError, TraceBridge};
+    use super::{
+        map_instance_status, node_error_json, run_in_process, BridgeError, HumanRecording,
+        TraceBridge,
+    };
     use zgraph_kernel::{
         FakeExecutor, InstanceSnapshot, InstanceStatus, NodeError, RunOptions, RunSpec, RunStatus,
         StreamingEvent, TraceSink,
@@ -1098,6 +1161,156 @@ mod tests {
         assert!(reader
             .human_decisions("run-1")
             .expect("human_decisions")
+            .is_empty());
+    }
+
+    /// 构造一次 `transition` 的 kernel 记录 + 迁移后快照（Completed 时携带输出）。
+    fn transition_pair(
+        instance: &str,
+        node: &str,
+        to: InstanceStatus,
+    ) -> (zgraph_kernel::TransitionRecord, InstanceSnapshot) {
+        let ts = "2026-10-31T10:00:00.000Z".to_string();
+        let output = (to == InstanceStatus::Completed)
+            .then(|| serde_json::json!({"decision": "approved", "reason": null}));
+        let record = zgraph_kernel::TransitionRecord {
+            run_id: "run-1".to_string(),
+            instance_id: instance.to_string(),
+            node_id: node.to_string(),
+            attempt: 0,
+            from: InstanceStatus::WaitingHuman,
+            to,
+            reason: Some("human_decided".to_string()),
+            ts: ts.clone(),
+        };
+        let snapshot = InstanceSnapshot {
+            run_id: "run-1".to_string(),
+            instance_id: instance.to_string(),
+            node_id: node.to_string(),
+            node_type: "python_node".to_string(),
+            attempt: 0,
+            status: to,
+            input: Some(serde_json::json!({"payload": {}})),
+            output,
+            error: None,
+            error_code: None,
+            created_at: ts.clone(),
+            started_at: Some(ts.clone()),
+            finished_at: Some(ts),
+        };
+        (record, snapshot)
+    }
+
+    /// `HumanRecording`（full/hash 两种 mode、指定 human 节点集合）。
+    fn human_recording(mode: zgraph_trace::RecordMode) -> HumanRecording {
+        HumanRecording {
+            mode,
+            human_nodes: ["review".to_string()].into_iter().collect(),
+        }
+    }
+
+    /// W3a L2：`--record=full` 下 human 实例 `WaitingHuman→Completed` 补录一条
+    /// `recorded_outputs`（output_json=human output、hash=同一 `output_hash` 口径）；
+    /// 非 human 节点 / 非 Completed 迁移不记录。
+    #[test]
+    fn human_completed_transition_records_output_in_full_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let bridge = TraceBridge::with_observers(
+            writer.handle(),
+            super::BridgeObservers {
+                human_recording: Some(human_recording(zgraph_trace::RecordMode::Full)),
+                ..Default::default()
+            },
+        );
+        bridge.run_started(kernel_run_started());
+        let (record, snapshot) =
+            transition_pair("inst-review", "review", InstanceStatus::Completed);
+        bridge.transition(record, snapshot);
+        // 非 human 节点 Completed（记录由 executor 负责，桥不得重复写）。
+        let (record, snapshot) = transition_pair("inst-work", "work", InstanceStatus::Completed);
+        bridge.transition(record, snapshot);
+        // human 但非 Completed（WaitingHuman）→ 不记录（同一实例，避免
+        // `(run_id,node_id,attempt)` 唯一键冲突）。
+        let (record, snapshot) =
+            transition_pair("inst-review", "review", InstanceStatus::WaitingHuman);
+        bridge.transition(record, snapshot);
+        writer.flush().expect("flush");
+        writer.close().expect("close");
+
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        let rows = reader.recorded_outputs("run-1").expect("recorded outputs");
+        assert_eq!(
+            rows.len(),
+            1,
+            "only the human Completed transition: {rows:?}"
+        );
+        assert_eq!(rows[0].node_id, "review");
+        assert_eq!(rows[0].attempt, 0);
+        assert_eq!(
+            rows[0].output_json,
+            Some(serde_json::json!({"decision": "approved", "reason": null}))
+        );
+        let output = rows[0].output_json.clone().expect("full output json");
+        assert_eq!(
+            rows[0].output_hash,
+            crate::run_cmd::output_hash(&output),
+            "hash must reuse the CLI record_output/hash 口径"
+        );
+    }
+
+    /// W3a L2：`--record=hash` 只写 hash（`output_json` 为 NULL，与既有口径一致）。
+    #[test]
+    fn human_completed_transition_records_hash_only_in_hash_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let bridge = TraceBridge::with_observers(
+            writer.handle(),
+            super::BridgeObservers {
+                human_recording: Some(human_recording(zgraph_trace::RecordMode::Hash)),
+                ..Default::default()
+            },
+        );
+        let (record, snapshot) =
+            transition_pair("inst-review", "review", InstanceStatus::Completed);
+        bridge.run_started(kernel_run_started());
+        bridge.transition(record, snapshot);
+        writer.flush().expect("flush");
+        writer.close().expect("close");
+
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        let rows = reader.recorded_outputs("run-1").expect("recorded outputs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].output_json, None, "hash mode stores no output_json");
+        assert_eq!(
+            rows[0].output_hash,
+            crate::run_cmd::output_hash(
+                &serde_json::json!({"decision": "approved", "reason": null})
+            )
+        );
+    }
+
+    /// 无 `human_recording` 配置（无 human 图/`--record=none`）：桥不写任何
+    /// `recorded_outputs`（既有轨迹行集合不变）。
+    #[test]
+    fn human_completed_transition_without_recording_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let bridge = TraceBridge::new(writer.handle());
+        let (record, snapshot) =
+            transition_pair("inst-review", "review", InstanceStatus::Completed);
+        bridge.run_started(kernel_run_started());
+        bridge.transition(record, snapshot);
+        writer.flush().expect("flush");
+        writer.close().expect("close");
+
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        assert!(reader
+            .recorded_outputs("run-1")
+            .expect("recorded outputs")
             .is_empty());
     }
 

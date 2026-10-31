@@ -63,7 +63,7 @@
 //! human 图 + `--db :memory:`：启动前预检拒绝 `RUN_ENTRY_INVALID`（exit 3、reason
 //! `trace_required_for_human`、**不产生 run**、不打印 run id；DR-006 §7.3 #7/N10）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -94,7 +94,7 @@ use zgraph_trace::{
 use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor, WorkerLimits};
 
 use crate::bridge::{
-    self, BridgeError, BridgeObservers, HumanDecisionObserver, LifecycleObserver,
+    self, BridgeError, BridgeObservers, HumanDecisionObserver, HumanRecording, LifecycleObserver,
     StreamingObserver, TracedRun,
 };
 use crate::recovery;
@@ -611,7 +611,10 @@ impl LlmCallRecorder for LlmCallTraceRecorder {
 }
 
 /// 成功输出 → `RecordedOutput`（`full` 带全文，`hash` 只带哈希，`none` 不发）。
-fn record_output(
+///
+/// W3a：human 实例不经执行器，由 [`crate::bridge::TraceBridge`] 在
+/// `transition → Completed` 时调用本函数补录（同一 hash/full 口径，`pub(crate)`）。
+pub(crate) fn record_output(
     handle: &TraceHandle,
     mode: RecordMode,
     run_id: &str,
@@ -915,6 +918,27 @@ fn graph_has_human(graph: &CompiledGraph) -> bool {
         .any(|node| matches!(node.handler, CompiledHandler::Human))
 }
 
+/// human 实例 L2 补录配置（W3a / DR-006 §2.2、§8 L2）。
+///
+/// `--record=none` 或无 human 节点 → `None`（行为逐字节不变）；否则收集图内
+/// `CompiledHandler::Human` 节点 id，由 [`crate::bridge::TraceBridge`] 在 human
+/// 实例 `→Completed` 时补录 `recorded_outputs`（复用 [`record_output`] 口径）。
+fn human_recording(mode: RecordMode, graph: &CompiledGraph) -> Option<HumanRecording> {
+    if mode == RecordMode::None {
+        return None;
+    }
+    let human_nodes: BTreeSet<String> = graph
+        .nodes
+        .values()
+        .filter(|node| matches!(node.handler, CompiledHandler::Human))
+        .map(|node| node.id.clone())
+        .collect();
+    if human_nodes.is_empty() {
+        return None;
+    }
+    Some(HumanRecording { mode, human_nodes })
+}
+
 /// 打开 trace 写端并执行启动中止标定（06 §6.8.1；打开/标定失败 → exit 4）。
 ///
 /// 标定告警与「跳过标定」告警都在此处写 stderr（06 §6.8.1 步骤 2②/步骤 5）。
@@ -1018,6 +1042,7 @@ fn start_run(
         streaming: args.stream.then(stream_observer),
         lifecycle: lifecycle_observer,
         human_decided: decision_observer,
+        human_recording: human_recording(args.record, &graph),
     };
     let spec = RunSpec {
         graph: Arc::clone(&graph),
@@ -1871,9 +1896,9 @@ fn close_quietly(writer: TraceWriter) {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_code_for, graph_has_human, is_memory_db, lifecycle_detail, llm_call_recorder,
-        output_hash, parse, resolve_entry_inputs, Consumed, FakeLlmMode, ParseState,
-        RecordingExecutor, RunArgs, DEFAULT_USER_ID,
+        exit_code_for, graph_has_human, human_recording, is_memory_db, lifecycle_detail,
+        llm_call_recorder, output_hash, parse, resolve_entry_inputs, Consumed, FakeLlmMode,
+        ParseState, RecordingExecutor, RunArgs, DEFAULT_USER_ID,
     };
     use serde_json::json;
     use std::future::Future;
@@ -1931,16 +1956,9 @@ mod tests {
         .to_string()
     }
 
-    fn compiled_graph(text: &str) -> std::sync::Arc<CompiledGraph> {
-        let loaded = zgraph_dsl::load_graph(text.as_bytes()).expect("valid dsl");
-        CompiledGraph::compile(&loaded).expect("compiled")
-    }
-
-    /// W3a：只有含 `builtin.human` 节点的图才需要 decision consumer / 跨进程 trace DB；
-    /// 普通 python_node / 无 human 图行为不变。
-    #[test]
-    fn graph_has_human_detects_builtin_human_nodes_only() {
-        let human = json!({
+    /// 单人审批 human 图（`start → review(builtin.human) → end`）。
+    fn human_graph_text() -> String {
+        json!({
             "version": "1.0",
             "metadata": {"name": "human_gate"},
             "entry_points": ["start"],
@@ -1957,9 +1975,42 @@ mod tests {
                 {"from": "review", "to_node": "end", "to_input_port": "r"}
             ]
         })
-        .to_string();
-        assert!(graph_has_human(&compiled_graph(&human)));
+        .to_string()
+    }
+
+    fn compiled_graph(text: &str) -> std::sync::Arc<CompiledGraph> {
+        let loaded = zgraph_dsl::load_graph(text.as_bytes()).expect("valid dsl");
+        CompiledGraph::compile(&loaded).expect("compiled")
+    }
+
+    /// W3a：只有含 `builtin.human` 节点的图才需要 decision consumer / 跨进程 trace DB；
+    /// 普通 python_node / 无 human 图行为不变。
+    #[test]
+    fn graph_has_human_detects_builtin_human_nodes_only() {
+        assert!(graph_has_human(&compiled_graph(&human_graph_text())));
         assert!(!graph_has_human(&compiled_graph(&graph_text())));
+    }
+
+    /// W3a L2：human 实例补录配置仅在「含 human 节点且 `--record≠none`」时注入；
+    /// human 节点集合 = 编译产物中的 `CompiledHandler::Human`，mode 取 run options。
+    #[test]
+    fn human_recording_is_configured_only_for_human_graphs_with_record_mode() {
+        let human = compiled_graph(&human_graph_text());
+        let full = human_recording(RecordMode::Full, &human).expect("human graph + full");
+        assert_eq!(full.mode, RecordMode::Full);
+        assert_eq!(
+            full.human_nodes.iter().collect::<Vec<_>>(),
+            vec![&"review".to_string()]
+        );
+        let hash = human_recording(RecordMode::Hash, &human).expect("human graph + hash");
+        assert_eq!(hash.mode, RecordMode::Hash);
+
+        // 无 human 图 / --record=none → 不注入（行为逐字节不变）。
+        assert_eq!(
+            human_recording(RecordMode::Full, &compiled_graph(&graph_text())),
+            None
+        );
+        assert_eq!(human_recording(RecordMode::None, &human), None);
     }
 
     #[test]

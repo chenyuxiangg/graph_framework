@@ -20,6 +20,16 @@
 //! `ctx.get_var` 的图可能 `REPLAY_OUTPUT_MISMATCH`）。`replay` 只读、**不迁移** schema
 //! （06 §6.6/§6.7）：v2 库需先由写端（`zgraph run`）迁移到 v3，否则按
 //! `error[STORAGE_ERROR]` 退出码 4。`llm_calls` 仅作审计，不参与重放。
+//!
+//! # human 节点（W3a / DR-006 §2.2/§8 L2）
+//!
+//! human 实例由内核内置完成、不经 [`NodeExecutor`]；若按 `CompiledHandler::Human`
+//! 重跑，内核会再次进入 `WaitingHuman` 等待决策（且新 `instance_id` 由内核生成，
+//! CLI 无法经 `RunControl` 注入）。L2 冻结口径是「human 实例输出按
+//! `(node_id, attempt)` 记录，重放**不重新要求人工决策**」——因此重跑前把 recorded
+//! graph 中的 human 节点替换为可执行 handler（[`replay_recorded_human_graph`]），
+//! 由 [`RecordedExecutor`] 直接返回记录输出；不启动 worker、不 solicit 人工，
+//! publish/gate/end 聚合与原 run 一致。无 human 节点的图原样重跑（零变化）。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -32,8 +42,8 @@ use serde_json::{json, Map, Value};
 
 use zgraph_dsl::load_graph;
 use zgraph_kernel::{
-    run_to_completion, CompiledGraph, MemoryTraceSink, NodeError, NodeExecution, NodeExecutor,
-    NodeId, PortName, RunOptions, RunOutcome, RunSpec, RunStatus,
+    run_to_completion, CompiledGraph, CompiledHandler, MemoryTraceSink, NodeError, NodeExecution,
+    NodeExecutor, NodeId, PortName, RunOptions, RunOutcome, RunSpec, RunStatus,
 };
 use zgraph_trace::{
     InstanceRow, InstanceStatus as TraceInstanceStatus, RecordedOutputRow, RunRow,
@@ -311,6 +321,7 @@ async fn run_outputs(args: &ReplayArgs) -> ExitCode {
         Ok(graph) => graph,
         Err(error) => return report(error),
     };
+    let graph = replay_recorded_human_graph(graph);
     let spec = match build_spec(&run, graph) {
         Ok(spec) => spec,
         Err(error) => return report(error),
@@ -452,6 +463,36 @@ fn load_recorded_graph(
     })?;
     CompiledGraph::compile(&loaded)
         .map_err(|error| ReplayError::storage(format!("cannot compile recorded graph: {error}")))
+}
+
+/// 把 recorded graph 中的 human 节点替换为「按记录输出执行」的可执行 handler
+/// （W3a / DR-006 §2.2/§8 L2）。
+///
+/// 原因：`CompiledHandler::Human` 由内核内置完成、不经 [`NodeExecutor`]，按原样重跑
+/// 会再次进入 `WaitingHuman` 等决策（且新 `instance_id` 由内核生成，CLI 无法注入）。
+/// L2 的冻结口径是「human 实例输出按 `(node_id, attempt)` 记录，重放不重新要求人工
+/// 决策」：把 human 节点在本地产物里改为普通 Python handler，使
+/// [`RecordedExecutor`] 直接返回该记录输出——不启动 worker、不 solicit 人工，
+/// 后续 publish/gate/end 聚合与原始 run 一致。无 human 节点时原样返回（零变化）。
+fn replay_recorded_human_graph(graph: Arc<CompiledGraph>) -> Arc<CompiledGraph> {
+    let has_human = graph
+        .nodes
+        .values()
+        .any(|node| matches!(node.handler, CompiledHandler::Human));
+    if !has_human {
+        return graph;
+    }
+    let mut replay = CompiledGraph::clone(&graph);
+    for node in replay.nodes.values_mut() {
+        if matches!(node.handler, CompiledHandler::Human) {
+            node.handler = CompiledHandler::Python {
+                module: "builtin".to_string(),
+                function: "human".to_string(),
+                exec_class: zgraph_dsl::ExecClass::Io,
+            };
+        }
+    }
+    Arc::new(replay)
 }
 
 /// 由 `runs` 快照重建 `RunSpec`（graph/entry_inputs/user_id/seed/global_vars）。
@@ -612,8 +653,9 @@ fn json_text(value: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_spec, ensure_replayable, index_recorded_outputs, parse, ReplayArgs, ReplayMode,
-        CODE_REPLAY_RECORD_CORRUPT, CODE_REPLAY_RECORD_MISSING, CODE_REPLAY_RUN_NOT_COMPLETED,
+        build_spec, ensure_replayable, index_recorded_outputs, parse, replay_recorded_human_graph,
+        ReplayArgs, ReplayMode, CODE_REPLAY_RECORD_CORRUPT, CODE_REPLAY_RECORD_MISSING,
+        CODE_REPLAY_RUN_NOT_COMPLETED,
     };
     use crate::run_cmd::output_hash;
     use std::path::PathBuf;
@@ -621,8 +663,8 @@ mod tests {
 
     use serde_json::{json, Value};
     use zgraph_kernel::{
-        run_to_completion, CompiledGraph, MemoryTraceSink, NodeError, NodeExecution, NodeExecutor,
-        RunStatus,
+        run_to_completion, CompiledGraph, CompiledHandler, MemoryTraceSink, NodeError,
+        NodeExecution, NodeExecutor, RunStatus,
     };
     use zgraph_trace::{RunRow, RunStatus as TraceRunStatus};
 
@@ -651,6 +693,59 @@ mod tests {
     fn gv_graph() -> Arc<CompiledGraph> {
         let loaded = zgraph_dsl::load_graph(GV_GRAPH.as_bytes()).expect("graph loads");
         CompiledGraph::compile(&loaded).expect("graph compiles")
+    }
+
+    /// W3a L2：重放前把 human 节点替换为可执行 handler（由 `RecordedExecutor` 按
+    /// `(node_id, attempt)` 返回记录输出，不重新要求人工决策）；无 human 图原样返回。
+    #[test]
+    fn replay_recorded_human_graph_replaces_human_handlers_only() {
+        const HUMAN_GRAPH: &str = r#"{
+            "version": "1.0",
+            "metadata": {"name": "human"},
+            "entry_points": ["start"],
+            "nodes": [
+              {"id": "start", "type": "start", "inputs": [], "config": {}},
+              {"id": "review", "type": "python_node",
+               "inputs": [{"name": "p", "type": "any", "required": true}],
+               "config": {"module": "builtin", "function": "human"}},
+              {"id": "end", "type": "end",
+               "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+            ],
+            "edges": [
+              {"from": "start", "to_node": "review", "to_input_port": "p"},
+              {"from": "review", "to_node": "end", "to_input_port": "r"}
+            ]
+        }"#;
+        let loaded = zgraph_dsl::load_graph(HUMAN_GRAPH.as_bytes()).expect("human graph loads");
+        let graph = CompiledGraph::compile(&loaded).expect("human graph compiles");
+        assert!(matches!(
+            &graph.nodes["review"].handler,
+            CompiledHandler::Human
+        ));
+
+        let replay = replay_recorded_human_graph(Arc::clone(&graph));
+        assert!(
+            matches!(
+                &replay.nodes["review"].handler,
+                CompiledHandler::Python { .. }
+            ),
+            "human handler must become replayable through the recorded executor"
+        );
+        assert!(matches!(
+            &replay.nodes["start"].handler,
+            CompiledHandler::Start
+        ));
+        assert_eq!(
+            replay.graph_hash, graph.graph_hash,
+            "重放替换不改 graph_hash/审计字段"
+        );
+
+        // 无 human 图：同一 `Arc` 原样返回（零变化）。
+        let plain = gv_graph();
+        assert!(Arc::ptr_eq(
+            &plain,
+            &replay_recorded_human_graph(Arc::clone(&plain))
+        ));
     }
 
     fn sample_run(global_vars: Option<Value>) -> RunRow {

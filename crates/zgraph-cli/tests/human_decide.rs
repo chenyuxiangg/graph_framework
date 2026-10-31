@@ -21,6 +21,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 /// 等待上限（真链路冷启动 + 决策消费轮询均为毫秒级，留足余量）。
@@ -606,4 +607,164 @@ fn plain_graph_still_accepts_memory_db() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains(":memory:"));
+}
+
+// ---------------------------------------------------------------------------
+// W3a L2：human 实例 recorded_outputs 补录（DR-006 §2.2/§8 L2）
+// ---------------------------------------------------------------------------
+
+/// `recorded_outputs` 行：`(node_id, attempt, output_hash, output_json)`。
+type RecordedRow = (String, u32, String, Option<Value>);
+
+fn recorded_outputs(db: &Path, run_id: &str) -> Vec<RecordedRow> {
+    let conn = Connection::open(db).expect("open db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT node_id, attempt, output_hash, output_json FROM recorded_outputs \
+             WHERE run_id = ?1 ORDER BY node_id, attempt",
+        )
+        .expect("prepare");
+    stmt.query_map([run_id], |row| {
+        let output_json: Option<String> = row.get(3)?;
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            output_json.map(|text| serde_json::from_str(&text).expect("valid output_json")),
+        ))
+    })
+    .expect("query")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("collect")
+}
+
+fn runs_count(db: &Path) -> i64 {
+    Connection::open(db)
+        .expect("open db")
+        .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
+        .expect("runs count")
+}
+
+/// `--record=full` 跑 human 图：human 实例补录（output_json/hash 与 `output_hash`
+/// 口径一致），且 `replay --mode=outputs` 成功、重放输出 == 原始（不重新要求决策）。
+#[test]
+fn human_full_record_supports_l2_outputs_replay() {
+    let fx = Fixture::new(HUMAN_GRAPH);
+    let mut args = fx.run_args();
+    args.push("--record=full".to_string());
+    let mut run = RunningCli::spawn(&args);
+    let (run_id, instance_id) = wait_for_waiting_human(&fx.db);
+    assert!(run.is_running());
+    let decide = zgraph(&fx.decide_args(&run_id, &instance_id, "approved"));
+    assert_eq!(decide.status.code(), Some(0));
+    let result = run.wait();
+    assert_eq!(result.code, 0, "run stderr={}", result.stderr);
+
+    let expected = json!({"decision": "approved", "reason": null});
+    let rows = recorded_outputs(&fx.db, &run_id);
+    let human = rows
+        .iter()
+        .find(|row| row.0 == "review")
+        .unwrap_or_else(|| panic!("human node record missing: {rows:?}"));
+    assert_eq!(human.1, 0, "attempt 0");
+    assert_eq!(human.3.as_ref(), Some(&expected), "full 保存 human output");
+    assert_eq!(
+        human.2,
+        zgraph_cli::run_cmd::output_hash(&expected),
+        "hash 复用 CLI record_output 口径"
+    );
+
+    // L2：human 节点用记录输出重放，不重新要求人工决策。
+    let replay = zgraph(&[
+        "replay".to_string(),
+        "--run".to_string(),
+        run_id.clone(),
+        "--mode".to_string(),
+        "outputs".to_string(),
+        "--json".to_string(),
+        "--db".to_string(),
+        path_str(&fx.db).to_string(),
+    ]);
+    assert_eq!(
+        replay.status.code(),
+        Some(0),
+        "replay stdout={} stderr={}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let value: Value =
+        serde_json::from_str(String::from_utf8_lossy(&replay.stdout).trim()).expect("replay json");
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["matched"], json!(true));
+    assert_eq!(value["original_output"], value["replayed_output"]);
+    assert_eq!(runs_count(&fx.db), 1, "L2 不产生新 run");
+}
+
+/// `--record=hash`：human 实例只写 hash（`output_json` 为 NULL，与既有口径一致）；
+/// L2 outputs 重放按既有语义拒绝（`REPLAY_RECORD_MISSING` exit 3）。
+#[test]
+fn human_hash_record_stores_only_hash() {
+    let fx = Fixture::new(HUMAN_GRAPH);
+    let mut args = fx.run_args();
+    args.push("--record=hash".to_string());
+    let run = RunningCli::spawn(&args);
+    let (run_id, instance_id) = wait_for_waiting_human(&fx.db);
+    assert_eq!(
+        zgraph(&fx.decide_args(&run_id, &instance_id, "approved"))
+            .status
+            .code(),
+        Some(0)
+    );
+    let result = run.wait();
+    assert_eq!(result.code, 0, "run stderr={}", result.stderr);
+
+    let rows = recorded_outputs(&fx.db, &run_id);
+    let human = rows
+        .iter()
+        .find(|row| row.0 == "review")
+        .unwrap_or_else(|| panic!("human node hash record missing: {rows:?}"));
+    assert_eq!(human.3, None, "hash mode stores no output_json");
+    assert_eq!(
+        human.2,
+        zgraph_cli::run_cmd::output_hash(&json!({"decision": "approved", "reason": null}))
+    );
+
+    let replay = zgraph(&[
+        "replay".to_string(),
+        "--run".to_string(),
+        run_id,
+        "--mode".to_string(),
+        "outputs".to_string(),
+        "--json".to_string(),
+        "--db".to_string(),
+        path_str(&fx.db).to_string(),
+    ]);
+    assert_eq!(replay.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&replay.stderr).contains("REPLAY_RECORD_MISSING"),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+}
+
+/// `--record=none`：不写 human 记录（桥配置为 `None`，`recorded_outputs` 为空）。
+#[test]
+fn human_record_none_writes_nothing() {
+    let fx = Fixture::new(HUMAN_GRAPH);
+    let mut args = fx.run_args();
+    args.push("--record=none".to_string());
+    let run = RunningCli::spawn(&args);
+    let (run_id, instance_id) = wait_for_waiting_human(&fx.db);
+    assert_eq!(
+        zgraph(&fx.decide_args(&run_id, &instance_id, "approved"))
+            .status
+            .code(),
+        Some(0)
+    );
+    let result = run.wait();
+    assert_eq!(result.code, 0, "run stderr={}", result.stderr);
+    assert!(
+        recorded_outputs(&fx.db, &run_id).is_empty(),
+        "record=none must not write recorded_outputs"
+    );
 }
