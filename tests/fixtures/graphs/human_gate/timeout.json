@@ -1,0 +1,51 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "human-gate-timeout",
+    "description": "W3a AC-16 d：human 节点声明决策等待期限 config.timeout_ms=200（无 decide → TimedOut/NODE_TIMEOUT）"
+  },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [{ "name": "message", "type": "string", "required": true }],
+      "config": {}
+    },
+    {
+      "id": "prep",
+      "type": "python_node",
+      "inputs": [{ "name": "message", "type": "any", "required": true }],
+      "config": { "module": "workers.echo", "function": "run" }
+    },
+    {
+      "id": "timeout_human",
+      "type": "python_node",
+      "inputs": [{ "name": "artifact", "type": "any", "required": true }],
+      "config": {
+        "module": "builtin",
+        "function": "human",
+        "timeout_ms": 200
+      }
+    },
+    {
+      "id": "done",
+      "type": "end",
+      "inputs": [{ "name": "result", "type": "any", "required": true }],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "prep", "to_input_port": "message" },
+    { "from": "prep", "to_node": "timeout_human", "to_input_port": "artifact" },
+    {
+      "from": "timeout_human",
+      "to_node": "done",
+      "to_input_port": "result",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "decision", "equals": "approved" }
+      }
+    }
+  ]
+}

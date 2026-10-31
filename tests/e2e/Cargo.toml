@@ -80,3 +80,7 @@ path = "gate_defer.rs"
 [[test]]
 name = "max_fanout"
 path = "max_fanout.rs"
+
+[[test]]
+name = "human_decide"
+path = "human_decide.rs"

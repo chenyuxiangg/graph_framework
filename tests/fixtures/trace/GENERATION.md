@@ -1,12 +1,19 @@
-# v3 trace seed 与 v0.1.0 expected trace 的生成方式（AC-14 h / ISSUE-104）
+# v3/v4 trace seed 与 expected trace 的生成方式（AC-14 h / ISSUE-104 / AC-16 e）
 
-> 资产：`schema_v3_seed.sql`（v3 schema + 一条 Completed 旧 run，`PRAGMA user_version=3`）、
-> `v0.1.0_expected_trace.json`（迁移后旧 run 的 `zgraph trace --json` 冻结 golden）、
-> `seed_graph.json`（生成 seed 的确定性小图）。
+> 资产：
+> - `schema_v3_seed.sql`（v3 schema + 一条 Completed 旧 run，`PRAGMA user_version=3`）、
+>   `v0.1.0_expected_trace.json`（v3 seed 迁移后旧 run 的 `zgraph trace --json` 冻结 golden）、
+>   `seed_graph.json`（生成 seed 的确定性小图）；
+> - **W3a / AC-16 e 新增**：`schema_v4_seed.sql`（v4 schema + 一条 Completed 旧 run，
+>   `PRAGMA user_version=4`）与 `v4_expected_trace.json`（**v4-era CLI 在迁移前**生成的
+>   旧 run `zgraph trace --json` 冻结 golden；用于断言 v4→v5 迁移不改写历史事件）。
 >
-> 背景：这两个 fixture 是 W1 的遗留缺口（**ISSUE-104**），由 W2a e2e 交付（DR-005 §4.3/§7 h）。
+> 背景：v3 seed / v0.1.0 expected 是 W1 的遗留缺口（**ISSUE-104**），由 W2a e2e 交付（DR-005 §4.3/§7 h）。
 > 旧 run 的 `events.payload` 保持 v3 形态（`GateResult.record` **不含** `deferred/attempt/verdict`）；
 > v3→v4 只补 `gate_results` SQL 列默认值（0/0/NULL），**不改写历史 payload**（06 §6.2.8）。
+> v4 seed 的 payload 是真实 v4 形态（`GateResult.record` 含 `deferred/attempt/verdict`），
+> v4→v5 只重建 `instances`/`transitions`（CHECK 增 `WaitingHuman`）并新建 `human_decisions`，
+> **不改写任何 `events` 行**（DR-006 §6.2），因此迁移前后 `trace --json` 必须逐字节一致。
 
 ## 1. 前置
 
@@ -92,16 +99,70 @@ PY
 
 校验（e2e 内同样断言）：
 
-- 迁移后 `user_version=4`、`schema_migrations` 1/2/3/4、`.bak.v3-*` 存在且备份
-  `user_version=3`；
+- 迁移后 `user_version=5`、`schema_migrations` 1/2/3/4/5、`.bak.v3-*` 存在且备份
+  `user_version=3`（W3a / schema v5 起；v3→v4 迁移步骤本身不变，链式继续到 v5）；
 - 旧 `gate_results` 三列 = `0 / 0 / NULL`；旧 `GateResult.record` 不含三键；
 - `zgraph trace <old> --json` == `v0.1.0_expected_trace.json`；
 - `zgraph replay --run <old> --mode events --json` 与 `trace --json` 逐字节一致；
-- 只读 `trace` 对未迁移的 v3 库 exit 4（`unsupported schema version=3, expected 4`）且不迁移。
+- 只读 `trace` 对未迁移的 v3 库 exit 4（`unsupported schema version=3, expected 5`）且不迁移。
 
-## 5. 变更约束
+## 5. v4 seed 与 v4 expected trace（W3a AC-16 e）
 
-- **不得手工编辑** `schema_v3_seed.sql` / `v0.1.0_expected_trace.json`；需要重建时按上述
-  步骤重跑并在 commit message / 评审记录写明「重新生成 + 归一化规则未变」。
-- seed 的 v3 DDL 必须来自 `v0.1.0` 代码（不能用当前 v4 DDL 降级伪造）；
-- expected 由**当前 CLI** 生成属 golden 生成，生成命令与归一化规则需在评审中可复核。
+生成方式与 v3 seed 完全同构，唯一区别是 source 代码与 **golden 生成时点**：
+
+1. **v4-era 代码**：W2b 收口后的 main（本仓库为 commit `1ed37ab`，`TRACE_SCHEMA_VERSION=4`）。
+   用 `git archive 1ed37ab | tar -x -C /tmp/zgraph-v4-src` 取源码（不建 worktree、不污染仓库），
+   `CARGO_TARGET_DIR=/tmp/zgraph-v4-target cargo build -p zgraph-cli --bin zgraph --offline`。
+2. **生成 v4 DB**（全新库，不经过迁移，v4 DDL 由 v4-era 代码直接建出）：
+
+   ```bash
+   /tmp/zgraph-v4-target/debug/zgraph run \
+     <repo>/tests/fixtures/trace/seed_graph.json \
+     --inputs '{"start":{"message":"seed"}}' \
+     --db /tmp/seed_v4.db --python python3 --json
+   # 期望：ok=true / status=Completed / 7 条事件 / 1 条 GateResult passed=false
+   ```
+
+3. **冻结（`sqlite3 .dump` + 归一化）**：归一化规则与 v3 seed **完全相同**（§3 的 1–4 条），
+   另将 `PRAGMA user_version = 4;` 追加在末尾。v4 的 `gate_results` 三列保持真实运行值
+   （`deferred=0 / attempt=0 / verdict_json='"seed"'`），`GateResult.record` 为真实 v4 形态。
+4. **生成 v4 expected golden（迁移前！）**：直接用 **v4-era CLI** 对 v4 seed 取
+
+   ```bash
+   /tmp/zgraph-v4-target/debug/zgraph trace 0192f0c4-7a1b-7c3d-8e4f-000000000001 \
+     --db /tmp/seed_v4.db --json > /tmp/v4_expected.ndjson
+   python3 - <<'PY'
+   import json
+   lines = [json.loads(line) for line in open("/tmp/v4_expected.ndjson") if line.strip()]
+   assert len(lines) == 7
+   assert lines[4]["payload"]["record"]["deferred"] is False, "v4 形态必须含 deferred"
+   json.dump(lines, open("tests/fixtures/trace/v4_expected_trace.json", "w"),
+             ensure_ascii=False, indent=2)
+   PY
+   ```
+
+   与 v3 golden 的关键区别：v4 golden 是**迁移前**（v4-era CLI）产物，因此 e2e 里
+   「v4→v5 迁移后 `zgraph trace <old> --json` == `v4_expected_trace.json`」直接证明
+   **迁移不改写历史事件**（DR-006 §6.2）。
+
+校验（e2e 内同样断言）：
+
+- `schema_v4_seed.sql` 建库后 `user_version=4`、1 条 Completed run、7 events、
+  2 instances（start Completed / b Skipped）、4 transitions、1 gate_result；
+- v5 CLI 只读 `trace`/`replay` 对 v4 → exit 4（`unsupported schema version=4, expected 5`），
+  `user_version` 仍 4、无 `.bak.*` 备份；
+- v5 CLI `run` 打开 v4 → 迁移 v5：`.bak.v4-*` 恰一份且备份 `user_version=4`、
+  `user_version=5`、`schema_migrations` 1..5、`human_decisions` + pending 索引存在、
+  `instances`/`transitions`/`gate_results`/`events` 行逐列保留；
+- 迁移后旧 run `trace --json` == `v4_expected_trace.json`，`replay --mode=events --json`
+  与 `trace --json` 逐字节一致。
+
+## 6. 变更约束
+
+- **不得手工编辑** `schema_v3_seed.sql` / `v0.1.0_expected_trace.json` /
+  `schema_v4_seed.sql` / `v4_expected_trace.json`；需要重建时按上述步骤重跑并在
+  commit message / 评审记录写明「重新生成 + 归一化规则未变」。
+- seed 的 DDL 必须来自对应年代代码：v3 用 `v0.1.0`（`5d43c58`），v4 用 W2b 收口后的
+  main（`1ed37ab`）；不能用当前 v5 DDL 降级伪造。
+- expected golden 由对应年代 CLI 生成（v3 golden 为迁移后 golden、v4 golden 为迁移前
+  golden），生成命令与归一化规则需在评审中可复核。

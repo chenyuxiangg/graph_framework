@@ -1,0 +1,47 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "human-gate-approve",
+    "description": "W3a AC-16 a：start → prep(echo worker) → approve_human(builtin.human) → end；approved 边 check_output{path:decision,equals:approved}"
+  },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [{ "name": "message", "type": "string", "required": true }],
+      "config": {}
+    },
+    {
+      "id": "prep",
+      "type": "python_node",
+      "inputs": [{ "name": "message", "type": "any", "required": true }],
+      "config": { "module": "workers.echo", "function": "run" }
+    },
+    {
+      "id": "approve_human",
+      "type": "python_node",
+      "inputs": [{ "name": "artifact", "type": "any", "required": true }],
+      "config": { "module": "builtin", "function": "human" }
+    },
+    {
+      "id": "done",
+      "type": "end",
+      "inputs": [{ "name": "result", "type": "any", "required": true }],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "prep", "to_input_port": "message" },
+    { "from": "prep", "to_node": "approve_human", "to_input_port": "artifact" },
+    {
+      "from": "approve_human",
+      "to_node": "done",
+      "to_input_port": "result",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "decision", "equals": "approved" }
+      }
+    }
+  ]
+}

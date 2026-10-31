@@ -1,0 +1,64 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "human-gate-rework",
+    "description": "W3a AC-16 b 主变体：prep → rework_human；approved 边 → end；rejected 边（check_output equals rejected + on_gate_false=defer）回边重入 prep/human（W2a attempt-per-activation，max_attempts 预算 2）"
+  },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [{ "name": "message", "type": "string", "required": true }],
+      "config": {}
+    },
+    {
+      "id": "prep",
+      "type": "python_node",
+      "inputs": [
+        { "name": "message", "type": "any", "required": true },
+        { "name": "feedback", "type": "any", "required": false }
+      ],
+      "config": {
+        "module": "workers.echo",
+        "function": "run",
+        "retry": { "max_attempts": 2 }
+      }
+    },
+    {
+      "id": "rework_human",
+      "type": "python_node",
+      "inputs": [{ "name": "artifact", "type": "any", "required": true }],
+      "config": { "module": "builtin", "function": "human" }
+    },
+    {
+      "id": "done",
+      "type": "end",
+      "inputs": [{ "name": "result", "type": "any", "required": true }],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "prep", "to_input_port": "message" },
+    { "from": "prep", "to_node": "rework_human", "to_input_port": "artifact" },
+    {
+      "from": "rework_human",
+      "to_node": "done",
+      "to_input_port": "result",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "decision", "equals": "approved" }
+      }
+    },
+    {
+      "from": "rework_human",
+      "to_node": "prep",
+      "to_input_port": "feedback",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "decision", "equals": "rejected" }
+      },
+      "on_gate_false": "defer"
+    }
+  ]
+}
