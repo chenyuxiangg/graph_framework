@@ -85,7 +85,8 @@
 
 ### 2.2 人类上下文（输入快照）
 
-- 等待所需上下文 = **该节点声明的输入端口**（与普通节点一致：`trigger=all/any`、required/optional、null 补齐）。实例创建时把触发它的 buffer 快照写入 `instances.input`（06 §6.2.5），e2e 用 `--record=full`/`instances.input` 断言「人工看到的是这一代上游产物」。
+- 等待所需上下文 = **该节点声明的输入端口**（与普通节点一致：`trigger=all/any`、required/optional、null 补齐）。
+- **`instances.input` 快照时点（冻结）**：在 **`Pending→WaitingHuman` 迁移前**（全部 required 端口已满足时）写入 `instances.input`，形状 = **全部声明端口**（未到为 `null`），与普通节点 dispatch 快照同语义；**惰性 `Pending` 创建时不写**（此时输入可能未齐）。e2e 用 `--record=full`/`instances.input` 断言「人工看到的是这一代上游产物」。
 - human 节点**没有额外的 prompt/schema 输入**；应用评审所需字段全部来自图的上游输出（SOP 的 `spec/result/review` 等）。
 - `--record=full` 的 L2 记录：human 实例输出按其 `(node_id, attempt)` 记录（与其它节点一致），重放不重新要求人工决策。
 
@@ -132,7 +133,7 @@ pub enum InstanceStatus {
 | 迁移 | 副作用（顺序冻结） |
 |---|---|
 | `Pending→WaitingHuman` | 写 `TransitionRecord`（reason=`human_waiting`）；记 `started_at`（等待起点）；若声明 `timeout_ms` 则登记 deadline；从 ready/active 视角转为等待态（不派发） |
-| `WaitingHuman→Completed` | 写 `TransitionRecord`（reason=`human_decided`）；写 `output={"decision","reason"}`；记 `finished_at`；清 deadline；触发普通 publish（gate 求值在 off-loop 的等价路径：human 输出在其完成时求值，见 §4.3） |
+| `WaitingHuman→Completed` | **顺序冻结**：① 写 `output={"decision","reason"}`；② 清 deadline；③ `transition(Completed, reason="human_decided")`（**快照携带 output**；`finished_at` 由 transition 统一写入，勿重复写）；④ 触发普通 publish（同一次完成内求值出边 gate，见 §4.3）。**不得先 transition 后写 output**（as-built `transition_raw` 在迁移时立即构造/发送快照，先 transition 会使 `instances.output`/快照为 NULL，违背 AC-16 a） |
 | `WaitingHuman→TimedOut` | 写 `TransitionRecord` + `NodeTimedOut` 事件；`NodeError::Timeout`；冷峻 fail_run（与既有超时同口径，§3.4） |
 | `WaitingHuman→Cancelled` | 写 `TransitionRecord`；run 取消/冷峻失败收尾（不等待、不决策） |
 
@@ -210,6 +211,7 @@ PENDING ──run 已终态/进程崩溃──▶ 保持 PENDING（W3b 处置；
 
 - `consumed_at` 一旦写入不再更新（审计只一次）；`applied=false` 也标 consumed（避免 consumer 反复重试同一行）。
 - `decide` **不写** `consumed_at`；`TraceWriter` **不写** 该表。
+- **`applied`/`reject_reason` 不落库（冻结，N21）**：二者只经 `TraceSink::human_decided` 到 CLI（stderr/内存），`human_decisions` 仅存 `consumed_at`；进程退出后不能从 trace 审计「是否应用/拒绝原因」。若 W3b 需要，可评估新增列或事件（合同外，登记 ISSUE-126）。
 
 ### 4.3 human 节点的 gate 求值时机
 
@@ -226,25 +228,30 @@ PENDING ──run 已终态/进程崩溃──▶ 保持 PENDING（W3b 处置；
 | 3 | 实例已非 `WaitingHuman`（已决策/已超时/已取消/非当前） | 不改状态；`applied=false` | 实例/run 不变 | `human_decided{applied:false}` 确认（CLI 可观测） |
 | 4 | 决策期限到期（无 decide） | `TimedOut` + `NodeError::Timeout` | run Failed（`NODE_TIMEOUT`，冷峻） | Transition + NodeTimedOut |
 | 5 | run 已终态 / 不存在 | decide 预检拒绝（exit 1）；consumer 已退出 | 不变 | — |
-| 6 | 同实例重复 decide | 第二次 INSERT 冲突（exit 5）；不会产生第二行 | 不变 | — |
+| 6 | 同实例重复 decide | **预检 ① 先查决策行 → 恒 exit 5 `HUMAN_DECISION_EXISTS`**（即使 run 已 Completed / instance 已非 WaitingHuman）；唯一键兜底并发窗口（第二个 INSERT 冲突） | 不变（不产生第二行） | — |
 | 7 | 并发 decide（两个进程同实例） | 唯一键 + SQLite 事务：**恰一 succeed（0），其余 exit 5** | 不变（仅一行） | — |
 | 8 | decide 在 Paused run 上 | decide 允许（预检 status ∈ {Running,Paused}）；consumer 提交、kernel 应用状态迁移与 publish；**不恢复派发**（Pause 语义不变） | 实例 Completed；run 仍 Paused | Transition（dispatch 端等 Resume） |
 
 > 行 8 是**冻结解释**：DR-004 §5 D3「run 存活轮询」与 03 §3.8「Pause 停派发、投递仍应用」的最小交集。若用户希望 decide 顺带 Resume，属产品选择，不在 W3a。
+>
+> **`reject_reason` 码（冻结）**：kernel→CLI 的 `HumanDecisionRecord.reject_reason` 只有三值——**`instance_missing` / `not_current` / `not_waiting_human`**（snake_case，按 §3.4.5 算法）。它与 decide 侧 `--json.code` 的 `HUMAN_*`（CLI 命名空间）是**两套码**：前者描述「why applied=false」（内核幂等确认），后者描述「decide 为什么没插入」（CLI 预检）。**不得**把 `HUMAN_*` 用作 `reject_reason`。
 
 ### 4.5 decide 前置校验与拒绝码（单 RO 快照）
 
-| 校验（同一快照） | 失败 → CLI 退出码 | `--json.code` |
-|---|---|---|
-| 参数完整/decision ∈ {approved,rejected}/approver 非空 | 2 | `CLI_USAGE` |
-| run 存在且 status ∈ {Running,Paused} | 1 | `HUMAN_RUN_NOT_ACTIVE` |
-| instance 存在 | 1 | `HUMAN_INSTANCE_NOT_FOUND` |
-| instance 属于该 run 且 status=WaitingHuman | 5 | `HUMAN_INSTANCE_NOT_WAITING` |
-| 该实例尚无决策行（唯一键） | 5 | `HUMAN_DECISION_EXISTS` |
-| DB 打不开/迁移未完成/busy 重试耗尽 | 4 | `HUMAN_DB_ERROR` |
-| panic 被捕获 | 70 | `HUMAN_INTERNAL` |
+**预检顺序（冻结，可判定）**：参数/DB 错误先于业务判断；**决策行存在性先于一切 run/instance 状态判断**。
 
+| 顺序 | 校验（同一 RO 快照） | 失败 → CLI 退出码 | `--json.code` |
+|---|---|---|---|
+| 0 | 参数完整/decision ∈ {approved,rejected}/approver 非空；DB 可打开/版本=5 | 2（参数）/4（DB） | `CLI_USAGE` / `HUMAN_DB_ERROR` |
+| **1** | **`human_decisions` 已有该 `(run_id,instance_id)` 行** | **5** | **`HUMAN_DECISION_EXISTS`** |
+| 2 | run 存在且 status ∈ {Running,Paused} | 1 | `HUMAN_RUN_NOT_ACTIVE` |
+| 3 | instance 存在（且属于该 run） | 1 | `HUMAN_INSTANCE_NOT_FOUND` |
+| 4 | instance status=WaitingHuman | 5 | `HUMAN_INSTANCE_NOT_WAITING` |
+| 5 | panic 被捕获 | 70 | `HUMAN_INTERNAL` |
+
+- 顺序冻结理由：二次 decide（含 run 已 Completed 后）必须恒得 `HUMAN_DECISION_EXISTS`（AC-16 c 可确定性断言，无时序依赖）；`HUMAN_RUN_NOT_ACTIVE`/`HUMAN_INSTANCE_NOT_FOUND` 只用于「该实例从未有决策行」的目标不存在路径。
 - 预检与 INSERT 在**同一决定阶段**：先 RO 预检、再独立 RW 单事务 INSERT（`busy_timeout=5000ms`，`SQLITE_BUSY` 重试 3 次）；唯一键冲突（并发窗口）→ exit 5（`HUMAN_DECISION_EXISTS`）。
+- **可见性（冻结，N11）**：预检以**已提交的 trace DB 状态**为准（`instances.status` 由 trace 写线程批量落库）；decide 只保证「看到 WaitingHuman 才返回 0」，若进入等待尚未可见 → 按顺序 3/4 返回 exit 1/5，由操作者轮询 `instances.status=WaitingHuman` 后重试。CLI `run` 在进入 `WaitingHuman` 时应 flush 该实例快照（W3a 实现按 06 §6.4 批量语义尽快可见）；AC-16 a 明确「轮询 DB 可见后再 decide」。
 - `HUMAN_*` 是 **CLI 命名空间**（decide 的 `--json.code`），**不写入** `runs.error_code`、不新增领域错误码（00 §0.4 不变）。
 
 > **E-11 裁决（Lead 2026-10-31）**：「instance 不存在」与「run 不存在/已终态」同属**目标不存在** → exit **1**（`HUMAN_INSTANCE_NOT_FOUND`）；「instance 存在但 status≠WaitingHuman」→ exit **5**（`HUMAN_INSTANCE_NOT_WAITING`）。实现与 06 §6.10.5 按此执行。
@@ -358,7 +365,8 @@ CREATE INDEX IF NOT EXISTS idx_human_decisions_pending
 
 - **人类可读**：在既有事件输出后追加一段决策摘要（若有）：`human_decisions: N (approved A / rejected R; pending P)`，逐行 `instance=… decision=… approver=… decided_at=… consumed_at=… reason=…`；无决策行时**不输出**（默认 run 输出逐字节不变）。
 - **`--json`（NDJSON）**：在事件行之后追加 `{"kind":"HumanDecision", "run_id", "instance_id", "decision", "approver", "reason", "decision_id", "decided_at", "consumed_at"}` 行；顺序按 `(decided_at, decision_id)`；**不写入 `events.kind`**、不改变既有事件行形状；无决策行时输出与 v5 前一致。
-- `--stats`：可选增加 `human_decisions` 计数（不影响既有字段）；`replay --mode=events` 沿用 `trace --json`（含 HumanDecision 行）时，须在 DR/实现中保持「events 回放逐字节复用 trace」的既有口径——**W3a0 冻结**：`replay --mode=events` 的 NDJSON 包含 HumanDecision 行（与 `trace --json` 逐字节一致）；`--mode=outputs` 不受决策影响（按记录输出重放）。
+- **pending 行的 `consumed_at`**：`--json` 中恒输出 `"consumed_at": null`（与列语义一致；不省略）；`--stats` **不新增** human 决策计数字段（W3a0 冻结；后续如需要另立，登记 ISSUE-127）。
+- `replay --mode=events` 沿用 `trace --json`（含 HumanDecision 行）时，保持「events 回放逐字节复用 trace」的既有口径——**W3a0 冻结**：`replay --mode=events` 的 NDJSON 包含 HumanDecision 行（与 `trace --json` 逐字节一致），但**不消费/不重新要求决策**（回放只读历史事实）；`--mode=outputs` 不受决策影响（按记录输出重放，不需要决策表）。
 
 ---
 
@@ -378,7 +386,7 @@ pub struct HumanDecisionRecord {
     pub approver: String, pub reason: Option<String>,
     pub decision_id: String, pub decided_at: String,
     pub applied: bool,
-    pub reject_reason: Option<String>,     // applied=false 的机器码（见 §4.5）
+    pub reject_reason: Option<String>,     // applied=false 的内核机器码：instance_missing/not_current/not_waiting_human（§4.1；≠ decide 的 HUMAN_*）
 }
 
 // 03 §3.8 控制通道
@@ -406,7 +414,7 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 
 | 项 | 规定 |
 |---|---|
-| `--db` | 与 run/trace/replay 同口径（缺省 `.zgraph/trace.db` 解析，06 §6.9.1） |
+| `--db` | 与 run/**decide**/trace/replay 同口径（缺省 `.zgraph/trace.db` 解析，06 §6.9.1） |
 | 必填 | `run_id`、`--instance`、`--decision`（闭集）、`--approver`（非空；空白视为空） |
 | 成功（人类） | stdout 一行：`decision recorded: run=<run_id> instance=<id> decision=<approved\|rejected> decision_id=<uuid>`；`--json` 时 stdout 只输出 JSON |
 | 成功 `--json` | `{"ok":true,"run_id","instance_id","decision","decision_id","decided_at"}` |
@@ -419,14 +427,15 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 
 ### 7.3 CLI `run` 的 decision consumer（冻结）
 
-1. run 启动成功后启动 consumer 任务（与 run 同生命周期）；无 human 节点的图也启动（空轮询开销可忽略）或按需延迟启动（实现自由，但**行为**必须一致）。
-2. 每 `HUMAN_DECISION_POLL_MS=200` 用 RO 连接查 `pending(run_id)`；对每行：
-   - 通过 bridge 维护的 `WaitingHuman` 实例集合（来自 lifecycle observer）判断是否仍等待；是 → 发 `RunControl::HumanDecision`；
-   - 收到 `human_decided` 确认（`TraceSink` 回调）→ 用独立 RW 短事务 `mark_consumed`；stderr 输出一行（applied 或 warning）；失败重试/告警（§5.3）。
-3. run 进入终态 → consumer 停止轮询；**退出前保证已确认决策的 `consumed_at` 已提交**（flush/等待短事务完成）；未消费行留 W3b。
+1. run 启动成功后启动 consumer 任务（与 run 同生命周期）；无 human 节点的图**不得改变行为语义（空轮询开销可忽略；实现可始终启动或按需延迟启动）**。
+2. 每 `HUMAN_DECISION_POLL_MS=200` 用 RO 连接查 `pending(run_id)`；**对所有 pending 行一律提交 `RunControl::HumanDecision`（不按 bridge 的 WaitingHuman 集合过滤）**：
+   - kernel 幂等校验（§3.4.5）：实例非当前/非 `WaitingHuman` → `human_decided{applied=false, reject_reason}`；
+   - consumer 收到 `human_decided` 确认（`TraceSink` 回调）→ 用独立 RW 短事务 `mark_consumed`；stderr 输出一行（applied 或 warning）；失败重试/告警（§5.3）。**set-miss 行同样提交并标 consumed**，不得悬挂。
+3. run 进入终态 → consumer 停止轮询；**退出前保证已确认决策的 `consumed_at` 已提交**（flush/等待短事务完成）；未处理行留 W3b。
 4. consumer 不阻塞事件循环、不执行用户 Python（I8）；所有 DB 访问为非阻塞/短事务（tokio blocking 线程或等价）。
 5. `--quiet` 抑制 stderr 决策行（不抑制错误）。
 6. 纯等待时 run 进程**保持存活**；Ctrl-C → Cancelled + exit 130（既有取消口径）。
+7. **trace 关闭 / 库 API（冻结，N10）**：CLI `run` 对**含 human 节点**的图要求 trace 开启（默认开启）；若 `trace_enabled=false`（CLI `--no-trace`/等价）→ **启动失败 `RUN_ENTRY_INVALID`（exit 3，reason `trace_required_for_human`）**，避免无决策通道的无限等待。库 API：**不内建 consumer，无 DB 依赖**——调用方直接通过 `RunControl::HumanDecision` 提交决策（`TraceSink` 可实现为 no-op；`applied` 结果仅通过 sink 回传）。
 
 ### 7.4 常量
 
@@ -451,7 +460,12 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | L1 | 含决策 run 的 events 回放 | events 逐字节一致；`trace --json` 追加 HumanDecision 行（确定性顺序） |
 | L2 | `--record=full` + `replay --mode=outputs` | human 实例输出按 `(node_id,attempt)` 重放；不重新要求人工输入；结果一致 |
 | CLI | decide 全部退出码/`--json` | 与 §4.5/§7.2 逐项一致 |
-| 并发 | decide × run、同实例双 decide | 无失败；同实例恰一 succeed（0），其余 exit 5 |
+| 并发 | decide × run、同实例双 decide | 无失败；同实例恰一 succeed（0），其余 exit 5（含已消费后的二次 decide：`HUMAN_DECISION_EXISTS`） |
+| trace 关闭 | CLI 含 human 图 + `trace_enabled=false` | **启动失败 `RUN_ENTRY_INVALID`（exit 3，`trace_required_for_human`）**；库 API 无此限制（调用方用 control） |
+| 库 API / sink | 无 SQLite、`TraceSink` no-op | human 等待/决策可经 `RunControl::HumanDecision` 驱动；`human_decided` 默认 no-op 合法（applied 仅 sink 可观测）；无 DB 依赖 |
+| L1 replay | 含决策 run 的 `replay --mode=events --json` | 与 `trace --json` **逐字节一致**（含 HumanDecision 行）；回放**不消费/不重新要求**决策 |
+| 保留符号兼容 | 既有图若恰好使用 `builtin.human` python_node | 语义变为 human 等待节点（保留符号）；属**显式语义收紧**，在 02 §2.5 与 DR 记录（W3a 实现后回写兼容说明）；无 human 图不受影响 |
+| 既有测试 | `tests/e2e/gate_defer.rs` 等 `expected 4` 只读断言 | **W3a 实施前置项**：schema v5 后同步改 `expected 5`（06 §6.7/§11；AC-16 e） |
 
 ---
 
@@ -460,7 +474,8 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | 风险 | 应对 |
 |---|---|
 | `WaitingHuman` 被误判静默 → run 提前 Completed | 03 §3.10 `is_quiescent` 显式含 `WaitingHuman`；AC-16 a/f；kernel 单测「纯等待不静默」 |
-| human 节点误走 worker / `NODE_WORKER_IMPORT` | 编译期精确映射 `builtin.human` → `CompiledHandler::Human`；02 §2.5 记录 R14 例外；AC-16 a 断言无 worker 进程/无 worker 版本 |
+| human 节点误走 worker / `NODE_WORKER_IMPORT` | 编译期精确映射 `builtin.human` → `CompiledHandler::Human`；02 §2.5 记录「R14 无代码例外、human 与普通 python_node 同走格式校验」；AC-16 a 断言无 worker 进程/无 worker 版本 |
+| 决策 applied/reject_reason 不可审计 | §4.2 明示不落库（仅 sink/stderr）；W3b 评估加列/事件（ISSUE-126） |
 | decide×run 并发写冲突/丢决策 | C13 分表写者 + WAL + busy_timeout/重试 + 唯一键；AC-16 c/f；并发 e2e 恰一成功 |
 | 决策重复应用 | 唯一键 + kernel「非 WaitingHuman → applied=false」双重幂等；AC-16 c |
 | trace v5 重建两表迁移失败/丢行 | `VACUUM INTO` 备份 + 单事务 + 显式列清单复制 + 失败恢复；AC-16 e；迁移测试覆盖 v1–v4→v5 |
@@ -478,13 +493,13 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 
 | # | 场景 | 图/资产（设计） | 关键断言 |
 |---|---|---|---|
-| a | **approve 真链路** | `human_gate/approve.json`：`start → prep(python) → approve_human(builtin.human, timeout 可选) → end`；approved 边 `check_output{path:"decision",equals:"approved"}`；真 CLI（真 worker + 真 SQLite） | 真 `zgraph run` 在 `approve_human` 挂起：`instances.status=WaitingHuman`、无 `Running` 迁移、无 worker 进程；`decide --decision approved` exit 0；run 自动接续 Completed；实例 output `{"decision":"approved","reason":...}`；出边 gate passed；`human_decisions` 一行 `consumed_at` 非空；`trace`/`--json` 可见决策行；`instances.input` 为该代上下文（`--record=full`） |
-| b | **reject + W2a rework** | `human_gate/rework.json`：`prep → human →（approved 边 → end；rejected 边 `on_gate_false:"defer"` → 回边重入 prep/human）`；`max_attempts` 预算；reject 后下一轮 approve | reject 决策后实例 **Completed**（不 Failed）；defer 回边按 W2a attempt-per-activation 产生 `attempt+1` 的新实例；再次 human 等待 → 再 decide approved → run Completed；`attempt` 序列 0/1；gate_results 记录 deferred 行；无 `RUN_DELIVERY_TO_TERMINAL`/死锁 |
-| c | **冲突/幂等/非 waiting/退出码 + `--json`** | 无特殊图；复用 a 的 run 快照 | 非 WaitingHuman 实例 decide → exit **5** + `code=HUMAN_INSTANCE_NOT_WAITING`；同实例二次 decide → exit **5** + `code=HUMAN_DECISION_EXISTS`；run 已终态 → exit **1** `HUMAN_RUN_NOT_ACTIVE`；instance 不存在 → exit **1** `HUMAN_INSTANCE_NOT_FOUND`；缺参/非法 decision/空 approver → exit **2**；`--json` 成功/失败形状逐字段；decision 行恰 1 行（重复未插入） |
+| a | **approve 真链路** | `human_gate/approve.json`：`start → prep(python) → approve_human(builtin.human, timeout 可选) → end`；approved 边 `check_output{path:"decision",equals:"approved"}`；真 CLI（真 worker + 真 SQLite） | `zgraph validate` 通过（`builtin.human` 保留符号，R14 只做格式校验、不 import）；真 `zgraph run` 在 `approve_human` 挂起：**轮询至** `instances.status=WaitingHuman`（trace 可见后再 decide，N11）、无 `Running` 迁移、无 worker 进程；`instances.input` 为**进入 WaitingHuman 前**写入的该代完整快照（全部声明端口，`--record=full` 可断言）；`decide --decision approved` exit 0；run 自动接续 Completed；实例 output `{"decision":"approved","reason":...}`（output 非 NULL 先行写入→transition 快照携带，C1）；出边 gate passed；`human_decisions` 一行 `consumed_at` 非空；`trace`/`--json` 可见决策行；含决策 run 的 `replay --mode=events --json` 与 `trace --json` **逐字节一致**（N18） |
+| b | **reject + W2a rework / reject→终止** | `human_gate/rework.json`：`prep → human`；**approved 边** gate `check_output{path:"decision",equals:"approved"}` → end；**rejected 边** gate `check_output{path:"decision",equals:"rejected"}` 且 `on_gate_false:"defer"` → 回边重入 `prep/human`（defer 承载 attempt-per-activation，gate 谓词必须显式写 rejected，避免「恒 false defer 边只挂账不返工」）；`max_attempts` 预算；reject 后下一轮 approve。**终止变体**：`human_gate/reject_end.json` 用 rejected **settle** 边 → end（无 defer） | 主变体：reject 决策后实例 **Completed**（不 Failed）；defer 回边按 W2a attempt-per-activation 产生 `attempt+1` 的新实例；再次 human 等待 → 再 decide approved → run Completed；`attempt` 序列 0/1；gate_results 记录 deferred 行；无 `RUN_DELIVERY_TO_TERMINAL`/死锁。终止变体：reject 后 rejected 边放行 → end 聚合 → run 正常 `Completed`（或按图设计失败节点 → `Failed`）；无 attempt 重入 |
+| c | **冲突/幂等/非 waiting/退出码 + `--json`** | 无特殊图；复用 a 的 run 快照 | **预检顺序冻结（C3）**：同实例二次 decide（含 run 已 Completed 后）→ 恒 exit **5** `HUMAN_DECISION_EXISTS`（先于一切状态判断）；无决策行时：非 WaitingHuman → exit **5** `HUMAN_INSTANCE_NOT_WAITING`；run 已终态 → exit **1** `HUMAN_RUN_NOT_ACTIVE`；instance 不存在 → exit **1** `HUMAN_INSTANCE_NOT_FOUND`；缺参/非法 decision/空 approver → exit **2**；DB 不存在/损坏/`user_version<5` 只读拒绝 → exit **4** `HUMAN_DB_ERROR`（不创建空库，N20）；`--json` 成功/失败形状逐字段；decision 行恰 1 行（重复未插入）。**kernel 幂等（N9）**：对已非 WaitingHuman 的迟到/重投决策，kernel 单测断言 `human_decided{applied=false, reject_reason ∈ {instance_missing, not_current, not_waiting_human}}`，状态不变 |
 | d | **决策期限超时** | `human_gate/timeout.json`：human 节点 `config.timeout_ms=200`（无 decide） | 到期后实例 `TimedOut` + `error_code=NODE_TIMEOUT`；run `Failed`；`killed_workers` 不增（无 worker）；决策期限从进入 `WaitingHuman` 起算；此时 decide → exit 1；trace 有 `NodeTimedOut` |
-| e | **trace v4→v5 迁移/备份/只读拒绝/v3→v5 链回放** | `tests/fixtures/trace/schema_v3_seed.sql`（既有）+ 新增 v4 seed（W3a 交付）；真 CLI 打开旧库 | `run` 打开 v4 库 → 迁移 v5：备份 `.bak.v4-*` 恰一份、`user_version=5`、`schema_migrations` 1..5、`instances`/`transitions` 行数与数据逐列保留、`human_decisions` 存在；只读 `trace`/`replay` 对 v4 → exit 4 且不迁移；v3 seed → v4 → v5 链后 L1 golden 与迁移前一致；无决策 run 的 `trace --json` 与 v5 前逐字节一致 |
-| f | **decide×run 并发（WAL busy）无失败、同实例并发恰一成功** | 真 CLI run 挂起 + 并发触发 decide（同实例 2–10 进程/线程、以及不同实例） | 并发的同实例 decide：恰 **1** 个 exit 0，其余 exit 5（`HUMAN_DECISION_EXISTS`/`HUMAN_INSTANCE_NOT_WAITING`）；`human_decisions` 恰 1 行；run 正常接续、无 `SQLITE_BUSY` 泄漏/存储错误；重复运行 3 次无 flake |
-| g | **默认图/v0.1.0 golden 不变** | v0.1.0 fixtures + W1 SOP v1 图 + W2a/W2b 图（无 human） | `graph_hash` 逐字节不变；validate/run 结果与 trace golden 不变；trace v5 后旧 run 回放不变；`instances.status` 不出现 `WaitingHuman`；`human_decisions` 空；`trace --json` 无 HumanDecision 行 |
+| e | **trace v4→v5 迁移/备份/只读拒绝/v3→v5 链回放** | `tests/fixtures/trace/schema_v3_seed.sql`（既有）+ 新增 v4 seed（W3a 交付）；真 CLI 打开旧库 | `run` 打开 v4 库 → 迁移 v5：备份 `.bak.v4-*` 恰一份、`user_version=5`、`schema_migrations` 1..5、`instances`/`transitions` 行数与数据逐列保留、`human_decisions` 存在；只读 `trace`/`replay` 对 v4 → exit 4 且不迁移；v3 seed → v4 → v5 链后 L1 golden 与迁移前一致；无决策 run 的 `trace --json` 与 v5 前逐字节一致；**含决策 run** 的 `replay --mode=events --json` 与 `trace --json` 逐字节一致（N18）；**既有 e2e 只读断言的 `expected 4` 随 v5 更新为 `expected 5`（N17，W3a 前置）** |
+| f | **decide×run 并发（WAL busy）与库 API 场景** | 真 CLI run 挂起 + 并发触发 decide（同实例 2–10 进程/线程、以及不同实例）；**另有库 API 用例**：无 SQLite、`TraceSink` no-op，调用方直接提交 `RunControl::HumanDecision` | 并发的同实例 decide：恰 **1** 个 exit 0，其余 exit 5（`HUMAN_DECISION_EXISTS`/`HUMAN_INSTANCE_NOT_WAITING`）；`human_decisions` 恰 1 行；run 正常接续、无 `SQLITE_BUSY` 泄漏/存储错误；重复运行 3 次无 flake。库 API：human 等待/决策经 control 驱动、无 DB 依赖；`human_decided` no-op 时行为仍正确（applied 不可观测） |
+| g | **默认图/v0.1.0 golden 不变 / trace 关闭保护** | v0.1.0 fixtures + W1 SOP v1 图 + W2a/W2b 图（无 human）；另 human 图 + `trace_enabled=false` | `graph_hash` 逐字节不变；validate/run 结果与 trace golden 不变；trace v5 后旧 run 回放不变；`instances.status` 不出现 `WaitingHuman`；`human_decisions` 空；`trace --json` 无 HumanDecision 行。human 图 + trace 关闭 → CLI 启动失败 `RUN_ENTRY_INVALID`（exit 3，`trace_required_for_human`）；库 API 不受此限 |
 
 ---
 
@@ -502,6 +517,7 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 - 模块边界：trace 只写 `crates/zgraph-trace/**`；kernel `crates/zgraph-kernel/**`；cli `crates/zgraph-cli/**`；e2e `tests/e2e/**` + `tests/fixtures/graphs/**`（+ trace seed fixtures，按 ISSUE-111 归属后续同步）；docs `doc/**`。
 - **契约钉死**：kernel 与 cli 的 `HumanDecisionRecord` 形状以 §7.1 为准；trace 的 `HumanDecisionRow` 以 §6.3 为准；二者字段对齐（snake_case 字符串/时间口径一致）。
 - `08 §8.7` 的 source-breaking 备注（`RunControl` 新 variant）由 W3a 实现/W3a-docs 补（W3a0 不写 as-built 注记，见 §12 E-4）。
+- **W3a 实施前置项（N17）**：schema v5 后，既有 e2e 的只读拒绝断言（`tests/e2e/gate_defer.rs` 等 `unsupported schema version=…, expected 4`）与任何 `schema version=4` 期望必须同步改 `expected 5`；06 §6.7 W3a0 段与 AC-16 e 已登记；**不得**遗留「测试仍期望 v4」的假失败。
 
 ---
 
@@ -536,6 +552,9 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | E-9 | `decision_id` 生成方 | **CLI decide 侧生成 UUIDv7** 并写入；run consumer 原样透传（审计/日志）；不接受用户指定 |
 | E-10 | trace 输出顺序 | HumanDecision 行在事件行之后、按 `(decided_at, decision_id)`；同一 run 的 decision 行确定性有序 |
 | E-11 | **合同内部不一致（**Lead 2026-10-31 已裁决**）**：task-11 §2.3 写「instance 不存在 → exit 1」，而 §3.4 写「instance 存在且 status=WaitingHuman（否则 exit 5）」——对「instance 不存在」的退出码口径不一致 | **Lead 裁决（2026-10-31）**：按本 DR 冻结口径执行——**instance 不存在 → exit 1**（`HUMAN_INSTANCE_NOT_FOUND`，与 run 不存在同属「目标不存在」）；**instance 存在但 status≠WaitingHuman → exit 5**（`HUMAN_INSTANCE_NOT_WAITING`）。§4.5/06 §6.10.5 口径为准，不再待决（见 §12.3 #5） |
+| E-12 | **trace 关闭 / 库 API 的 human 决策通道（N10）** | CLI `run` 含 human 图要求 trace 开启；`trace_enabled=false` → 启动失败 `RUN_ENTRY_INVALID`（exit 3，`trace_required_for_human`）。库 API：无内建 consumer/无 DB 依赖，调用方直接提交 `RunControl::HumanDecision`；`TraceSink::human_decided` 默认 no-op 合法（§7.3 #7） |
+| E-13 | **decide 预检可见性（N11）** | 预检以已提交 trace 状态为准；进入 `WaitingHuman` 时 CLI 应尽快 flush 实例快照；decide 早于可见 → 按预检顺序 3/4 exit 1/5，操作者轮询 `instances.status=WaitingHuman` 后重试（AC-16 a 明确轮询） |
+| E-14 | **applied/reject_reason 不落库（N21）** | `human_decisions` 仅存 `consumed_at`；`applied`/`reject_reason` 只经 sink→CLI（stderr/内存），进程退出后不可从 trace 审计；W3b 评估加列/事件（ISSUE-126） |
 
 ### 12.3 已确认项（Lead 2026-10-31 裁决；W3a 实现依据）
 
@@ -574,7 +593,7 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 |---|---|
 | `doc/decisions/DR-006-w3a-human-decide-freeze.md` | 新增（本文件） |
 | `doc/spec-v1.2/00-总纲.md` | banner；`InstanceStatus::WaitingHuman`；`HumanDecision`（可选枚举）；`HUMAN_DECISION_POLL_MS`；§0.4 CLI 命名空间注；§0.6 I1 解释；§0.7 术语 |
-| `doc/spec-v1.2/01-领域模型与状态机.md` | banner；§1.1.1 `CompiledHandler::Human`；§1.2.1 状态；§1.2.3 矩阵/副作用；新增 §1.2.4 人工等待；§1.5 `HumanDecisionRecord` |
+| `doc/spec-v1.2/01-领域模型与状态机.md` | banner；§1.1.1 `CompiledHandler::Human`；§1.2.3 矩阵/副作用（WaitingHuman 行/列与迁移副作用）；新增 §1.2.4 人工等待/output/input 快照；§1.5 `HumanDecisionRecord`；§1.6 deadlines 注；§1.9 human 输出聚合注（§1.2.1 `InstanceRecord` 结构本身未改） |
 | `doc/spec-v1.2/02-DSL与校验.md` | banner；§2.5 保留符号 `builtin.human` 与 R14 例外（DSL schema/R1–R16 不变） |
 | `doc/spec-v1.2/03-调度器与生命周期.md` | banner；新增 §3.4.5 人工等待与决策应用；§3.8 Paused decide 注；§3.9.1 human 期限例外/§3.9.3；§3.10 `is_quiescent` 含 WaitingHuman；§3.15 矩阵行 |
 | `doc/spec-v1.2/04-节点接口与扩展点.md` | banner；§4.1.2 handler 表；§4.1.3 措辞（W3a0 产生 WaitingHuman、仍无 resume）；§4.4.1 映射表；新增 §4.4.5 `builtin.human`；§4.6 `manual` gate 无关注 |
@@ -595,3 +614,4 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 - 分支 `docs/docs-human-design`；提交正文含 `Review: REV-078` 与 `Agent: docs-dev`；**本批不 push、不合并**。
 - `bash scripts/dev/check.sh` 必须 PASSED；PROVENANCE §3 的 SHA-256/行数以实测为准；合并前由独立评审人写 `doc/reviews/REV-078-docs-human-design.md`，结论必须为「通过」（AGENTS §3/§4）。
 - W3a 实现完成后由 W3a-docs 做 as-built 回写（新增 PROVENANCE 第 2 条、回写 07 AC-16 测试名/计数、08 §8.7 备注）。
+- **REV-078 条件修复（C1–C5）**：本批在 `docs/docs-human-design` 追加修复提交（C1 副作用顺序/C2 consumer 总是提交/C3 预检顺序与二次 decide 码/C4 文档事实/C5 设计补全）；残留 P3 建议登记 `doc/issues.md`（ISSUE-126 起），由评审人复审后转「通过」。

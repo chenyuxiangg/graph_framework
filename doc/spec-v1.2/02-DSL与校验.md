@@ -526,9 +526,10 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 > **W3a0 保留符号 `builtin.human`（冻结）**：
 > - **匹配规则**：仅当 `config.module == "builtin" && config.function == "human"` 精确匹配时视为 human 节点；其余 `builtin.*`（含 `builtin.check_output` 等）**不是**保留节点符号（`builtin.check_output` 只能出现在 `gate.function`，写进 python_node 是普通 user 符号，仍按 D7 在 worker 启动时校验）。
-> - **R14 例外**：human 节点只做 `module/function` **格式校验**（不合法仍 `DSL_SYMBOL_NOT_FOUND`/`bad_format`），**跳过 import/签名**；运行期**不启动 worker**，因此**永不产生 `NODE_WORKER_IMPORT` / `NODE_WORKER_HANDSHAKE`**（DR-006 §2.1）。
+> - **R14 无代码例外（措辞修正）**：按既有 D7，R14 对所有 `python_node` 都只做 `module/function` **格式校验**、**不 import**（import/签名在 worker 启动期）；human 与普通 python_node **同走**该格式校验（不合法仍 `DSL_SYMBOL_NOT_FOUND`/`bad_format`）。真实差异在 **kernel 编译/运行期**：human 映射为内置 handler、**不启动 worker**，因此**永不产生 `NODE_WORKER_IMPORT`/`NODE_WORKER_HANDSHAKE`**（DR-006 §2.1）。
 > - **与 gate canonical 无冲突**：`DSL_SYMBOL_CONFLICT` 只比较 `builtin.<op>`（`check_output`/`compare`/`manual`）与 python_node 符号；`human` 不是 gate op，不参与该判定；`gate.function` 写 `human` 仍按 R14b `DSL_SYMBOL_NOT_FOUND`（不是 gate op）。
 > - **DSL schema/hash 不变**：`PythonNodeConfig` 键集合已覆盖；`config` 全量参与既有 canonical 投影规则，无新增字段/默认值；DSL 规则编号 R1–R16 不变（02 §2.1.2）。
+> - **保留符号的语义收紧（兼容说明，N19）**：`builtin.human` 由普通 python_node 符号变为**保留符号**；若有既有图恰好使用该符号，语义变为 human 等待节点（需人工决策）——属**显式语义收紧**，须改名或接受等待语义；无 `builtin.human` 的图 hash/validate/run 不变。
 
 - `GateDefinition.function` 字段名**不改**（向后兼容）；v1.2 只收紧其取值语义（00 §0.1 的"修订"见 §2.11 P-02-04）。
 - 符号在**同一张图内**是唯一键：同一符号出现多次 → 只解析/登记一次（幂等）。
