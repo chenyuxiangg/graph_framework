@@ -109,3 +109,26 @@ target/debug/zgraph validate /tmp/exhaust.json --assets-dir tests/fixtures/graph
 | C1（重要）`HARNESS_MAX_ITERATIONS` e2e | `8c1fd59` 新增 `smoke_reviewer_max_iterations_crashes_review_and_fails_run`；`design_reviewer_exhaust`（`max_iterations=1` + `echo`）+ `fake_llm_max_iterations.json`；CLI `--json`/runs/实例/trace 断言 Failed、`HARNESS_MAX_ITERATIONS`、Crashed、`harness_kind=MaxIterations`、`detail.max_iterations=1`、`pending_tool_calls=["echo"]`；解析未执行、无 approved gate、archer 未 Completed；target 7 passed/1 ignored | ✅ 关闭 2026-10-31 |
 
 > C1 已关闭，S2 为非阻塞建议；本记录结论 **通过**。合并仍须通过 `scripts/dev/merge.sh` 的 build/test/clippy/pytest 门禁。
+
+## 7. 增量确认（clippy `cmp_owned` 修复，2026-10-31）
+
+- **范围**：`f0710ff..df0a300`，1 文件 **+41/−34**（仅 `tests/e2e/software_team_v1.rs`；未动 fixture/codegen/资产/其他模块）。
+- **修复内容复核**：将 8 处 `Value::from(...)` 比较改为 `as_str()`/`as_bool()` 形态（node id/type/trigger/config、gate 字段、`python_node` 筛选、archer 出边/目标等）；逐处对照：相等语义不变（JSON 字符串/布尔/缺失值行为一致），未使用 `#[allow]`，文件内 `Value::from(` 计数为 **0**；测试断言、fixture、codegen、图结构未变。
+- **验证（worktree 内）**：
+  ```bash
+  bash scripts/dev/check.sh
+  # CHECK PASSED
+  CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home CARGO_NET_OFFLINE=true \
+    cargo clippy -p zgraph-e2e --all-targets --locked -- -D warnings
+  # Finished ... [exit 0]
+  CARGO_HOME=... cargo clippy --workspace --all-targets --locked -- -D warnings
+  # Finished ... [exit 0]
+  CARGO_HOME=... cargo test -p zgraph-e2e --test software_team_v1
+  # 7 passed; 0 failed; 1 ignored
+  CARGO_HOME=... cargo test -p zgraph-e2e
+  # 汇总 46 passed / 0 failed / 2 ignored
+  /Users/zyzs/lczyzs/code/zgraph/.venv/bin/python -m pytest python/tests
+  # 104 passed
+  ```
+- **语义/回归**：仅测试代码表述调整；`codegen.py` 与 fixture 未变，full/smoke/exhaust 图 hash 保持 `3d8d735b1d5e8a1b` / `df9341c04063b80a` / `a8e508deb9c6cf44`；target 测试 8 个（7 passed/1 ignored）与全 e2e 46/2、pytest 104 全绿。
+- **结论**：无 `cmp_owned` 语义漂移，REV-065 结论维持 **通过**；同意进入 merge.sh 门禁。
