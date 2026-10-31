@@ -5,6 +5,11 @@ SOP 设计稿 D11：确定性、无需 LLM 的工作项用 `python_node` 承载�
 
     {"kind": "software_team_work", "role": <设计角色>, "item": <item>, "task": <上游整包>}
 
+**W2a 增量（仅 rework profile）**：rework 的 `W` 节点额外声明可选 `feedback` 端口；
+当输入里**存在** `feedback` 键时，artifact 追加 `"feedback": <P→W 回投的上一轮解析输出>`。
+approved profile 的 W 不声明该端口 → 输入无该键 → 输出与 W1 **逐字节一致**（W1 e2e 断言
+全绿）；rework e2e 据此断言「下游拿到的是返工后最终 attempt 的 artifact」。
+
 解析节点 `P` 会把该 artifact 原样透传给下游设计角色，e2e 据此断言「下游拿到的是工作
 agent 的完整产物，不是评审摘要」（SOP §3 产物传播 / §11.3）。
 
@@ -23,13 +28,21 @@ ARTIFACT_KIND: str = "software_team_work"
 
 
 def _artifact(role: str, item: str, inputs: dict[str, Any]) -> dict[str, Any]:
-    """构造 item 产物：角色/item + 上游任务包（`task` 端口原样带回）。"""
-    return {
+    """构造 item 产物：角色/item + 上游任务包（`task` 端口原样带回）。
+
+    rework profile 的 W 声明了可选 `feedback` 端口：仅当输入**存在**该键时把
+    P→W 回投的上一轮解析输出内嵌进 artifact（用于「下游拿到返工后最终产物」断言）；
+    approved profile 输入无该键，输出键集与 W1 完全相同。
+    """
+    artifact: dict[str, Any] = {
         "kind": ARTIFACT_KIND,
         "role": role,
         "item": item,
         "task": inputs.get("task"),
     }
+    if "feedback" in inputs:
+        artifact["feedback"] = inputs["feedback"]
+    return artifact
 
 
 def work_planer_specification(

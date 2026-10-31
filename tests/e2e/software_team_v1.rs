@@ -1375,3 +1375,230 @@ fn real_llm_smoke_manual() {
         SMOKE_ITEMS.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// W2a（SOP v1.1）：codegen `--mode approved|rework`（AC-14 c/e 的静态部分）
+// ---------------------------------------------------------------------------
+
+/// W2a rework profile 的 `--mode` 名称。
+const MODE_REWORK: &str = "rework";
+
+/// rework full（60 节点 / 116 边）与 smoke（11 / 21）规模（SOP v1.1 §7.2）。
+const FULL_REWORK_EDGE_COUNT: usize = 116;
+const SMOKE_REWORK_EDGE_COUNT: usize = 21;
+
+/// rework W/R/P 的 `config.retry.max_attempts`（DR-005 §6.4）。
+const REWORK_MAX_ATTEMPTS: i64 = 3;
+
+/// W1 approved 三基线 `graph_hash`（DR-004 §10 / REV-065；approved 必须逐字节不变）。
+const W1_FULL_HASH: &str = "3d8d735b1d5e8a1b";
+const W1_SMOKE_HASH: &str = "df9341c04063b80a";
+const W1_EXHAUST_HASH: &str = "a8e508deb9c6cf44";
+
+/// rework 解析节点函数（P v2）。
+const PARSE_FUNCTION_REWORK: &str = "parse_verdict_rework";
+
+/// 生成一个 mode 的图（`--mode` 追加在 codegen 参数尾部）。
+fn generate_mode_graph(dir: &Path, profile: &str, mode: &str) -> PathBuf {
+    generate_graph_with(dir, profile, &["--mode", mode])
+}
+
+/// approved profile 三基线 hash 逐字节不变（W1 回归硬条件，AC-14 d）。
+#[test]
+fn approved_codegen_hashes_match_w1_baselines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cases: [(&str, &[&str], &str); 3] = [
+        (PROFILE_FULL, &[], W1_FULL_HASH),
+        (PROFILE_SMOKE, &[], W1_SMOKE_HASH),
+        (
+            PROFILE_SMOKE,
+            &["--review-agent", REVIEW_AGENT_EXHAUST],
+            W1_EXHAUST_HASH,
+        ),
+    ];
+    for (index, (profile, extra, expected_hash)) in cases.iter().enumerate() {
+        let case_dir = dir.path().join(format!("approved-{index}"));
+        std::fs::create_dir_all(&case_dir).expect("case dir");
+        let graph = generate_graph_with(&case_dir, profile, extra);
+        let (_, _, hash) = parse_validate_summary(&validate_graph(&graph));
+        assert_eq!(
+            hash, *expected_hash,
+            "approved {profile} {extra:?} 的 graph_hash 必须与 W1 基线一致"
+        );
+    }
+}
+
+/// rework 图的 `(role, item)` 清单（full = §4.1 全部 item；smoke = planer 的 3 个）。
+fn rework_items(profile: &str) -> Vec<(&'static str, &'static str)> {
+    if profile == PROFILE_FULL {
+        let mut pairs = Vec::new();
+        for (role, _deps, items) in DESIGN_MATRIX {
+            for item in *items {
+                pairs.push((*role, *item));
+            }
+        }
+        pairs
+    } else {
+        SMOKE_ITEMS.iter().map(|item| ("planer", *item)).collect()
+    }
+}
+
+/// 找一个边三元组；缺失即失败。
+fn find_edge<'a>(graph: &'a Value, from: &str, to_node: &str, port: &str) -> &'a Value {
+    edges(graph)
+        .iter()
+        .find(|edge| edge_triple(edge) == (from.to_string(), to_node.to_string(), port.to_string()))
+        .unwrap_or_else(|| panic!("缺少边 {from}->{to_node}.{port}"))
+}
+
+/// 断言一个 item 的 rework 节点/边增量（SOP §7.2 a–e）。
+fn assert_rework_item(graph: &Value, role: &str, item: &str) {
+    let base = format!("{role}_{item}");
+    let work = node_by_id(graph, &base);
+    assert_eq!(
+        input_names(work),
+        vec!["task".to_string(), "feedback".to_string()],
+        "{base} W 端口"
+    );
+    assert_eq!(
+        work["inputs"][1]["required"],
+        json!(false),
+        "{base}.feedback 必须 required:false"
+    );
+    assert_eq!(
+        work["config"]["retry"]["max_attempts"],
+        json!(REWORK_MAX_ATTEMPTS)
+    );
+    let review = node_by_id(graph, &format!("{base}_review"));
+    assert_eq!(
+        review["config"]["retry"]["max_attempts"],
+        json!(REWORK_MAX_ATTEMPTS)
+    );
+    let parse = node_by_id(graph, &format!("{base}_parse"));
+    assert_eq!(parse["config"]["function"], PARSE_FUNCTION_REWORK);
+    assert_eq!(
+        parse["config"]["retry"]["max_attempts"],
+        json!(REWORK_MAX_ATTEMPTS)
+    );
+
+    for (from, to_node, port) in [
+        (base.clone(), format!("{base}_review"), "result"),
+        (base.clone(), format!("{base}_parse"), "artifact"),
+        (format!("{base}_review"), format!("{base}_parse"), "review"),
+        (format!("{base}_parse"), base.clone(), "feedback"),
+    ] {
+        let edge = find_edge(graph, &from, &to_node, port);
+        assert_eq!(
+            edge["on_gate_false"], "defer",
+            "{base} {from}->{to_node}.{port} 必须 defer"
+        );
+    }
+    let feedback = find_edge(graph, &format!("{base}_parse"), &base, "feedback");
+    assert_eq!(feedback["gate"]["function"], "check_output");
+    assert_eq!(feedback["gate"]["params"]["path"], "verdict");
+    assert_eq!(feedback["gate"]["params"]["equals"], "rework");
+
+    // 环外 D→W.task / D→R.spec 保持缺省 settle（不写 on_gate_false）。
+    for (to_node, port) in [(base.clone(), "task"), (format!("{base}_review"), "spec")] {
+        let edge = find_edge(graph, role, &to_node, port);
+        assert!(
+            edge.get("on_gate_false").is_none(),
+            "{base}: 环外边 {role}->{to_node}.{port} 不得 defer"
+        );
+    }
+}
+
+/// rework 全域 defer 策略：W/R/P 出边全 defer、其它源不得 defer、回边数=item 数。
+fn assert_rework_policy(graph: &Value, profile: &str) {
+    let pairs = rework_items(profile);
+    let mut work_ids: BTreeSet<String> = BTreeSet::new();
+    let mut review_ids: BTreeSet<String> = BTreeSet::new();
+    let mut parse_ids: BTreeSet<String> = BTreeSet::new();
+    for (role, item) in &pairs {
+        let base = format!("{role}_{item}");
+        work_ids.insert(base.clone());
+        review_ids.insert(format!("{base}_review"));
+        parse_ids.insert(format!("{base}_parse"));
+        assert_rework_item(graph, role, item);
+    }
+
+    let mut defer_edges = 0usize;
+    let mut feedback_edges = 0usize;
+    for edge in edges(graph) {
+        let source = edge["from"].as_str().expect("edge.from");
+        let ring_source =
+            work_ids.contains(source) || review_ids.contains(source) || parse_ids.contains(source);
+        if ring_source {
+            assert_eq!(
+                edge["on_gate_false"], "defer",
+                "环上源 {source} 的出边必须 defer: {edge}"
+            );
+            defer_edges += 1;
+            if edge["to_input_port"] == "feedback" {
+                feedback_edges += 1;
+            }
+        } else {
+            assert!(
+                edge.get("on_gate_false").is_none(),
+                "环外源 {source} 的出边不得 defer: {edge}"
+            );
+        }
+    }
+    assert_eq!(
+        feedback_edges,
+        pairs.len(),
+        "P→W.feedback 回边数必须等于 item 数"
+    );
+    let gated = edges(graph)
+        .iter()
+        .filter(|edge| edge.get("gate").is_some())
+        .count();
+    assert_eq!(
+        defer_edges,
+        gated + 3 * pairs.len(),
+        "defer 边 = 全部 gate 边（含回边）+ 每条 item 的 3 条内部环边"
+    );
+}
+
+/// rework codegen：规模/确定性/`zgraph validate`（含 R15）/defer 统一规则。
+#[test]
+fn rework_codegen_validates_with_expected_scale_and_full_defer_policy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cases: [(&str, usize, usize); 2] = [
+        (PROFILE_FULL, FULL_NODE_COUNT, FULL_REWORK_EDGE_COUNT),
+        (PROFILE_SMOKE, SMOKE_NODE_COUNT, SMOKE_REWORK_EDGE_COUNT),
+    ];
+    for (index, (profile, node_count, edge_count)) in cases.iter().enumerate() {
+        let first_dir = dir.path().join(format!("rework-{index}-a"));
+        let second_dir = dir.path().join(format!("rework-{index}-b"));
+        std::fs::create_dir_all(&first_dir).expect("first dir");
+        std::fs::create_dir_all(&second_dir).expect("second dir");
+
+        let first = generate_mode_graph(&first_dir, profile, MODE_REWORK);
+        let second = generate_mode_graph(&second_dir, profile, MODE_REWORK);
+        assert_eq!(
+            std::fs::read(&first).expect("read first"),
+            std::fs::read(&second).expect("read second"),
+            "rework {profile} 两次生成应字节级一致"
+        );
+
+        let (actual_nodes, actual_edges, first_hash) =
+            parse_validate_summary(&validate_graph(&first));
+        let (_, _, second_hash) = parse_validate_summary(&validate_graph(&second));
+        assert_eq!(
+            (actual_nodes, actual_edges),
+            (*node_count, *edge_count),
+            "rework {profile} 规模"
+        );
+        assert_eq!(first_hash, second_hash, "rework {profile} hash 确定性");
+
+        let graph = read_graph(&first);
+        assert_eq!(
+            graph["metadata"]["name"],
+            format!("software_team_v1_{profile}_rework"),
+            "rework metadata 后缀"
+        );
+        assert_eq!(graph["entry_points"], serde_json::json!(["planer"]));
+        assert_rework_policy(&graph, profile);
+    }
+}
