@@ -10,9 +10,9 @@ use std::process::{Command, Output};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use zgraph_trace::{
-    EventQuery, GateResultRecord, InstanceSnapshot, InstanceStatus, RecordMode, RunFinishedInfo,
-    RunMetrics, RunStartedInfo, RunStatus, StreamingEvent, TraceHandle, TraceInput, TraceReader,
-    TraceWriter, TransitionRecord,
+    DecisionStore, EventQuery, GateResultRecord, InstanceSnapshot, InstanceStatus,
+    NewHumanDecision, RecordMode, RunFinishedInfo, RunMetrics, RunStartedInfo, RunStatus,
+    StreamingEvent, TraceHandle, TraceInput, TraceReader, TraceWriter, TransitionRecord,
 };
 
 const RUN_ID: &str = "run-trace-1";
@@ -880,4 +880,195 @@ fn trace_notes_unknown_host_owner_without_pid_verdict() {
         text.contains("run may be running on another host") && text.contains("owner host unknown"),
         "{text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// W3a：human_decisions 输出（DR-006 §6.4；W3a0 冻结）
+// ---------------------------------------------------------------------------
+
+/// 在已关闭的 fixture 库插入一行决策（`DecisionStore`；`consumed_at` 恒 NULL）。
+fn insert_decision(
+    path: &Path,
+    instance: &str,
+    decision: &str,
+    approver: &str,
+    reason: Option<&str>,
+    decision_id: &str,
+    decided_at: &str,
+) {
+    let mut store = DecisionStore::open(path).expect("open decision store");
+    store
+        .insert(NewHumanDecision {
+            run_id: RUN_ID.to_string(),
+            instance_id: instance.to_string(),
+            decision: decision.to_string(),
+            approver: approver.to_string(),
+            reason: reason.map(str::to_string),
+            decision_id: decision_id.to_string(),
+            decided_at: decided_at.to_string(),
+        })
+        .expect("insert decision");
+}
+
+/// 模拟 run consumer 的 `mark_consumed`（测试直接 UPDATE 以构造已消费行）。
+fn mark_consumed(path: &Path, instance: &str, consumed_at: &str) {
+    rusqlite::Connection::open(path)
+        .expect("open db")
+        .execute(
+            "UPDATE human_decisions SET consumed_at = ?1 \
+             WHERE run_id = ?2 AND instance_id = ?3",
+            rusqlite::params![consumed_at, RUN_ID, instance],
+        )
+        .expect("mark consumed");
+}
+
+/// 含 2 行决策（1 approved 已消费 / 1 rejected pending）的库。
+fn decision_fixture() -> Fixture {
+    let fx = fixture();
+    // 故意先插较晚的行，验证输出按 (decided_at, decision_id) 升序而非插入序。
+    insert_decision(
+        &fx.path,
+        "inst-human",
+        "rejected",
+        "bob",
+        Some("needs rework"),
+        "0192f0d0-0000-7000-8000-000000000001",
+        "2026-10-28T09:13:02.000Z",
+    );
+    insert_decision(
+        &fx.path,
+        "inst-answer",
+        "approved",
+        "alice",
+        None,
+        "0192f0d0-0000-7000-8000-000000000002",
+        "2026-10-28T09:13:00.000Z",
+    );
+    mark_consumed(&fx.path, "inst-answer", "2026-10-28T09:13:01.000Z");
+    fx
+}
+
+#[test]
+fn human_replay_appends_human_decision_summary() {
+    let fx = decision_fixture();
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&fx.path)]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("human_decisions: 2 (approved 1 / rejected 1; pending 1)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "instance=inst-answer decision=approved approver=alice \
+             decided_at=2026-10-28T09:13:00.000Z consumed_at=2026-10-28T09:13:01.000Z \
+             reason=-"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "instance=inst-human decision=rejected approver=bob \
+             decided_at=2026-10-28T09:13:02.000Z consumed_at=- reason=needs rework"
+        ),
+        "{text}"
+    );
+    // 确定性顺序：较早的 approved 行在前。
+    let approved = text.find("decision=approved").expect("approved row");
+    let rejected = text.find("decision=rejected").expect("rejected row");
+    assert!(approved < rejected, "decisions ordered by decided_at");
+    // 事件行保持在前（决策摘要追加在时间线之后）。
+    let finished = text.find("RunFinished").expect("RunFinished row");
+    assert!(finished < approved, "decisions follow the event timeline");
+}
+
+#[test]
+fn json_replay_appends_human_decision_ndjson_after_events() {
+    let fx = decision_fixture();
+    let output = zgraph(&["trace", RUN_ID, "--db", path_str(&fx.path), "--json"]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let lines = json_lines(&output);
+    assert_eq!(lines.len(), EVENT_COUNT + 2, "{lines:?}");
+    // 前 EVENT_COUNT 行仍是事件（形状不变，无 HumanDecision）。
+    assert!(lines[..EVENT_COUNT]
+        .iter()
+        .all(|line| line["kind"] != json!("HumanDecision")));
+
+    let approved = &lines[EVENT_COUNT];
+    assert_eq!(approved["kind"], json!("HumanDecision"));
+    assert_eq!(approved["run_id"], json!(RUN_ID));
+    assert_eq!(approved["instance_id"], json!("inst-answer"));
+    assert_eq!(approved["decision"], json!("approved"));
+    assert_eq!(approved["approver"], json!("alice"));
+    assert_eq!(approved["reason"], json!(null));
+    assert_eq!(
+        approved["decision_id"],
+        json!("0192f0d0-0000-7000-8000-000000000002")
+    );
+    assert_eq!(approved["decided_at"], json!("2026-10-28T09:13:00.000Z"));
+    assert_eq!(approved["consumed_at"], json!("2026-10-28T09:13:01.000Z"));
+
+    let rejected = &lines[EVENT_COUNT + 1];
+    assert_eq!(rejected["instance_id"], json!("inst-human"));
+    assert_eq!(rejected["decision"], json!("rejected"));
+    assert_eq!(rejected["reason"], json!("needs rework"));
+    // pending 行 consumed_at 恒输出 null（键存在、不省略）。
+    assert_eq!(rejected["consumed_at"], json!(null));
+    assert!(
+        rejected.get("consumed_at").is_some(),
+        "consumed_at key must be present"
+    );
+}
+
+#[test]
+fn replay_events_json_is_byte_identical_to_trace_json() {
+    let fx = decision_fixture();
+    let db = path_str(&fx.path);
+    let trace = zgraph(&["trace", RUN_ID, "--db", db, "--json"]);
+    let replay = zgraph(&[
+        "replay",
+        "--run",
+        RUN_ID,
+        "--db",
+        db,
+        "--mode=events",
+        "--json",
+    ]);
+    assert_eq!(code(&trace), 0, "{}", stderr(&trace));
+    assert_eq!(code(&replay), 0, "{}", stderr(&replay));
+    assert_eq!(
+        stdout(&trace),
+        stdout(&replay),
+        "replay --mode=events --json must be byte-identical to trace --json"
+    );
+    assert!(
+        stdout(&trace).contains("\"kind\":\"HumanDecision\""),
+        "decision line included"
+    );
+}
+
+#[test]
+fn default_run_output_is_unchanged_without_decisions() {
+    let fx = fixture();
+    let db = path_str(&fx.path);
+
+    let human = zgraph(&["trace", RUN_ID, "--db", db]);
+    assert_eq!(code(&human), 0, "{}", stderr(&human));
+    assert!(
+        !stdout(&human).contains("human_decisions"),
+        "no decision section for runs without decisions"
+    );
+
+    let json = zgraph(&["trace", RUN_ID, "--db", db, "--json"]);
+    assert_eq!(code(&json), 0, "{}", stderr(&json));
+    let lines = json_lines(&json);
+    assert_eq!(lines.len(), EVENT_COUNT);
+    assert!(lines
+        .iter()
+        .all(|line| line["kind"] != json!("HumanDecision")));
+
+    // --stats 不新增 human 决策计数字段（W3a0 冻结）。
+    let stats = zgraph(&["trace", RUN_ID, "--db", db, "--stats"]);
+    assert_eq!(code(&stats), 0, "{}", stderr(&stats));
+    assert!(!stdout(&stats).contains("human"), "{}", stdout(&stats));
 }

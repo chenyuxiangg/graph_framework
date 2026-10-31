@@ -3,13 +3,20 @@
 //! 只读约束：通过 [`TraceReader::open_readonly`] 打开库，**不创建库、不迁移、
 //! 不标定**。事件严格按 `seq ASC` 输出（禁止按 `at` 排序），`--json` 输出 NDJSON
 //! （一行一个事件），诊断信息一律走 stderr。
+//!
+//! **W3a human 决策行（DR-006 §6.4）**：事件输出之后按 `(decided_at, decision_id)`
+//! 追加 `human_decisions` 摘要（人类可读）或 `{"kind":"HumanDecision",...}` NDJSON
+//! 行；决策**不是** `TraceEvent`（`events.kind` 不变），无决策行时输出与 v5 前逐字节
+//! 一致。`replay --mode=events` 直接复用本模块，因此两者输出逐字节一致。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::Value;
-use zgraph_trace::{EventQuery, EventRow, RunRow, RunStats, RunStatus, TraceError, TraceReader};
+use zgraph_trace::{
+    EventQuery, EventRow, HumanDecisionRow, RunRow, RunStats, RunStatus, TraceError, TraceReader,
+};
 
 use crate::{EXIT_OTHER, EXIT_STORAGE, EXIT_SUCCESS};
 
@@ -256,6 +263,9 @@ fn is_truncated(reader: &TraceReader, run: &RunRow) -> Result<bool, TraceError> 
 }
 
 /// 回放时间线：human 表格或 `--json` NDJSON。
+///
+/// W3a（DR-006 §6.4）：事件输出之后追加该 run 的 `human_decisions` 行（无决策行时
+/// 不追加，输出与 v5 前逐字节一致）；决策行不参与 `seq`/`--limit`/`--kinds` 过滤。
 fn run_timeline(
     reader: &TraceReader,
     options: &TraceOptions,
@@ -266,14 +276,20 @@ fn run_timeline(
         Ok(events) => events,
         Err(error) => return report_storage_error(&error),
     };
+    let decisions = match reader.human_decisions(&options.run_id) {
+        Ok(decisions) => decisions,
+        Err(error) => return report_storage_error(&error),
+    };
     if options.json {
         print_ndjson(&events);
+        print_human_decisions_ndjson(&decisions);
         if truncated {
             eprintln!("{}", truncation_note(run));
         }
     } else {
         let duration = duration_text(reader, run);
         print_human(run, &events, &duration, truncated);
+        print_human_decisions(&decisions);
     }
     exit_code(run.status, truncated)
 }
@@ -318,6 +334,90 @@ fn print_ndjson(events: &[EventRow]) {
         }
         object.insert("payload".to_string(), event.payload.clone());
         println!("{}", Value::Object(object));
+    }
+}
+
+/// 追加 human 决策 NDJSON 行（DR-006 §6.4；一行一个决策，`kind=HumanDecision`）。
+///
+/// 字段形状（顺序与文档一致）：`kind, run_id, instance_id, decision, approver,
+/// reason, decision_id, decided_at, consumed_at`；`reason`/`consumed_at` 为 `null`
+/// 时**不省略**（pending 行 `consumed_at:null`，DR-006 §6.4）。
+fn print_human_decisions_ndjson(decisions: &[HumanDecisionRow]) {
+    for decision in decisions {
+        let mut object = serde_json::Map::new();
+        object.insert("kind".to_string(), serde_json::json!("HumanDecision"));
+        object.insert(
+            "run_id".to_string(),
+            serde_json::json!(decision.run_id.as_str()),
+        );
+        object.insert(
+            "instance_id".to_string(),
+            serde_json::json!(decision.instance_id.as_str()),
+        );
+        object.insert(
+            "decision".to_string(),
+            serde_json::json!(decision.decision.as_str()),
+        );
+        object.insert(
+            "approver".to_string(),
+            serde_json::json!(decision.approver.as_str()),
+        );
+        object.insert(
+            "reason".to_string(),
+            serde_json::json!(decision.reason.as_deref()),
+        );
+        object.insert(
+            "decision_id".to_string(),
+            serde_json::json!(decision.decision_id.as_str()),
+        );
+        object.insert(
+            "decided_at".to_string(),
+            serde_json::json!(decision.decided_at.as_str()),
+        );
+        object.insert(
+            "consumed_at".to_string(),
+            serde_json::json!(decision.consumed_at.as_deref()),
+        );
+        println!("{}", Value::Object(object));
+    }
+}
+
+/// 追加 human 决策摘要（人类可读；无决策行时**不输出**，默认 run 输出不变）。
+///
+/// 形状：`human_decisions: N (approved A / rejected R; pending P)` + 每行
+/// `instance=… decision=… approver=… decided_at=… consumed_at=… reason=…`；
+/// 空值显示 `-`（与 trace 其它列的 `-` 口径一致）。
+fn print_human_decisions(decisions: &[HumanDecisionRow]) {
+    if decisions.is_empty() {
+        return;
+    }
+    let approved = decisions
+        .iter()
+        .filter(|decision| decision.decision == "approved")
+        .count();
+    let rejected = decisions
+        .iter()
+        .filter(|decision| decision.decision == "rejected")
+        .count();
+    let pending = decisions
+        .iter()
+        .filter(|decision| decision.consumed_at.is_none())
+        .count();
+    println!();
+    println!(
+        "human_decisions: {} (approved {approved} / rejected {rejected}; pending {pending})",
+        decisions.len()
+    );
+    for decision in decisions {
+        println!(
+            "  instance={} decision={} approver={} decided_at={} consumed_at={} reason={}",
+            decision.instance_id,
+            decision.decision,
+            decision.approver,
+            decision.decided_at,
+            decision.consumed_at.as_deref().unwrap_or("-"),
+            decision.reason.as_deref().unwrap_or("-"),
+        );
     }
 }
 

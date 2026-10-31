@@ -2,13 +2,15 @@
 //!
 //! 二进制入口 [`crate::run`] 只做 `std::env::args` 收集与退出码返回；各子命令的
 //! 实现位于 [`validate`]（M1）、[`trace_cmd`]（M2，L1 只读回放）、[`run_cmd`]
-//! （M5，`zgraph run` 真实链路）与 [`replay_cmd`]（M5 wave2，L1/L2 重放）。
+//! （M5，`zgraph run` 真实链路）、[`replay_cmd`]（M5 wave2，L1/L2 重放）与
+//! [`decide_cmd`]（W3a，人工决策写入）。
 //!
 //! 退出码权威表：`doc/spec-v1.2/06-存储与可观测.md` §6.10.5。
 //! 注（M6 起，ISSUE-059 收口）：`validate` 统一为目标口径 `0/1/2/70`——**用法 → 2、
 //! IO/内部 → 1**（02 §2.7.4 的 M1 临时口径 3 已废弃）；`trace` 使用 `0/1/2/4`；
 //! `run` 使用 `0/1/2/3/4/130`；`replay` 使用 `0/1/2/3/4`（L2 记录类错误
-//! `REPLAY_*` 退出 3，不写 `runs.error_code`）；所有子命令的 panic 由顶层
+//! `REPLAY_*` 退出 3，不写 `runs.error_code`）；`decide`（W3a）使用 `0/1/2/4/5/70`
+//! （冲突 = 5 `EXIT_CONFLICT`，DR-006 §4.5）；所有子命令的 panic 由顶层
 //! `catch_unwind` 捕获并统一返回 **70**（不依赖 Rust 默认 101）。
 //!
 //! # v0.1 CLI 决策（REV-028 #6 / DR-002 §9 #11）
@@ -32,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bridge;
+pub mod decide_cmd;
 pub mod recovery;
 pub mod replay_cmd;
 pub mod run_cmd;
@@ -54,6 +57,9 @@ pub const EXIT_USAGE: u8 = 2;
 pub const EXIT_ENTRY_INPUT: u8 = 3;
 /// 退出码 4：存储/环境错误（06 §6.10.5）。
 pub const EXIT_STORAGE: u8 = 4;
+/// 退出码 5：冲突（06 §6.10.5 W3a0 新增 `EXIT_CONFLICT`；`decide` 的
+/// 「已有决策行 / instance 非 `WaitingHuman`」）。
+pub const EXIT_CONFLICT: u8 = 5;
 /// 退出码 130：SIGINT 取消（128+2；run 标 `Cancelled`）。
 pub const EXIT_INTERRUPTED: u8 = 130;
 /// 退出码 70：内部错误（panic 被顶层 `catch_unwind` 捕获；06 §6.10.5）。
@@ -70,6 +76,8 @@ usage: zgraph <command>
 
 commands:
   run <graph.json> --inputs <json|@file> [options]       run a graph (M5)
+  decide <run_id> --instance <id> --decision approved|rejected --approver <id> [options]
+                                                         record a human decision (W3a)
   replay --run <run_id> [--mode=events|outputs]          replay a run (L1 events / L2 outputs)
   validate <graph.json> [--json] [--assets-dir <dir>]   validate a graph definition
   trace <run_id> [options]                               replay a run trace (L1)
@@ -227,6 +235,16 @@ pub fn dispatch(args: &[String]) -> Result<ExitCode, CliError> {
                 Some(options) => Ok(run_cmd::run(&options)),
                 None => {
                     println!("{}", run_cmd::RUN_USAGE);
+                    Ok(ExitCode::SUCCESS)
+                }
+            }
+        }
+        "decide" => {
+            let parsed = decide_cmd::parse(&args[1..]).map_err(CliError::usage)?;
+            match parsed {
+                Some(options) => Ok(decide_cmd::run(&options)),
+                None => {
+                    println!("{}", decide_cmd::DECIDE_USAGE);
                     Ok(ExitCode::SUCCESS)
                 }
             }
