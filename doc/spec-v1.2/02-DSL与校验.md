@@ -2,6 +2,7 @@
 
 > **⚠ v2 落地偏差（已回写）**：本分册的进程内执行/超时/门控/并发/符号解析等假设，已按 [`doc/architecture-v2.md`](../architecture-v2.md) §8 偏差表（D1–D12）**回写为正文**（M0–M2 批次，2026-10-30，见 PROVENANCE §2 第 4 条）；正文与偏差表冲突时以正文为准。
 > **W2a0 批次（2026-10-31，REV-067；见 PROVENANCE §2 第 15 条）**：边级 `on_gate_false`（白名单/serde/hash 投影/编译映射）、新校验规则 **R15** 与新错误码 `DSL_DEFER_NOT_REENTRANT`（DSL 域 17→18 码）、`max_attempts` 复用说明；执行顺序冻结为 `R1→R13→R15→R14`（R15 属 L2 纯函数阶段）。
+> **W2a 实现回写（2026-10-31，REV-073；分支 `docs/docs-gate-defer-spec`）**：本册补 as-built 注记（实现已合并 `e7578f1`）；不改 W2a0 冻结语义/historical 段。
 > **状态**：规格冻结（编码前置）。本分册冻结**图 DSL schema、加载期校验规则 R1–R15、错误响应契约、符号解析、graph_hash**；这些内容可直接转成 Loader / `types.rs` / CLI 的实现与测试。
 > **取代关系**：本分册细化并修正《详细设计 v1.1》第 1 章（`/tmp/designdoc/doc.txt` L84–L270）与第 6 章符号解析相关部分；冲突时**以本规格为准**，00 分册为本册的上级锚点。v1.1 原文保留作为意图参考与审计依据。
 > **范围**：仅内核（见 [`doc/analysis/decision-record-01-scope.md`](../analysis/decision-record-01-scope.md) §2）。子图**执行**、人工介入、Agent 资产平台、API/前端不在本规格内。
@@ -62,6 +63,8 @@
 | 自动修复 | **MUST NOT**（图定义错误是设计错误，用户修） |
 | 部分加载 | **MUST NOT**：任一错误 → 无 `CompiledGraph`、无 run（`zgraph run` exit 2，不创建 run 记录） |
 | 错误顺序 | 稳定：规则序 → 数组序；同一输入产生同一序列 |
+
+> **as-built（W2a 实现，REV-073）**：R15 按 `edges` 数组序取**首错**（与表内「同规则聚合」为例外，与 R13 一致，REV-069 N5）；R15 的 `expected` 为完整可重入条件串、`actual = {node_id, scc_size, defer_edges(升序)}`，与 §2.4.2 模板一致（dsl `bc92951` 已对齐，REV-069 N1 关闭）。**子图内**沿用既有聚合口径：R13 与 R15 同时命中时聚合为 **2 条** `DSL_SUBGRAPH_INVALID`（各带 `subgraph '<id>': …` 前缀，REV-069 N7）——与「跨规则 fail-fast」仅对主图成立，子图是显式例外，见 §2.6.1。
 
 ### 2.1.4 校验上下文
 
@@ -605,6 +608,8 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | `SubgraphConfig` 为什么没有 mapping | v1 不执行子图，节点级映射无消费者（C-17(a)）；映射语义留 v1.1，届时作为新增可选字段加入（仍兼容 schema 1.0） |
 
 > **两个码的分工（本册裁定，与 04 A5 一致）**：`NODE_TYPE_UNSUPPORTED`（运行期域）= schema 已知但 v1 不执行的 `subgraph`；`DSL_UNSUPPORTED_NODE_TYPE`（加载期/DSL 域）= `type` 字符串**不在** 5 个枚举内（未知/保留类型，如 `"human_node"`）。00 §0.4 该行括号说明"如 `subgraph` 运行"需按此修订（§2.11 P-02-03）。
+
+> **as-built（W2a 实现，REV-073）**：子图定义递归校验（`nodes.rs::wrap_subgraph_errors`）对子图内**跨规则**命中**聚合**：例如同时有「无 gate 环（R13）」与「非法 defer 源（R15）」时返回 2 条 `DSL_SUBGRAPH_INVALID`（message 分别为 `subgraph '<id>': ungated data cycle …` / `… defer edge source '<u>' is not re-entrant …`，`location.node_id`/`edge_index` 保留内部定位；CLI 定位串为 `graph.json: subgraphs[i]`）。这是既有「子图内 R4/R5/R8–R13 统一聚合」口径的延续，**主图**仍按 §2.1.3 跨规则 fail-fast。
 
 ### 2.6.2 保留字段的 v1 行为（`outputs` / `from_output_port`）
 
