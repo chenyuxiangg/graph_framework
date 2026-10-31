@@ -635,7 +635,7 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | cli | `feat/cli-decide` / `4d671a0` + `c711232` | REV-081（reviewer-a） | `971e48f` | cli **198/0**（decide 15 + human_decide 7） |
 | cli fix | `fix/cli-human-record` / `c3022ea` | REV-082（reviewer-a） | `9006345` | cli **206/0**；workspace **798/0/3**；L2 human 补录 + replay handler 替换 |
 | e2e | `test/e2e-human-decide` / `05383d0` + `5128f53` + `2ac54c2` | REV-083（reviewer-b） | `2444548` | e2e **85/0/2**（human_decide **21/0**，连跑 3 次稳定）；workspace **819/0/3** |
-| docs | `docs/docs-human-spec`（本批） | REV-084（待评审；评审人待定） | 本分支待合并 | check.sh / PROVENANCE §3 实测 |
+| docs | `docs/docs-human-spec`（本批） | **REV-084（通过，`d5df1e8`）** | 本分支待合并 | check.sh / PROVENANCE §3 实测 |
 
 ### 15.2 as-built 实现要点（与 §2–§7 的对应）
 
