@@ -1602,3 +1602,306 @@ fn rework_codegen_validates_with_expected_scale_and_full_defer_policy() {
         assert_rework_policy(&graph, profile);
     }
 }
+
+// ---------------------------------------------------------------------------
+// W2a（SOP v1.1）：rework → approved 双轮与超限（AC-14 c/e，runtime）
+// ---------------------------------------------------------------------------
+
+/// rework 双轮剧本（8 calls：planer → round1×3 rework → round2×3 approved → archer）。
+const FAKE_REWORK_ROUNDTRIP: &str = "fake_llm_rework_roundtrip.json";
+
+/// 恒定 rework 剧本（planer + 3 轮×3 rework；W attempt=3 超限失败）。
+const FAKE_REWORK_EXHAUST: &str = "fake_llm_rework_exhaust.json";
+
+/// round1 评审 comments（用于锁定「新一轮 P 消费新一轮 R」）。
+const REWORK_ROUND1_COMMENTS: &str = "round1: 缺少错误码定义";
+
+/// round2 评审 comments。
+const REWORK_ROUND2_COMMENTS: &str = "round2: 已补齐错误码定义";
+
+/// 某节点的全部实例（按 attempt 升序）。
+fn instances_for(reader: &TraceReader, run_id: &str, node_id: &str) -> Vec<InstanceRow> {
+    let mut rows: Vec<InstanceRow> = reader
+        .instances(run_id)
+        .expect("query instances")
+        .into_iter()
+        .filter(|row| row.node_id == node_id)
+        .collect();
+    rows.sort_by_key(|row| row.attempt);
+    rows
+}
+
+/// 某节点实例的 attempt 列表。
+fn attempts_of(reader: &TraceReader, run_id: &str, node_id: &str) -> Vec<u32> {
+    instances_for(reader, run_id, node_id)
+        .iter()
+        .map(|row| row.attempt)
+        .collect()
+}
+
+/// 解析节点输出的 `(verdict, comments, artifact)`。
+fn parse_output_fields(instance: &InstanceRow) -> (String, String, Value) {
+    let output = instance.output_json.as_ref().expect("parse output");
+    (
+        output["verdict"].as_str().expect("verdict").to_string(),
+        output["comments"].as_str().expect("comments").to_string(),
+        output["artifact"].clone(),
+    )
+}
+
+/// 断言一条 gate_result 的 `(attempt, passed, deferred, verdict)`。
+fn assert_gate(row: &GateResultRow, expected: (u32, bool, bool, Option<Value>), context: &str) {
+    assert_eq!(
+        (row.attempt, row.passed, row.deferred, row.verdict.clone()),
+        expected,
+        "{context}: {row:?}"
+    );
+}
+
+/// 断言一个 item 的 rework 双轮链路（W/R/P attempts 0/1、gate 真实值、最终 artifact）。
+fn assert_rework_chain(reader: &TraceReader, run_id: &str, item: &str) {
+    let base = format!("planer_{item}");
+    let work_id = base.clone();
+    let review_id = format!("{base}_review");
+    let parse_id = format!("{base}_parse");
+    for node_id in [&work_id, &review_id, &parse_id] {
+        assert_eq!(
+            attempts_of(reader, run_id, node_id),
+            vec![0, 1],
+            "{node_id} attempts 0/1"
+        );
+    }
+    let parses = instances_for(reader, run_id, &parse_id);
+    assert_eq!(parses[0].status, TraceInstanceStatus::Completed);
+    assert_eq!(parses[1].status, TraceInstanceStatus::Completed);
+    let (v0, c0, _) = parse_output_fields(&parses[0]);
+    assert_eq!(
+        (v0.as_str(), c0.as_str()),
+        ("rework", REWORK_ROUND1_COMMENTS)
+    );
+    let (v1, c1, a1) = parse_output_fields(&parses[1]);
+    assert_eq!(
+        (v1.as_str(), c1.as_str()),
+        ("approved", REWORK_ROUND2_COMMENTS)
+    );
+    // P 第二轮必须消费第二轮 R 的 review（调用序锁定，防 stale-input）。
+    let p1_input = parses[1].input.as_ref().expect("P attempt1 input");
+    let review_content = p1_input["review"]["content"]
+        .as_str()
+        .expect("P attempt1 review.content");
+    assert!(
+        review_content.contains("\"approved\"") && review_content.contains(REWORK_ROUND2_COMMENTS),
+        "P attempt1 必须消费新一轮 R 的 approved review，实际: {review_content}"
+    );
+    // 最终 artifact = W attempt1 的整包产物（内含 P attempt0 作为 feedback）。
+    let works = instances_for(reader, run_id, &work_id);
+    assert_eq!(
+        works[1].output_json.as_ref().expect("W attempt1 output"),
+        &a1,
+        "P attempt1 的 artifact 必须来自 W attempt1"
+    );
+    assert_eq!(
+        a1["feedback"]["verdict"],
+        json!("rework"),
+        "W attempt1 feedback 来自 P attempt0"
+    );
+    assert_eq!(
+        a1["task"],
+        works[0].output_json.as_ref().expect("W attempt0 output")["task"]
+    );
+
+    let gates: Vec<GateResultRow> = reader.gate_results(run_id).expect("gate_results");
+    let forward: Vec<&GateResultRow> = gates
+        .iter()
+        .filter(|row| row.node_id == parse_id && row.to_node == "archer" && row.to_port == item)
+        .collect();
+    assert_eq!(forward.len(), 2, "{item} P→archer 两行");
+    assert_gate(
+        forward[0],
+        (0, false, true, Some(json!("rework"))),
+        "round1 approved 前进边 false 挂账",
+    );
+    assert_gate(
+        forward[1],
+        (1, true, false, Some(json!("approved"))),
+        "round2 approved 前进边放行",
+    );
+    let feedback: Vec<&GateResultRow> = gates
+        .iter()
+        .filter(|row| row.node_id == parse_id && row.to_port == "feedback")
+        .collect();
+    assert_eq!(feedback.len(), 2, "{item} P→W.feedback 两行");
+    assert_gate(
+        feedback[0],
+        (0, true, false, Some(json!("rework"))),
+        "round1 rework 回边放行",
+    );
+    assert_gate(
+        feedback[1],
+        (1, false, true, Some(json!("approved"))),
+        "round2 approved 回边 false 挂账（dormant）",
+    );
+    // 无 gate 的 settle 边：passed/deferred/verdict 不参与 defer 语义。
+    for row in gates.iter().filter(|row| row.gate_fn.is_none()) {
+        assert!(row.passed && !row.deferred && row.verdict.is_none());
+    }
+}
+
+/// AC-14 c：SOP rework → approved 双轮；attempts 0/1、gate 真实值、下游最终 artifact。
+#[test]
+fn smoke_rework_roundtrip_completes_with_attempts_and_final_artifact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = generate_mode_graph(dir.path(), PROFILE_SMOKE, MODE_REWORK);
+    let (output, db) = run_smoke(dir.path(), &graph, FAKE_REWORK_ROUNDTRIP);
+    assert_exit(&output, 0, "smoke rework roundtrip run");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    assert_eq!(payload["run_output"], Value::Null, "smoke 无 end 节点");
+    let run_id = payload_run_id(&payload);
+
+    let reader = TraceReader::open_readonly(&db).expect("reader");
+    common::assert_lifecycle_shape(&reader, &run_id);
+    let run = common::run_row(&reader, &run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Completed);
+    assert_eq!(run.error_code, None);
+    assert_eq!(
+        attempts_of(&reader, &run_id, "planer"),
+        vec![0],
+        "planer 只执行一次"
+    );
+
+    for item in SMOKE_ITEMS {
+        assert_rework_chain(&reader, &run_id, item);
+    }
+
+    // archer 拿最终 artifact（最新 W attempt 的整包，feedback.verdict=rework 证明是返工后 attempt）。
+    let archer = instances_for(&reader, &run_id, "archer");
+    assert_eq!(archer.len(), 1);
+    assert_eq!(archer[0].status, TraceInstanceStatus::Completed);
+    let archer_input = archer[0].input.as_ref().expect("archer input");
+    for item in SMOKE_ITEMS {
+        assert_eq!(archer_input[item]["verdict"], json!("approved"));
+        assert_eq!(
+            archer_input[item]["artifact"]["feedback"]["verdict"],
+            json!("rework"),
+            "{item}: 下游必须拿到返工后最终 W attempt 的产物"
+        );
+    }
+}
+
+/// AC-14 e：恒定 rework → W attempt=3 超限 → Failed NODE_INTERNAL；超限 GateResult 不入库。
+#[test]
+fn smoke_rework_exhaust_fails_after_max_attempts_without_overlimit_gate_result() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = generate_mode_graph(dir.path(), PROFILE_SMOKE, MODE_REWORK);
+    let (output, db) = run_smoke(dir.path(), &graph, FAKE_REWORK_EXHAUST);
+    assert_exit(&output, 1, "超限 run 应 exit 1");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["ok"], json!(false));
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(payload["error"]["code"], json!("NODE_INTERNAL"));
+    let run_id = payload_run_id(&payload);
+
+    let reader = TraceReader::open_readonly(&db).expect("reader");
+    let run = common::run_row(&reader, &run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
+    assert_eq!(run.error_code.as_deref(), Some("NODE_INTERNAL"));
+    let message = run.error_message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("exceeded max_attempts (3)"),
+        "超限 message: {message}"
+    );
+
+    let instances = reader.instances(&run_id).expect("instances");
+    assert!(
+        instances.iter().all(|row| !matches!(
+            row.status,
+            TraceInstanceStatus::Pending
+                | TraceInstanceStatus::Ready
+                | TraceInstanceStatus::Running
+        )),
+        "Failed run 不得残留非终态实例"
+    );
+    let crashed: Vec<&InstanceRow> = instances
+        .iter()
+        .filter(|row| row.status == TraceInstanceStatus::Crashed)
+        .collect();
+    assert_eq!(crashed.len(), 1, "恰一个 W 超限 Crashed: {crashed:?}");
+    let crashed = crashed[0];
+    let crashed_item = crashed
+        .node_id
+        .strip_prefix("planer_")
+        .expect("crashed W 节点应形如 planer_<item>");
+    assert!(SMOKE_ITEMS.contains(&crashed_item));
+    assert_eq!(crashed.attempt, 3, "Crashed attempt = max_attempts");
+    assert_eq!(crashed.error_code.as_deref(), Some("NODE_INTERNAL"));
+    assert_eq!(
+        crashed.error.as_ref().expect("error json")["kind"],
+        json!("Internal")
+    );
+
+    // 并发下其它 item 可能只推进到第 2 轮（run 因首个超限失败而终止）；能确定的硬事实：
+    // ① 任何节点的 attempt 连续从 0 开始（不跳号）；② 超限 victim 必然完成 3 轮 W/R/P；
+    // ③ run 失败后无 Pending/Ready/Running（上面已断言）。
+    let victim_base = crashed.node_id.clone();
+    for item in SMOKE_ITEMS {
+        let base = format!("planer_{item}");
+        for node_id in [&base, &format!("{base}_review"), &format!("{base}_parse")] {
+            let attempts = attempts_of(&reader, &run_id, node_id);
+            let expected: Vec<u32> = (0..attempts.len() as u32).collect();
+            assert_eq!(attempts, expected, "{node_id} attempt 必须从 0 连续");
+        }
+        let parses = instances_for(&reader, &run_id, &format!("{base}_parse"));
+        assert!(
+            parses
+                .iter()
+                .all(|row| row.status == TraceInstanceStatus::Completed
+                    || row.status == TraceInstanceStatus::Cancelled),
+            "{item} P 实例只应 Completed/Cancelled: {parses:?}"
+        );
+    }
+    assert_eq!(
+        attempts_of(&reader, &run_id, &victim_base),
+        vec![0, 1, 2, 3],
+        "超限 victim W：三轮 + Crashed attempt3"
+    );
+    assert_eq!(
+        attempts_of(&reader, &run_id, &format!("{victim_base}_review")),
+        vec![0, 1, 2],
+        "victim R 完成三轮评审"
+    );
+    let victim_parses = instances_for(&reader, &run_id, &format!("{victim_base}_parse"));
+    assert_eq!(
+        victim_parses
+            .iter()
+            .map(|row| row.attempt)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "victim P 三轮（P2 产出 rework 后触发 W 超限）"
+    );
+    assert!(
+        victim_parses
+            .iter()
+            .all(|row| row.status == TraceInstanceStatus::Completed),
+        "victim P 在反馈求值前均 Completed: {victim_parses:?}"
+    );
+
+    // 超限那次 GateResult 不入库：crashed W 的 feedback 边只有前两轮（attempt 0/1）两行。
+    let crash_parse_id = format!("{}_parse", crashed.node_id);
+    let gates: Vec<GateResultRow> = reader.gate_results(&run_id).expect("gate_results");
+    let feedback: Vec<&GateResultRow> = gates
+        .iter()
+        .filter(|row| row.node_id == crash_parse_id)
+        .filter(|row| row.to_port == "feedback")
+        .collect();
+    assert_eq!(
+        feedback.len(),
+        2,
+        "超限前只有前两轮 feedback GateResult: {feedback:?}"
+    );
+    assert_eq!(
+        feedback.iter().map(|row| row.attempt).collect::<Vec<_>>(),
+        vec![0, 1],
+        "不得出现 attempt=2（超限那次）的 GateResult"
+    );
+}

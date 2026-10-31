@@ -12,13 +12,16 @@
 //!
 //! 本文件分三部分：
 //!
-//! 1. **fixtures 静态断言**（不依赖 W2a kernel）：三个 defer 图 `zgraph validate`
-//!    通过（R13/R15）且 `on_gate_false` 形状符合冻结；
-//! 2. **AC-14 h**（不依赖 W2a kernel）：`tests/fixtures/trace/schema_v3_seed.sql`
-//!    建 v3 库 → 真 `zgraph run` 触发 v3→v4 迁移 → 备份/审计/旧行默认值/旧 payload
-//!    保持 v3 形态 → `trace`/`replay --mode=events` 对照冻结 golden；只读 v3 拒绝；
-//! 3. **AC-14 a/b/f/g 运行时用例**：Phase 2A 先写全断言但 `#[ignore]`（W2a kernel
-//!    `feat/kernel-deferrable-gate` 尚未合并），Phase 2B 合并后去掉 ignore 并跑全量。
+//! 1. **fixtures 静态断言**：三个 defer 图 `zgraph validate` 通过（R13/R15）且
+//!    `on_gate_false` 形状符合冻结；
+//! 2. **AC-14 h**：`tests/fixtures/trace/schema_v3_seed.sql` 建 v3 库 → 真
+//!    `zgraph run` 触发 v3→v4 迁移 → 备份/审计/旧行默认值/旧 payload 保持 v3 形态 →
+//!    `trace`/`replay --mode=events` 对照冻结 golden；只读 v3 拒绝；v4 新 run 的
+//!    `deferred`/`attempt`/`verdict` 为真实运行值（REV-071 N1），并锁定超限那次
+//!    GateResult 不入库；
+//! 3. **AC-14 a/b/f/g 运行时用例**：真 kernel deferrable gate + 真 worker + 真 SQLite；
+//!    自环 attempts 0/1、A→B→A attempts 0/1、dormant 正常 Completed、blocked 确定性
+//!    `RUN_DEADLOCK`。
 //!
 //! v3 seed/golden 的生成方式与归一化规则见
 //! [`tests/fixtures/trace/GENERATION.md`](../../fixtures/trace/GENERATION.md)（W1 遗留
@@ -410,7 +413,7 @@ fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
         "L1 replay 与 trace 的 NDJSON 必须逐字节一致"
     );
 
-    // v4 后新写入 run：payload 含三键（值为 W2a cli 真实接线，Phase 2B 再断言非默认值）。
+    // v4 后新写入 run：payload 含三键，且是 cli 真实接线值（REV-071 N1，非 false/0/null 过渡）。
     let new_events = reader
         .events(&new_run_id, &EventQuery::default())
         .expect("new events");
@@ -431,11 +434,160 @@ fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
             .is_some_and(|value| value.as_u64().is_some()),
         "v4 新事件 payload.record.attempt 必须是整数: {new_record:?}"
     );
-    assert!(
-        new_record.contains_key("verdict"),
-        "v4 新事件 payload.record.verdict 键必须存在（可 null）: {new_record:?}"
+    // seed 图的 gate 是 `check_output{path:"message"}`，真实 verdict 是原始路径值 "seed"。
+    assert_eq!(
+        new_record.get("verdict"),
+        Some(&serde_json::json!("seed")),
+        "v4 新事件 payload.record.verdict 必须是真实路径值: {new_record:?}"
     );
     drop(reader);
+
+    // 同一个 v4 库上跑 defer 自环：DB/trace 三字段必须是真实运行值（非过渡值）。
+    let self_loop = defer_gate_graph("defer_self_loop.json");
+    let defer_output = run_cli(
+        &defer_run_args(&self_loop, SELF_LOOP_INPUTS, &db),
+        dir.path(),
+    );
+    assert_exit(&defer_output, 0, "v4 库上的 defer 自环 run");
+    let defer_payload = json_stdout(&defer_output);
+    assert_eq!(defer_payload["status"], serde_json::json!("Completed"));
+    let defer_run_id = defer_payload["run_id"]
+        .as_str()
+        .expect("defer run_id")
+        .to_string();
+
+    let conn = cli_support::read_only_connect(&db);
+    let defer_rows: Vec<(i64, i64, i64, Option<String>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT attempt, passed, deferred, verdict_json FROM gate_results \
+                 WHERE run_id = ?1 AND edge_index = 1 ORDER BY seq",
+            )
+            .expect("prepare defer gate rows");
+        stmt.query_map([&defer_run_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query defer gate rows")
+        .map(|row| row.expect("defer gate row"))
+        .collect()
+    };
+    assert_eq!(
+        defer_rows,
+        vec![
+            (0, 1, 0, Some("true".to_string())),
+            (1, 0, 1, Some("false".to_string())),
+        ],
+        "v4 DB 真实值：attempt0 放行、attempt1 false+deferred（verdict_json 是 JSON 值文本）"
+    );
+
+    // `trace --json` 同步带出真实值（bool / 整数 / JSON 值，而不是 null/0）。
+    let defer_trace = run_cli(
+        &[
+            "trace".to_string(),
+            defer_run_id.clone(),
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&defer_trace, 0, "trace defer 自环新 run");
+    let defer_records: Vec<Value> = ndjson_events(&defer_trace)
+        .into_iter()
+        .filter(|event| event["kind"] == "GateResult")
+        .filter_map(|event| event["payload"]["record"].as_object().cloned())
+        .filter(|record| record.get("edge_index") == Some(&serde_json::json!(1)))
+        .map(Value::Object)
+        .collect();
+    assert_eq!(defer_records.len(), 2, "自环边两条 GateResult");
+    assert_eq!(defer_records[0]["deferred"], serde_json::json!(false));
+    assert_eq!(defer_records[0]["attempt"], serde_json::json!(0));
+    assert_eq!(defer_records[0]["verdict"], serde_json::json!(true));
+    assert_eq!(defer_records[1]["deferred"], serde_json::json!(true));
+    assert_eq!(defer_records[1]["attempt"], serde_json::json!(1));
+    assert_eq!(defer_records[1]["verdict"], serde_json::json!(false));
+}
+
+/// h/Phase 2B：自环 defer 超限（`max_attempts=1`）→ 超限那次 GateResult **不入库**。
+///
+/// 证据：自环 gate=true 的 attempt0 投递在 `resolve` 内先 create Crashed(attempt=1) +
+/// `fail_run(NODE_INTERNAL)`，解析失败不 emit（与 settle 的失败顺序一致，DR-005 §3.3）；
+/// 因此该边**一行 GateResult 都没有**（不是「先 emit 后失败」）。sink 关闭后也不补写。
+#[test]
+fn overlimit_self_loop_gate_result_is_not_persisted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut graph = read_graph(&defer_gate_graph("defer_self_loop.json"));
+    graph["nodes"][1]["config"]["retry"] = serde_json::json!({ "max_attempts": 1 });
+    let variant = cli_support::write_json(dir.path(), "overlimit.json", &graph);
+    let db = dir.path().join("overlimit.db");
+    let output = run_cli(&defer_run_args(&variant, SELF_LOOP_INPUTS, &db), dir.path());
+    assert_exit(&output, 1, "超限 run 应 exit 1");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], serde_json::json!("Failed"));
+    assert_eq!(payload["error"]["code"], serde_json::json!("NODE_INTERNAL"));
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+
+    let reader = TraceReader::open_readonly(&db).expect("reader");
+    let run = run_row(&reader, &run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
+    assert_eq!(run.error_code.as_deref(), Some("NODE_INTERNAL"));
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("max_attempts (1)"),
+        "超限 message 应含 max_attempts (1): {:?}",
+        run.error_message
+    );
+    let loop_instances = instances_of(&reader, &run_id, "loop");
+    assert_eq!(
+        loop_instances
+            .iter()
+            .map(|row| (row.attempt, row.status, row.error_code.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, TraceInstanceStatus::Completed, None),
+            (
+                1,
+                TraceInstanceStatus::Crashed,
+                Some("NODE_INTERNAL".to_string())
+            ),
+        ],
+        "attempt0 Completed + 超限 attempt1 Crashed"
+    );
+
+    // 超限那次 GateResult 不入库：自环边 0 行；唯一 GateResult 是 start→loop（无 gate）。
+    let gates = reader.gate_results(&run_id).expect("gates");
+    assert!(
+        gates.iter().all(|row| row.edge_index != 1),
+        "超限那次的 GateResult 不得入库: {gates:?}"
+    );
+    let ungated: Vec<_> = gates.iter().filter(|row| row.gate_fn.is_none()).collect();
+    assert_eq!(ungated.len(), 1, "start→loop 无 gate 的 GateResult 仍应在");
+    assert!(ungated[0].passed && !ungated[0].deferred);
+    drop(reader);
+
+    // trace 可读（Failed → exit 1），且 NDJSON 中同样没有自环边的 GateResult。
+    let trace_out = run_cli(
+        &[
+            "trace".to_string(),
+            run_id,
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&trace_out, 1, "Failed run 的 trace 应 exit 1");
+    let gate_edges: Vec<Value> = ndjson_events(&trace_out)
+        .into_iter()
+        .filter(|event| event["kind"] == "GateResult")
+        .map(|event| event["payload"]["record"]["edge_index"].clone())
+        .collect();
+    assert!(
+        !gate_edges.contains(&serde_json::json!(1)),
+        "trace --json 不得出现超限边的 GateResult: {gate_edges:?}"
+    );
 }
 
 /// h：只读 `trace` 对 v3 库拒绝且**不迁移**（exit 4，forward-only）。
@@ -503,7 +655,6 @@ fn gate_rows_for_edge(
 
 /// AC-14 a：defer 自环返工（attempt 0/1；同一自环边两行 gate；dormant 正常完成）。
 #[test]
-#[ignore = "W2a kernel（feat/kernel-deferrable-gate）未合并；Phase 2B 打开（AC-14 a）"]
 fn self_loop_defer_reentry_completes_with_attempts_and_gate_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (output, db) = run_defer_graph(dir.path(), "defer_self_loop.json", SELF_LOOP_INPUTS, "a");
@@ -562,7 +713,6 @@ fn self_loop_defer_reentry_completes_with_attempts_and_gate_rows() {
 
 /// AC-14 b：A→B→A 两条 gate 环边均 defer，attempt-per-activation 重入。
 #[test]
-#[ignore = "W2a kernel（feat/kernel-deferrable-gate）未合并；Phase 2B 打开（AC-14 b）"]
 fn ab_cycle_defer_reentry_completes_with_attempts() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (output, db) = run_defer_graph(dir.path(), "defer_ab_cycle.json", CYCLE_INPUTS, "b");
@@ -601,7 +751,6 @@ fn ab_cycle_defer_reentry_completes_with_attempts() {
 
 /// AC-14 f：自环 gate 恒 false（defer）→ 只挂账、dormant，run 正常 Completed。
 #[test]
-#[ignore = "W2a kernel（feat/kernel-deferrable-gate）未合并；Phase 2B 打开（AC-14 f）"]
 fn self_loop_defer_with_false_gate_completes_dormant() {
     let dir = tempfile::tempdir().expect("tempdir");
     // 变体：同一 fixture 把自环 gate 的 equals 改为 false（不新增第 4 个图文件）。
@@ -625,12 +774,12 @@ fn self_loop_defer_with_false_gate_completes_dormant() {
     let gates = gate_rows_for_edge(&reader, &run_id, 1);
     assert_eq!(gates.len(), 1);
     assert!(!gates[0].passed && gates[0].deferred);
-    assert_eq!(gates[0].verdict, Some(serde_json::json!(false)));
+    // verdict 是**原始路径值**（不是比较结果）：continue=true，故 Some(true)。
+    assert_eq!(gates[0].verdict, Some(serde_json::json!(true)));
 }
 
 /// AC-14 g：defer 前进边目标永不实例化 → 静默后立即确定性 RUN_DEADLOCK。
 #[test]
-#[ignore = "W2a kernel（feat/kernel-deferrable-gate）未合并；Phase 2B 打开（AC-14 g）"]
 fn blocked_deferred_receipt_fails_with_run_deadlock() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (output, db) = run_defer_graph(dir.path(), "defer_blocked.json", CYCLE_INPUTS, "g");
@@ -654,8 +803,19 @@ fn blocked_deferred_receipt_fails_with_run_deadlock() {
     assert_eq!(a_instances[0].status, TraceInstanceStatus::Completed);
 
     let gates = reader.gate_results(&run_id).expect("gates");
-    assert_eq!(gates.len(), 2, "自环 + a→b 各一条 deferred gate");
-    assert!(gates.iter().all(|row| !row.passed && row.deferred));
+    // 每条出边每次 publish 恰一条 GateResult（含无 gate 的 start→a）：3 行。
+    assert_eq!(gates.len(), 3, "start→a + 自环 + a→b 各一条 GateResult");
+    let ungated: Vec<&zgraph_trace::GateResultRow> =
+        gates.iter().filter(|row| row.gate_fn.is_none()).collect();
+    assert_eq!(ungated.len(), 1, "start→a 无 gate 但仍有 GateResult");
+    assert!(ungated[0].passed && !ungated[0].deferred);
+    let deferred: Vec<&zgraph_trace::GateResultRow> =
+        gates.iter().filter(|row| row.deferred).collect();
+    assert_eq!(deferred.len(), 2, "自环 + a→b 各一条 deferred gate");
+    assert!(deferred.iter().all(|row| !row.passed));
+    assert!(deferred
+        .iter()
+        .all(|row| row.gate_fn.as_deref() == Some("check_output")));
     let error_message = run.error_message.as_deref().unwrap_or_default();
     assert!(
         error_message.contains("blocked") && error_message.contains("b"),
