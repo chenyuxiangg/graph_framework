@@ -85,7 +85,7 @@
 | [REV-081](REV-081-cli-decide.md) | 2026-10-31 | cli | `feat/cli-decide` | 通过（zgraph decide/consumer/trace 决策行/`:memory:` 预检；cli 198、workspace 790/0/3；P3 建议 → ISSUE-134/135/136 + 环境观察 ISSUE-137） | reviewer-a |
 | [REV-082](REV-082-cli-human-record.md) | 2026-11-01 | cli | `fix/cli-human-record` | 通过（human L2 recorded_outputs 补录 + replay outputs handler 替换；cli 206、workspace 798/0/3；P3 建议 → ISSUE-140） | reviewer-a |
 | [REV-083](REV-083-e2e-human-decide.md) | 2026-11-01 | e2e | `test/e2e-human-decide` | 通过（AC-16 a–g 真链路 + L2 human outputs；human_decide 21/0、e2e 85/0/2、workspace 819/0/3、3 次稳定；P3 建议 → ISSUE-138/139） | reviewer-b |
-| [REV-084](REV-084-docs-human-spec.md) | 2026-11-01 | docs | `docs/docs-human-spec` | 待评审（W3a as-built 回写：spec 00/01/03/04/06/07/08 + DR-006 §15 + AC-16 实测 + PROVENANCE；本分支） | —（待定） |
+| [REV-084](REV-084-docs-human-spec.md) | 2026-11-01 | docs | `docs/docs-human-spec` | 通过（W3a as-built 回写：spec 00/01/03/04/06/07/08 + DR-006 §15 + AC-16 实测 21 用例 + PROVENANCE 第 22 条；e2e 85/0/2、workspace 819/0/3、PROVENANCE §3 9/9 SHA/行数实测一致；P3 建议见记录 §3） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
