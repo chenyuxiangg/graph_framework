@@ -102,3 +102,17 @@ bash scripts/dev/check.sh           # CHECK PASSED（exit 0）
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（本记录结论为"通过"，无未关闭条件；S1–S5 为非阻塞建议/待确认项）。
+
+## 7. 第二评审（跨模块 cli 机械改动 · Lead，2026-10-31）
+
+> AGENTS §2 跨模块例外：本分支主模块 `trace`；因 `GateResultRecord` 三字段扩展，机械修改 `crates/zgraph-cli/src/bridge.rs`（过渡映射）与 cli 测试字面量/payload 断言。Lead 为第二评审人（≠ 作者），仅复核 **cli 机械改动范围与语义影响**，不替代主审 reviewer-a 的 trace 语义评审。
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| 改动范围 | ✅ 仅 3 个 cli 文件、+18/−0 | `git diff 7f88614..96ab28e -- crates/zgraph-cli`：`bridge.rs` +8（仅 `map_gate_result` 过渡值 + 注释）、`run_cmd.rs` +3（仅 `#[cfg(test)] mod tests` 结构体字面量）、`tests/trace.rs` +7（fixture 字面量 + 3 条 payload 断言） |
+| 语义影响 | ✅ 无（过渡值等价 v0.1.0 默认） | 过渡值 `deferred=false/attempt=0/verdict=None`；无错误码/退出码/人类文本列变化；`--json` 仅新增三键（W2a 契约） |
+| 测试断言 | ✅ 只增不减 | `tests/trace.rs` 新增 3 条 payload 断言；`run_cmd.rs` 仅补齐字段；主审复跑 `cargo test -p zgraph-cli` 160 passed |
+| 越界检查 | ✅ 无 | 未改 kernel/dsl/harness/worker/doc/`CLAUDE.md`/Cargo；`cargo test --workspace` 650 passed / 0 failed / 3 ignored |
+| 遗留去向 | S1（损坏 `verdict_json` 读取应为 NULL+告警）/S4（DDL 列序展示）归 W2a-docs 校准；v0.1.0 trace seed 跨波次缺口由 Lead 登记 ISSUE | 见 §5 |
+
+**第二评审结论：通过（cli 机械改动无阻塞条件）**。
