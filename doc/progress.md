@@ -2,10 +2,10 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.2（M7）**W3a 已完成并合入 `main`**（HEAD `2444548`）：trace schema v5 + `human_decisions`（REV-079）、kernel `WaitingHuman`/`builtin.human`/`HumanDecision`（REV-080）、cli `zgraph decide` + decision consumer（REV-081）、cli human L2 记录/replay 适配（REV-082）、e2e AC-16 a–g 真链路（REV-083）；W3a-docs as-built 回写（REV-084）**已通过**。无 human 图行为/hash/trace 不变。
+**当前阶段**：v0.2（M7）**W3a 已全部合入 `main`（HEAD `e3b7a4f`；REV-079..084）**：trace schema v5 + `human_decisions`（REV-079）、kernel `WaitingHuman`/`builtin.human`/`HumanDecision`（REV-080）、cli `zgraph decide` + decision consumer（REV-081）、cli human L2 记录/replay 适配（REV-082）、e2e AC-16 a–g 真链路（REV-083）、as-built 回写（REV-084）。无 human 图行为/hash/trace 不变。
 
 **进行中任务**
-- docs `docs/docs-human-spec`（REV-084，作者 docs-dev，worktree `.worktrees/docs-docs-dev`）：as-built 回写 + AC-16 实测（21 用例）+ DR-006 §15 + PROVENANCE 第 22 条 + 台账/索引/进度；**REV-084 已通过（`d5df1e8`）**；合并前 P3 残留收口（本 commit，待 Lead 合并）。
+- 无（W3a 收口完成；worktree/分支已清理）。
 
 **下一步**
 - W4a（动态 N）→ W4b；**W3b durable resume 可选，需用户确认**（DR-004 §4/§9）；无阻塞则从 W4a 开始。
