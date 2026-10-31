@@ -17,7 +17,10 @@ autotests = false
 zgraph-cli = { path = "../../crates/zgraph-cli" }
 zgraph-dsl = { path = "../../crates/zgraph-dsl" }
 zgraph-harness = { path = "../../crates/zgraph-harness" }
-zgraph-kernel = { path = "../../crates/zgraph-kernel" }
+# W2b（DR-004 §3）：运行期扇出上限是防御性校验（静态层 R16 已拒绝加载期非法图），
+# 运行期反例只能靠 `TestHooks.force_max_fanout` 构造；与 `zgraph-cli` 的 kernel
+# dev-dep 同口径启用该 feature（`cargo test --workspace` 本就会因特性合并打开）。
+zgraph-kernel = { path = "../../crates/zgraph-kernel", features = ["test-hooks"] }
 zgraph-trace = { path = "../../crates/zgraph-trace" }
 zgraph-worker = { path = "../../crates/zgraph-worker" }
 serde_json.workspace = true
@@ -73,3 +76,7 @@ path = "software_team_v1.rs"
 [[test]]
 name = "gate_defer"
 path = "gate_defer.rs"
+
+[[test]]
+name = "max_fanout"
+path = "max_fanout.rs"
