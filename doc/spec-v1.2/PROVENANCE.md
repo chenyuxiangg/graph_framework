@@ -133,14 +133,14 @@
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6334 行**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准）。
 
 17. **W2a 实现回写批次**（2026-10-31，REV-073；分支 `docs/docs-gate-defer-spec`）：
-    - **来源**：已合并实现——dsl `fa6ea16`+`bc92951`（REV-069）、trace `27f9200`（REV-070）、py-worker `dd96d89`+`f685178`（REV-068）、kernel `ee4ca27`+cli `6c90a16`（REV-071）；e2e 分支 `test/e2e-gate-defer`（**REV-072 已通过**，含 N1 后 §7 追加复审；e2e 分支待合并，HEAD 以合并时为准）。本批**按实际实现校准**，不重写 W2a0 冻结决策。
+    - **来源**：已合并实现——dsl `fa6ea16`+`bc92951`（REV-069）、trace `27f9200`（REV-070）、py-worker `dd96d89`+`f685178`（REV-068）、kernel `ee4ca27`+cli `6c90a16`（REV-071）；e2e 已合并 `main` `e2cba52`（**REV-072 已通过**，含 N1 后 §7 + 单 item 加固 §8）。本批**按实际实现校准**，不重写 W2a0 冻结决策。
     - **07**：AC-14 资产路径改 `tests/fixtures/graphs/defer_gate/**` + `tests/fixtures/trace/{schema_v3_seed,v0.1.0_expected_trace,seed_graph,GENERATION}`；测试落点改 `tests/e2e/gate_defer.rs`（a/b/f/g/h 均通过）与 `tests/e2e/software_team_v1.rs`（c/e codegen 静态 + 运行期，REV-072 已通过；e2e final 将改单 item rework profile，c/e 规模/断言以 final 为准）；§7.1/§7.2 行同步。
     - **01/03/04/06 as-built 注记**：`DeferredReceipt.updated_at` RFC3339 `String`、审计字段当前无读取方；per-port 继承 + `settled_by_node` 清空、不回收继承端口结算；`apply_publish` 四路径/超限 GateResult 不入库/`fail_if_blocked_deferred` message；`GateEvaluation.verdict` 实现口径；DDL 三列表尾追加（列序无语义）、`verdict_json` 损坏**严格报错**（ISSUE-105 待定案）、迁移/只读拒绝实测。
     - **02 as-built 注记**：R15 首错 + `expected/actual` 与冻结模板一致（REV-069 N1/N5）；子图内 R13+R15 跨规则聚合 2 条 `DSL_SUBGRAPH_INVALID`（REV-069 N7，子图为例外）。
     - **08**：§8.9.1 追加 W2a 实现证据表（模块/commit/REV/测试计数/as-built 偏差/台账），不改 8.0–8.9 历史。
     - **DR-005 / DR-004**：DR-005 §7.5 R1–R5 修正（超限证据/§7 h L1 拆分/行 8→9/伪代码 3-4-8/commit 数）；AC-14 as-built 注；DR-004 §10 追加 W2a0+W2a 执行记录（不改原决策）。
     - **索引/架构**：`doc/index.md` reviews 范围补 REV-067–072（073 待评审）、DR-005/SOP 描述；`doc/architecture-v2.md` 只加 banner 注记指向 02 R15 / 00 §0.4（18 码），不改 D1–D12 历史。
-    - **e2e 证据（REV-072 已通过；e2e 分支待合并，最终 HEAD 以合并时为准）**：`gate_defer` **8/0**、`software_team_v1` **11/1 ignored**；**c/e 运行期用 `--profile rework-item` 5/7**（hash as-built `79dd51c684ffc771`，合并后以实测为准），full 60/116 与 smoke 11/21 仅 validate/结构/hash；e2e **58/0/2**、空载 workspace **694/0/3**；**稳定性**：4 CPU busy-loop + 全 e2e 并行下 e2e 连续 **5 轮 58/0/2**（首版 3-item 并发因 fake LLM 全局调用序交错 flake → 单 item 后确定）。07 AC-14 c/e/f/h 按实测校准：c（4 calls；W/R/P 0/1；前进/feedback 边真实 `deferred`/`verdict`；P1 消费 round2 review；archer 拿返工后最终产物）、e（victim 固定 `planer_specification`；W [0,1,2,3]、R/P [0,1,2]；forward 三轮 false+deferred；feedback 仅 attempt0/1 两行，超限那次求值不入库）、f（`verdict` 为原始路径值：`passed=false` 而 `verdict=true`）、h（seed 新 run `verdict="seed"`；defer 自环新库真实 bool/int；`max_attempts=1` 首轮即超限自环边 0 行 GateResult）。**ISSUE-104 → fixed**（e2e 分支 + REV-072）；full rework 60/116 运行期未覆盖 → **ISSUE-112**。
+    - **e2e 证据（REV-072 已通过；e2e 已合并 `main` `e2cba52`）**：`gate_defer` **8/0**、`software_team_v1` **11/1 ignored**；**c/e 运行期用 `--profile rework-item` 5/7**（hash as-built `79dd51c684ffc771`，合并后以实测为准），full 60/116 与 smoke 11/21 仅 validate/结构/hash；e2e **58/0/2**、空载 workspace **694/0/3**；**稳定性（REV-072 §8）**：e2e 连跑 **3 轮** 58/0/2；4 busy-loop 下 `software_team_v1` 连跑 3 轮 11/0/1；空载 workspace 694/0/3（首版 3-item 并发因 fake LLM 全局调用序交错 flake → 单 item 后确定）。07 AC-14 c/e/f/h 按实测校准：c（4 calls；W/R/P 0/1；前进/feedback 边真实 `deferred`/`verdict`；P1 消费 round2 review；archer 拿返工后最终产物）、e（victim 固定 `planer_specification`；W [0,1,2,3]、R/P [0,1,2]；forward 三轮 false+deferred；feedback 仅 attempt0/1 两行，超限那次求值不入库）、f（`verdict` 为原始路径值：`passed=false` 而 `verdict=true`）、h（seed 新 run `verdict="seed"`；defer 自环新库真实 bool/int；`max_attempts=1` 首轮即超限自环边 0 行 GateResult）。**ISSUE-104 → fixed**（e2e 分支 + REV-072）；full rework 60/116 运行期未覆盖 → **ISSUE-112**。
     - **台账**：新增 ISSUE-104（v3 seed；**已 fixed**）、ISSUE-105（`verdict_json` 口径）、ISSUE-106（trace 测试/守卫）、ISSUE-107（kernel N1–N7）、ISSUE-108（dsl N5–N8）、ISSUE-109（py-worker S1）、ISSUE-110（e2e L2/测试行数）、ISSUE-111（e2e trace fixture 路径归属）、ISSUE-112（full rework 运行期未覆盖）；ISSUE-100/101 → fixed；ISSUE-062 保持 open。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6385 行**）。
 
@@ -155,8 +155,8 @@
 | `04-节点接口与扩展点.md` | 46247060b7b9da82656773aac7b98267b2c9e5cb959a14b054ac7e98e4ead513 | 906 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
 | `06-存储与可观测.md` | 8ab4b5e2d62d3c0bca304de4d9e8af10def9c955073c76401bfb02ecb89fc9ee | 1117 |
-| `07-验收用例.md` | 21e0ea21ab34c915e27e9f76f54cde8a70f6ce15b4ae0784c73534d0bd3a906c | 330 |
-| `08-审计关闭矩阵.md` | e7483be19d9f0df54eceb917b1b5869ce2b909d7be1b87b445988060facd0f19 | 524 |
+| `07-验收用例.md` | 715448478ac96f0212da0680a3a2d89ba3a15ca15b3e68d6f06bde71fdbae9fd | 330 |
+| `08-审计关闭矩阵.md` | 5dc763aa358fad5a7ead77a10dc995f4362433bbe237b2248b4a339234d97f04 | 524 |
 
 > 00–08 合计 **6385 行**（`wc -l` 口径；2026-10-31 **W2a 实现回写批次后**实测（REV-073；00/01/02/03/04/06/07/08 **净 +51 行**（新增 87/删除 36），见 §2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条）；此前 W1 SOP v1 批次为 6051 行、M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6668 行）。
 

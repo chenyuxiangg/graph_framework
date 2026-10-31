@@ -62,7 +62,7 @@
 - 技术前提：`../analysis/spike/REPORT.md` 的 8 项实测（PyO3/GIL/超时/事件循环/SQLite）已全部跑通。
 - 验收：07 的 AC-01..AC-14，P6 阶段以 `cargo test` + CLI + SQLite 断言执行。
 - **W2a0 回写批次（2026-10-31，REV-067）**：见 PROVENANCE §2 第 15 条（新增 AC-14、R15/`DSL_DEFER_NOT_REENTRANT`、trace schema v4、SOP v1.1）。
-- **W2a 实现回写批次（2026-10-31，REV-073）**：见 PROVENANCE §2 第 17 条（按已合并 dsl/trace/py-worker/kernel+cli 实现校准 AC-14/as-built 注记/08 §8.9.1；REV-072 已通过，e2e 分支待合并；c/e 运行期以 `--profile rework-item` 5/7 单 item 图校准）。
+- **W2a 实现回写批次（2026-10-31，REV-073）**：见 PROVENANCE §2 第 17 条（按已合并 dsl/trace/py-worker/kernel+cli 实现校准 AC-14/as-built 注记/08 §8.9.1；REV-072 已通过、e2e 已合并 `main` `e2cba52`；c/e 运行期以 `--profile rework-item` 5/7 单 item 图校准；REV-073 复审通过）。
 
 ## 仍未覆盖 / 延后项（诚实清单）
 
