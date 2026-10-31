@@ -69,6 +69,7 @@
 | [REV-065](REV-065-e2e-software-team-v1.md) | 2026-10-31 | e2e | `test/e2e-software-team-v1` | 通过（C1 HARNESS_MAX e2e 关闭；target 7 passed/1 ignored、全 e2e 46/2；S1/S3 落实，S2 非阻塞建议；clippy cmp_owned 修复 df0a300 增量确认） | reviewer-sop |
 | [REV-066](REV-066-docs-sop-v1-ac.md) | 2026-10-31 | docs | `docs/docs-sop-v1-ac` | 通过（C1–C3 关闭、S1–S3 落实；07 a02afcd5…/254、合计 6051；S4 非阻塞建议） | reviewer-sop |
 | [REV-067](REV-067-docs-rework-design.md) | 2026-10-31 | docs | `docs/docs-rework-design` | 通过（W2a0 设计冻结；首轮有条件通过，C1/C2/S1–S3 于 `749e9ee` 关闭、N-1…N-11 落实后复审通过；残留建议见记录 §7.5） | reviewer-docs |
+| [REV-069](REV-069-dsl-gate-defer.md) | 2026-10-31 | dsl | `feat/dsl-gate-defer` | 通过（W2a 边级 `on_gate_false` + R15；v0.1.0 5 valid/31 bad CLI 输出与 hash 逐字节不变；N1–N4 于 `a084f2e` 关闭、N5–N8 非阻塞建议） | reviewer-b |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
