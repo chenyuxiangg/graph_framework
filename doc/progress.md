@@ -2,7 +2,7 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.2（M7）**已立项**——DR-004（REV-063 通过）已合入 `main`；v0.1.0 发布与 SOP 设计稿 v1 已完成；W1（SOP v1 落地）待启动。
+**当前阶段**：v0.2（M7）**已启动**——DR-004（REV-063 通过）已合入 `main`；用户 2026-10-31 确认 DR-004 §9 A1–A7「按推荐」；**W1（SOP v1 落地）进行中**：`feat/py-worker-software-team-parse-verdict` + `test/e2e-software-team-v1`。
 
 | 里程碑 | 状态 | 关键交付 | REV |
 |---|---|---|---|
@@ -12,7 +12,7 @@
 | v0.2 立项 | done | DR-004：W1 SOP v1 落地 / W2 返工+扇出上限 / W3 人工评审 / W4 动态 N；共享队列 v0.3 | 063 |
 
 **下一步**
-1. 用户确认 DR-004 §9 A1–A7（范围/W3b durable/CLI decide/动态 N/扇出/返工 P 契约/版本），确认后启动 **W1**（e2e + py-worker，无内核改动）。
+1. W1：py-worker `parse_verdict` + e2e codegen/资产/用例（无内核改动）；之后 W1-docs 追加 DR-004 A 组冻结记录与 07 AC。
 2. W1 后按 DR-004 §4 顺序：W2a0(docs) → W2a → W2b → W3a0 → W3a → W3b(可选) → W4a → W4b。
 3. 收口项：ISSUE-091（时序 flaky）、ISSUE-098（REV-062 措辞）、ISSUE-099（tag 61/59 口径）、ISSUE-100（W2a spec 02 环检测规则）。
 
