@@ -102,3 +102,13 @@ bash scripts/dev/check.sh
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（本记录结论为"通过"，无未关闭条件；S1–S3 为非阻塞建议）。
+
+## 7. 追加复审（S2/S3 关闭，2026-10-31）
+
+> 编号说明：本记录 §6 已按模板保留为「条件关闭记录」，追加复审按 REV-065 §7 先例顺延为 §7；仅追加、不改原记录。
+
+- **范围**：`119437d..50eb1f7`，1 提交 `50eb1f7`（`test(py-worker): 补 parse_verdict_rework L3 守卫与错误前缀断言（REV-068 S2/S3）`，正文含 `Review: REV-068` / `Agent: py-worker-writer`），2 文件 **+10/−2**，仅测试：`python/tests/test_workers.py`（+9/−1）、`python/tests/test_parse_verdict.py`（+1/−1）；`git diff 137d68d..50eb1f7 -- python/workers/` 为空，**未改产品代码**。
+- **S2 关闭（守卫覆盖）**：`test_workers.py:29-32` 补 `parse_verdict_rework` import，`:63-67` 登记进 `WORKER_CALLABLES`，条目数 **8→9**；既有 `test_worker_functions_are_module_level_sync_with_two_params` 与 `test_worker_docstrings_declare_l3_contract` 循环自动覆盖新函数。独立复核（复用同一守卫逻辑）：L3 四标记（输入/输出/幂等性/外部副作用）齐全、副作用声明以「无」开头、模块级同步函数、恰 2 参数、登记对象与模块属性同一，全部通过；**负向对照**——缺标记 docstring 与 1 参数函数分别被 L3/签名守卫判为不通过，证明守卫非恒真。
+- **S3 关闭（前缀收紧）**：`test_parse_verdict.py:19` 的 `ERROR_PREFIX` 改为 `"parse_verdict_rework: "`（含结尾空格），`_assert_rework_error`（`:38-43`）的 `startswith` 现要求契约前缀精确匹配；13 处调用覆盖 8 个 raise 分支。独立探针：8 个非法输入分支的 message 全部 `startswith("parse_verdict_rework: ") == True`。
+- **验证**：`git status --porcelain --branch` → `## feat/py-worker-parse-rework...origin/main [ahead 3]`（clean）；pytest `test_parse_verdict.py + test_workers.py` → **110 passed**（86 + 24）；全量 → **170 passed**（基线失败名额 0，无新增失败）；`bash scripts/dev/check.sh` → **CHECK PASSED**（exit 0）。
+- **结论**：**S2/S3 关闭**；S1（v1/v2 校验分支重复）保留为**建议/台账项**，不阻塞。REV-068 结论维持 **通过**；本追加记录提交正文含 `Review: REV-068` / `Agent: reviewer-a`，且只改 `doc/reviews/**`（未改产品/测试）。
