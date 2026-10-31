@@ -18,7 +18,7 @@
 | [`development-workflow.md`](development-workflow.md) | 开发流程细则：worktree 并行、四维评审、合并与清理、进度与台账 |
 | [`progress.md`](progress.md) | 当前开发进度（保持简洁，≤30 行） |
 | [`issues.md`](issues.md) | 遗留问题台账（P0–P3，唯一问题来源） |
-| [`reviews/`](reviews/README.md) | 评审记录：索引、模板、REV-000–REV-036、REV-038–072（REV-000 bootstrap；M4 为 REV-017–024；M5 为 REV-025–036/038；M6 为 REV-039–061；W1/v0.2 kickoff 为 REV-062–066；W2a0 为 REV-067、W2a 实现为 REV-068–071，均已合入 main；**REV-072 为 e2e（已通过）；REV-073 为 W2a 实现回写（有条件通过，S-1..S-4 修复后增量复审）**；REV-037/051/059 未创建） |
+| [`reviews/`](reviews/README.md) | 评审记录：索引、模板、REV-000–REV-036、REV-038–072（REV-000 bootstrap；M4 为 REV-017–024；M5 为 REV-025–036/038；M6 为 REV-039–061；W1/v0.2 kickoff 为 REV-062–066；W2a0 为 REV-067、W2a 实现为 REV-068–071，均已合入 main；**REV-072 为 e2e（已通过，N1 后 §7 + 单 item 加固 §8）；REV-073 为 W2a 实现回写（有条件通过，S-1..S-4 修复后增量复审）**；REV-037/051/059 未创建） |
 | [`test-baseline.txt`](test-baseline.txt) | 已知失败测试基线（合并门禁依据；只允许缩小） |
 
 流程入口：仓库根 [`AGENTS.md`](../AGENTS.md)（强制约束）与 [`README.md`](../README.md)（快速开始）。

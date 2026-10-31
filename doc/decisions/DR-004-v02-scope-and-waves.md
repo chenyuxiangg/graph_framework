@@ -75,7 +75,7 @@
 #### W2a · opt-in deferrable gate + 有限返工（实现）
 
 - 按 W2a0 冻结的语义实现；模块：`kernel` + `dsl` + `trace` + `py-worker` + `e2e` + `docs`；spec 01/02/03/06（05 若 agent 输出契约受影响、07 AC）。
-- DoD：自环返工、A→B→A 回边返工、**真实 SOP v1 图 rework e2e**（使用 `parse_verdict_rework` + 回边）端到端通过；**approved-only 与 rework→approved 双路径 e2e**（C11）；最终超限失败；v0.1.0 图/回放 golden 不变。**部分达成（2026-10-31，REV-072）**：rework e2e 以 **smoke 11/21 单链路**运行期覆盖；**full 60/116 仅 validate/结构/hash**（fake LLM 全局调用序限制）→ **ISSUE-112** 跟踪 full rework 运行期 e2e。
+- DoD：自环返工、A→B→A 回边返工、**真实 SOP v1 图 rework e2e**（使用 `parse_verdict_rework` + 回边）端到端通过；**approved-only 与 rework→approved 双路径 e2e**（C11）；最终超限失败；v0.1.0 图/回放 golden 不变。**部分达成（2026-10-31，REV-072）**：rework e2e 以 **`rework-item` 5/7 单 item 图**运行期覆盖；full 60/116 与 smoke 11/21 仅 validate/结构/hash（fake LLM 全局调用序限制；单 item 化为消除 flake 的取舍）→ **ISSUE-112** 跟踪 full rework 运行期 e2e。
 
 #### W2b · 每节点最大扇出限制（两层）
 
@@ -248,7 +248,7 @@
   - trace：`27f9200`；REV-070（`a746525`/`ea645d8`，通过；cli 机械改动第二评审 lead）——`GateResultRecord`/`GateResultRow` 三字段、schema v4（v3→v4 逐版本迁移/备份/只读拒绝）、payload 三键；trace 63、cli 160、workspace 650/0/3。
   - py-worker：`dd96d89` + `f685178`（S2/S3）；REV-068（`2b32f22`/`61ba5a3`，通过）——`parse_verdict_rework`（`approved/rework` 闭集、8 个 `ValueError` 分支、v1 不变）；`test_parse_verdict` 86、pytest 170。
   - kernel + cli：`ee4ca27` + `6c90a16`；REV-071（`46226fc`/`e7578f1`，通过；第二评审 reviewer-a）——defer 决策矩阵/attempt-per-activation（自环 `源+1`、非自环 `目标当前+1`）/per-port 继承 + `settled_by_node` 重置/`end` 特例/超限 Crashed+`NODE_INTERNAL`（该次 GateResult 不入库）/dormant+确定性 `RUN_DEADLOCK`；cli `bridge.rs::map_gate_result` 接真实 `deferred/attempt/verdict`；kernel 107、cli 160、workspace 682/0/3、e2e 46/2。
-  - e2e（**REV-072 已通过**（含 N1 后 §7 追加复审）；e2e 分支待合并，HEAD 以合并时为准）：`tests/fixtures/graphs/defer_gate/**`（a/b/f/g）、`tests/fixtures/trace/{schema_v3_seed.sql,v0.1.0_expected_trace.json,seed_graph.json,GENERATION.md}`（h/ISSUE-104→fixed）、`gate_defer` **8 passed/0 ignored**（a/b/f/g/h + 超限 + 辅助）、`software_team_v1` **11 passed/1 ignored**（c/e 当前 smoke 11/21 运行期；full 60/116 仅 validate/结构/hash）；e2e **58/0/2**、workspace **694/0/3**；稳定性口径 = 两 target 连跑 **3 次** + `smoke_rework` 过滤 **5 次**（无全量 5 轮）。**已知教训**：merge 门禁曾因并发调用序 flake 失败，e2e 作者改为**单 item rework profile** 消除（final 校准）。
+  - e2e（**REV-072 已通过**（N1 后 §7 + 单 item 加固 §8 增量复核）；e2e 分支待合并，HEAD 以合并时为准）：`tests/fixtures/graphs/defer_gate/**`（a/b/f/g）、`tests/fixtures/trace/{schema_v3_seed.sql,v0.1.0_expected_trace.json,seed_graph.json,GENERATION.md}`（h/ISSUE-104→fixed）、`gate_defer` **8 passed/0 ignored**、`software_team_v1` **11 passed/1 ignored**；**c/e 运行期用 `--profile rework-item` 5/7**（hash as-built `79dd51c684ffc771`，合并后以实测为准），full 60/116 与 smoke 11/21 仅 validate/结构/hash；e2e **58/0/2**、空载 workspace **694/0/3**；**稳定性**：4 CPU busy-loop + 全 e2e 并行下 e2e 连续 **5 轮 58/0/2**。**已知教训**：首版 smoke 3-item 并发下 fake LLM 全局调用序交错 → merge 门禁 flake；改单 item 后确定（并发重入由 kernel `defer_reentry` 覆盖）。
   - e2e 跨批事实：`tests/fixtures/trace/**`（v3 seed/golden）按 §6.3 属 e2e 交付；AGENTS §2 的 e2e 路径清单未含该目录 → process/docs 后续同步（**ISSUE-111**）；REV-072 N2/N3（rework 图 L2 outputs 无直接 e2e、4 个新增测试函数 >60 行）→ **ISSUE-110**。
   - 遗留：**ISSUE-104**（v3 seed；**fixed**）、**ISSUE-105**（`verdict_json` 损坏读取口径待定案）、**ISSUE-106**（trace 测试强度/命名/DDL 守卫）、**ISSUE-107**（kernel N1–N7）、**ISSUE-108**（dsl N5–N8）、**ISSUE-109**（py-worker S1）、**ISSUE-110**（e2e L2/测试行数）、**ISSUE-111**（e2e trace fixture 路径归属）、**ISSUE-112**（full rework 运行期未覆盖）；ISSUE-100/101 → fixed；ISSUE-062 保持 open（本批不修）；`architecture-v2.md` 历史口径仅加 banner 注记。
 - **后续**：W2a 合并后按 §4 顺序进入 W2b（每节点最大扇出限制）→ W3a0 → W3a → W3b(可选) → W4a → W4b。

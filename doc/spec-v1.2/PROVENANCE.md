@@ -140,9 +140,9 @@
     - **08**：§8.9.1 追加 W2a 实现证据表（模块/commit/REV/测试计数/as-built 偏差/台账），不改 8.0–8.9 历史。
     - **DR-005 / DR-004**：DR-005 §7.5 R1–R5 修正（超限证据/§7 h L1 拆分/行 8→9/伪代码 3-4-8/commit 数）；AC-14 as-built 注；DR-004 §10 追加 W2a0+W2a 执行记录（不改原决策）。
     - **索引/架构**：`doc/index.md` reviews 范围补 REV-067–072（073 待评审）、DR-005/SOP 描述；`doc/architecture-v2.md` 只加 banner 注记指向 02 R15 / 00 §0.4（18 码），不改 D1–D12 历史。
-    - **e2e 证据（REV-072 已通过；e2e 分支待合并，最终 HEAD 以合并时为准）**：`gate_defer` **8 passed/0 ignored**（a/b/f/g/h + 超限 + 2 辅助）、`software_team_v1` **11 passed/1 ignored**（real-LLM manual）；e2e **58/0/2**、workspace **694/0/3**；**稳定性口径** = 两 target 连跑 **3 次** + `smoke_rework` 过滤 **5 次**（无全量 5 轮）。07 AC-14 c/e/f/h 按实测校准（c/e 规模/断言待 e2e final 单 item profile）：c（c 当前 smoke 11/21 运行期；前进/feedback 边 attempt0/1 的真实 `deferred`/`verdict`；P1 消费 round2 review；archer 拿返工后最终产物）、e（victim 不写死、恰一 Crashed W attempt=3、超限那次求值不产生 GateResult / 更早轮次 attempt0-1 行保留、其它边仍可有行）、f（`verdict` 为原始路径值：`passed=false` 而 `verdict=true`）、h（seed 新 run `verdict="seed"`；defer 自环新库真实 bool/int；`max_attempts=1` 首轮即超限自环边 0 行 GateResult）。**ISSUE-104 → fixed**（e2e 分支 + REV-072）；full rework 60/116 运行期未覆盖 → **ISSUE-112**。
+    - **e2e 证据（REV-072 已通过；e2e 分支待合并，最终 HEAD 以合并时为准）**：`gate_defer` **8/0**、`software_team_v1` **11/1 ignored**；**c/e 运行期用 `--profile rework-item` 5/7**（hash as-built `79dd51c684ffc771`，合并后以实测为准），full 60/116 与 smoke 11/21 仅 validate/结构/hash；e2e **58/0/2**、空载 workspace **694/0/3**；**稳定性**：4 CPU busy-loop + 全 e2e 并行下 e2e 连续 **5 轮 58/0/2**（首版 3-item 并发因 fake LLM 全局调用序交错 flake → 单 item 后确定）。07 AC-14 c/e/f/h 按实测校准：c（4 calls；W/R/P 0/1；前进/feedback 边真实 `deferred`/`verdict`；P1 消费 round2 review；archer 拿返工后最终产物）、e（victim 固定 `planer_specification`；W [0,1,2,3]、R/P [0,1,2]；forward 三轮 false+deferred；feedback 仅 attempt0/1 两行，超限那次求值不入库）、f（`verdict` 为原始路径值：`passed=false` 而 `verdict=true`）、h（seed 新 run `verdict="seed"`；defer 自环新库真实 bool/int；`max_attempts=1` 首轮即超限自环边 0 行 GateResult）。**ISSUE-104 → fixed**（e2e 分支 + REV-072）；full rework 60/116 运行期未覆盖 → **ISSUE-112**。
     - **台账**：新增 ISSUE-104（v3 seed；**已 fixed**）、ISSUE-105（`verdict_json` 口径）、ISSUE-106（trace 测试/守卫）、ISSUE-107（kernel N1–N7）、ISSUE-108（dsl N5–N8）、ISSUE-109（py-worker S1）、ISSUE-110（e2e L2/测试行数）、ISSUE-111（e2e trace fixture 路径归属）、ISSUE-112（full rework 运行期未覆盖）；ISSUE-100/101 → fixed；ISSUE-062 保持 open。
-    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6389 行**）。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6385 行**）。
 
 ## 3. 文件清单（SHA-256 + 行数）
 
@@ -155,10 +155,10 @@
 | `04-节点接口与扩展点.md` | 46247060b7b9da82656773aac7b98267b2c9e5cb959a14b054ac7e98e4ead513 | 906 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
 | `06-存储与可观测.md` | 8ab4b5e2d62d3c0bca304de4d9e8af10def9c955073c76401bfb02ecb89fc9ee | 1117 |
-| `07-验收用例.md` | 440af69793ae4970d6207c40856ffdf326a589f6f9e765a8989ab806dee009e9 | 334 |
-| `08-审计关闭矩阵.md` | deded461b5b4aed2676f2ec92dabeed8089b2cd354c3e188278cc02971340caf | 524 |
+| `07-验收用例.md` | 21e0ea21ab34c915e27e9f76f54cde8a70f6ce15b4ae0784c73534d0bd3a906c | 330 |
+| `08-审计关闭矩阵.md` | e7483be19d9f0df54eceb917b1b5869ce2b909d7be1b87b445988060facd0f19 | 524 |
 
-> 00–08 合计 **6389 行**（`wc -l` 口径；2026-10-31 **W2a 实现回写批次后**实测（REV-073；00/01/02/03/04/06/07/08 **净 +51 行**（新增 87/删除 36），见 §2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条）；此前 W1 SOP v1 批次为 6051 行、M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6672 行）。
+> 00–08 合计 **6385 行**（`wc -l` 口径；2026-10-31 **W2a 实现回写批次后**实测（REV-073；00/01/02/03/04/06/07/08 **净 +51 行**（新增 87/删除 36），见 §2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条）；此前 W1 SOP v1 批次为 6051 行、M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6668 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 

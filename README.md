@@ -14,7 +14,7 @@
 
 **W2a0（设计冻结，REV-067）**：[DR-005](doc/decisions/DR-005-w2a-defer-gate-freeze.md) + spec 00–08 回写（`on_gate_false`、R15/`DSL_DEFER_NOT_REENTRANT`、trace schema v4、SOP v1.1 双 profile、07 AC-14）。
 
-**W2a（实现，REV-068–072）**：dsl/trace/py-worker/kernel+cli 已合入 `main`（`e7578f1` 时点）；e2e 分支 `test/e2e-gate-defer`（REV-072 已通过；待合并）：`gate_defer` 8/0、`software_team_v1` 11/1 ignored、e2e 58/0/2、workspace 694/0/3（最终计数以合并时为准）。证据见 [07 AC-14](doc/spec-v1.2/07-验收用例.md)、[PROVENANCE](doc/spec-v1.2/PROVENANCE.md)、[progress](doc/progress.md)。
+**W2a（实现，REV-068–072）**：dsl/trace/py-worker/kernel+cli 已合入 `main`（`e7578f1` 时点）；e2e 分支 `test/e2e-gate-defer`（REV-072 已通过；待合并）：`gate_defer` 8/0、`software_team_v1` 11/1 ignored；c/e 运行期 `--profile rework-item` 5/7；e2e 58/0/2、空载 workspace 694/0/3（最终计数以合并时为准）。证据见 [07 AC-14](doc/spec-v1.2/07-验收用例.md)、[PROVENANCE](doc/spec-v1.2/PROVENANCE.md)、[progress](doc/progress.md)。
 
 **下一步**：W2b（每节点最大扇出限制）→ W3a0 → W3a → W3b(可选) → W4a → W4b（[DR-004](doc/decisions/DR-004-v02-scope-and-waves.md) §4）。
 
