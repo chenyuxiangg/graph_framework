@@ -131,3 +131,21 @@ for i in 1 2 3 4 5; do cargo test -p zgraph-e2e --offline --test software_team_v
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（本记录结论为「通过」，无未关闭条件；N1–N4 为非阻塞建议）。
+
+## 7. 追加复审（N1 关闭，2026-10-31）
+
+- **范围**：`2b2efb2..301b91f`，1 提交 `301b91f`（`test(e2e): 收紧 AC-14 g deadlock message 断言（REV-072 N1）`，正文含 `Review: REV-072` / `Agent: trace-writer`），**1 file +9/−2**（仅 `tests/e2e/gate_defer.rs`；`git diff 2b2efb2..301b91f --name-status` 无其它文件）。
+- **N1 关闭证据**：
+  - 删除原恒真断言 `contains("blocked") && contains("b")`（`"b"` 被 `"blocked"` 包含而失效、未锁 edge）；
+  - 改为两条**确定性逐字片段**断言：`contains("deferred receipt(s) blocked on edge(s) [2]")` + `contains("target node(s) [b] never instantiated")`——`[2]`/`[b]` 均无法被 `"blocked"` 子串满足，**不再恒真**，且同时锁 edge 索引与 target node；
+  - 保留 exit 1 / `RUN_DEADLOCK` / `b` 零实例 / 3 行 gate / 2 条 deferred 等既有断言（diff 仅 message 段 +9/−2，无其它语义改动）。
+  - 口径核对：实际 message 为 `deferred receipt(s) blocked on edge(s) [2]: target node(s) [b] never instantiated`（独立手工复跑同图确认）；与 kernel REV-071 `defer_gate::blocked_deferred_receipt_fails_immediately_with_deadlock` 的 `edge(s) [2]`/`[b]` 断言口径一致（本节断言比 kernel 片段更严格）。
+- **独立验证**（HEAD `301b91f`）：
+  ```bash
+  cargo test -p zgraph-e2e --offline   # 58 passed / 0 failed / 2 ignored（gate_defer 8 passed / 0 failed / 0 ignored）
+  cargo test -p zgraph-e2e --offline --test gate_defer   # 8 passed / 0 failed（含 blocked_deferred_receipt_fails_with_run_deadlock）
+  bash scripts/dev/check.sh            # CHECK PASSED（exit 0）
+  git status --porcelain --branch      # ## test/e2e-gate-defer...origin/main [ahead 6]；clean
+  ```
+- **其它建议处置**（按 Lead 安排）：N2（rework L2 outputs 覆盖）与 N3（>60 行测试函数）**转 ISSUE-110**，由 W2a-docs 批次登记台账；N4（h 落点与 DR-005 §7.1 差异）由 W2a-docs 校准落点表。
+- **结论**：N1 关闭；REV-072 结论维持 **通过**（无阻塞/重要项；N2/N3 转 ISSUE-110、N4 待 W2a-docs，均不阻塞 e2e 合并）。本追加段提交只改 `doc/reviews/**`，未改产品/测试。
