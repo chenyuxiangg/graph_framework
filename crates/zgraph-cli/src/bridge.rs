@@ -582,10 +582,8 @@ fn map_transition(
 
 /// 映射门控结果；`edge_index` 由 `usize` 收窄为 `i64`（溢出取 `i64::MAX`）。
 ///
-/// **过渡态（W2a）**：trace schema v4 已落地 `deferred`/`attempt`/`verdict` 三字段，
-/// 真实值由 W2a kernel 分支（`feat/kernel-deferrable-gate`）在 `kernel::GateResultRecord`
-/// 中接线后在此透传；本分支（trace）先把 trace API/schema 落地并保持编译通过，因此
-/// 暂填过渡值 `deferred=false`、`attempt=0`、`verdict=None`（等价 v0.1.0 默认语义）。
+/// W2a0（DR-005 §4.1）：`deferred`/`attempt`/`verdict` 由内核 `GateResultRecord`
+/// 逐字段透传（内核决定本次求值是否 deferred、发布者实例 attempt 与路径判定值）。
 fn map_gate_result(record: &kernel::GateResultRecord) -> trace::GateResultRecord {
     trace::GateResultRecord {
         run_id: record.run_id.clone(),
@@ -597,9 +595,9 @@ fn map_gate_result(record: &kernel::GateResultRecord) -> trace::GateResultRecord
         gate_fn: record.gate_fn.clone(),
         passed: record.passed,
         error: record.error.clone(),
-        deferred: false,
-        attempt: 0,
-        verdict: None,
+        deferred: record.deferred,
+        attempt: record.attempt,
+        verdict: record.verdict.clone(),
         ts: record.ts.clone(),
     }
 }
