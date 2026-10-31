@@ -247,6 +247,8 @@ PENDING ──run 已终态/进程崩溃──▶ 保持 PENDING（W3b 处置；
 - 预检与 INSERT 在**同一决定阶段**：先 RO 预检、再独立 RW 单事务 INSERT（`busy_timeout=5000ms`，`SQLITE_BUSY` 重试 3 次）；唯一键冲突（并发窗口）→ exit 5（`HUMAN_DECISION_EXISTS`）。
 - `HUMAN_*` 是 **CLI 命名空间**（decide 的 `--json.code`），**不写入** `runs.error_code`、不新增领域错误码（00 §0.4 不变）。
 
+> **E-11 裁决（Lead 2026-10-31）**：「instance 不存在」与「run 不存在/已终态」同属**目标不存在** → exit **1**（`HUMAN_INSTANCE_NOT_FOUND`）；「instance 存在但 status≠WaitingHuman」→ exit **5**（`HUMAN_INSTANCE_NOT_WAITING`）。实现与 06 §6.10.5 按此执行。
+
 ### 4.6 decide 自动接续裁决（DR-004 W3a0「二选一」）
 
 - **冻结：decide 自动接续**。`zgraph decide` 成功后，run（存活进程）自动把该实例推进完成并继续执行；**不存在**「先 decide、再 `resume`」的两步操作。
@@ -533,17 +535,17 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | E-8 | decide 的 `--reason` 空白 | 视为空字符串？**冻结**：`--reason` 未提供 → `NULL`；提供但全空白 → 存原样（非空校验只针对 `approver`）；不 trim 业务文本（除 approver） |
 | E-9 | `decision_id` 生成方 | **CLI decide 侧生成 UUIDv7** 并写入；run consumer 原样透传（审计/日志）；不接受用户指定 |
 | E-10 | trace 输出顺序 | HumanDecision 行在事件行之后、按 `(decided_at, decision_id)`；同一 run 的 decision 行确定性有序 |
-| E-11 | **合同内部不一致（需 Lead 裁决）**：task-11 §2.3 写「instance 不存在 → exit 1」，而 §3.4 写「instance 存在且 status=WaitingHuman（否则 exit 5）」——对「instance 不存在」的退出码口径不一致 | 本 DR 按更具体的 §2.3 冻结：**instance 不存在 → exit 1**（`HUMAN_INSTANCE_NOT_FOUND`）；**instance 存在但非 WaitingHuman → exit 5**（`HUMAN_INSTANCE_NOT_WAITING`）。已在 §12.3 列为待确认项，不阻塞设计冻结 |
+| E-11 | **合同内部不一致（**Lead 2026-10-31 已裁决**）**：task-11 §2.3 写「instance 不存在 → exit 1」，而 §3.4 写「instance 存在且 status=WaitingHuman（否则 exit 5）」——对「instance 不存在」的退出码口径不一致 | **Lead 裁决（2026-10-31）**：按本 DR 冻结口径执行——**instance 不存在 → exit 1**（`HUMAN_INSTANCE_NOT_FOUND`，与 run 不存在同属「目标不存在」）；**instance 存在但 status≠WaitingHuman → exit 5**（`HUMAN_INSTANCE_NOT_WAITING`）。§4.5/06 §6.10.5 口径为准，不再待决（见 §12.3 #5） |
 
-### 12.3 需用户/Lead 确认（不阻塞 W3a0 评审，但 W3a 实现前需定稿）
+### 12.3 已确认项（Lead 2026-10-31 裁决；W3a 实现依据）
 
-1. **决策期限缺省**：本 DR 冻结「human 节点未声明 `timeout_ms` → 无期限」（§2.3）。若用户希望「缺省 180s 与其他节点一致」，需改本 DR（会影响 AC-16 d 与 CLI 等待体验）。
-2. **Paused 期间 decide 不自动 Resume**（E-1）：是否接受？若希望 decide 后自动恢复派发，需另立决策（会改变 Pause 语义）。
-3. **trace `--json` 追加 HumanDecision 行**（§6.4）：是否接受 NDJSON 混合 kind（既有消费者需容忍新 kind 行）？若希望独立子命令/独立文件，需改契约。
-4. **`builtin.human` 作为保留 python_node 符号**（H1）：是否接受「不新增 NodeType」？这保持 DSL schema 零变更，但人类节点在 DSL 里看起来像 python_node。
-5. **合同 §2.3 与 §3.4 的退出码口径冲突（E-11）**：本 DR 暂按「instance 不存在 → exit 1」冻结；请确认是否同意，或统一为 exit 5。
+1. **决策期限缺省**：**采纳**本 DR §2.3 冻结「human 节点未声明 `timeout_ms` → 无期限」（显式例外；普通节点缺省仍 180s）。
+2. **Paused 期间 decide 不自动 Resume**（E-1）：**采纳**——decide 允许插入行且 consumer 应用决策（`WaitingHuman→Completed` + publish），但 run **保持 Paused**、不自动恢复派发；CLI 无 `pause`/`resume` 子命令，库调用方自行 Resume。Pause 语义不变。
+3. **trace `--json` 追加 HumanDecision 行**（§6.4）：**采纳**——事件行之后追加 `{"kind":"HumanDecision",...}` NDJSON 行（不写入 `events.kind`；既有消费者需容忍新 kind 行；无决策 run 输出不变）。
+4. **`builtin.human` 作为保留 python_node 符号**（H1）：**采纳**——不新增 NodeType，保持 DSL schema 零变更（02 §2.5/04 §4.4.5）。
+5. **合同 §2.3 与 §3.4 的退出码口径冲突（E-11）**：**Lead 已裁决**——instance 不存在 → **exit 1**（`HUMAN_INSTANCE_NOT_FOUND`，与 run 不存在同属「目标不存在」）；instance 存在但 status≠WaitingHuman → **exit 5**（`HUMAN_INSTANCE_NOT_WAITING`）。§4.5/06 §6.10.5 按此执行。
 
-> 以上 4 条请在 REV-078 评审中逐条确认；若有不同意见，以 Lead/用户裁决为准，并在本 DR 追加修订段（不改历史决策）。
+> 以上为 **Lead 2026-10-31 裁决记录**（追加，不改历史决策）；W3a 实现与 W3a-docs 回写按此执行。
 
 ---
 

@@ -13,4 +13,4 @@
 **阻塞**
 - 无硬阻塞；环境 `CARGO_HOME=<repo>/.cargo-home` + 离线；merge 门禁偶发 ISSUE-091 假失败（重跑通过）。
 - 台账：ISSUE-100/101/104 fixed；ISSUE-105–112 + ISSUE-113–125 open；ISSUE-062 保持 open（见 `doc/issues.md`）。
-- 待用户/Lead 确认（DR-006 §12.3，不阻塞本批复用）：human 决策期限缺省无期限、Paused 期间 decide 不自动 Resume、`trace --json` 追加 HumanDecision 行、`builtin.human` 保留符号形态。
+- DR-006 §12.3 五项已由 Lead 2026-10-31 裁决/采纳（期限缺省无期限、Paused decide 不自动 Resume、trace HumanDecision 行、保留符号形态；E-11：instance 不存在 → exit 1、非 WaitingHuman → exit 5）。

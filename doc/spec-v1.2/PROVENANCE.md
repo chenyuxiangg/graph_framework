@@ -175,7 +175,7 @@
     - **06**：banner；schema **v5**（§6.2.2 版本表/§6.2.5/§6.2.7 CHECK 增 WaitingHuman；新增 **§6.2.14 `human_decisions`**）；§6.6 C13 写者模型；§6.7 v4→v5 迁移（备份/重建两表/新表/单事务/失败恢复/只读拒绝）与测试矩阵；§6.10.1 五子命令；§6.10.4 trace 决策摘要/NDJSON；§6.10.5 decide 退出码（含 5）；§6.10.6 decide/HumanDecision JSON；新增 **§6.10.8 `zgraph decide`**。
     - **07**：banner/通过标准 AC-01..AC-16；§7.1 人工评审图资产（W3a 交付，设计）；§7.2 增 AC-16 行；新增 **AC-16 a–g（设计冻结：approve 真链路 / reject+W2a 返工 / 冲突幂等退出码 / 决策期限 / v4→v5 迁移与 v3→v5 链回放 / decide×run 并发 / 默认 golden 不变）**；§7.3 #3 改 AC-16。**测试名/计数由 W3a 实现后 W3a-docs 回写**（本批不写 as-built）。
     - **关键裁决**：① human 不改 DSL schema（保留符号，无新 NodeType/领域错误码）；② `WaitingHuman` 为非静默等待态（`is_quiescent` 显式含之）；③ 决策为一次性完成（不重跑；W2a 重入产生新实例）；④ 决策期限 = `timeout_ms`，缺省**无期限**（显式例外）；⑤ trace v5 重建两表（SQLite CHECK 不可 ALTER）；⑥ `HUMAN_*` 仅 CLI 命名空间。
-    - **待用户/Lead 确认（DR-006 §12.3）**：决策期限缺省无期限、Paused 期间 decide 不自动 Resume、`trace --json` 追加 HumanDecision 行、`builtin.human` 保留符号形态；不阻塞本批复用。
+    - **Lead 2026-10-31 裁决（DR-006 §12.2 E-11 / §12.3）**：决策期限缺省无期限、Paused 期间 decide 不自动 Resume、`trace --json` 追加 HumanDecision 行、`builtin.human` 保留符号形态均采纳；E-11 按「instance 不存在 → exit 1（`HUMAN_INSTANCE_NOT_FOUND`）、存在但非 WaitingHuman → exit 5（`HUMAN_INSTANCE_NOT_WAITING`）」执行。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6795 行**；00 317→330、01 348→390、02 950→958、03 526→592、04 906→933、06 1119→1219、07 372→420；`doc/spec-v1.2/README.md` 行数表同步）。
 
 ## 3. 文件清单（SHA-256 + 行数）
