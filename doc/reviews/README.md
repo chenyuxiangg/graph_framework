@@ -66,6 +66,7 @@
 | [REV-062](REV-062-docs-software-team-sop-v1.md) | 2026-10-31 | docs | `docs/docs-software-team-sop-v1` | 通过（首轮有条件通过；C1–C6 关闭、S1–S7/R1–R6 落实，附录 A validate 通过；R7–R8 非阻塞备注） | reviewer-sop |
 | [REV-063](REV-063-docs-v02-kickoff.md) | 2026-10-31 | docs | `docs/docs-v02-kickoff` | 通过（r5 关闭 C1–C13/S11；S12 环检测细则为非阻塞建议） | reviewer-sop |
 | [REV-064](REV-064-py-worker-software-team-parse-verdict.md) | 2026-10-31 | py-worker | `feat/py-worker-software-team-parse-verdict` | 通过（W1 v1 parse_verdict：approved/透传/异常契约；44 passed；S1/S2 非阻塞建议） | reviewer-sop |
+| [REV-065](REV-065-e2e-software-team-v1.md) | 2026-10-31 | e2e | `test/e2e-software-team-v1` | 有条件通过（full/smoke e2e 5 passed/1 ignored；C1 HARNESS_MAX_ITERATIONS e2e 待补；S1–S3 建议） | reviewer-sop |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
