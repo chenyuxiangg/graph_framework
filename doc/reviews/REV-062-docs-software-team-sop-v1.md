@@ -1,25 +1,23 @@
 # REV-062 · docs · software_team SOP 设计稿 v1（设计角色主链 + 工作 agent + per-item 评审）
 
 - **分支**：`docs/docs-software-team-sop-v1`
-- **作者**：`lead`（设计稿初版 `05cab0d`、修复提交 `fa53677`；提交正文含 `Review: REV-062` / `Agent: lead`）
-- **评审人**：`reviewer-sop`（**≠ 作者**；独立评审；首轮评审提交 `b07897c`）
-- **变更范围**：`5d43c58..fa53677`：初版 `05cab0d` 新增 `doc/design/software-team-sop-v1.md`（284 行）+ `doc/index.md` 1 行；修复 `fa53677` 仅改设计稿（296 行 diff，+170/−126）；评审记录与索引由 `b07897c`（reviewer-sop）增加。全部在 `doc/**`，**无代码/测试/配置改动**；复审前 worktree clean；base 即 `origin/main`（`5d43c58`）
-- **评审时间**：2026-10-31（首轮 + 增量复审同日）
+- **作者**：`lead`（设计稿初版 `05cab0d`；修复 `fa53677`（C1–C5/S1–S7）、`e522606`（C6/R1–R6）；提交正文含 `Review: REV-062` / `Agent: lead`）
+- **评审人**：`reviewer-sop`（**≠ 作者**；首轮评审提交 `b07897c`，二次复审 `ae38ad0`）
+- **变更范围**：`5d43c58..e522606`：初版 `05cab0d`（设计稿 284 行 + `doc/index.md` 1 行）；`fa53677`（仅设计稿 +170/−126）；`e522606`（设计稿 + `doc/index.md`，24 插入/21 删除）；评审记录/索引由 `b07897c`、`ae38ad0` 增加。全部在 `doc/**`，**无代码/测试/配置改动**；复审前 worktree clean；base 即 `origin/main`（`5d43c58`）
+- **评审时间**：2026-10-31（首轮 + 两次续审同日）
 - **关联**：DR-001（技术路线）；spec v1.2 分册 00/01/02/03/04/05；ISSUE-011/ISSUE-062；`legacy/config/software_team_graph.json`、`legacy/graph_base_design.md`（冻结只读）；用户 2026-10-31 确认的设计方向
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（第三次复审 `e522606`：C6 关闭、R1–R6 落实，无新阻塞/重要问题；首轮「有条件通过」与二次「新 C6」的历史记录保留于 §3/§6）
 
-> 首轮（`05cab0d`）为有条件通过；修复 `fa53677` 已关闭 C1–C5、落实 S1–S7（证据见 §6.2/§6.3）。**增量复审新发现 C6（阻塞）**：评审"内部重做"的产物没有进入下游的通道（见 §3 C6 / §6.5）。**C6 关闭前不得合并**（`merge.sh` 只接受记录结论为"通过"）。
+方向判定：设计稿忠实于用户确认的方向——设计类角色是**主链关键节点**、设计角色**派发工作 agent**、工作 agent 产物由**评审节点**评审（`design_reviewer` 资产被多个节点共享，替代共享评审队列）、下游 `trigger: "all"` **等 inputs 到齐**；人工评审、图级有限返工、每节点最大扇出限制、动态 N、共享评审队列均已**明确延期到下一版本**（§1.2/§9 与用户口径一致，未把延期能力写成已支持）。`e522606` 采用关闭条件 (b)：v1 取消"内部重做"，评审 tool loop 只做只读验证，不通过即 `P` 抛错 → run `Failed`，与"工作 agent output 不可变"（04 §4.5）自洽。
 
-方向判定：设计稿忠实于用户确认的方向——设计类角色是**主链关键节点**、设计角色**派发工作 agent**、工作 agent 产物由**评审节点**评审（`design_reviewer` 资产被多个节点共享，替代共享评审队列）、下游 `trigger: "all"` **等 inputs 到齐**；人工评审、图级有限返工、每节点最大扇出限制、动态 N、共享评审队列均已**明确延期到下一版本**（§1.2/§9 与用户口径一致，未把延期能力写成已支持）。
-
-> 首轮问题与四维结论见 §2/§3（保留原文，行号对应 `05cab0d` 版本）；复审后四维复核见 §6.1。
+> 复审历史：首轮四维与发现见 §2/§3（行号按 `05cab0d`）；二次复审（`fa53677`）证据见 §4.1/§6.2/§6.3；三次复审（`e522606`）证据见 §4.2/§6.1/§6.4/§6.5；残留 R7–R8 为可读性建议（§6.6，不阻塞）。
 
 ## 2. 四维评审
 
-> 下表为首轮（`05cab0d`）四维结论，保留原文；复审复核见 §6.1（功能正确性因 C6 仍为 ⚠️）。
+> 下表为首轮（`05cab0d`）四维结论，保留原文；三次复审后的复核见 §6.1（四维均已通过）。
 
 | 维度 | 结论 | 依据（文件/行 + 实测） |
 |---|---|---|
@@ -30,7 +28,7 @@
 
 ## 3. 发现清单
 
-> 下表为首轮发现（行号按 `05cab0d`）；状态列已按 `fa53677` 更新。C6 为增量复审新发现（行号按 `fa53677`，见 §6.5）。
+> 下表为首轮/二次复审发现（首轮行号按 `05cab0d`）；状态列已按后续修复提交更新：C1–C5/S1–S7 → `fa53677`，C6/R1–R6 → `e522606`。
 
 | # | 级别 | 位置 | 问题 | 建议 | 状态 |
 |---|---|---|---|---|---|
@@ -46,13 +44,13 @@
 | S5 | 建议 | 同上 `:157` | "所有节点通过 `agent_id` 引用资产"不准确：`python_node`/`start`/`end` 不引用 agent 资产 | 改为"`agent_call` 节点通过 `agent_id` 引用资产；资产根由 CLI `--assets-dir` / `ZGRAPH_ASSETS` 提供" | 已落实（`fa53677`） |
 | S6 | 建议 | 同上 `:48,:120` | "重做次数受 `max_iterations`（默认 10，上限 50）约束"术语不准：`max_iterations` 是**LLM 调用轮次上限**（05 §5.2.2/§5.5.2），不是重做次数；一次迭代可含多个 tool call | 改为"评审 agent 的 LLM 轮次预算受 `max_iterations` 约束（默认 10，上限 50）；重做的 tool call 计入该预算" | 已落实（`fa53677`） |
 | S7 | 建议 | 同上 `:153-158` | 未说明工作 agent 的实现载体与既有资产复用：main 已有 `python/workers/software_team/{planer,archer}.py`（M3 迁移的纯函数 worker，legacy `planer_proc`/`archer_proc` 语义），设计未提是否作为 W（`python_node`）复用 | 在 §3/§4/§6 说明各 item 的 W 载体（agent / python_node）与复用关系，避免重复实现 | 已落实（`fa53677`） |
-| C6 | **阻塞** | `fa53677` 版 `§5.1:122-133`、`§5.2:135-142`、`§3:71-78`、`§7:198-206` | **评审"内部重做"的产物没有进入下游的通道（C1 修复后暴露的新矛盾）**。§5.1 规定 `verdict="rework"` 时评审 agent 调用修复工具"重做"并重新评审；但按 §5.2，`P` 的 `artifact` 输入端来自 `W`、输出"原样透传 `W` 的整包产物"。`R`（评审 agent）的输出固定为四字段 `{content, stop_reason, iterations, usage}`（05 §5.9），修复工具的结果只存在于 `R` 的 tool-loop 上下文；§5.1 的 `content` 示例也只有 `verdict/comments`。因此即使重做后评审为 approved，下游拿到的仍是**重做前的 W 产物**；若重做不改变 W 产物，则要么评审放行陈旧产物、要么 `P` 抛错 → run Failed，"内部重做"形同虚设（D7/§5.4「质量不合格走内部重做消化」不成立）。注：W 的 output 在 04 §4.5 中是整包广播的不可变值，`R` 的 tool 调用无法写回 W 实例输出 | 需在定稿前给出可执行通路，三选一：(a) 给 `R` 的输出契约增加 `artifact`（修复工具产出的最终产物），`P` 优先采用 `review.content.artifact`、缺省回退 `W.artifact`，并同步 §5.1/§5.2/§7/附录 A/§11；(b) 明确"内部重做"=只做检查/校验、不修改产物（删除"修复工具重做"表述，重写 D7/§5.1/§5.4 的语义）；(c) 其它能证明修复产物进入 `P` 的显式机制（若需要框架/内核改动，则应移入 v0.2 并相应调整 D7/D8） | open |
+| C6 | **阻塞** | `fa53677` 版 `§5.1:122-133`、`§5.2:135-142`、`§3:71-78`、`§7:198-206` | **评审"内部重做"的产物没有进入下游的通道（C1 修复后暴露的新矛盾）**。§5.1 规定 `verdict="rework"` 时评审 agent 调用修复工具"重做"并重新评审；但按 §5.2，`P` 的 `artifact` 输入端来自 `W`、输出"原样透传 `W` 的整包产物"。`R`（评审 agent）的输出固定为四字段 `{content, stop_reason, iterations, usage}`（05 §5.9），修复工具的结果只存在于 `R` 的 tool-loop 上下文；§5.1 的 `content` 示例也只有 `verdict/comments`。因此即使重做后评审为 approved，下游拿到的仍是**重做前的 W 产物**；若重做不改变 W 产物，则要么评审放行陈旧产物、要么 `P` 抛错 → run Failed，"内部重做"形同虚设（D7/§5.4「质量不合格走内部重做消化」不成立）。注：W 的 output 在 04 §4.5 中是整包广播的不可变值，`R` 的 tool 调用无法写回 W 实例输出 | 需在定稿前给出可执行通路，三选一：(a) 给 `R` 的输出契约增加 `artifact`（修复工具产出的最终产物），`P` 优先采用 `review.content.artifact`、缺省回退 `W.artifact`，并同步 §5.1/§5.2/§7/附录 A/§11；(b) 明确"内部重做"=只做检查/校验、不修改产物（删除"修复工具重做"表述，重写 D7/§5.1/§5.4 的语义）；(c) 其它能证明修复产物进入 `P` 的显式机制（若需要框架/内核改动，则应移入 v0.2 并相应调整 D7/D8） | 已关闭（`e522606`，采用条件 (b)） |
 
 > 级别口径：阻塞 = 必须修复后才能给"通过"；重要 = 必须修复或登记 ISSUE；建议 = 可后置，但需修复或进台账。
 
 ## 4. 验证命令与结果
 
-> 以下为首轮（`05cab0d`）证据，保留原文；增量复审（`fa53677`）证据见 §4.1。
+> 以下为首轮（`05cab0d`）证据，保留原文；二次复审（`fa53677`）证据见 §4.1；三次复审（`e522606`）证据见 §4.2。
 
 ```bash
 # --- 范围与干净度（首轮评审前）---
@@ -132,111 +130,138 @@ sqlite3 /tmp/rev062-trace.db "select status,output_json from runs;"
 # ✓ graph valid: 4 nodes, 3 edges, 0 subgraphs (graph_hash=52b9bd9dba110144)
 ```
 
-- 规格/实现核对（文档断言 ↔ 依据，均为一致项）：`agent_call` 输出固定四字段（05 §5.9）；`max_iterations` 默认 10/上限 50、`HARNESS_MAX_ITERATIONS → Crashed → Failed`（05 §5.2.2/§5.7）；gate 在发布者执行任务内、投递前求值、只拦截边（04 §4.6.1、`crates/zgraph-kernel/src/gate.rs:1-45`）；gate 拦截后的下游 Skipped/`RUN_DEADLOCK`（03 §3.4.2/§3.9.3/§3.15、`crates/zgraph-kernel/src/run.rs:1010-1035,1253-1310`）；`end` 约束（02 §2.4 R4/R12、01 §1.9）；`subgraph` 加载通过/运行期拒绝（02 §2.6.4）；`WaitingHuman` 不产生（00 §0.3 注）；每 run worker 上限 8（03 §3.5/§3.13、`crates/zgraph-worker/src/executor.rs:38`）；工具串行（05 §5.5.3）；R14c 仅查存在性（02 §2.6.3）；`--assets-dir`/`ZGRAPH_ASSETS`（`crates/zgraph-cli/src/validate.rs:100-104`、`run_cmd.rs:98,120`）。
-- legacy 核对：`legacy/config/software_team_graph.json` 为 12 节点/25 边、11 条 `*_loop` 自环、5 条 `driver:"manual"`、`tick_period_s:300` —— 文档 §1.2/§8 的这些数字**正确**；但首轮 §4 的"下一阶段 T"汇入关系与 legacy 依赖不一致（C3，已在 `fa53677` 改为依赖矩阵）。
+- 规格/实现核对（文档断言 ↔ 依据，均为一致项）：`agent_call` 输出固定四字段（05 §5.9）；`max_iterations` 默认 10/上限 50、`HARNESS_MAX_ITERATIONS → Crashed → Failed`（05 §5.2.2/§5.7）；gate 在发布者执行任务内、投递前求值、只拦截边（04 §4.6.1、`crates/zgraph-kernel/src/gate.rs:1-45`）；gate 拦截后的下游 Skipped/`RUN_DEADLOCK`（03 §3.4.2/§3.9.3/§3.15、`crates/zgraph-kernel/src/run.rs:1010-1035,1253-1310`）；`end` 约束（02 §2.4 R4/R12、01 §1.9）；`subgraph` 加载通过/运行期拒绝（02 §2.6.4）；`WaitingHuman` 不产生（00 §0.3 注）；`entry_inputs` 注入（03 §3.2/02 §2.3.4）；每 run worker 上限 8（03 §3.5/§3.13、`crates/zgraph-worker/src/executor.rs:38`）；工具串行（05 §5.5.3）；R14c 仅查存在性（02 §2.6.3）；`--assets-dir`/`ZGRAPH_ASSETS`（`crates/zgraph-cli/src/validate.rs:100-104`、`run_cmd.rs:98,120`）。
+- legacy 核对：`legacy/config/software_team_graph.json` 为 12 节点/25 边、11 条 `*_loop` 自环、5 条 `driver:"manual"`、`tick_period_s:300` —— 文档 §1.2/§8 的这些数字**正确**；首轮 §4 的"下一阶段 T"汇入关系与 legacy 依赖不一致（C3，已在 `fa53677` 改为依赖矩阵）。
 - 本分支仅文档改动，未跑 `cargo test`/`pytest`（合并门禁会执行 build + workspace test + clippy + pytest；本次 `check.sh` 已含 `cargo fmt --check` 且无代码可测）。探针使用 main 工作区 12:56 构建的 `target/debug/zgraph`（base `5d43c58` 与分支零代码差异）。
 
-### 4.1 增量复审证据（`fa53677`）
+### 4.1 二次复审证据（`fa53677`，C1–C5/S1–S7）
 
 ```bash
 # --- 修复范围（只应改设计稿）---
 git diff b07897c..fa53677 --stat
 #  doc/design/software-team-sop-v1.md | 296 ++++++++++++++++++++++++-------------
 #  1 file changed, 170 insertions(+), 126 deletions(-)
-git diff 05cab0d..fa53677 --name-status
-#  M doc/design/software-team-sop-v1.md
-#  M doc/reviews/README.md            （上一评审提交 b07897c）
-#  A doc/reviews/REV-062-docs-software-team-sop-v1.md（同上）
 git status --porcelain              # 空（复审前 worktree clean）
-git rev-parse HEAD                  # fa53677
+bash scripts/dev/check.sh           # CHECK PASSED
+
+# --- 附录 A 重新提取并实跑（/tmp/rev062_appendixA_v2.json）---
+/Users/zyzs/lczyzs/code/zgraph/target/debug/zgraph validate /tmp/rev062_appendixA_v2.json
+# ✓ graph valid: 5 nodes, 6 edges, 0 subgraphs (graph_hash=15f4501150237554)   [exit 0]
+
+# --- C2 机制探针：python_node 抛未捕获异常 ---
+/Users/zyzs/lczyzs/code/zgraph/target/debug/zgraph run /tmp/rev062_raise.json \
+  --inputs '{"p":{"message":"hi"}}' \
+  --python /Users/zyzs/lczyzs/code/zgraph/.venv/bin/python --python-path python \
+  --python-path /tmp/rev062_probe --db /tmp/rev062-raise.db --json
+# status=Failed, error={"code":"NODE_PYTHON_EXCEPTION","message":"node 'p' failed: python exception: bad review json"}
+# => P 抛异常 → Crashed → run Failed 的机制成立（常量见 crates/zgraph-kernel/src/types.rs:77/466）
+```
+
+- legacy 依赖矩阵逐项比对（`legacy/config/software_team_graph.json` 的 iport）：`mde/te ← archer 3 份`、`mte/ste ← te`、`fo ← mde 2 份`、`mto ← mte+fo`、`sto ← ste+mto`、`qa ← sto`、`release ← qa`、`end ← release 3 份` —— 与修订后 §4.1 一致。
+- 参考图规模核算：16 work items；节点 11 + 16*3 + 1 = 60；边 16*5 + P→下游 20 = 100 ✓。
+
+### 4.2 三次复审证据（`e522606`，C6/R1–R6）
+
+```bash
+# --- 修复范围（设计稿 + doc/index.md，无代码）---
+git show --stat --oneline e522606
+#  doc/design/software-team-sop-v1.md | 43 ++++++++++++++++++++------------------
+#  doc/index.md                       |  2 +-
+#  2 files changed, 24 insertions(+), 21 deletions(-)
+git diff ae38ad0..e522606 --name-status
+#  M doc/design/software-team-sop-v1.md
+#  M doc/index.md
+git status --porcelain              # 空（复审前 worktree clean）
+git rev-parse HEAD                  # e522606
 
 # --- 自检 ---
 bash scripts/dev/check.sh
 # CHECK PASSED（身份/冻结文件/分支/语法/cargo fmt/git diff --check 全 OK）
 
-# --- 附录 A 重新提取并实跑（提取脚本同 §4，输出 /tmp/rev062_appendixA_v2.json；39 行）---
-/Users/zyzs/lczyzs/code/zgraph/target/debug/zgraph validate /tmp/rev062_appendixA_v2.json
+# --- 附录 A 重新提取并实跑（/tmp/rev062_appendixA_v3.json，39 行）---
+/Users/zyzs/lczyzs/code/zgraph/target/debug/zgraph validate /tmp/rev062_appendixA_v3.json
 # ✓ graph valid: 5 nodes, 6 edges, 0 subgraphs (graph_hash=15f4501150237554)   [exit 0]
-# 与设计稿 :275 图注哈希一致；补 assets-dir 时会按 R14c 报 DSL_AGENT_NOT_FOUND（设计稿未声明资产索引，属预期）
+# 与设计稿 :278 图注哈希一致
 
-# --- C2 机制探针：python_node 抛未捕获异常 ---
-# /tmp/rev062_probe/probe_worker.py 的 run() 直接 raise ValueError("bad review json")
-/Users/zyzs/lczyzs/code/zgraph/target/debug/zgraph run /tmp/rev062_raise.json \
-  --inputs '{"p":{"message":"hi"}}' \
-  --python /Users/zyzs/lczyzs/code/zgraph/.venv/bin/python --python-path python \
-  --python-path /tmp/rev062_probe --db /tmp/rev062-raise.db --json
-# {"ok":false,"status":"Failed",...,"error":{"code":"NODE_PYTHON_EXCEPTION",
-#   "message":"node 'p' failed: python exception: bad review json"}}
-# => P 抛异常 → Crashed → run Failed 的机制成立（C2 关闭依据；常量见 crates/zgraph-kernel/src/types.rs:77/466）
-
-# --- 参考图规模核算（按 §4.1 依赖矩阵）---
-# 16 work items；节点 11 + 16*3 + 1 = 60；边 16*5 + P→下游 20 = 100 ✓（与 §4.1/§7/§8 一致）
+# --- 关键残留项检索（应均已清除/改写）---
+grep -n "N=3" doc/design/software-team-sop-v1.md          # 无匹配（R2 已改）
+grep -n "§9.2" doc/design/software-team-sop-v1.md          # 无匹配（R3 已改）
+grep -n "内部重做\|修复工具" doc/design/software-team-sop-v1.md  # 无匹配（C6 按条件 (b) 删除重做表述）
+grep -n "无 artifact 端口" doc/design/software-team-sop-v1.md   # 无匹配（R5 已改为"无框架级 artifact 端口/存储"）
+grep -n "design/software-team-sop" doc/index.md            # :9 已改"设计角色依赖 DAG"（R6）
 ```
 
-- legacy 依赖矩阵逐项比对（`legacy/config/software_team_graph.json` 的 iport）：`mde/te ← archer 3 份`、`mte/ste ← te`、`fo ← mde 2 份`、`mto ← mte+fo`、`sto ← ste+mto`、`qa ← sto`、`release ← qa`、`end ← release 3 份` —— 与修订后 §4.1 一致（C3 关闭依据）。
-- C6 依据：`agent_call` 输出固定四字段、`content` 为字符串（05 §5.9/§5.9.1）；节点 output 为**不可变整包**，每条出边收到同一份值（04 §4.5）；设计稿 §5.2 规定 `P.artifact` 来自 `W`、原样透传 `W` 的产物；§5.1 的 `R` 输出 `content` 只含 `verdict/comments`。评审修复工具的结果仅存在于 `R` 的 tool-loop 上下文，没有进入 `P.artifact` 的通道（见 §3 C6 / §6.5）。
+- C6 关闭路径核对（采用条件 (b)）：§1.2:32（返工行）、D7:49、§5.1:123-135、§5.4:158、§6:167、§10:250、§11:263-271 均改为"v1 不做重做 / 评审 tool loop 只读验证 / 不通过即 `P` 抛错 → run Failed"；§9:238 保留 v0.2 的 rejected 边方案；与 04 §4.5（output 不可变）、05 §5.9（R 输出固定四字段）自洽。
+- R1/R2/R3/R4/R5/R6 落实位置：§7:187,196（planer `requirement` 端口 = entry 注入、不生成入边）；§7:215、§11:266,271（删除 N=3 口径）；附录 B:328（§9 第 2 项）；§3:61-68（ASCII 图补 `W→P.artifact` 分支）；D10:52、§10:251（"无框架级 artifact 端口/存储"）；`doc/index.md:9`（依赖 DAG）。
 
 ## 5. 遗留问题
 
-- **C1–C5 已关闭、S1–S7 已落实（`fa53677`，证据见 §6.2/§6.3）**。
-- **C6（阻塞）为新条件，未关闭**：评审内部重做的产物没有进入下游的通道（§6.5）；关闭前本记录结论保持"有条件通过"，不得合并。
-- R1–R6 为复审新发现的可读性/口径建议（§6.4，不阻塞）；建议作者顺手修复或由 Lead 登记 `doc/issues.md`（本评审按授权不改设计稿/台账）。
-- 修复提交 `fa53677` 只改设计稿，未越界（无代码/测试/配置/评审记录改动）；branch base = `origin/main`，复审前 worktree clean；本评审未 merge/push/切 main。
+- **C1–C6 全部关闭、S1–S7 与 R1–R6 全部落实**（证据见 §6.2–§6.5）。
+- **R7–R8 为三次复审新发现的可读性/口径建议（§6.6，不阻塞）**：建议作者顺手修或由 Lead 登记 `doc/issues.md`（本评审按授权不改设计稿/台账）；不影响本次结论。
+- 三次修复提交 `fa53677`/`e522606` 均在 `doc/**` 范围内（`e522606` 含 `doc/index.md` 摘要更新），未越界；branch base = `origin/main`，复审前 worktree clean；本评审未 merge/push/切 main。
+- 结论：本记录已改判为"通过"，可由 `scripts/dev/merge.sh docs/docs-software-team-sop-v1` 走合并门禁（仍需门禁的 build/test/clippy/pytest 全绿）。
 
-## 6. 条件关闭记录（复审 `fa53677`）
+## 6. 条件关闭记录（三次复审 `e522606`）
 
-**关闭提交范围**：`b07897c..fa53677`，1 文件 +170/−126（仅 `doc/design/software-team-sop-v1.md`）；worktree clean；`bash scripts/dev/check.sh` = CHECK PASSED。
+**关闭提交范围**：`ae38ad0..e522606`，2 文件 24 插入/21 删除（`doc/design/software-team-sop-v1.md` + `doc/index.md`）；worktree clean；`bash scripts/dev/check.sh` = CHECK PASSED。
 
-### 6.1 四维复核（复审后）
+### 6.1 四维复核（三次复审后）
 
 | 维度 | 复审结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C6 未闭） | C1 产物透传与 C2 强制失败已闭合（§3 C1/C2 状态 + §6.2）；但 C6 使"内部重做"无法改变下游产物，功能链路仍有缺口（§6.5） |
-| 代码结构合理性 | ✅ | 模型统一为"`D_i` + `W/R/P` + 依赖矩阵"：§3 模式、§4.1 矩阵、§7 codegen、附录 A 互相一致；无 `T` 概念残留（§3:80 明示） |
-| 逻辑性 | ✅（C6 除外） | 依赖关系与 legacy iport 一致；并发关系（mde/te、mte/ste）正确；失败路径唯一（`P` 抛错）、gate 仅不变量；附录 A validate 通过 |
-| 可读性 | ✅ | 版本约定/标题/条款清晰，S1–S7 已改写；残留 R1–R6 为可读性/口径建议（§6.4，不阻塞） |
+| 功能正确性 | ✅ | C1–C6 全部关闭：产物经 `W→P.artifact` 进 P 并原样透传（§5.2）；失败契约由 `P` 抛错唯一承担（§5.1/§5.2/§5.3）；v1 取消重做后与 output 不可变一致；依赖矩阵与 legacy iport 对齐；附录 A validate 通过（§4.2） |
+| 代码结构合理性 | ✅ | 模型统一为"`D_i` + `W/R/P` + 依赖矩阵"；§3 模式、§4.1 矩阵、§7 codegen、附录 A 一致；`T` 概念与重做概念均已从 v1 正文移除（仅 §9 保留 v0.2 说明） |
+| 逻辑性 | ✅ | 失败路径唯一（`P` 抛错 → `NODE_PYTHON_EXCEPTION` → `Crashed` → run `Failed`）；gate 仅不变量；等待语义 Pending；无重做/回写矛盾；`entry_inputs` 注入 planer 与 DSL R12 豁免一致 |
+| 可读性 | ✅（有残留建议） | 版本约定、标题、验收项清晰；R1–R6 已改写；残留 R7–R8 为措辞级建议（§6.6，不阻塞） |
 
-### 6.2 C1–C5 关闭证据
+### 6.2 C1–C5 关闭证据（`fa53677`）
 
-| 条件 | 关闭证据（`fa53677`） | 结论/日期 |
+| 条件 | 关闭证据 | 结论/日期 |
 |---|---|---|
-| C1（阻塞）产物交接 | §3:71-78 新增 `W→R/P` 两条数据流与"产物传播（关闭 C1）"段；§5.2:138-142 规定 `P` 输入 `review+artifact`、输出含 `artifact` 原样透传；§7:201 生成 `W→P.artifact`；附录 A:311 新增该边；§11:265 新增"下游收到完整产物"验收。复审实测附录 A validate 通过 | ✅ 关闭 2026-10-31 |
-| C2（阻塞）失败契约 | D8:50、§5.1:130-133、§5.2:140-141、§5.3:150-151、§10:247、§11:266 统一为"`P` 在非 approved / 非法 JSON 时抛异常 → `NODE_PYTHON_EXCEPTION` → `Crashed` → run `Failed`"，并写入 gate=false 实测结论；复审异常探针实测 `{"status":"Failed","error":{"code":"NODE_PYTHON_EXCEPTION",...}}` | ✅ 关闭 2026-10-31 |
-| C3（阻塞）T 语义/codegen | 全文删除 `T` 概念（§3:80 明示）；§4.1 改为依赖矩阵并逐项对齐 legacy iport；§4.2 给出依赖 DAG 执行示例；§7:177-212 改为依赖矩阵驱动（每依赖 item 一个端口、`P→下游/end` 带 approved gate）；删除"§9 并行设计阶段"引用 | ✅ 关闭 2026-10-31 |
-| C4（重要）附录 A | 附录 A 改为 5 节点/6 边（含 `W→P.artifact`），无悬空 `end`；复审实跑 `zgraph validate /tmp/rev062_appendixA_v2.json` = `✓ graph valid: 5 nodes, 6 edges, 0 subgraphs (graph_hash=15f4501150237554)`（exit 0），与图注 `:275` 哈希一致 | ✅ 关闭 2026-10-31 |
+| C1（阻塞）产物交接 | §3:71-78 新增 `W→R/P` 两条数据流与"产物传播"段；§5.2:139-144 规定 `P` 输入 `review+artifact`、输出含 `artifact` 原样透传；§7:204 生成 `W→P.artifact`；附录 A:314 新增该边；§11:268 新增"下游收到完整产物"验收；`e522606` 复审 validate 通过 | ✅ 关闭 2026-10-31 |
+| C2（阻塞）失败契约 | D8:50、§5.1:130-135、§5.2:140-143、§5.3:150-153、§10:250、§11:269 统一为"`P` 在非 approved / 非法 JSON 时抛异常 → `NODE_PYTHON_EXCEPTION` → `Crashed` → run `Failed`"；实测异常探针 `{"status":"Failed","error":{"code":"NODE_PYTHON_EXCEPTION",...}}` | ✅ 关闭 2026-10-31 |
+| C3（阻塞）T 语义/codegen | 全文删除 `T` 概念（§3:80 明示）；§4.1 依赖矩阵逐项对齐 legacy iport；§4.2 给出依赖 DAG 执行示例；§7:177-215 改为依赖矩阵驱动；删除"§9 并行设计阶段"引用 | ✅ 关闭 2026-10-31 |
+| C4（重要）附录 A | 附录 A 改为 5 节点/6 边（含 `W→P.artifact`），无悬空 `end`；三次复审实跑 `zgraph validate` = `✓ graph valid: 5 nodes, 6 edges, 0 subgraphs (graph_hash=15f4501150237554)`（exit 0），与图注一致 | ✅ 关闭 2026-10-31 |
 | C5（重要）方向表述 | `:35` 改为"评审由共享 `design_reviewer` 资产的评审节点执行（设计角色定义评审标准并对结论负责，而非由设计 agent 亲自评审）"，与 D3/§1.1/§3 一致 | ✅ 关闭 2026-10-31 |
 
-### 6.3 S1–S7 落实证据
+### 6.3 S1–S7 落实证据（`fa53677`）
 
-| 建议 | 落实证据（`fa53677`） | 结论 |
+| 建议 | 落实证据 | 结论 |
 |---|---|---|
-| S1 | §9 第 2 项（`:235`）改为"`RUN_DEADLOCK` 或 `RUN_DELIVERY_TO_TERMINAL`（视 `trigger`/gate 配置，ISSUE-062 的两种失效模式）" | ✅ 落实 |
+| S1 | §9 第 2 项（`:238`）改为"`RUN_DEADLOCK` 或 `RUN_DELIVERY_TO_TERMINAL`（视 `trigger`/gate 配置，ISSUE-062 的两种失效模式）" | ✅ 落实 |
 | S2 | D4（`:46`）改为"节点实例独立超时/独立 trace；重试仅自环（`retry.max_attempts`），v1 不使用自环" | ✅ 落实 |
-| S3 | §11（`:259`）标题改"v1 落地验收"；新增产物传播（`:265`）/失败路径（`:266`）/等待（`:267`）/规模（`:268`）验收 | ✅ 落实 |
-| S4 | §10（`:249-250`）新增 JSON 截断（MaxTokens）/围栏与评审超时预算风险；§6（`:165,170`）给出 `max_iterations` 10–20、`node_timeout_ms` 300000 | ✅ 落实 |
-| S5 | §6（`:168`）改为"只有 `agent_call` 节点通过 `agent_id` 引用资产"，并注明 `python_node`/`start`/`end` 的配置方式 | ✅ 落实 |
-| S6 | D7（`:49`）/§5.1（`:131`）明确 `max_iterations` 是 LLM 调用轮次预算、重做 tool call 计入该预算 | ✅ 落实 |
-| S7 | §6（`:171`）说明复用 `python/workers/software_team/{planer,archer}.py`；D11（`:53`）同步 | ✅ 落实 |
+| S3 | §11（`:262`）标题改"v1 落地验收"；新增产物传播/失败路径/等待/规模验收（`:266-271`） | ✅ 落实 |
+| S4 | §10（`:252-253`）新增 JSON 截断（MaxTokens）/围栏与评审超时预算风险；§6（`:167,172`）给出 `max_iterations` 10–20、`node_timeout_ms` 300000 | ✅ 落实 |
+| S5 | §6（`:170`）改为"只有 `agent_call` 节点通过 `agent_id` 引用资产"，并注明 `python_node`/`start`/`end` 的配置方式 | ✅ 落实 |
+| S6 | D7（`:49`）/§5.1（`:131-134`）明确 `max_iterations` 是 LLM 调用轮次预算（`e522606` 后重做取消，预算仅用于只读验证） | ✅ 落实 |
+| S7 | §6（`:173`）说明复用 `python/workers/software_team/{planer,archer}.py`；D11（`:53`）同步 | ✅ 落实 |
 
-### 6.4 复审新发现（建议，不阻塞）
+### 6.4 R1–R6 落实证据（`e522606`）
 
-| # | 级别 | 位置（`fa53677`） | 问题 | 建议 |
+| 建议 | 落实证据 | 结论 |
+|---|---|---|
+| R1 | §7:187 改为 `dep_ports = ... 或（planer）[requirement 端口] # entry 输入由 run 注入`；§7:196 注明 `entry_points=[planer]` 且 requirement 由 `RunSpec.entry_inputs` 注入、不生成入边 | ✅ 落实 |
+| R2 | §7:215 改为"按 §4.1 的 N_i 展开（工作 agent 合计 16 个）→ 60 节点/100 边"；§11:266,271 同步删除"N=3"口径 | ✅ 落实 |
+| R3 | 附录 B:328 改为"两种失效模式见 §9 第 2 项" | ✅ 落实 |
+| R4 | §3:61-68 ASCII 图补 `W_{i,j} ──▶ P_{i,j}.artifact` 分支（与文字/附录 A 一致） | ✅ 落实 |
+| R5 | D10:52、§10:251 改为"无框架级 artifact 端口/存储" | ✅ 落实 |
+| R6 | `doc/index.md:9` 摘要改为"设计角色依赖 DAG + 工作 agent + per-item 评审" | ✅ 落实 |
+
+### 6.5 C6 关闭证据（`e522606`，采用关闭条件 (b)）
+
+| 关闭条件 | 证据 | 结论/日期 |
+|---|---|---|
+| (b) 明确 v1 不做内部重做、评审只读验证 | §1.2:32（返工行改"v1 不做重做：评审不通过 → P 抛错 → run Failed；图级返工框架 v0.2"）；D7:49（tool loop 只做只读验证、不修改产物、v1 不做重做，理由"工作 agent output 不可变（04 §4.5），评审无法回写"）；§5.1:123-135（标题"v1 不重做"；仅 approved 放行；其它值如 rework → P 抛错 → `NODE_PYTHON_EXCEPTION` → `Crashed` → run Failed；tool loop 只读；`max_iterations` 达限 → `HARNESS_MAX_ITERATIONS` → Failed）；§5.4:158（无"等新输入"机制，不通过即 Failed，重做/回环见 §9）；§6:167（`design_reviewer` tools 仅含只读检查工具）；§10:250（v1 没有重做通道）；§9:238 保留 v0.2 rejected 边方案；§11:266-271 验收保留"非 approved/非法 JSON → Failed"，不再要求 rework→approved 断言 | ✅ 关闭 2026-10-31 |
+
+- 自洽性复核：`P` 仍是唯一失败出口（§5.2:140-143），gate 仍为不变量（§5.3:152），等待语义不变（§5.4:157）；重做取消后不再需要在 `R→P` 之间传递修复产物，C6 的根因消除。
+
+### 6.6 三次复审新发现（建议，不阻塞）
+
+| # | 级别 | 位置（`e522606`） | 问题 | 建议 |
 |---|---|---|---|---|
-| R1 | 建议 | `§7:185` | codegen 伪代码 `inputs=每个 dep item 一个端口` 对 entry `planer` 为空，未生成 run 输入 `requirement`（§4.1:90 已声明"run 输入"）；照伪代码实现会丢 entry 输入 | 在 §7 为 `planer` 显式生成 `requirement` 端口（并说明由 run 注入） |
-| R2 | 建议 | `§7:212`、`§11:263,268` | "N=3 参考图（60 节点/100 边）"与 §4.1 每角色 N_i=1–3、16 items 的参考实例口径不一致（若 N=3 指统一扇出，规模不是 60/100） | 改称"§4.1 参考实例（N_i 见该表；60/100）"，或在 §4.1 定义 N=3 的确切含义 |
-| R3 | 建议 | `附录 B:325` | "两种失效模式见 §9.2"：§9 是编号列表、无 §9.2 小节 | 改为"见 §9 第 2 项" |
-| R4 | 建议 | `§3:61-68` | ASCII 图未画 `W→P.artifact` 分支（文字 `:71/:78` 与附录 A 已体现），易被读成线性 `W→R→P` | 图中补 `W ──▶ P.artifact` 分支 |
-| R5 | 建议 | `§10:248` | "无 artifact 端口"与新增的 `P.artifact` 端口术语冲突（本条意为"无框架级 artifact 存储"） | 改为"无框架级 artifact 端口/存储" |
-| R6 | 建议 | `doc/index.md:9` | 索引摘要仍写"设计角色主链"，修订后 v1 是依赖 DAG（"主链关键节点"仍成立，但"主链"易误读为线性） | 合并/收尾时改为"设计角色依赖 DAG + 工作 agent + per-item 评审" |
+| R7 | 建议（低） | `§5.1:132` vs `:135` | verdict 取值表述有小冲突：`:132` 说非 approved 值（如 `"rework"`）由 `P` 抛错；`:135` 又说"评审不得返回其它 `verdict` 值"。若严格按 `:135`，评审只能返回 approved，失败信号无处表达；若按 `:132`，`:135` 的"其它"又需澄清 | 明确 v1 合法取值：`approved`（放行）/ `rejected`（不通过，`P` 抛错），并改写 `:135` 为"不得发明其它值；不通过用 `rejected`" |
+| R8 | 建议（低） | `§5.1:133`、`§6:167` | "只读检查工具（跑测试/lint）…不得写文件"存在张力：测试/lint 通常写 build/cache；且框架不对工具做 fs 沙箱，只读靠资产选择/审计而非强制 | 改为"不得写业务/共享产物；检查工具使用临时目录"，并在 §10 注明只读是资产/审计约定、框架不强制 |
 
-### 6.5 新条件 C6（阻塞，未关闭）
+> R7–R8 为措辞级建议，不影响失败机制（`P` 对任何非 approved 抛错已由 §5.2 唯一确定）与设计可执行性，不阻塞本次结论；建议作者顺手修复，或由 Lead 登记 `doc/issues.md`。
 
-- **位置（`fa53677`）**：§5.1:122-133、§5.2:135-142、§3:71-78、§7:198-206。
-- **问题**：`verdict="rework"` 时评审 agent 调用修复工具"重做"并重新评审（§5.1:131），但 `P` 的 `artifact` 输入来自 `W`、输出原样透传 `W` 的整包产物（§5.2:138-142）；`R` 的输出固定四字段、`content` 只含 `verdict/comments`（05 §5.9；§5.1:127 示例）——修复工具的结果留在 `R` 的 tool-loop 上下文，无法写回 `W` 的不可变 output（04 §4.5）。结论：重做不会改变下游拿到的产物，"内部重做"（D7、§5.4:156）没有可执行通路。
-- **关闭条件（三选一）**：
-  1. `R` 输出契约增加 `artifact`（修复工具产出的最终产物），`P` 优先采用 `review.content.artifact`、缺省回退 `W.artifact`，并同步 §5.1/§5.2/§7/附录 A/§11；
-  2. 明确"内部重做"= 只做检查/校验、不修改产物（删除"修复工具重做"表述，重写 D7/§5.1/§5.4 语义）；
-  3. 其它能证明修复产物进入 `P` 的显式机制；若需要框架/内核改动（如回写上游输出/新增产物通道），应移入 v0.2，并相应调整 D7/D8。
-- **验证要求**：修订后给出最小端到端断言（fake LLM：rework → approved，断言下游 `artifact` 是重做后的产物）；本记录届时新增关闭证据并改判。
-
-> **复审结论**：C1–C5、S1–S7 全部关闭/落实；新条件 C6（阻塞）未关闭，本记录结论维持"有条件通过"（`merge.sh` 不会放行），待作者修复 C6 后再次复审。
+> **最终结论**：C1–C6 全部关闭，S1–S7 与 R1–R6 全部落实；三次复审未发现新的阻塞/重要问题，本记录结论由"有条件通过"改判为**通过**。合并仍须通过 `scripts/dev/merge.sh` 的 build/test/clippy/pytest 门禁。
