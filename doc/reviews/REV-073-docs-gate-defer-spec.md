@@ -260,3 +260,60 @@ cd doc/spec-v1.2 && shasum -a 256 0*.md && wc -l 0*.md README.md PROVENANCE.md R
 - 首轮 §1 的「结论：有条件通过」经本条**修订为「结论：通过」**：S-1/S-2/S-3/S-4 全部关闭（§7.2；S-2 引用口径微调为 N-9 建议）、N-1…N-8 全部落实（§7.3）、e2e 单 item 校准核实（§7.4）、四维复审 ✅（§7.5）；残留 N-9…N-12 均为**建议/跨批时点**，不阻塞合并。
 - 合并前置已满足：评审记录含 `分支: docs/docs-gate-defer-spec` + `结论：通过` + 真实评审人；评审提交后 worktree clean；`check.sh` PASSED；范围仅 `doc/**`+根 README。合并后由 Lead 按 AGENTS §4 清理 worktree/分支并更新 `progress.md`/`issues.md`；docs 分支需在 e2e 合并后 rebase（N-11）。
 - 签字：`reviewer-docs` · 2026-10-31（增量复审）。
+
+
+---
+
+## 8. 收口复审（rebase 到 e2cba52 + N-9..N-12 关闭，2026-10-31）
+
+> 复审对象：`docs/docs-gate-defer-spec` rebase 到最新 `origin/main`（`e2cba52`，含 e2e 合并与 REV-072 §8）后的收口 commit **`9996013`**；最终 HEAD `9996013`（ahead 10，clean）。本节只确认 rebase 冲突解决与 N-9..N-12 关闭**不破坏**已达成的「通过」结论；§7.6 所列 N-9…N-12 以本节状态为准（均已关闭）。
+
+### 8.1 范围与 rebase 哈希映射
+
+- `git merge-base HEAD origin/main` = `e2cba52`；`git log --oneline origin/main..HEAD` 10 commits（ahead 10）。
+- **rebase 前 → 后哈希映射**（§1/§7/§3 记录正文中引用的原哈希以此为准）：
+
+| 原（rebase 前） | 新（rebase 后） | 内容 |
+|---|---|---|
+| `20a9b89` | `1860584` | 07 AC-14 校准 + 01/02/03/04/06 as-built |
+| `46c8b3d` | `4e9cb75` | DR-005 R1–R5 + 08 §8.9.1 + PROVENANCE 第 17 条 |
+| `6b8eb9a` | `38515c8` | 索引/架构注记/进度/台账 ISSUE-104..109 |
+| `d6561ac` | `184f029` | e2e 终证/台账/PROVENANCE 终测 |
+| `0eef2e3` | `dc43343` | 登记 ISSUE-110（REV-072 N2/N3） |
+| `d4f0550` | `4977927` | REV-073 首轮评审（有条件通过） |
+| `a35a54d` | `d9855f2` | 关闭 S-1..S-4/N1–N8 |
+| `706fcdf` | `df083a3` | 单 item rework profile 校准 |
+| `7f81835` | `f61add2` | REV-073 条件关闭复审（通过） |
+| —（新增） | `9996013` | 收口：e2e 合并同步 + N-9..N-12 关闭 |
+
+- `git diff e2cba52..9996013`：18 files +441/−102，全部 `doc/**` + 根 README（无代码/测试/配置/`CLAUDE.md`）；`9996013^..9996013`：10 files +22/−22（仅上述收口项）。
+- **唯一冲突** `doc/reviews/README.md` 已按编号解决：`README:76-77` 保留 REV-072（补 §7/§8 复核）→ REV-073（标「通过」）两行，顺序正确；`doc/index.md:21` 同步 REV-072 已合并/REV-073 待合并。
+- 范围门禁：`git diff --name-only e2cba52..HEAD | grep -E 'CLAUDE|\.rs$|\.py$|Cargo|scripts/|schemas/'` → 空；`git status --porcelain` clean（本次评审提交前）；`bash scripts/dev/check.sh` **PASSED**；`git diff --check` 通过。
+
+### 8.2 N-9..N-12 关闭证据
+
+| # | 关闭证据 | 结论 |
+|---|---|---|
+| N-9 | 稳定性口径统一为 REV-072 §8 实测：`cargo test -p zgraph-e2e` 连跑 **3 轮** 58/0/2；4 busy-loop 下 `software_team_v1` 连跑 **3 轮** 11/0/1；空载 workspace 694/0/3。落点 `07:257/:316`、`08:512`、`DR-005:595`、`DR-004:251`、`PROVENANCE:143`；grep 无「5 轮/连续 5 轮」残留（REV-072 记录中的历史「连跑 5 次」属既有评审原文，不改） | ✅ 关闭 |
+| N-10 | `issues:120` ISSUE-112 引用改为「REV-072 §8 / N2–N3」（原悬空「N6」已删） | ✅ 关闭 |
+| N-11 | 全文「e2e 分支待合并」→「e2e 已合并 `main` `e2cba52`」：`README:17`、`07:19/:50/:257`、`08:503/:512`、`DR-004:251`、`DR-005:588/:590/:595`、`PROVENANCE:136/:143`、`spec README:65`、`index:21`、`progress:5`、`ISSUE-104`；与 rebase 基线 `e2cba52` 一致 | ✅ 关闭 |
+| N-12 | `progress.md` 17 行四块结构；「e2e 已合并 main `e2cba52`」「REV-072 已通过」「REV-073 复审通过 → rebase 收口 + merge.sh；之后 W2b」与 N-9 口径同步（`progress:5/:11/:15`） | ✅ 关闭 |
+
+### 8.3 PROVENANCE 实测（收口后）
+
+```bash
+cd doc/spec-v1.2 && shasum -a 256 0*.md && wc -l 0*.md README.md PROVENANCE.md REFERENCES.md
+# 9/9 SHA-256 与 §3 表逐字一致（07 715448478ac96f02…ae9fd、08 5dc763aa358fad5a…4d97f04；
+#   00 ce92145f…d25c5 / 01 710f6c8f…bf85d / 02 04820a7d…30928 / 03 a7553b41…a640 /
+#   04 46247060…ad513 / 05 52f35e7b…bf42 / 06 8ab4b5e2…c9ee）
+# 00–08 = 6385 行（309/346/935/489/906/1429/1117/330/524）；含 README/PROVENANCE/REFERENCES = 6668 行
+# 08=524、07=330；spec README 行数表同步；§3 脚注「净 +51（新增 87/删除 36）」不变
+```
+
+- `bash scripts/dev/check.sh` PASSED（复跑一次）；`git diff --check` 通过；worktree clean（评审提交前）。
+
+### 8.4 结论与残留建议
+
+- 收口增量（rebase 冲突解决 + N-9..N-12）未破坏已完成的内容与结论，**结论维持「通过」**；merge.sh 前置（分支匹配 / `结论：通过` / 无模板占位 / worktree clean / 基于最新 `origin/main`）满足。
+- 残留建议（非阻塞）：**N-13** `PROVENANCE:137`（§2 第 17 条 07 项）仍写「e2e final **将**改单 item rework profile，c/e 规模/断言以 final 为准」（未来时；final 已完成）——建议下次 docs 触碰改为「已改/以 07 AC-14 为准」；**N-14** `progress:5` 仍写「REV-073 有条件通过」（复审已通过）——按 AGENTS §4 于合并后更新为「通过/已完成」。
+- 签字：`reviewer-docs` · 2026-10-31（收口复审）。
