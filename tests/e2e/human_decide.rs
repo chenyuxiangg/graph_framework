@@ -13,17 +13,20 @@
 //!   → TraceReader / 只读 SQL / trace / replay 断言
 //! ```
 //!
-//! 本文件当前交付 **阶段 1（不依赖 cli decide 分支）**：
+//! 本文件按 AC-16 组织：
 //!
-//! 1. `human_gate/` 四个 fixture 的静态断言（真 `zgraph validate`：`builtin.human` 保留符号、
-//!    R14 只做格式校验、hash 冻结、gate 形状冻结）；
-//! 2. `gate.function="human"` **不是**内置 gate op（仍 `DSL_SYMBOL_NOT_FOUND`，DR-006 §8）；
-//! 3. trace schema v4 seed：只读 `trace`/`replay` 对 v4 拒绝（exit 4）且**不迁移**；真 CLI `run`
-//!    打开 v4 库 → v4→v5 迁移（备份/逐列数据保留/`human_decisions` 建表）且旧 run
-//!    `trace --json` 与「迁移前 v4-era CLI 冻结 golden」逐字节一致。
-//!
-//! 阶段 2（cli decide/consumer 合并后补）：AC-16 a–d/f/g 的真链路用例；测试名与计数由
-//! W3a-docs 回写 07。
+//! - **静态层**：`human_gate/` 四个 fixture 的真 `zgraph validate`（`builtin.human` 保留符号、
+//!   R14 只做格式校验、hash/gate 形状冻结）；`gate.function="human"` **不是**内置 gate op；
+//!   trace schema v4 seed（只读拒绝不迁移、v4→v5 迁移逐列保留历史、迁移前 v4 golden 不变）；
+//! - **AC-16 a**：approve 真链路（挂起 → trace 可见 `WaitingHuman` → `decide` → 自动 Completed）
+//!   与 L2 `replay --mode=outputs`（human 实例 `recorded_outputs` 记录 + 重放不重新要求人工
+//!   决策，DR-006 §2.2/§8）；
+//! - **AC-16 b**：reject → 实例 Completed（不 Failed）→ W2a defer attempt+1 重入 → 二次
+//!   WaitingHuman → approve；终止变体 rejected settle → end；
+//! - **AC-16 c/d**：decide 预检顺序/全部退出码/`--json`；决策期限到期 TimedOut/NODE_TIMEOUT；
+//! - **AC-16 e**：v3 seed → v5 链式迁移 L1 golden 不变、v4 seed 迁移与回放；
+//! - **AC-16 f**：decide×run 并发（恰一成功/无 busy 泄漏）+ 库 API（无 SQLite/无 consumer）；
+//! - **AC-16 g**：默认图 hash/validate/trace golden 不变、human 图 + `--db :memory:` 启动前拒绝。
 //!
 //! 稳定性约定：每用例独立 `tempfile::TempDir`/trace DB；等待用轮询 + 宽松上限，不做 sleep
 //! 猜测；不新增 ignore、不放宽既有断言。
@@ -50,7 +53,7 @@ use zgraph_kernel::{
     RunStartedInfo, RunStatus as KernelRunStatus, StreamingEvent, TraceSink, TransitionRecord,
 };
 use zgraph_trace::{
-    GateResultRow, HumanDecisionRow, InstanceStatus as TraceInstanceStatus,
+    GateResultRow, HumanDecisionRow, InstanceStatus as TraceInstanceStatus, RecordedOutputRow,
     RunStatus as TraceRunStatus, TraceReader,
 };
 
@@ -2360,5 +2363,402 @@ fn ac16g_human_graph_with_memory_db_is_rejected_before_run() {
     assert!(
         entries.is_empty(),
         "启动前拒绝不得产生 run/DB 文件: {entries:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-16 a/e 补充：L2 `replay --mode=outputs`（human 实例记录与重放）
+// ---------------------------------------------------------------------------
+//
+// DR-006 §2.2/§8 L2 行冻结：`--record=full` 下 human 实例输出按 `(node_id, attempt)`
+// 记录，`replay --mode=outputs` **不重新要求人工决策**、结果与原 run 一致。
+// 记录由 CLI bridge 在 human `WaitingHuman→Completed` 迁移时补发（fix/cli-human-record）。
+
+/// 某 run 的 `recorded_outputs` 行（按 `instance_id, attempt` 升序）。
+fn recorded_rows(reader: &TraceReader, run_id: &str) -> Vec<RecordedOutputRow> {
+    reader
+        .recorded_outputs(run_id)
+        .expect("query recorded_outputs")
+}
+
+/// 断言某条记录：`output_json` 与期望一致、`output_hash` 为 64-hex blake3 且可复核。
+fn assert_recorded_output(record: &RecordedOutputRow, expected_output: &Value, context: &str) {
+    assert_eq!(
+        record.output_json.as_ref(),
+        Some(expected_output),
+        "{context}: recorded output_json"
+    );
+    assert_eq!(
+        record.output_hash.len(),
+        64,
+        "{context}: blake3 hex 应为 64 字符"
+    );
+    assert!(
+        record
+            .output_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()),
+        "{context}: output_hash 必须是 64 hex"
+    );
+    assert_eq!(
+        record.output_hash,
+        zgraph_cli::run_cmd::output_hash(expected_output),
+        "{context}: output_hash 口径与 run_cmd::output_hash 一致"
+    );
+}
+
+/// AC-16 a（L2）：approve 真链路 `--record=full` → human 实例 `recorded_outputs` 行
+/// （output_json/hash）→ `replay --mode=outputs --json` exit0/matched=true、
+/// 不产生新 run、不修改原 trace、无 REPLAY_RECORD_MISSING。
+#[test]
+fn ac16a_human_run_l2_outputs_replay_matches_recorded_outputs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("approve_l2.db");
+    let run = RunProcess::spawn(
+        dir.path(),
+        &db,
+        &human_gate_graph(APPROVE.name),
+        r#"{"start":{"message":"l2"}}"#,
+        true,
+    );
+    let (run_id, instance_id) = poll_waiting_human(&db, "approve_human", 0);
+    let decide = decide_cli(
+        dir.path(),
+        &db,
+        &run_id,
+        &instance_id,
+        "approved",
+        "l2-approver",
+        Some("L2 ok"),
+    );
+    assert_exit(&decide, 0, "L2 用例 decide approved");
+    let output = run.wait("L2 approve run");
+    assert_exit(&output, 0, "L2 用例 run Completed");
+
+    // ISSUE-089：先取 DB 字节快照，再开任何只读连接（读连接也会更新 -shm）。
+    let files_before = cli_support::db_files_snapshot(&db);
+
+    let expected_output = json!({"decision": "approved", "reason": "L2 ok"});
+    let expected_run_output = json!({"result": {"decision": "approved", "reason": "L2 ok"}});
+    {
+        let reader = TraceReader::open_readonly(&db).expect("open trace");
+        let records = recorded_rows(&reader, &run_id);
+        let mut nodes: Vec<(&str, u32)> = records
+            .iter()
+            .map(|record| (record.node_id.as_str(), record.attempt))
+            .collect();
+        nodes.sort_unstable();
+        assert_eq!(
+            nodes,
+            vec![("approve_human", 0), ("prep", 0)],
+            "human 实例必须有 L2 记录（DR-006 §2.2）；start/end 为内置节点不记录"
+        );
+        let human = records
+            .iter()
+            .find(|record| record.node_id == "approve_human" && record.attempt == 0)
+            .expect("human recorded_outputs 行");
+        assert_recorded_output(human, &expected_output, "human/attempt0");
+    }
+
+    let runs_before = cli_support::runs_count(&db);
+    let replay = run_cli(
+        &[
+            "replay".to_string(),
+            "--run".to_string(),
+            run_id.clone(),
+            "--mode".to_string(),
+            "outputs".to_string(),
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(
+        &replay,
+        0,
+        "human 图 L2 replay（不得 REPLAY_RECORD_MISSING）",
+    );
+    let payload = json_stdout(&replay);
+    assert_eq!(payload["ok"], json!(true));
+    assert_eq!(payload["command"], json!("replay"));
+    assert_eq!(payload["mode"], json!("outputs"));
+    assert_eq!(payload["run_id"], json!(run_id));
+    assert_eq!(payload["record_mode"], json!("full"));
+    assert_eq!(payload["status"], json!("Completed"));
+    assert_eq!(payload["matched"], json!(true));
+    assert_eq!(
+        payload["recorded_outputs"],
+        json!(2),
+        "prep + human 两条记录"
+    );
+    assert_eq!(payload["original_output"], expected_run_output);
+    assert_eq!(
+        payload["original_output"], payload["replayed_output"],
+        "L2 重放输出必须与原 run 输出一致（retrieve human 记录、不重新要求人工决策）"
+    );
+    assert!(
+        !stderr_text(&replay).contains("REPLAY_RECORD_MISSING"),
+        "stderr 不得出现 REPLAY_RECORD_MISSING: {}",
+        stderr_text(&replay)
+    );
+
+    // 只读：不产生新 run、不修改原 trace 字节（先文件字节、后计数，ISSUE-089）。
+    assert_eq!(
+        cli_support::db_files_snapshot(&db),
+        files_before,
+        "L2 replay 不得修改原 trace DB（主文件 + -wal + -shm）"
+    );
+    assert_eq!(
+        cli_support::runs_count(&db),
+        runs_before,
+        "replay 不得产生新 run"
+    );
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    let decisions = decision_rows(&reader, &run_id);
+    assert_eq!(decisions.len(), 1, "replay 不得重新写决策");
+    assert!(decisions[0].consumed_at.is_some());
+}
+
+/// AC-16 b/e（L2，attempt>0）：rework 两轮决策后 human attempt 0/1 均有 L2 记录，
+/// `replay --mode=outputs` matched（重放不重新要求人工决策）。
+#[test]
+fn ac16b_rework_l2_outputs_replay_uses_both_human_attempts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("rework_l2.db");
+    let run = RunProcess::spawn(
+        dir.path(),
+        &db,
+        &human_gate_graph(REWORK.name),
+        r#"{"start":{"message":"l2 rework"}}"#,
+        true,
+    );
+    let (run_id, instance0) = poll_waiting_human(&db, "rework_human", 0);
+    let reject = decide_cli(
+        dir.path(),
+        &db,
+        &run_id,
+        &instance0,
+        "rejected",
+        "bob",
+        Some("needs rework"),
+    );
+    assert_exit(&reject, 0, "rework L2 第一轮 reject");
+    let (_, instance1) = poll_waiting_human(&db, "rework_human", 1);
+    let approve = decide_cli(
+        dir.path(),
+        &db,
+        &run_id,
+        &instance1,
+        "approved",
+        "alice",
+        Some("ok now"),
+    );
+    assert_exit(&approve, 0, "rework L2 第二轮 approve");
+    let output = run.wait("rework L2 run");
+    assert_exit(&output, 0, "rework L2 run Completed");
+    let expected_run_output = json!({"result": {"decision": "approved", "reason": "ok now"}});
+
+    let files_before = cli_support::db_files_snapshot(&db);
+    {
+        let reader = TraceReader::open_readonly(&db).expect("open trace");
+        let records = recorded_rows(&reader, &run_id);
+        let human0 = records
+            .iter()
+            .find(|record| record.node_id == "rework_human" && record.attempt == 0)
+            .expect("human attempt0 记录");
+        let human1 = records
+            .iter()
+            .find(|record| record.node_id == "rework_human" && record.attempt == 1)
+            .expect("human attempt1 记录（defer 重入后逐 attempt 记录）");
+        assert_recorded_output(
+            human0,
+            &json!({"decision": "rejected", "reason": "needs rework"}),
+            "rework_human/attempt0",
+        );
+        assert_recorded_output(
+            human1,
+            &json!({"decision": "approved", "reason": "ok now"}),
+            "rework_human/attempt1",
+        );
+        assert_ne!(
+            human0.instance_id, human1.instance_id,
+            "attempt 0/1 是不同实例、各自记录"
+        );
+    }
+
+    let replay = run_cli(
+        &[
+            "replay".to_string(),
+            "--run".to_string(),
+            run_id.clone(),
+            "--mode".to_string(),
+            "outputs".to_string(),
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&replay, 0, "rework 图 L2 replay");
+    let payload = json_stdout(&replay);
+    assert_eq!(payload["matched"], json!(true));
+    assert_eq!(payload["status"], json!("Completed"));
+    assert_eq!(payload["original_output"], expected_run_output);
+    assert_eq!(payload["replayed_output"], expected_run_output);
+    assert_eq!(
+        payload["recorded_outputs"],
+        json!(4),
+        "prep×2 + human×2 共四条记录"
+    );
+    assert_eq!(
+        cli_support::db_files_snapshot(&db),
+        files_before,
+        "L2 replay 不得修改原 trace"
+    );
+    assert_eq!(cli_support::runs_count(&db), 1, "L2 replay 不得产生新 run");
+}
+
+/// AC-16 e/a（L2 反例）：人为删除 human 记录（模拟旧 run 缺记录）→ 预检 exit3
+/// `REPLAY_RECORD_MISSING`、快速拒绝（不进入重跑/不挂起）、不产生新 run。
+#[test]
+fn ac16a_l2_replay_rejects_missing_human_record() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("missing_human_record.db");
+    let run = RunProcess::spawn(
+        dir.path(),
+        &db,
+        &human_gate_graph(APPROVE.name),
+        r#"{"start":{"message":"old-run"}}"#,
+        true,
+    );
+    let (run_id, instance_id) = poll_waiting_human(&db, "approve_human", 0);
+    let decide = decide_cli(
+        dir.path(),
+        &db,
+        &run_id,
+        &instance_id,
+        "approved",
+        "alice",
+        None,
+    );
+    assert_exit(&decide, 0, "missing-record 用例 decide");
+    assert_exit(&run.wait("missing-record run"), 0, "missing-record run");
+
+    // 模拟「旧 run / 未补录 human 记录」：直接删除 human 的 recorded_outputs 行。
+    {
+        let conn = cli_support::connect(&db);
+        let deleted = conn
+            .execute(
+                "DELETE FROM recorded_outputs WHERE run_id = ?1 AND node_id = 'approve_human'",
+                [&run_id],
+            )
+            .expect("delete human recorded output");
+        assert_eq!(deleted, 1, "应恰删除一条 human 记录");
+    }
+    let runs_before = cli_support::runs_count(&db);
+
+    let started = Instant::now();
+    let replay = run_cli(
+        &[
+            "replay".to_string(),
+            "--run".to_string(),
+            run_id.clone(),
+            "--mode".to_string(),
+            "outputs".to_string(),
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    let elapsed = started.elapsed();
+    assert_exit(
+        &replay,
+        3,
+        "缺 human 记录 → exit 3（REPLAY_RECORD_MISSING）",
+    );
+    let stderr = stderr_text(&replay);
+    assert!(stderr.contains("REPLAY_RECORD_MISSING"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("approve_human"),
+        "错误消息应指出缺失节点: {stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "缺记录必须快速拒绝、不进入重跑挂起（{elapsed:?}）"
+    );
+    assert_eq!(
+        cli_support::runs_count(&db),
+        runs_before,
+        "预检失败不得产生新 run"
+    );
+}
+
+/// AC-16 a（`--record=hash`）：human 行同样被记录（fix 的行集合变化属设计预期），
+/// 但 `output_json` 为 NULL；L2 replay 因 record_mode≠full 快速 exit3。
+#[test]
+fn ac16a_human_hash_record_mode_has_no_output_json() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("hash_mode.db");
+    let run = RunProcess::spawn(
+        dir.path(),
+        &db,
+        &human_gate_graph(APPROVE.name),
+        r#"{"start":{"message":"hash"}}"#,
+        false,
+    );
+    let (run_id, instance_id) = poll_waiting_human(&db, "approve_human", 0);
+    let decide = decide_cli(
+        dir.path(),
+        &db,
+        &run_id,
+        &instance_id,
+        "approved",
+        "alice",
+        Some("hash mode"),
+    );
+    assert_exit(&decide, 0, "hash 模式 decide");
+    assert_exit(&run.wait("hash 模式 run"), 0, "hash 模式 run");
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    let run_row = common::run_row(&reader, &run_id);
+    assert_eq!(
+        run_row.record_mode.as_deref(),
+        Some("hash"),
+        "默认 record 模式为 hash"
+    );
+    let records = recorded_rows(&reader, &run_id);
+    let human = records
+        .iter()
+        .find(|record| record.node_id == "approve_human" && record.attempt == 0)
+        .expect("hash 模式同样记录 human 行（行集合变化属 fix 设计预期）");
+    assert_eq!(
+        human.output_json, None,
+        "hash 模式只写 output_hash、不写 output_json"
+    );
+    assert_eq!(human.output_hash.len(), 64, "hash 恒写 64-hex");
+    drop(reader);
+
+    // L2 预检只看 run.record_mode：hash → exit3（且不重跑/不挂起）。
+    let replay = run_cli(
+        &[
+            "replay".to_string(),
+            "--run".to_string(),
+            run_id,
+            "--mode".to_string(),
+            "outputs".to_string(),
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&replay, 3, "hash 模式 L2 replay 应 exit3");
+    let stderr = stderr_text(&replay);
+    assert!(stderr.contains("REPLAY_RECORD_MISSING"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("requires --record=full"),
+        "应提示 --record=full: {stderr}"
     );
 }
