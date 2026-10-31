@@ -619,3 +619,47 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 - `bash scripts/dev/check.sh` 必须 PASSED；PROVENANCE §3 的 SHA-256/行数以实测为准；合并前由独立评审人写 `doc/reviews/REV-078-docs-human-design.md`，结论必须为「通过」（AGENTS §3/§4）。
 - W3a 实现完成后由 W3a-docs 做 as-built 回写（新增 PROVENANCE 第 2 条、回写 07 AC-16 测试名/计数、08 §8.7 备注）。
 - **REV-078 条件修复（C1–C5）**：本批在 `docs/docs-human-design` 追加修复提交（C1 副作用顺序/C2 consumer 总是提交/C3 预检顺序与二次 decide 码/C4 文档事实/C5 设计补全）；残留 P3 建议登记 `doc/issues.md`（ISSUE-126 起）；**复审通过（REV-078，复审记录 `05a5803`）**；R1–R4 复审残留已由合并前小 commit 收口。
+
+---
+
+## 15. W3a 实现执行记录（as-built，2026-11-01，REV-084；只追加）
+
+> 本 DR 是 W3a 实现的唯一语义依据；本节只追加**实现/评审/合并事实与偏差**，不改 §2–§13 冻结语义。来源：REV-079..083、main `2444548`、各实现分支工作树。
+
+### 15.1 分支、提交、评审与合并点
+
+| 模块 | 分支 / 实现提交 | 评审记录 | 合并点（main） | 测试证据 |
+|---|---|---|---|---|
+| trace | `feat/trace-human-decisions` / `4cae6b9` | REV-079（reviewer-a 主审 + lead e2e 机械第二评审） | `adf54a1` | trace **79/0**（migration 15 / decisions 11）；v1–v4→v5、备份/失败恢复/只读拒绝；e2e `gate_defer` 8/8 |
+| kernel | `feat/kernel-human-wait` / `ab4b805` + `72036b6`（cli 机械 arm） | REV-080（reviewer-b 主审 + lead cli 第二评审） | `390dbe1` | kernel **122/0**、`--features test-hooks` **132/0**、cli **162/0**；`human_wait` 9、`state_machine` 9×9、`compile` 映射 |
+| cli | `feat/cli-decide` / `4d671a0` + `c711232` | REV-081（reviewer-a） | `971e48f` | cli **198/0**（decide 15 + human_decide 7） |
+| cli fix | `fix/cli-human-record` / `c3022ea` | REV-082（reviewer-a） | `9006345` | cli **206/0**；workspace **798/0/3**；L2 human 补录 + replay handler 替换 |
+| e2e | `test/e2e-human-decide` / `05383d0` + `5128f53` + `2ac54c2` | REV-083（reviewer-b） | `2444548` | e2e **85/0/2**（human_decide **21/0**，连跑 3 次稳定）；workspace **819/0/3** |
+| docs | `docs/docs-human-spec`（本批） | REV-084（待评审；评审人待定） | 本分支待合并 | check.sh / PROVENANCE §3 实测 |
+
+### 15.2 as-built 实现要点（与 §2–§7 的对应）
+
+- **触发模型（§2）**：`compile_python_handler` 精确匹配 `module == "builtin"` 且 `function == "human"` → `CompiledHandler::Human`；其它 `builtin.*` 仍普通 Python handler；不 import/不启 worker。
+- **生命周期（§3）**：`enter_waiting_human` 在 `Pending→WaitingHuman` 前写 `instances.input` 全端口快照；仅 `declared_timeout_ms` 声明时登记 deadline；期限用 `started_instant` 自等待起点计，Paused 下 watchdog 仍扫描；`is_quiescent`/`check_deadlock` 含/排除 `WaitingHuman`；`cancel_active_instances` 覆盖 `WaitingHuman→Cancelled`。
+- **决策（§4）**：顺序「写 output+清 deadline → transition(Completed，快照带 output) → publish → `human_decided`」；校验三值 `instance_missing`/`not_current`/`not_waiting_human`；不通过不改状态、不 fail run；Paused 下应用但**不派发**。
+- **表/写者（§5）**：C13 落地——`TraceWriter` 不写 `human_decisions`；`decide` 独立 RW 单事务 INSERT；run consumer 独立 RW 只更新 `consumed_at`；WAL+busy_timeout/重试；未消费行归 W3b。
+- **trace v5（§6）**：`TRACE_SCHEMA_VERSION=5`；v4→v5 备份/单事务/重建 instances+transitions CHECK/新表+pending 索引；v1–v4→v5 链；只读拒绝 `expected 5`；`DecisionError::{Conflict,Trace}`、`human_decisions.decision: String`。
+- **CLI（§7）**：`zgraph decide` 实现（预检顺序/退出码 0/1/2/4/5/70/`--json`/不建库/不迁移）；consumer 按需启动、专线程 DB/主循环 control/bridge 确认；trace/replay 决策行；human+`:memory:` 启动前拒绝。
+
+### 15.3 as-built 偏差（已由评审裁决/接受）
+
+| # | 偏差 | 裁决/依据 |
+|---|---|---|
+| D1 | `DecisionError::{Conflict,Trace}` 独立于 `TraceError`（不做新 variant） | REV-079 N5：避免 cli 三处穷举 match 破裂；Conflict→exit5、Trace→exit4；W3a-docs 记录 |
+| D2 | `human_decisions.decision: String`（非枚举） | REV-079 N7：存储层与表同构、避免 trace→kernel 依赖倒置；闭集由表 CHECK + CLI 校验 |
+| D3 | consumer 拓扑拆分（专线程 DB / 主循环 control / bridge 确认）+ 按需启动（仅 human 图） | REV-081 N5：DR §7.3 未冻结线程拓扑/允许按需启动；语义一致 |
+| D4 | human + `:memory:` 时既有内存库 warning 先于预检错误输出 | REV-081 N4：DR 只冻结 exit3/不产生 run/reason；无冲突 |
+| D5 | L2：bridge 在 transition 前补录 human `recorded_outputs`；replay `--mode=outputs` 替换 human handler 为 `RecordedExecutor` 驱动的 Python | REV-082 N5：与 DR §8 L2 一致且安全；仅 replay 进程内图、不改 `graph_hash` |
+| D6 | `--record=hash` 时 human 行存在、`output_json=NULL`（L2 仅 full） | REV-082 N7/REV-083 N4：与其它节点口径一致；e2e 用例锁定 |
+| D7 | `--quiet` 抑制两类决策行、保留错误/存储告警 | REV-081 N4：符合 DR §7.3 #5 |
+| D8 | trace 决策行不受 `--limit/--since-seq/--kinds` 过滤；NDJSON 键序非契约 | REV-081 N6/N8：DR 未规定过滤/键序；形状是契约 |
+| D9 | E-6：`applied=true` 确认在 publish 后发送；若 publish 触发 fail_run/run 已终态则确认丢弃、决策行留 PENDING | REV-080 N4：与 DR E-6 一致（W3b 处置；W3a 不重试） |
+
+### 15.4 遗留建议（已登记台账）
+
+ISSUE-129..ISSUE-140（映射 REV-079/080/081/082/083；含 trace 迁移索引/跨连接唯一键、busy 口径、kernel trace-disabled/多端口/rejected 逐边/E-6/超时首错、cli paused/JSON/SIGINT/过滤/`Ok(false)`、e2e pgrep/v4 seed/时间包络、trace `channels` FK flake 观察、cli human-record 维护性）。**W3a 实现不新增阻塞项**；下一步 W4a（W3b durable resume 可选，需用户确认）。

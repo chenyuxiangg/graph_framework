@@ -80,6 +80,12 @@
 | [REV-076](REV-076-e2e-max-fanout.md) | 2026-10-31 | e2e | `test/e2e-max-fanout` | 通过（W2b AC-15 a/b/c 真链路：静态反例/正例/运行期 test-hooks；`max_fanout` 6/0、e2e 64/0/2、workspace 725/0/3；P3 建议 → ISSUE-121–124） | reviewer-a |
 | [REV-077](REV-077-docs-fanout-spec.md) | 2026-10-31 | docs | `docs/docs-fanout-spec` | 通过（条件关闭见记录 §6；W2b spec 00/01/02/03/06/07 回写 + PROVENANCE 第 18 条 + AC-15/索引/台账；C1–C4 于条件修复提交关闭） | reviewer-b |
 | [REV-078](REV-078-docs-human-design.md) | 2026-10-31 | docs | `docs/docs-human-design` | 通过（首轮有条件通过 → C1–C5 关闭 + R1–R4 收口后复审通过；W3a0 设计冻结：DR-006 + spec 00/01/02/03/04/06/07 冻结 + trace v5/decide 契约 + AC-16 设计） | reviewer-b |
+| [REV-079](REV-079-trace-human-decisions.md) | 2026-10-31 | trace | `feat/trace-human-decisions` | 通过（schema v5：WaitingHuman CHECK/重建两表/human_decisions+pending 索引/v1–v4→v5 迁移；trace 79、workspace 741/0/3；e2e 机械改动第二评审 lead；P3 建议 → ISSUE-129/130） | reviewer-a |
+| [REV-080](REV-080-kernel-human-wait.md) | 2026-10-31 | kernel（含 cli 机械 arm） | `feat/kernel-human-wait` | 通过（WaitingHuman 生命周期/builtin.human/HumanDecision 控制通道；kernel 122、test-hooks 132、cli 162；P3 建议 → ISSUE-131/132/133） | reviewer-b（主审）+ lead（cli 第二评审） |
+| [REV-081](REV-081-cli-decide.md) | 2026-10-31 | cli | `feat/cli-decide` | 通过（zgraph decide/consumer/trace 决策行/`:memory:` 预检；cli 198、workspace 790/0/3；P3 建议 → ISSUE-134/135/136 + 环境观察 ISSUE-137） | reviewer-a |
+| [REV-082](REV-082-cli-human-record.md) | 2026-11-01 | cli | `fix/cli-human-record` | 通过（human L2 recorded_outputs 补录 + replay outputs handler 替换；cli 206、workspace 798/0/3；P3 建议 → ISSUE-140） | reviewer-a |
+| [REV-083](REV-083-e2e-human-decide.md) | 2026-11-01 | e2e | `test/e2e-human-decide` | 通过（AC-16 a–g 真链路 + L2 human outputs；human_decide 21/0、e2e 85/0/2、workspace 819/0/3、3 次稳定；P3 建议 → ISSUE-138/139） | reviewer-b |
+| [REV-084](REV-084-docs-human-spec.md) | 2026-11-01 | docs | `docs/docs-human-spec` | 待评审（W3a as-built 回写：spec 00/01/03/04/06/07/08 + DR-006 §15 + AC-16 实测 + PROVENANCE；本分支） | —（待定） |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
@@ -95,3 +101,5 @@
 - W2b（已全部合并到 main，2026-10-31）：REV-074（dsl `max_fanout` + R16，dsl-dev/reviewer-a）、REV-075（kernel 运行期每激活扇出上限 + `NODE_FANOUT_EXCEEDED` + cli 机械 arm，kernel-dev；reviewer-b 主审 + lead cli 第二评审）、REV-076（e2e AC-15 静态/正例/运行期 test-hooks，e2e-dev/reviewer-a）、REV-077（docs spec 回写 00/01/02/03/06/07 + PROVENANCE 第 18 条 + AC-15/索引/台账，docs-dev/reviewer-b；首轮有条件通过，C1–C4 于条件修复提交关闭后复审通过）。
 
 - W3a0（已全部合并到 main，2026-10-31）：REV-078（docs 设计冻结：DR-006 + spec 00/01/02/03/04/06/07 冻结 + AC-16 a–g 设计 + trace schema v5/decide 契约，docs-dev/reviewer-b；首轮有条件通过 → C1–C5 关闭 + R1–R4 收口后复审通过）。下一步 W3a 实现（trace v5 → kernel WaitingHuman → cli decide/consumer → e2e AC-16）。
+
+- W3a（已全部合并到 main，2026-11-01）：REV-079（trace v5/`human_decisions`，trace-dev/reviewer-a；e2e 机械第二评审 lead）、REV-080（kernel `WaitingHuman`/`builtin.human`/`HumanDecision`，kernel-dev；reviewer-b + lead cli 第二评审）、REV-081（cli `decide`/consumer/trace 决策行，cli-dev/reviewer-a）、REV-082（cli human L2 记录/replay 适配，cli-dev/reviewer-a）、REV-083（e2e AC-16 a–g 真链路，e2e-dev/reviewer-b）；合并点 `adf54a1`→`390dbe1`→`971e48f`→`9006345`→`2444548`；docs as-built 回写为 REV-084。下一步 W4a（W3b durable resume 可选，需用户确认）。

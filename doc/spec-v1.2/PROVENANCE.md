@@ -194,20 +194,35 @@
       - **小 commit 后** 00–08 合计 **6815 行**（00 330、01 393、02 959、03 596、04 933、05 1429、06 1226、07 425、08 524；相对 `05a5803` spec numstat **+12/−11，净 +1**）；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7151 行）。
     - 条件修复后（`90fa845`）00–08 合计 **6814 行**（03 595；其余同 R 修复后除 03 外）；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准。
 
+22. **W3a 实现回写批次**（2026-11-01，REV-084；分支 `docs/docs-human-spec`，base = 本地 `main` `2444548`）：
+    - **来源（已合并实现）**：trace `4cae6b9`（REV-079；合并 `adf54a1`）、kernel `ab4b805`+`72036b6`（REV-080；合并 `390dbe1`）、cli `4d671a0`+`c711232`（REV-081；合并 `971e48f`）、cli fix `c3022ea`（REV-082；合并 `9006345`）、e2e `05383d0`+`5128f53`+`2ac54c2`（REV-083；合并 `2444548`）。本批**按实际实现校准 as-built**，不改 W3a0 冻结语义；无 human 图行为/hash/trace 不变。
+    - **改动分册**：00/01/03/04/06/07/08（另 `doc/decisions/DR-006...md` §15、`doc/spec-v1.2/README.md` 行数表、`doc/reviews/README.md`、`doc/index.md`、`doc/progress.md`、`doc/issues.md`、DR-004 §10）。
+    - **00**：banner + as-built——`WaitingHuman` 实际产生；`HUMAN_DECISION_POLL_MS=200` 落地；`zgraph decide` 实现、`HUMAN_*` 仍只作 decide `--json.code`（不写 `runs.error_code`）；`RunControl` 新 variant（Copy→Clone，source-breaking 见 08 §8.10）。
+    - **01**：banner + as-built——状态机 **9 状态/13 合法迁移**（`state_machine` 9×9）；`Pending→WaitingHuman` 旁路与迁移前 `instances.input` 全端口快照、`human_waiting` reason、`declared_timeout_ms` 才登记 deadline；`HumanDecisionRecord` 10 字段、sink 默认 no-op/Emitter 串行化；`human_wait.rs` 9 用例断言 input/迁移/无 worker/无 Running。
+    - **03**：banner + §3.2/§3.4.5 as-built——决策顺序（写 output+清 deadline → transition 快照 → publish → `human_decided`）；consumer 拓扑（`DecisionSession`/`decision_consumer_loop`/`submit_human_decisions`/`HumanDecisionObserver`）与按需启动、`mark_consumed` 幂等、退出 flush、`--quiet`/`:memory:` warning 口径；`applied=false` 三值；迟到决策仍 consumed；Paused decide 不派发；期限 `started_instant`/Paused 扫描/无 worker kill；E-6 确认丢弃边界；`force_node_timeout_ms` 对 human 不生效。
+    - **04**：banner + §4.4.5 as-built——`builtin.human` 精确映射 `CompiledHandler::Human`（`compile.rs` 双反向断言）；其它 `builtin.*` 仍 Python；L2 `replay --mode=outputs` 的 human handler 替换（clone 进程内图 → `RecordedExecutor` 返回 `(node_id,attempt)` 记录；不改 graph_hash/dsl/events；缺失记录预检 exit3）。
+    - **06**：banner + as-built——schema v5（`TRACE_SCHEMA_VERSION=5`、v4→v5 重建两表/新表+pending 索引/备份/单事务/失败恢复；v1–v4→v5 链；只读 `expected 5`；旧行逐列一致；trace 79/0，迁移测试 15，评审探针 27/27）；`DecisionError::{Conflict,Trace}` 独立、`decision: String`、C13 写者；`trace --json` 决策行（不受过滤/键序非契约）；`zgraph decide` 退出码/不建库/不迁移/Paused；human+`:memory:` 启动前拒绝。
+    - **07**：banner + **AC-16 a–g 改为实测**——`tests/e2e/human_decide.rs` **21 用例**（a 4 / b 3 / c 1 / d 1 / e 3 / f 3 / g 3 + 静态 3；测试名逐一回写），e2e **85/0/2**（human_decide 21/0，连跑 3 次稳定）、workspace **819/0/3**；v3→v5 链/v4→v5 迁移/L2 human outputs/`:memory:` 拒绝/golden 不变均有实测断言；W1 SOP 不变由既有 AC-13/AC-14 套件覆盖。
+    - **08**：新增 **§8.10 W3a 注记**（实现证据表 + source-breaking 兼容备注 + as-built 偏差/遗留）；§8.7 兼容备注位追加指引——不重写 8.0–8.9 历史快照。
+    - **DR-006**：追加 **§15 W3a 实现执行记录**（分支/提交/评审/合并点/测试、as-built 要点、偏差 D1–D9、遗留建议）。
+    - **台账/索引**：`doc/issues.md` 新增 **ISSUE-129–140**（REV-079/080/081/082/083 未修 P3，含 ISSUE-137 P2 trace FK flake 环境观察、非 W3a 引入）；`doc/reviews/README.md` 补 REV-079–083 索引行 + REV-084（本分支待评审）+ W3a 收口段；`doc/index.md`/`doc/progress.md` 状态同步（W3a 完成、下一步 W4a；W3b 可选需用户确认）。
+    - **测试证据（as-built）**：trace **79/0**；kernel **122/0**、`--features test-hooks` **132/0**；cli **206/0**；e2e **85/0/2**（human_decide **21/0**，3 轮稳定）；空载 workspace **819/0/3**；pytest **170**；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`、`bash scripts/dev/check.sh` 全绿。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6883 行**；相对 main `2444548` **净 +68 行**（新增 100/删除 32）；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7236 行））。
+
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | a233bd846984ba61ac10c84d9c4c69afded3f59cbf4622dea523f9d4688d909e | 330 |
-| `01-领域模型与状态机.md` | 619ce97d6119cad8b6c5aab446b91cdaa13d349eb9554e72687b0a29a0feefcf | 393 |
+| `00-总纲.md` | f76b1726de2bce0477f2797d3d379401b7ade42e52c084b29541e20e941389e0 | 333 |
+| `01-领域模型与状态机.md` | 8fffde58aa15dc4a7089784f8be163ca5855d825dc0da8bbb7996de1111078bb | 398 |
 | `02-DSL与校验.md` | f57d257aabebe0127190b5cd457bc507babc005342c29cfb92cce0b1694b516e | 959 |
-| `03-调度器与生命周期.md` | 3d7d78bd92e53421ec79ce1938f5eb03cd8f7670da08f24418acf8cd98c5e054 | 596 |
-| `04-节点接口与扩展点.md` | c4cafcab5e58688b12a435914408a879e44d2ebf81fdb490d554721e67de4ef1 | 933 |
+| `03-调度器与生命周期.md` | b29d89dfc624c8cff9fdfe3f3e38e4be082c4d8ad92ac8556cd432da074ecc27 | 601 |
+| `04-节点接口与扩展点.md` | ec676faaf9a3c06a1397a6b6616f7247a8e04967e754fc41e616002bc5566339 | 936 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | 476878e032cfea496d542913970d03f969fce229e36751febbb025c89c643dbf | 1226 |
-| `07-验收用例.md` | b7c9f78187c3012bc066a90d37ed53aa3c77a26d7a16d664e83eff57084f88d4 | 425 |
-| `08-审计关闭矩阵.md` | 5dc763aa358fad5a7ead77a10dc995f4362433bbe237b2248b4a339234d97f04 | 524 |
+| `06-存储与可观测.md` | 9f02d9fea8a6a79b86657fe1f6e4a6e8709c7d4e07e69ea17c3be176078bab61 | 1237 |
+| `07-验收用例.md` | b9ebb3ef1f9119ee937a635a8cc6918fd023161e537ee4e3219300cf52d61469 | 429 |
+| `08-审计关闭矩阵.md` | 5d5ff39fb5393b924ac26ec43e5a70fd85c24ecb1a7e0035867ca41178a8112c | 561 |
 
-> 00–08 合计 **6815 行**（`wc -l` 口径；2026-10-31 **W3a0 设计冻结 + REV-078 条件修复 + R1–R4 小 commit 后**实测（REV-078；相对 main **净 +324 行**（新增 375/删除 51），见 §2 第 20–21 条；冻结批次 6795/§2 第 20 条；条件修复 +19（spec numstat +59/−40）/§2 第 21 条；R1–R4 小 commit +1（spec numstat +12/−11））；此前 W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7151 行）。
+> 00–08 合计 **6883 行**（`wc -l` 口径；2026-11-01 **W3a as-built 回写批次后**实测（REV-084；相对 main `2444548` **净 +68 行**（新增 100/删除 32），见 §2 第 22 条）；此前 W3a0 冻结 + R1–R4 批次 6815 行/§2 第 20–21 条；W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7236 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
@@ -232,3 +247,4 @@ wc -l 0*.md
 - **W2a0 返工设计冻结已完成（2026-10-31，REV-067）**：00/01/02/03/04/06/07/08 已按 DR-005 冻结 deferrable gate（`on_gate_false`）、R15/`DSL_DEFER_NOT_REENTRANT`、`DeferredReceipt`/attempt-per-activation（per-port 继承 + `settled_by_node` 重置）、trace schema v4、AC-14；SOP 设计稿升 v1.1。**本批是设计冻结，不代表 W2a 实现完成**；实现偏差由 W2a-docs 回写。`doc/architecture-v2.md` 的 `R1–R14`/17 码口径未在本批同步（DR-005 §11 C-7），建议 W2a-docs/process 收口。
 - **W2b spec 回写已完成（2026-10-31，REV-077）**：00/01/02/03/06/07 已按已合并实现（REV-074 dsl / REV-075 kernel+cli / REV-076 e2e）回写 R16 静态扇出上限、`NODE_FANOUT_EXCEEDED` 运行期防御层、`CompiledNode.max_fanout`、`NodeError` canonical JSON 与 07 AC-15；`doc/architecture-v2.md` 顶部注记同步为 R1–R16（历史表述保持冻结）；默认无 `max_fanout` 的图行为/hash/错误序列与 v0.1.0 逐字节一致。台账新增 ISSUE-113–125（113–124 为 REV-074/075/076 P3，125 为 03 §3.2 预存偏差）；`doc/progress.md` 已更新为 W2b 完成、下一步 W3a0；REV-077 复审条件 C1–C4 已由条件修复批次关闭（见 §2 第 19 条）。
 - **W3a0 人工评审设计冻结已完成（2026-10-31，REV-078）**：00/01/02/03/04/06/07 已按 [`DR-006`](../decisions/DR-006-w3a-human-decide-freeze.md) 冻结 human lifecycle（`builtin.human` 保留符号、`WaitingHuman` 非静默等待、decide 自动接续/无 `resume`、`human_decisions`+C13 写者、trace schema v5、CLI decide 退出码 5、AC-16 a–g 设计）。**本批是设计冻结，不代表 W3a 实现完成**；本批不写 as-built，实现偏差由 W3a-docs 回写；07 AC-16 的测试名/计数待实现后补。REV-078 首轮「有条件通过」的 C1–C5 已由条件修复批次关闭（见 §2 第 21 条），**复审通过（REV-078，复审记录 `05a5803`）**；R1–R4 复审残留已由合并前小 commit 收口；残留 P3 建议登记 ISSUE-126–128。
+- **W3a 实现回写已完成（2026-11-01，REV-084）**：00/01/03/04/06/07/08 已按已合并实现（REV-079 trace / REV-080 kernel / REV-081 cli / REV-082 cli L2 / REV-083 e2e）回写 as-built（WaitingHuman 实际生命周期、`builtin.human` 精确映射、decide/consumer 实测、schema v5 迁移证据、AC-16 a–g 实测 21 用例、08 §8.10 source-breaking）；DR-006 §15 执行记录；台账新增 ISSUE-129–140。默认无 human 图行为/hash/trace 不变。
