@@ -4,6 +4,7 @@
 > **W2a0 批次（2026-10-31，REV-067；见 PROVENANCE §2 第 15 条）**：边级 `on_gate_false`（白名单/serde/hash 投影/编译映射）、新校验规则 **R15** 与新错误码 `DSL_DEFER_NOT_REENTRANT`（DSL 域 17→18 码）、`max_attempts` 复用说明；执行顺序冻结为 `R1→R13→R15→R14`（R15 属 L2 纯函数阶段）。
 > **W2a 实现回写（2026-10-31，REV-073；分支 `docs/docs-gate-defer-spec`）**：本册补 as-built 注记（实现已合并 `e7578f1`）；不改 W2a0 冻结语义/historical 段。
 > **W2b 批次（2026-10-31，REV-077；见 PROVENANCE §2 第 18 条）**：节点级 `max_fanout`（schema/白名单/serde/hash 投影/编译映射）+ 新校验规则 **R16 静态扇出上限**（L2 纯函数；执行顺序 `R1→R13→R15→R16→R14`；超限复用 `DSL_PARSE_ERROR`，DSL 域仍 18 码；子图内收敛 `DSL_SUBGRAPH_INVALID`）。默认无 `max_fanout` → v0.1.0 行为/错误序列/hash 逐字节不变。
+> **W3a0 批次（2026-10-31，REV-078；见 PROVENANCE §2 第 20 条）**：新增**保留 python_node 符号 `builtin.human`**（人工审批节点，02 §2.5.1/§2.5.4；kernel 编译为内置 Human handler，**不 import、不启动 worker、无 `NODE_WORKER_IMPORT`**）。**DSL schema/R1–R16/canonical hash 均不变**；默认（无 human 节点）行为不变。本批只冻结设计，不写 as-built。
 > **状态**：规格冻结（编码前置）。本分册冻结**图 DSL schema、加载期校验规则 R1–R16、错误响应契约、符号解析、graph_hash**；这些内容可直接转成 Loader / `types.rs` / CLI 的实现与测试。
 > **取代关系**：本分册细化并修正《详细设计 v1.1》第 1 章（`/tmp/designdoc/doc.txt` L84–L270）与第 6 章符号解析相关部分；冲突时**以本规格为准**，00 分册为本册的上级锚点。v1.1 原文保留作为意图参考与审计依据。
 > **范围**：仅内核（见 [`doc/analysis/decision-record-01-scope.md`](../analysis/decision-record-01-scope.md) §2）。子图**执行**、人工介入、Agent 资产平台、API/前端不在本规格内。
@@ -512,6 +513,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | 用法 | DSL 字段 | 符号（唯一键） | 格式规则 | 示例 |
 |---|---|---|---|---|
 | python_node | `config.module` + `config.function` | `${module}.${function}` | `module` 为点分 Python 标识符（`^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$`），`function` 为标识符；合并名必须含 ≥1 点（自动满足） | `gates.hr` + `need_human_check` → `gates.hr.need_human_check` |
+| **human 节点（W3a0 保留符号）** | `python_node` 的 `config.module` + `config.function` | **`builtin.human`**（精确匹配） | 固定两字段 `module="builtin"`、`function="human"`；格式校验照常通过；**不 import、不启动 worker**（02 §2.5.4） | `{"module":"builtin","function":"human"}` |
 | gate | `gate.function`（**单字段**） | 值本身 | **v2（D6）只接受 3 个内置 op 短名**：`check_output` / `compare` / `manual`（不含点；Python gate 延后，ISSUE-014）。canonical 符号 `builtin.<op>` 只用于跨类冲突检测 | `check_output` |
 
 | 作废写法（v1.1） | v1.2 处理 |
@@ -521,6 +523,12 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | `gates.{name}` 中间写法 | **v2 作废（D6/D7）**：Python gate 延后（ISSUE-014），`gate.function` 只接受内置 op（`check_output`/`compare`/`manual`，canonical `builtin.<op>`） |
 
 > **D7 回写（ISSUE-026/050）**：`python_node` 的符号串仍按上表格式校验（全限定名、合法标识符），但**图加载期不 import**。精确边界：`DSL_SYMBOL_NOT_FOUND` 在 v2 仍会因 python_node 的 `module/function` **格式非法**在加载期报出（`bad_format`，定位 `node_id`）；`DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT` 只由**内置 gate op 的 `params` 契约/跨类同名**触发。Python 节点的 **import/签名**失败是**运行期**错误：worker 启动时校验失败 → `NODE_WORKER_IMPORT`（实例 Crashed）。
+
+> **W3a0 保留符号 `builtin.human`（冻结）**：
+> - **匹配规则**：仅当 `config.module == "builtin" && config.function == "human"` 精确匹配时视为 human 节点；其余 `builtin.*`（含 `builtin.check_output` 等）**不是**保留节点符号（`builtin.check_output` 只能出现在 `gate.function`，写进 python_node 是普通 user 符号，仍按 D7 在 worker 启动时校验）。
+> - **R14 例外**：human 节点只做 `module/function` **格式校验**（不合法仍 `DSL_SYMBOL_NOT_FOUND`/`bad_format`），**跳过 import/签名**；运行期**不启动 worker**，因此**永不产生 `NODE_WORKER_IMPORT` / `NODE_WORKER_HANDSHAKE`**（DR-006 §2.1）。
+> - **与 gate canonical 无冲突**：`DSL_SYMBOL_CONFLICT` 只比较 `builtin.<op>`（`check_output`/`compare`/`manual`）与 python_node 符号；`human` 不是 gate op，不参与该判定；`gate.function` 写 `human` 仍按 R14b `DSL_SYMBOL_NOT_FOUND`（不是 gate op）。
+> - **DSL schema/hash 不变**：`PythonNodeConfig` 键集合已覆盖；`config` 全量参与既有 canonical 投影规则，无新增字段/默认值；DSL 规则编号 R1–R16 不变（02 §2.1.2）。
 
 - `GateDefinition.function` 字段名**不改**（向后兼容）；v1.2 只收紧其取值语义（00 §0.1 的"修订"见 §2.11 P-02-04）。
 - 符号在**同一张图内**是唯一键：同一符号出现多次 → 只解析/登记一次（幂等）。

@@ -259,3 +259,9 @@
   - e2e：`test/e2e-max-fanout`（**REV-076 通过**；合并 `main` `9a91076`）——`tests/e2e/max_fanout.rs` 6 用例（a 静态反例 CLI 3、b 正例真链路 1、c 运行期 test-hooks in-process 2；d v0.1.0 golden 由既有 e2e target 全绿 + dsl fixture 表回归覆盖）；`cargo test -p zgraph-e2e` **64/0/2**、空载 workspace **725/0/3**（REV-076 §4）。W2b-docs（REV-077）回写 07 AC-15 与 PROVENANCE §2 第 18 条。
   - docs：`docs/docs-fanout-spec`（REV-077）回写 spec 00/02/03/06/07 + PROVENANCE + 索引/README + 台账。
 - **后续**：W2b 合并后按 §4 顺序进入 W3a0（人工评审设计冻结）→ W3a → W3b(可选) → W4a → W4b。
+- **W3a0 设计冻结已交付（2026-10-31，REV-078）**（追加执行记录，不改 §3/§5 原决策；本批只写设计、不写 as-built）：
+  - 产出 [`DR-006`](DR-006-w3a-human-decide-freeze.md)：触发模型（`builtin.human` 保留 python_node 符号、不启动 worker/不 import）、`WaitingHuman` 生命周期与状态机、decide 自动接续（**不提供 `resume`**）、拒绝矩阵（approve/reject 均正常 Completed，路由交给图/W2a defer 返工）、`human_decisions` 表与 C13 写连接模型、trace schema **v5**（重建 instances/transitions CHECK + human_decisions + 迁移/备份/只读拒绝）、kernel/CLI/trace API、退出码（新增 `EXIT_CONFLICT=5`）/`--json`、AC-16 a–g 设计与断言口径、非目标/风险/待确认项。
+  - spec 冻结写入 00/01/02/03/04/06/07（banner + 冻结口径；**不写 as-built**）；07 新增 **AC-16 a–g（设计冻结）**，通过标准 AC-01..AC-16；`doc/index.md`/`doc/progress.md`/PROVENANCE §2 第 20 条同步。
+  - **关键裁决**：① human 不改 DSL schema（保留符号 `builtin.human`，无新 NodeType/错误码）；② `WaitingHuman` 为非静默等待态（`is_quiescent` 显式含之）；③ 决策是**一次性完成**（不重跑；W2a 重入产生新实例）；④ 决策期限 = `timeout_ms`（缺省**无期限**，显式例外）；⑤ trace v5 迁移重建两表（SQLite CHECK 不可 ALTER）；⑥ `HUMAN_*` 为 CLI 命名空间（不写 `runs.error_code`）。
+  - **待用户/Lead 确认（DR-006 §12.3；不阻塞本批复用）**：决策期限缺省无期限、Paused 期间 decide 不自动 Resume、`trace --json` 混入 HumanDecision 行、`builtin.human` 保留符号形态。
+  - **后续**：本批复用后进入 W3a 实现（trace/kernel/cli/e2e）→ W3a-docs as-built 回写（测试名/计数/08 source-breaking 备注）。
