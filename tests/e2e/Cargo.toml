@@ -65,3 +65,7 @@ path = "cli_ac01.rs"
 [[test]]
 name = "cli_replay"
 path = "cli_replay.rs"
+
+[[test]]
+name = "software_team_v1"
+path = "software_team_v1.rs"
