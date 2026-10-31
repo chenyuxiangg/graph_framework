@@ -64,7 +64,7 @@
 | [REV-060](REV-060-e2e-m6-tool-limits.md) | 2026-10-31 | e2e | `test/e2e-m6-tool-limits` | 通过（e2e 工具+节点共享上限适配） | lead |
 | [REV-061](REV-061-process-m6-wrapup.md) | 2026-10-31 | process/docs | `docs/docs-m6-wrapup` | 通过（M6 收口：台账/进度/索引/baseline/ISSUE-096/097、AC-12 10 次重跑） | reviewer-a |
 | [REV-062](REV-062-docs-software-team-sop-v1.md) | 2026-10-31 | docs | `docs/docs-software-team-sop-v1` | 通过（首轮有条件通过；C1–C6 关闭、S1–S7/R1–R6 落实，附录 A validate 通过；R7–R8 非阻塞备注） | reviewer-sop |
-| [REV-063](REV-063-docs-v02-kickoff.md) | 2026-10-31 | docs | `docs/docs-v02-kickoff` | 有条件通过（r3 关闭 C1–C9；复审新 C10 待关闭：W2a 与 SOP v1 P 契约/py-worker） | reviewer-sop |
+| [REV-063](REV-063-docs-v02-kickoff.md) | 2026-10-31 | docs | `docs/docs-v02-kickoff` | 有条件通过（r4 关闭 C1–C10；复审新 C11–C13 待关闭：defer 边环规则/W3a0 唯一键与幂等键/写连接模型） | reviewer-sop |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
