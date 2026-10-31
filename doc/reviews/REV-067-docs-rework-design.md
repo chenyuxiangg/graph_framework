@@ -4,27 +4,27 @@
 > 评审基准：用户/Lead 2026-10-31 冻结语义（defer 边、R15、attempt-per-activation、per-port 继承、`settled_by_node` 重置、`end` 特例、receipt 不消费、dormant/确定性死锁、trace v4、P v2、SOP 双 profile、AC-14、v0.1.0 兼容硬约束）；这些语义不再作为「设计争议」，本记录只核对文档是否准确、自洽、可实施。
 
 - **分支**：`docs/docs-rework-design`
-- **作者**：`docs-writer`（提交 `27188f2`（DR-005 + SOP v1.1）、`09027dc`（spec 00/01/02/03）、`2f0bb22`（spec 04/06/07/08 + 索引/溯源）；三笔正文均含 `Review: REV-067` / `Agent: docs-writer`）
-- **评审人**：`reviewer-docs`（**≠ 作者**；独立评审；本轮为首次评审）
-- **变更范围**：`7f88614..2f0bb22`，13 files **+1228/−151**（`git diff --shortstat`）：新增 `doc/decisions/DR-005-w2a-defer-gate-freeze.md`（+700）、`doc/design/software-team-sop-v1.md`（+151/−49，升 v1.1）、spec `00`（+18/−3）、`01`（+47/−6）、`02`（+52/−35）、`03`（+89/−12）、`04`（+9/−1）、`06`（+28/−16）、`07`（+73/−5）、`08`（+19/−0，只追加 §8.9）、`doc/spec-v1.2/README.md`（+14/−13）、`PROVENANCE.md`（+25/−9）、`doc/index.md`（+3/−2）；无代码/测试/配置/`CLAUDE.md`/`doc/progress.md`/`doc/issues.md`/`doc/reviews/**` 改动
+- **作者**：`docs-writer`（`27188f2`（DR-005 + SOP v1.1）、`09027dc`（spec 00/01/02/03）、`2f0bb22`（spec 04/06/07/08 + 索引/溯源）、`749e9ee`（REV-067 条件修复：C1/C2/S1–S3 + N-1…N-11，11 files +192/−118）；正文均含 `Review: REV-067` / `Agent: docs-writer`）
+- **评审人**：`reviewer-docs`（**≠ 作者**；独立评审；首轮 2026-10-31 于 `2f0bb22`，增量复审同日于 `749e9ee`，见 §7）
+- **变更范围**：`7f88614..749e9ee`：**设计/规格/索引 13 files +1311/−160**（首轮 `2f0bb22`：13 files +1228/−151；增量修复 `749e9ee`：11 files +192/−118，见 §7）；另评审记录 2 files（+182）。首轮明细：新增 `doc/decisions/DR-005-w2a-defer-gate-freeze.md`（+700）、`doc/design/software-team-sop-v1.md`（+151/−49，升 v1.1）、spec `00`（+18/−3）、`01`（+47/−6）、`02`（+52/−35）、`03`（+89/−12）、`04`（+9/−1）、`06`（+28/−16）、`07`（+73/−5）、`08`（+19/−0，只追加 §8.9）、`doc/spec-v1.2/README.md`（+14/−13）、`PROVENANCE.md`（+25/−9）、`doc/index.md`（+3/−2）；无代码/测试/配置/`CLAUDE.md`/`doc/progress.md`/`doc/issues.md` 改动
 - **评审时间**：2026-10-31
 - **关联**：DR-004 §3 W2a0 / §5 D1 / §3 W2a DoD / §6.3；DR-005（本批冻结稿）；REV-063 **C9/C11/S12**；ISSUE-100/101/062；REV-064/065/066（W1 先例）；spec v1.2 分册 00/01/02/03/04/06/07/08；`doc/design/software-team-sop-v1.md` v1.1；`v0.1.0` tag `5d43c58`
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（2026-10-31 增量复审修订：首轮结论为「有条件通过」；C-1/C-2/S-1/S-2/S-3 已按 §7.2 证据全部关闭，N-1…N-11 已落实/登记，残留仅 §7.5 的非阻塞建议与 Lead 台账待办）
 
-方向判定：本批把 DR-004 §3 W2a0 的 7 项冻结内容（P v2、返工图模式、dormant/quiescence、语法、上限、trace/回放、兼容）与 Lead 2026-10-31 裁决（per-port 继承、重入清空 `settled_by_node`、`end` 特例、receipt 不消费、E-1 闭迹判定）**逐项落到 DR-005 与 00/01/02/03/04/06/07/08、SOP v1.1 与 AC-14**；R15/`DSL_DEFER_NOT_REENTRANT`（17→18 码）、执行顺序 `R1→R13→R15→R14`、attempt-per-activation 决策矩阵、trace schema v4、AC-14 a–h、v0.1.0 兼容矩阵（B6/d 条）均已成文；13 个文件全部在允许范围、无越界，PROVENANCE 9 个分册 SHA-256 与行数实测一致（00–08 合计 6308、含 README/PROVENANCE/REFERENCES 合计 6568），`check.sh` PASSED。作为 W2a 实现依据**主体可实施**。
+方向判定：本批把 DR-004 §3 W2a0 的 7 项冻结内容（P v2、返工图模式、dormant/quiescence、语法、上限、trace/回放、兼容）与 Lead 2026-10-31 裁决（per-port 继承、重入清空 `settled_by_node`、`end` 特例、receipt 不消费、E-1 闭迹判定）**逐项落到 DR-005 与 00/01/02/03/04/06/07/08、SOP v1.1 与 AC-14**；R15/`DSL_DEFER_NOT_REENTRANT`（17→18 码）、执行顺序 `R1→R13→R15→R14`、attempt-per-activation 决策矩阵、trace schema v4、AC-14 a–h、v0.1.0 兼容矩阵（B6/d 条）均已成文；13 个文件全部在允许范围、无越界，PROVENANCE 9 个分册 SHA-256 与行数实测一致（首轮 6308/6568；修订后 6334/6604，见 §7.1），`check.sh` PASSED。作为 W2a 实现依据**主体可实施**。
 
-但独立核对发现 **2 条阻塞 + 3 条重要**问题，均为可小的文档修订（不影响 DR-004 方向），但 C-1/C-2 若不修，W2a kernel 按 03 字面实现会破坏 v0.1.0 兼容硬约束（B6/AC-14 d），因此不能给「通过」。条件如下（关闭后可增量复审转「通过」）：
+首轮独立核对发现 **2 条阻塞 + 3 条重要**问题（不影响 DR-004 方向），当时判「有条件通过」。条件如下，**均已于 2026-10-31 在 `749e9ee` 关闭（证据见 §7.2）**：
 
-1. **C-1（阻塞）**：03 §3.4.2/§3.4.3 的应用伪代码与 DR-005 §3.3、现行 kernel 实现三处不一致（passed 边 emit 时机、END_TERMINAL 是否 emit、超限与自环超限「同序」），且循环体缺 `if status.is_terminal() return`；需按 DR-005 §3.3 对齐并分别冻结 v0.1.0 自环超限顺序（见 #C1）。
-2. **C-2（阻塞）**：03 §3.4.3 `resolve_defer_reentry` 第一分支守卫 `edge.on_gate_false != Defer or …` 把 **settle 边**也纳入 attempt-per-activation，与 01 §1.2.2:89 / B6 冲突；需加 defer 前置条件并补矩阵行（见 #C2）。
-3. **S-1（重要）**：DR-005 §7 a / 07 AC-14 a 的 `gate_results` 断言把 attempt=1 行写成 `deferred=0`；该行实为 defer 命中（`deferred=true`），按现文实现的 e2e 会失败（见 #S1）。
-4. **S-2（重要）**：迁移历史事件的 payload 口径未限定——v3→v4 只给 `gate_results` 表补列，旧 `events.payload` 仍是 v3 形态；06 §6.10.4 / 07 AC-14 h「v4 库 `trace --json`/L1 含三键」对迁移后的历史行不成立（见 #S2）。
-5. **S-3（重要）**：W2a 波及 **cli** 模块（`bridge.rs::map_gate_result` 等）未进入 DR-005 §8 实施计划/写作用域；trace 分支已由 Lead 特批临时填 `deferred=false/attempt=0/verdict=None`（REV-070），kernel 分支必须把真实值接回，否则 trace/e2e 三字段恒为默认值（见 #S3）。
+1. **C-1（阻塞）**：03 §3.4.2/§3.4.3 的应用伪代码与 DR-005 §3.3、现行 kernel 实现三处不一致（passed 边 emit 时机、END_TERMINAL 是否 emit、超限与自环超限「同序」），且循环体缺 `if status.is_terminal() return`；需按 DR-005 §3.3 对齐并分别冻结 v0.1.0 自环超限顺序（见 #C1）。**✅ 已关闭（§7.2 C-1）**
+2. **C-2（阻塞）**：03 §3.4.3 `resolve_defer_reentry` 第一分支守卫 `edge.on_gate_false != Defer or …` 把 **settle 边**也纳入 attempt-per-activation，与 01 §1.2.2:89 / B6 冲突；需加 defer 前置条件并补矩阵行（见 #C2）。**✅ 已关闭（§7.2 C-2）**
+3. **S-1（重要）**：DR-005 §7 a / 07 AC-14 a 的 `gate_results` 断言把 attempt=1 行写成 `deferred=0`；该行实为 defer 命中（`deferred=true`），按现文实现的 e2e 会失败（见 #S1）。**✅ 已关闭（§7.2 S-1）**
+4. **S-2（重要）**：迁移历史事件的 payload 口径未限定——v3→v4 只给 `gate_results` 表补列，旧 `events.payload` 仍是 v3 形态；06 §6.10.4 / 07 AC-14 h「v4 库 `trace --json`/L1 含三键」对迁移后的历史行不成立（见 #S2）。**✅ 已关闭（§7.2 S-2）**
+5. **S-3（重要）**：W2a 波及 **cli** 模块（`bridge.rs::map_gate_result` 等）未进入 DR-005 §8 实施计划/写作用域；trace 分支已由 Lead 特批临时填 `deferred=false/attempt=0/verdict=None`（REV-070），kernel 分支必须把真实值接回，否则 trace/e2e 三字段恒为默认值（见 #S3）。**✅ 已关闭（§7.2 S-3）**
 
-其余 11 条为**建议**（N-1…N-11），不阻塞合并，但需修复或登记台账（见 §3/§5）。
+其余 11 条为**建议**（N-1…N-11），首轮不阻塞合并；**均已在 `749e9ee` 落实或登记编号（见 §7.3）**，其中台账登记由 Lead 收口（§7.5 R8）。
 
 ## 2. 四维评审
 
@@ -161,21 +161,114 @@ python/workers/software_team/parse_verdict.py            # v1 行为/docstring �
 
 ## 5. 遗留问题
 
-- **条件关闭后需增量复审**（见 §6）；条件全部关闭前结论保持「有条件通过」，不得合并。
+- **2026-10-31 增量复审更新**：首轮 5 条条件（C-1/C-2/S-1/S-2/S-3）已全部关闭（§7.2）；首轮 N-1…N-11 已落实/登记（§7.3）；本轮新增残留建议 R1–R7 与 Lead 台账待办 R8 见 **§7.5**（均非阻塞）。以下为**首轮快照**，供追溯：
+- ~~条件关闭后需增量复审（见 §6）；条件全部关闭前结论保持「有条件通过」，不得合并。~~ **（2026-10-31 复审：5 条件已全部关闭、增量复审通过，最终结论见 §1/§7.6）**
 - **跨分支/跨批（不在本分支改动，但 W2a 合并前需闭环，建议 Lead 协调）**：
-  - trace 分支 **REV-070 S1**：实现 `verdict_json` 读取失败严格报错 vs DR-005 §4.2「视为 NULL 并告警、不让 `trace` 崩」——两边择一（建议 W2a-docs 在 06 §6.2.8/DR-005 改为与其它 JSON 列一致的严格报错，或 reader 补兜底；本批不阻塞，但需在 W2a-docs 收口）。
+  - trace 分支 **REV-070 S1**：实现 `verdict_json` 读取失败严格报错 vs DR-005 §4.2「视为 NULL 并告警、不让 `trace` 崩」——两边择一（建议 W2a-docs 在 06 §6.2.8/DR-005 改为与其它 JSON 列一致的严格报错，或 reader 补兜底；本批不阻塞，但需在 W2a-docs 收口）。**（复审后：已由 **ISSUE-105** 承接，见 §7.3 / §7.5 R8）**
   - dsl 分支 **REV-069 N1**：R15 `expected`/`actual` 实现与 DR-005 §2.5.2 冻结模板不一致（实现 `actual={from,to_node,on_gate_false}`；冻结要求 `{node_id,scc_size,defer_edges}`）；W2a 合并前需实现对齐模板或本批追加修订并回写 02 §2.4.2。
   - dsl 分支 **REV-069 N7**：子图内 R13/R15 同时命中聚合为 2 条 `DSL_SUBGRAPH_INVALID`，与 02 §2.1.3「跨规则 fail-fast」字面冲突（既有子图聚合口径的延续）；建议 W2a-docs 在 02 §2.6.1/R6 明确「子图内跨规则聚合」例外（与 N-4/N-5 一并处理）。
-  - **ISSUE 台账**：v3 seed 缺口（N-2）建议 Lead 开号并回填 DR-005 §4.3/PROVENANCE §2 第 15 条；ISSUE-100 设计层关闭的正式收口、ISSUE-101 承接状态由 Lead 在台账维护（本批不改 `doc/issues.md`，符合范围约定）。
+  - **ISSUE 台账**：v3 seed 缺口（N-2）建议 Lead 开号并回填 DR-005 §4.3/PROVENANCE §2 第 15 条；ISSUE-100 设计层关闭的正式收口、ISSUE-101 承接状态由 Lead 在台账维护（本批不改 `doc/issues.md`，符合范围约定）。**（复审后：已引用 **ISSUE-104**，见 §7.3 / §7.5 R8）**
 - **跨册残留（已由 DR-005 §11 C-7 明示，本批不改）**：`doc/architecture-v2.md` 仍写 `R1–R14`/17 码；`doc/analysis/decision-record-01-scope.md` 亦为历史口径（R1–R14/17 码），建议 W2a-docs/process 收口时统一或标注历史。二者不阻塞本批。
 - 未发现：越界改动、禁用文件/冻结文件修改、未评审代码、历史记录改写（08 只追加 §8.9、DR-004 未改）、空占位（除 N-8 半句）、悬空 §号/文件引用。
 
-## 6. 条件关闭记录（仅「有条件通过」填写）
+## 6. 条件关闭记录（首轮「有条件通过」的 5 条条件；2026-10-31 全部关闭，证据见 §7.2）
 
 | 条件 | 关闭证据（需可复核） | 关闭日期 |
 |---|---|---|
-| C-1 03 §3.4.2/§3.4.3 应用算法与 DR-005 §3.3/现行 v0.1.0 顺序对齐（emit 时机、terminal 短路、END_TERMINAL、超限/自环顺序分别冻结） | 修订后 `grep -n "emit(record)" doc/spec-v1.2/03-*.md` 与 DR-005 §3.3 同构；AC-14 d 的 v0.1.0 trace golden 断言不变；DR-005:313 措辞更新 | 待 |
-| C-2 `resolve_defer_reentry` 仅对 defer 边生效；决策矩阵补「Settle + passed=true + 目标 Completed → RUN_DELIVERY_TO_TERMINAL」 | 03 §3.4.3 守卫/矩阵修订；kernel 单测（gated 环 settle 边到 Completed 目标）通过 | 待 |
-| S-1 AC-14 a 的 `deferred` 断言修正（attempt0 `deferred=false`、attempt1 `deferred=true`），DR-005 §7 a 同步 | DR-005:555 / 07:259 修订后与 01 §1.5 `deferred` 定义一致 | 待 |
-| S-2 迁移历史事件的 payload 口径限定；AC-14 h 断言拆分（旧行 SQL 默认值 / 新 run `--json`+L1 三键） | 06 §6.10.4/§6.10.6、07 AC-14 h、DR-005 §4.3 修订；措辞与 `reader.events` 直读 payload 的实现一致 | 待 |
-| S-3 DR-005 §8/§12.1 增 cli 适配项（bridge 真实值接线归属 + 第二评审/跨模块声明） | DR-005 §8/§12.1 修订；W2a 合并验收含「defer 图 `trace --json` 三字段非默认值」 | 待 |
+| C-1 03 §3.4.2/§3.4.3 应用算法与 DR-005 §3.3/现行 v0.1.0 顺序对齐（emit 时机、terminal 短路、END_TERMINAL、超限/自环顺序分别冻结） | 03:148-185 与 DR-005:273-342 逐行同构；「超限不产生该次 GateResult」经 `kernel/trace.rs` Emitter 关闭语义 + `run.rs` 现行顺序核实（§7.2） | **已关闭** 2026-10-31（§7.2） |
+| C-2 `resolve_defer_reentry` 仅对 defer 边生效；决策矩阵补「Settle + passed=true + 目标 Completed → RUN_DELIVERY_TO_TERMINAL」 | 03:224 defer 前置；03:214 矩阵行；DR-005:251 行 8 + :255 attempt 计算冻结；§7.2 | **已关闭** 2026-10-31（§7.2） |
+| S-1 AC-14 a 的 `deferred` 断言修正（attempt0 `deferred=false`、attempt1 `deferred=true`），DR-005 §7 a 同步 | 07:259 / DR-005:586 修订后与 01 §1.5 `deferred` 定义一致；§7.2 | **已关闭** 2026-10-31（§7.2） |
+| S-2 迁移历史事件的 payload 口径限定；AC-14 h 断言拆分（旧行 SQL 默认值 / 新 run `--json`+L1 三键） | 06:297-299/06:916/06:985、07:300-307、DR-005:449-462 修订；措辞与 `reader.events` 直读 payload 的实现一致；§7.2 | **已关闭** 2026-10-31（§7.2） |
+| S-3 DR-005 §8/§12.1 增 cli 适配项（bridge 真实值接线归属 + 第二评审/跨模块声明） | DR-005:619-631（§8 第 7 行/写作用域/跨模块评审）、:711/:717（§12.1/§12.2）修订；§7.2 | **已关闭** 2026-10-31（§7.2） |
+
+---
+
+## 7. 条件关闭与复审（2026-10-31）
+
+> 复审对象：作者条件修复提交 **`749e9ee`**（`749e9ee^..749e9ee`：11 files +192/−118；`2f0bb22..749e9ee` 含评审提交 `b5363c4`）。本段为增量复审记录，**不改写 §3/§6 的首轮发现快照**；§3 表中 `open` 状态为首次评审时点，实际关闭/落实以本段为准。
+
+### 7.1 复审范围、范围门禁与实测
+
+```bash
+cd /Users/zyzs/lczyzs/code/zgraph/.worktrees/docs-docs-writer
+git status --porcelain --branch        # ## docs/docs-rework-design...origin/main [ahead 5]（复审提交前 clean）
+git show --stat 749e9ee                # 11 files changed, 192 insertions(+), 118 deletions(-)
+git diff --name-status 749e9ee^..749e9ee
+# M DR-005；M 00/01/02/03/04/06/07/08；M spec README/PROVENANCE（无代码/测试/配置/CLAUDE/progress/issues）
+git diff --shortstat 7f88614..749e9ee -- doc/decisions doc/design doc/spec-v1.2 doc/index.md
+# 13 files changed, 1311 insertions(+), 160 deletions(-)（首轮 1228/151 + 修复 192/118）
+git diff --name-only 7f88614..749e9ee | grep -E 'CLAUDE\.md|doc/progress\.md|doc/issues\.md|\.rs$|\.py$|Cargo|scripts/|schemas/' || echo "(none)"
+# (none)；DR-004 未改（`git diff --name-only 7f88614..749e9ee | grep -c DR-004` → 0）
+bash scripts/dev/check.sh              # CHECK PASSED（exit 0；提交评审前复跑）
+
+cd doc/spec-v1.2
+shasum -a 256 0*.md                    # 9/9 SHA-256 与 PROVENANCE §3 表逐字一致：
+# 00 ce92145f…d25c5 / 01 1d9634c7…8c2f / 02 f3f397e2…43986 / 03 ffa5c0f0…dbd3dbc /
+# 04 d551e857…238f4 / 05 52f35e7b…bf42 / 06 86492d86…e48c9 / 07 3736fb24…27289e / 08 cdbfd322…e86e
+wc -l 0*.md README.md PROVENANCE.md REFERENCES.md
+# 00–08 = 6334 行（309+343+930+486+903+1429+1112+323+499）；含 README/PROVENANCE/REFERENCES = 6604 行
+# 与 README:24-32 行数表、PROVENANCE:136-146 §3 表、PROVENANCE:123/133 注记**全部一致**
+```
+
+- 一致性 grep（实测）：`R1→R13→R15→R14` 6 处一致；00 表 18 个 DSL 码；`AC-01..AC-14` 三处一致；`TRACE_SCHEMA_VERSION=4` 三处一致；新 §1.4.1/§3.4.3/§8.9 存在且被引用；`R1–R14`/17 码残留仅 08 历史审计行（§8.0–8.8 历史快照，允许）+ `architecture-v2`/analysis（C-7 已声明）；`6308/6568` 已不在当前 spec 正文（见 §7.5 R7 的史料口径提示）。
+- 08 仍是**只追加**：`git diff 7f88614..749e9ee --numstat -- 'doc/spec-v1.2/08-*'` → `21 0`（§8.9 内补 ISSUE-104/105 两行；8.0–8.8 未动）。
+
+### 7.2 条件关闭证据（逐条）
+
+| 条件 | 关闭证据（文件:行 / 命令 / 实现对照） | 结论 |
+|---|---|---|
+| **C-1** 应用顺序 | 03 §3.4.2 已改为「终态短路 → blocked（先 emit 再结算/挂账）→ passed（先 resolve 后 emit）」：`03:151-153`（顺序注释 + `if run.status.is_terminal() { return; }`）、`:161`（blocked 先 emit）、`:173-176`（resolve 失败 `return`、成功后才 emit）；§3.4.3 `:220`/`:260` 冻结超限「fail_run（sink 关闭）→ 外层 emit no-op（不入库）」。DR-005 §3.3 `:273-342` 与 03 逐行同构（`:297-302` resolve 前不 emit、`:341-342` 超限顺序 + 「不得改成 create→emit→fail」）。实现核实：`crates/zgraph-kernel/src/run.rs:987-1050`（现行 `apply_publish`：passed 分支 `:1016` 先 resolve、`:1020` 后 emit；循环开头 `:997` 附近终态短路；`resolve` 失败 `None => return`）与 `:1086-1112`（`resolve_self_loop` 超限先 `fail_run` 再返回）；`crates/zgraph-kernel/src/trace.rs:584-591`（`gate_result` 在 `closed` 后直接 return）、`:643-655`（`Emitter::finish` 先置 `closed=true` 再发 `RunFinished`）、`run.rs:1444-1464`（`fail_run` → `emitter.finish`）⇒ 「超限该次 GateResult 不入库」属实，v0.1.0 自环超限 trace 顺序不变（B6/AC-14 d） | ✅ 关闭 |
+| **C-2** defer 前置 | 03 `:224` 首行 `if edge.on_gate_false != Defer: return NotApplicable`；matrix 新增 `:214`「settle 直投终态 → RUN_DELIVERY_TO_TERMINAL（不 attempt+1）」；DR-005 `:251` 行 8 + `:255`「attempt 计算（C2 明确）」；01 `:89`「普通边（settle）→ RUN_DELIVERY_TO_TERMINAL」一致；attempt 计算无歧义（自环 `src.attempt+1`、非自环 `target_current.attempt+1`） | ✅ 关闭 |
+| **S-1** AC-14 a | 07 `:259`：attempt0 `passed=true/deferred=false`、attempt1 `passed=false/deferred=true`；attempt1 只写 receipt（不结算/不 Skipped）、target Completed → dormant → run `Completed`；DR-005 `:586` 同步；与 01 §1.5 `deferred = !passed && edge.on_gate_false == Defer` 一致 | ✅ 关闭 |
+| **S-2** 迁移 payload | 06 `:297-299`（§6.2.8：迁移只补 SQL 列默认值、历史 `events.payload` 保持 v3、`trace --json` 不合成）、`:916`（§6.10.4 行「v4 后新写入事件」）、`:985/:989`（示例改新写入口径 + S2 注记）；07 `:300-307`（AC-14 h 拆「新库/迁移结构」「迁移历史行 SQL 默认值 + 历史 payload v3」「v4 后新 run 三键 + L1」三组）；DR-005 `:453`（§4.2）、`:462`（§4.3 L1）；与 `trace --json` 直读 `events.payload` 的实现（`crates/zgraph-trace/src/reader.rs:414-465`、`crates/zgraph-cli/src/trace_cmd.rs:319`）一致 | ✅ 关闭 |
+| **S-3** cli 接入计划 | DR-005 `:619-631`（§8 增第 7 行 cli 适配、写作用域含 `crates/zgraph-cli/**`、依赖钉死「真实值接线等 kernel 合并」、Lead 跨模块声明 + 第二评审 REV-070/REV-071）；`:711`/`:717`（§12.1 W2a 波及文件、§12.2 注「W2a 实现批包含 cli」）；与 trace 分支 `96ab28e` 已落过渡值（REV-070）的现状一致 | ✅ 关闭 |
+| **Lead 补充 ①** AC-14 g R15-valid | 07 `:291-296`（新增 `a` defer 自环作可重入来源，`a→b` 仍 blocked）；DR-005 `:592`（AC-14 g）+ `:686`（E-4）；R15 判定：defer 自环 `a→a` + defer 边 `a→b` 源 `a` 均满足「defer 自环」→ 通过；R13 无无 gate 环 → 通过；静默后 `a→b` target 从未实例化 → 确定性 `RUN_DEADLOCK`，骨架成立 | ✅ 关闭 |
+| **Lead 补充 ②** 超限 GateResult | 与 C-1 同证据：`trace.rs:584-591`/`:643-655` + `run.rs:1444-1464` 证明 `fail_run` 关闭 sink、外层 emit no-op；DR-005 `:341-342/:382`、03 `:220/:260`、07 `:283`（AC-14 e「不断言超限那次 GateResult」）一致 | ✅ 关闭 |
+| **Lead 补充 ③** `updated_at` 统一 | DR-005 `:230`、01 `:190` 均改为 `String`（RFC3339 毫秒 Z）；`DeferredReceipt` 结构、写入/刷新口径（`01:196`）一致 | ✅ 关闭 |
+
+### 7.3 建议项 N-1…N-11 落实核验
+
+| # | 首轮建议 | 落实证据 | 状态 |
+|---|---|---|---|
+| N-1 | 环语义「充分/必要/保守」方向错 | DR-005 `:159` 改为「闭迹为权威、简单环更严」；E-1 `:683` 改为「放宽例（不是反例）」 | ✅ 落实 |
+| N-2 | v3 seed 缺口无 ISSUE 编号 | DR-005 `:465`、PROVENANCE `:122`、07 `:19`、08 `:496` 均引用 **ISSUE-104**（编号由 Lead 分配；台账登记见 §7.5 R8） | ✅ 落实（台账待 Lead） |
+| N-3 | README 07 行数 320≠实测 322 | README `:30` 改 **323**；`wc -l 07-验收用例.md` = 323；PROVENANCE `:146` = 323 | ✅ 落实（注：§2 #16 摘要仍写 322，见 R6） |
+| N-4 | 子图 R15 收敛未明写 | 02 `:405`（R6 行明写收敛为 `DSL_SUBGRAPH_INVALID`）、`:432` detail 列表增 `defer_not_reentrant`；DR-005 `:166` 同口径 | ✅ 落实 |
+| N-5 | R15 同规则聚合 vs 首错未冻结 | 02 `:60`（例外：R15 取 edges 序首错）、`:414`（R15 行同口径） | ✅ 落实 |
+| N-6 | 04 §4.6.4 回传载体漏 `verdict` | 04 `:703` 改为 `GateEvaluation { edge_index, passed, error, verdict }` | ✅ 落实 |
+| N-7 | 06 示例 `verdict:false` 与 C1 规则冲突 | 06 `:985` 示例改 `"gate_fn":"check_output"` + `"verdict":null` | ✅ 落实 |
+| N-8 | DR-005 N-3 反例行占位「且……」 | 该行已删除（diff 显示 N-3 整行删除；P-4 保留为合法例） | ✅ 落实 |
+| N-9 | 实例级/节点级 settled 口径未冻结 | 01 `:125/:141/:199-200`、03 `:258`、DR-005 `:267` 统一「实现按节点级 `settled_by_node`；实例级 `settled_sources` 仅审计/排障、不参与 skip/就绪判定」 | ✅ 落实 |
+| N-10 | 00 §0.7 未写 per-port | 00 `:296` 已加「按端口继承（仅入边 `on_gate_false != defer` 的 values/arrived；defer 端口必须新一代重投）」 | ✅ 落实 |
+| N-11 | R4 边结构校验落点 vs 现行 R8 阶段 | 02 `:403` 增注：只冻结错误码归属（R4 类型桶）、结构解析可在 R8 阶段、不得改变多错图 `errors[0]`/`error_count` 顺序 | ✅ 落实 |
+| （关联） | REV-070 S1 待定 | 06 `:297`、DR-005 `:456`、08 `:497` 引用 **ISSUE-105** 承接口径定案 | ✅ 登记（定案归 W2a-docs/trace） |
+
+### 7.4 四维复审（增量）
+
+| 维度 | 复审结论 | 依据 |
+|---|---|---|
+| 功能正确性 | ✅ | C-1/C-2 关闭；03 §3.4.2/§3.4.3 与 DR-005 §3.3 同构且与现行 kernel `apply_publish`/`resolve_self_loop`/`Emitter` 顺序逐点吻合；AC-14 a/e/g/h 修正后可直接执行；超限/迁移口径分别有 Emitter 关闭语义与 events payload 直读实现支撑；B6（v0.1.0 hash/validate/run/trace）在文档层无新增破坏点 |
+| 代码结构合理性（文档/计划结构） | ✅ | 增量仅 11 个 doc 文件；S-3 把 cli 适配、跨模块评审、依赖钉死写入 §8/§12；与 trace 分支既有过渡值（REV-070）衔接；DR-004 未改、08 只追加、无越界 |
+| 逻辑性 | ✅（附 §7.5 R1–R4 建议） | 决策矩阵重编号后主体自洽；E-1 方向修正后与反例一致；dormant/deadlock、per-port/settled 口径、attempt 计算自洽；仅剩 DR-005 少量行号/摘要引用未同步（不改变错误码/行为，均落到同一 `RUN_DELIVERY_TO_TERMINAL`/证据口径） |
+| 可读性 | ✅ | 术语一致、表格/代码块规范；新增 S2 注记、ISSUE 引用、C1/C2 注释清晰；无未替换占位（N-8 已删）；新增 §号/交叉引用实测全部命中 |
+
+### 7.5 残留项（均非阻塞；建议 W2a-docs 或合并前微提交收口）
+
+| # | 级别 | 位置 | 问题 | 建议 |
+|---|---|---|---|---|
+| R1 | 建议 | `doc/decisions/DR-005-w2a-defer-gate-freeze.md:570`（§6.4 超限证据） | 仍写「trace 有 … `GateResult`（P→W 边）」；未说明该 GateResult 来自**之前轮次**、超限该次不入库（与 §3.5/§7 e/07 AC-14 e 的裁决字面不完全同步） | 改为「Crashed 实例（attempt=3）+ **之前轮次**已产生的 P→W `GateResult` 行 + `RunFinished{Failed}`；超限该次不入库」 |
+| R2 | 建议 | `doc/decisions/DR-005-w2a-defer-gate-freeze.md:593`（§7 h） | 仍写「L1 events 回放含新字段」，未按 S-2 拆「历史 run 逐字节复用旧 payload / 新 run 含三键」 | 与 07 AC-14 h `:300-307` 对齐改写 |
+| R3 | 建议 | `doc/decisions/DR-005-w2a-defer-gate-freeze.md:369`（§3.4 dormant 判定表） | 决策矩阵重编号后仍写「按行 8 `RUN_DELIVERY_TO_TERMINAL`」；行 8 现为 settle 直投 Completed，此处应为行 9（defer 终态非 Completed） | 行 8 → 行 9（与 E-2 `:684` 一致） |
+| R4 | 建议 | `doc/decisions/DR-005-w2a-defer-gate-freeze.md:298`（§3.3 伪代码注释） | 「NotApplicable → 现行 resolve（3/4/8/9）」中行 9 实为 `resolve_defer_reentry` 的 `Failed` 分支（结果同为 `RUN_DELIVERY_TO_TERMINAL`、不 emit），不在「现行 resolve」 | 注释改「3/4/8；行 9 走 Failed」或删去 9 |
+| R5 | 建议 | `doc/decisions/DR-005-w2a-defer-gate-freeze.md:721`（§12.3） | 「逻辑拆 3 个 commit」未计入条件修复提交 `749e9ee` | 改「3 个逻辑 commit + 1 个 REV-067 条件修复 commit（`749e9ee`）」 |
+| R6 | 建议 | `doc/spec-v1.2/PROVENANCE.md:132`（§2 第 16 条） | 「N-3 README 07=322」与最终实测 323 不符（首轮发现值 322、修复后 323） | 改 323，或写明「首轮 322 → 修复后 323」 |
+| R7 | 建议 | `doc/spec-v1.2/PROVENANCE.md:123`（§2 第 15 条末行） | 首轮批次的实测合计被从 **6308** 改为 **6334**，覆盖了历史批次快照（第 16 条已记 6334、§3 当前 6334）；与 PROVENANCE 既有「历史批次留痕不覆盖」惯例不一致（M4 5818、M5 5958 均保留） | 第 15 条恢复 **6308**（首轮快照），第 16 条保留 6334；§3 当前值不变 |
+| R8 | 台账待办（Lead） | `doc/issues.md`（base `7f88614`） | 文档已引用 **ISSUE-104**（v3 seed 缺口）与 **ISSUE-105**（`verdict_json` 损坏口径待定），但 base 台账最新为 ISSUE-101..103，尚无 104/105 行（编号由 Lead 分配；本批按范围不改 `issues.md`） | Lead 在 process 收口/合并前补登 104/105 并回填状态；与 DR-005 §4.3/06 §6.2.8 引用一致 |
+
+> 另：§5 的跨分支项 REV-069 N1（R15 `expected`/`actual` 模板）与 N7（子图聚合口径）仍待 W2a 实现/W2a-docs 收口，不属本批 docs 分支范围。
+
+### 7.6 结论修订
+
+- 首轮 §1 的「结论：有条件通过」经本条**修订为「结论：通过」**：C-1/C-2/S-1/S-2/S-3 全部关闭（§7.2），N-1…N-11 全部落实或登记（§7.3），四维复审均 ✅（§7.4）；残留 R1–R8 均为**建议/台账待办，不阻塞合并**（§7.5）。
+- 合并前置已满足：评审记录含 `分支: docs/docs-rework-design` + `结论：通过` + 真实评审人；worktree 在评审提交前 clean；`check.sh` PASSED；范围仅 `doc/**`。合并后由 Lead 按 AGENTS §4 清理 worktree/分支并更新 `doc/progress.md`；`doc/issues.md` 补登 ISSUE-104/105（R8）。
+- 签字：`reviewer-docs` · 2026-10-31（增量复审）。
