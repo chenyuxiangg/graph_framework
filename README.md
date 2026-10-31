@@ -10,15 +10,13 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：v0.2（M7）W2a0 + W2a 已完成
+## 当前状态：v0.2（M7）W2b 已完成
 
-**W2a0（设计冻结，REV-067）**：[DR-005](doc/decisions/DR-005-w2a-defer-gate-freeze.md) + spec 00–08 回写（`on_gate_false`、R15/`DSL_DEFER_NOT_REENTRANT`、trace schema v4、SOP v1.1 双 profile、07 AC-14）。
+**W2b（每节点最大扇出限制，REV-074–077）**：节点级 `max_fanout`（可选整数 ≥1，缺省无上限）；**静态层 R16**（复用 `DSL_PARSE_ERROR`，DSL 域保持 18 码；子图收敛 `DSL_SUBGRAPH_INVALID`）+ **运行期每激活防御层**（新运行期错误码 `NODE_FANOUT_EXCEEDED`；反例经 `test-hooks` 构造）。dsl（REV-074）、kernel+cli（REV-075，含 cli 跨模块第二评审）、e2e（REV-076，已通过）已合并；spec 00/01/02/03/06/07 回写 + **AC-15** + PROVENANCE 见 [07 AC-15](doc/spec-v1.2/07-验收用例.md)、[PROVENANCE](doc/spec-v1.2/PROVENANCE.md)（REV-077）。证据：dsl 101、kernel 110（`--features test-hooks` 120）、cli 161、e2e 64/0/2、空载 workspace 725/0/3；默认无 `max_fanout` 行为/hash 与 v0.1.0 逐字节一致。
 
-**W2a（实现，REV-068–072）**：dsl/trace/py-worker/kernel+cli 已合入 `main`（`e7578f1` 时点）；e2e 已合并 `main`（`e2cba52`；REV-072 已通过）：`gate_defer` 8/0、`software_team_v1` 11/1 ignored；c/e 运行期 `--profile rework-item` 5/7；e2e 58/0/2、空载 workspace 694/0/3。证据见 [07 AC-14](doc/spec-v1.2/07-验收用例.md)、[PROVENANCE](doc/spec-v1.2/PROVENANCE.md)、[progress](doc/progress.md)。
+**下一步**：W3a0（人工评审设计冻结：decide/resume + `human_decisions`）→ W3a → W3b(可选) → W4a → W4b（[DR-004](doc/decisions/DR-004-v02-scope-and-waves.md) §4）。
 
-**下一步**：W2b（每节点最大扇出限制）→ W3a0 → W3a → W3b(可选) → W4a → W4b（[DR-004](doc/decisions/DR-004-v02-scope-and-waves.md) §4）。
-
-**历史里程碑（摘要）**：M0–M6 已完成——Rust 内核 + Python 子进程 worker、DSL loader/校验、内核事件循环、trace/SQLite（L1 回放）、Harness（LLM 流式 + tool loop）、CLI、e2e；M6 收口 trace 双通道/fail-stop/退出码/run 版本列/`global_vars` schema v3 等（REV-039–061）；v0.1.0 已发布（tag `v0.1.0`）；W1 SOP v1（REV-064–066）。遗留项见 [issues](doc/issues.md)。
+**历史里程碑（摘要）**：M0–M6 已完成——Rust 内核 + Python 子进程 worker、DSL loader/校验、内核事件循环、trace/SQLite（L1 回放）、Harness（LLM 流式 + tool loop）、CLI、e2e；M6 收口 trace 双通道/fail-stop/退出码/run 版本列/`global_vars` schema v3 等（REV-039–061）；v0.1.0 已发布（tag `v0.1.0`）；W1 SOP v1（REV-064–066）；W2a0 设计冻结 + W2a 实现（REV-067–073）。遗留项见 [issues](doc/issues.md)。
 
 ## 快速开始
 
@@ -40,8 +38,8 @@ uv run pytest -q
 
 | 路径 | 说明 |
 |---|---|
-| `crates/zgraph-dsl/` | DSL 类型、loader、R1–R15（W2a 增 R15）、graph_hash（M1） |
-| `crates/zgraph-kernel/` | 状态机、事件循环、Delivery、门控、run 生命周期（M2） |
+| `crates/zgraph-dsl/` | DSL 类型、loader、R1–R16（W2a 增 R15、W2b 增 R16）、graph_hash（M1） |
+| `crates/zgraph-kernel/` | 状态机、事件循环、Delivery、门控、run 生命周期（M2）；W2b 每激活扇出上限（运行期防御层） |
 | `crates/zgraph-trace/` | TraceEvent、SQLite、回放（M2） |
 | `crates/zgraph-worker/` | worker 协议、supervisor（进程组/取消/帧超时）、`WorkerExecutor`（M3）；M4 `WorkerFailure::Worker` 装箱 |
 | `crates/zgraph-harness/` | Agent Harness（M4）：AgentConfig/预算/LLM(fake+genai 0.7.2)/tool loop/`HarnessExecutor` |
@@ -49,7 +47,7 @@ uv run pytest -q
 | `python/zgraph_worker/` | worker SDK：握手、ctx、运行时；M4 `tool_runner`（discover/call） |
 | `python/workers/` | 示例 worker：echo/slow/parallel/cycle/software_team（M3） |
 | `schemas/` | worker 协议 v1（M0 冻结，M3 检查单闭环）；DSL JSON Schema 未实现（ISSUE-029） |
-| `tests/e2e/` | 真链路验收：AC-06/07/09/10 + 故障注入 + 并发（M3）；AC-08 fake LLM/tool/流式（M4）；AC-12 多 run 隔离（M5） |
+| `tests/e2e/` | 真链路验收：AC-06/07/09/10 + 故障注入 + 并发（M3）；AC-08 fake LLM/tool/流式（M4）；AC-12 多 run 隔离（M5）；AC-14 defer/返工（W2a）；AC-15 max_fanout 静态反例/正例/运行期防御层（W2b） |
 | `tests/fixtures/` | 图与 worker fixture |
 | `doc/` | 决策/架构/规格/评审/进度/台账 |
 | `legacy/` | 旧 Python 实现（冻结只读，见 `legacy/README.md`） |

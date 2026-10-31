@@ -144,21 +144,33 @@
     - **台账**：新增 ISSUE-104（v3 seed；**已 fixed**）、ISSUE-105（`verdict_json` 口径）、ISSUE-106（trace 测试/守卫）、ISSUE-107（kernel N1–N7）、ISSUE-108（dsl N5–N8）、ISSUE-109（py-worker S1）、ISSUE-110（e2e L2/测试行数）、ISSUE-111（e2e trace fixture 路径归属）、ISSUE-112（full rework 运行期未覆盖）；ISSUE-100/101 → fixed；ISSUE-062 保持 open。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6385 行**）。
 
-## 3. 文件清单（SHA-256 + 行数）
+18. **W2b spec 回写批次**（2026-10-31，REV-077；分支 `docs/docs-fanout-spec`，base = 本地 `main` `9a91076`）：
+    - **改动分册**：00/01/02/03/06/07（另 `doc/spec-v1.2/README.md` 行数表、`doc/index.md`、根 `README.md`、`doc/architecture-v2.md` 顶部注记、DR-004 §10、`doc/issues.md`、`doc/progress.md`）。
+    - **来源**：已合并实现——dsl `1fa4cc0`（REV-074；评审记录 `220f53c`，合并链 `7b4aba1..220f53c`）、kernel+cli `a4cb1b1`（REV-075；含 `abc1e15`/`aa6bfd4`/`6f3ac2a`/`e37b1ad` 与 Lead 追加的 cli 跨模块第二评审）、e2e `9a91076`（REV-076：`06d6945` 实现 + `9a91076` 评审记录，fast-forward 合入）。本批**按实际实现 as-built 校准**，不改 W2a0/W2a 冻结语义。
+    - **关键决策**：① **R16 复用 `DSL_PARSE_ERROR`**，DSL 域保持 **18 码**（不新增 `DSL_FANOUT_EXCEEDED`；静态扇出超限属图定义错误类型桶）；② 运行期层为**防御性兜底**（静态 R16 已保证加载期合法图 `actual <= out_degree <= max_fanout`；反例只能经 `test-hooks`/程序化构图构造，防御 W4 动态 N）；③ 有效上限 = `min(declared, test-hooks force)`，仅 `test-hooks` 构建生效；④ 超限**不产生该激活任何 GateResult、不应用任何边**（与 W2a0 超限"该次求值不入库"同序），实例 `Crashed(attempt=源+1)` + `run Failed`；⑤ 缺省无 `max_fanout` → 行为/hash/错误序列与 v0.1.0 逐字节一致。
+    - **00**：banner 增 W2b；§0.3 `NodeError::FanoutExceeded{limit, actual}`；§0.4 运行期域新增 **`NODE_FANOUT_EXCEEDED`**（Crashed → run Failed）并注明 DSL 域仍 18 码（R16 复用）。
+    - **02**：banner/状态改 R1–R16；§2.1.2/§2.1.3 加载流水线与 fail-fast 顺序改 `R1→R13→R15→R16→R14`；§2.2.1 增 `GraphNode.max_fanout` 行；§2.2.2 schema 增 `max_fanout?: number`；§2.2.3 S-2/S-6/S-9 补白名单/序列化/整数边界；§2.2.4 节点键白名单加 `max_fanout`；§2.3.3 自查表增 R16（不适用）；§2.4 标题/总表/模板/正反例/裁定新增 **R16 静态扇出上限**（`nodes` 序首错、`out_degree` 含 gate/defer 边、`DSL_PARSE_ERROR`、子图收敛 `DSL_SUBGRAPH_INVALID`、fixture 实测 `valid_max_fanout` hash `e05d882cc55aa275`、dsl 101 passed）；§2.4.4 增 D-02-13；§2.7.2/§2.7.3/§2.7.4 顺序/location/`--structure-only` 同步；§2.8.2/§2.8.3 hash 前置与 max_fanout 投影（仅显式存在、缺省不补齐）；§2.9.2/§2.9.3 编译映射；§2.11 增 P-02-10。
+    - **03**：banner 增 W2b；§3.2 `TestHooks.force_max_fanout`；§3.4.2 应用入口补扇出校验注释；新增 **§3.4.4 每激活扇出上限**（`actual` 定义含 defer passed、`min(declared,force)`、应用任何边前失败、Crashed attempt+1、无 GateResult、冻结 message、确定性与 trace 证据、可达性/测试入口、as-built）；§3.15 矩阵补行。
+    - **06**：banner 增 W2b；§6.2.5.1 canonical `NodeError` JSON 增 `kind:"FanoutExceeded"` 行（`limit`/`actual`，M5/W2b 例外注记）；DDL/迁移不变。
+    - **07**：banner/通过标准改 AC-01..AC-15；§7.1 增扇出上限图资产行；§7.2 增 AC-15 行；新增 **AC-15 每节点扇出上限（W2b）**（a 静态反例 CLI 3 用例、b 正例真链路 1 用例、c 运行期 test-hooks 2 用例、d v0.1.0 golden 不变；含真实测试名与实测计数）；§7.3 #1 改 16 条（R1–R16）、#3 改 AC-15。
+    - **索引/README/台账**：`doc/index.md`（reviews 范围至 REV-077、DR-004 §10 注记）、根 `README.md`（状态段改 W2b 已完成/下一步 W3a0、目录表 dsl/kernel/e2e 行）、`doc/decisions/DR-004-v02-scope-and-waves.md` §10 追加 W2b 执行记录（不改原决策）；`doc/issues.md` 登记 **ISSUE-113–120**（REV-074/075 P3）与 **ISSUE-121–124**（REV-076 P3）；`doc/progress.md` 更新（≤30 行）。
+    - **测试证据（as-built）**：`cargo test -p zgraph-dsl` **101 passed**；`cargo test -p zgraph-kernel` **110 passed**（默认不编译 `tests/max_fanout.rs`）、`--features test-hooks` **120 passed**；`cargo test -p zgraph-cli` **161 passed**；`cargo test -p zgraph-e2e` **64 passed / 0 failed / 2 ignored**（`tests/e2e/max_fanout.rs` **6/0**，未新增 ignore）；空载 `cargo test --workspace` **725 passed / 0 failed / 3 ignored**；pytest **170 passed**；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`bash scripts/dev/check.sh` 全绿。v0.1.0 回归：REV-074 对 36 个 pre-W2a fixture 做 human/`--json` 双模式 A/B（72/72 输出+退出码逐字节一致）；无 `max_fanout` 图 hash 不变。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6491 行**；00 309→317、01 346→348、02 935→950、03 489→526、06 1117→1119、07 330→372；`doc/spec-v1.2/README.md` 行数表同步）。
 
+## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | ce92145f7d7296865f4ddaabc9af9ff17efe22c8f50cfa9dffea1e7a9ded25c5 | 309 |
-| `01-领域模型与状态机.md` | 710f6c8f30d9902ea4c7495e9a133c88d80bf4bf5588d5502b24bbe28b4bf85d | 346 |
-| `02-DSL与校验.md` | 04820a7d3c9839a9589dd2bbb583186a4d1a8e427b9a7b0f6c05044a57d30928 | 935 |
-| `03-调度器与生命周期.md` | a7553b416f2ac8e1d8d984a4e5f0fd8ebac4404dd534b9283433101f2d7aa640 | 489 |
+| `00-总纲.md` | dfe8deb69571949b86f645f03a3ebb7b0c51b6afd09e420b4f602c9b7ff636ae | 317 |
+| `01-领域模型与状态机.md` | 3ac7a587c3136cbebb41b1d4f0210f47a387ade1c52f0c328802291474ac15c0 | 348 |
+| `02-DSL与校验.md` | f99210b753dfd7b2e19be9016157eddc4b0df46e5aae48135e3cd90389f0b6d6 | 950 |
+| `03-调度器与生命周期.md` | 60172673fae4ec26a7831cbc7eb688ee2aa4145b71549a07b2a7991070703382 | 526 |
 | `04-节点接口与扩展点.md` | 46247060b7b9da82656773aac7b98267b2c9e5cb959a14b054ac7e98e4ead513 | 906 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | 8ab4b5e2d62d3c0bca304de4d9e8af10def9c955073c76401bfb02ecb89fc9ee | 1117 |
-| `07-验收用例.md` | 715448478ac96f0212da0680a3a2d89ba3a15ca15b3e68d6f06bde71fdbae9fd | 330 |
+| `06-存储与可观测.md` | 7bb033798948a0eca3cad0357aaf580edc1814e44ea9b009f7aa9690efb2aaae | 1119 |
+| `07-验收用例.md` | 97622de193c43144d855a830dec8945ad4eae0f0a7edc5be35d8061eaa33d826 | 372 |
 | `08-审计关闭矩阵.md` | 5dc763aa358fad5a7ead77a10dc995f4362433bbe237b2248b4a339234d97f04 | 524 |
 
-> 00–08 合计 **6385 行**（`wc -l` 口径；2026-10-31 **W2a 实现回写批次后**实测（REV-073；00/01/02/03/04/06/07/08 **净 +51 行**（新增 87/删除 36），见 §2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条）；此前 W1 SOP v1 批次为 6051 行、M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6668 行）。
+> 00–08 合计 **6491 行**（`wc -l` 口径；2026-10-31 **W2b spec 回写批次后**实测（REV-077；00/01/02/03/06/07 **净 +106 行**（新增 143/删除 37），见 §2 第 18 条）；此前 W2a 实现回写批次为 **6385 行**/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6788 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
@@ -181,3 +193,4 @@ wc -l 0*.md
 - **REV-035 评审条件已关闭（2026-10-30）**：C1/C2/C3 + 建议已在同一分支追加提交（未改写评审记录）；等待 reviewer-a 复审翻「通过」。
 - **M6 回写已完成（2026-10-31，REV-057）**：05/06/07/08 正文与 `architecture-v2.md` §5.2 已同步 M6 已实现口径（REV-040/041/042/043/044/047/048/049/050/052/055/056/058/060；REV-061 属 wrapup、仅用于 ISSUE-096 登记）；03 §3.12 与 04 A7/A17/§4.2 的双通道临时口径同步撤销；08 只追加 §8.8 M6 注记（8.0–8.7 历史快照不改）。**ISSUE-082（REV-048）与 ISSUE-088（REV-056）均已合并并回写**；ISSUE-095 保持 open（kernel hostname 口径差）、ISSUE-096 仍 pending（open，待 REV-061 wrapup 合并后置 fixed）；正文无未合并实现的 pending 占位。
 - **W2a0 返工设计冻结已完成（2026-10-31，REV-067）**：00/01/02/03/04/06/07/08 已按 DR-005 冻结 deferrable gate（`on_gate_false`）、R15/`DSL_DEFER_NOT_REENTRANT`、`DeferredReceipt`/attempt-per-activation（per-port 继承 + `settled_by_node` 重置）、trace schema v4、AC-14；SOP 设计稿升 v1.1。**本批是设计冻结，不代表 W2a 实现完成**；实现偏差由 W2a-docs 回写。`doc/architecture-v2.md` 的 `R1–R14`/17 码口径未在本批同步（DR-005 §11 C-7），建议 W2a-docs/process 收口。
+- **W2b spec 回写已完成（2026-10-31，REV-077）**：00/01/02/03/06/07 已按已合并实现（REV-074 dsl / REV-075 kernel+cli / REV-076 e2e）回写 R16 静态扇出上限、`NODE_FANOUT_EXCEEDED` 运行期防御层、`CompiledNode.max_fanout`、`NodeError` canonical JSON 与 07 AC-15；`doc/architecture-v2.md` 顶部注记同步为 R1–R16（历史表述保持冻结）；默认无 `max_fanout` 的图行为/hash/错误序列与 v0.1.0 逐字节一致。台账新增 ISSUE-113–124；`doc/progress.md` 已更新为 W2b 完成、下一步 W3a0。
