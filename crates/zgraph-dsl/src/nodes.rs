@@ -903,8 +903,8 @@ fn invalid_entry(value: &str, reason: &str) -> DslError {
 
 /// R6：子图定义与引用。
 ///
-/// 子图内部的 R4/R5/R8–R13 违规统一收敛为 `DSL_SUBGRAPH_INVALID`（message 前缀
-/// `subgraph '<id>'`，定位保留内部节点/边信息）；定义非法同时使子图引用校验失败。
+/// 子图内部的 R4/R5/R8–R13/R15 违规统一收敛为 `DSL_SUBGRAPH_INVALID`（message
+/// 前缀 `subgraph '<id>'`，定位保留内部节点/边信息）；定义非法同时使子图引用校验失败。
 pub(crate) fn check_subgraphs(
     raw: &Value,
     main_nodes: &[GraphNode],
@@ -1044,7 +1044,7 @@ fn parse_subgraph(
     })
 }
 
-/// 子图语义校验：形状、节点 ID 唯一、mapping 引用、R8–R13（全部收敛为
+/// 子图语义校验：形状、节点 ID 唯一、mapping 引用、R8–R13/R15（全部收敛为
 /// `DSL_SUBGRAPH_INVALID`）。返回 `false` 表示本子图不可用。
 fn validate_subgraph_rules(
     subgraph_id: &str,
@@ -1077,6 +1077,7 @@ fn validate_subgraph_rules(
         &entry_refs,
     ));
     inner.extend(edges::check_cycles(&body.nodes, &body.edges));
+    inner.extend(edges::check_defer_reentrancy(&body.nodes, &body.edges));
     errors.extend(wrap_subgraph_errors(subgraph_id, inner));
     errors.len() == start
 }

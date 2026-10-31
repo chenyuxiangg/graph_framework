@@ -1,8 +1,10 @@
-//! R8–R13：边端点、端口引用、两级唯一性、输入来源、无门控环检测。
+//! R8–R13、R15：边端点、端口引用、两级唯一性、输入来源、无门控环检测、
+//! defer 边可重入性。
 //!
-//! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4.1 R8–R13。
-//! 说明：边的**结构**检查（键白名单/必填/类型、gate 对象形状）在执行 R8 时完成，
-//! 错误码仍按 02 §2.4.1 的归属分配（结构错误 → `DSL_PARSE_ERROR`/`DSL_MISSING_FIELD`）。
+//! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4.1 R8–R13 与 DR-004 D1（R15，
+//! W2a0 冻结）。说明：边的**结构**检查（键白名单/必填/类型、gate 对象形状、
+//! `on_gate_false` 枚举）在执行 R8 时完成，错误码仍按 02 §2.4.1 的归属分配
+//! （结构错误 → `DSL_PARSE_ERROR`/`DSL_MISSING_FIELD`）。
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -10,16 +12,18 @@ use serde_json::Value;
 
 use crate::error::{msg, DslError, DslErrorCode};
 use crate::shape::{check_keys, required_nonempty_str};
-use crate::types::{GateDefinition, GraphEdge, GraphNode, NodeType};
+use crate::types::{GateDefinition, GraphEdge, GraphNode, NodeType, OnGateFalse};
 
-const EDGE_KEYS: [&str; 5] = [
+const EDGE_KEYS: [&str; 6] = [
     "from",
     "to_node",
     "to_input_port",
     "gate",
+    "on_gate_false",
     "from_output_port",
 ];
 const GATE_KEYS: [&str; 2] = ["function", "params"];
+const ON_GATE_FALSE_VALUES: [&str; 2] = ["settle", "defer"];
 
 /// R8（结构部分）：把 `edges` 数组解析成类型化边。
 pub(crate) fn parse_edges(value: &Value) -> Result<Vec<GraphEdge>, Vec<DslError>> {
@@ -42,6 +46,7 @@ pub(crate) fn parse_edges(value: &Value) -> Result<Vec<GraphEdge>, Vec<DslError>
         let to_input_port =
             required_nonempty_str(map, "to_input_port", &scope, &mut errors).map(str::to_string);
         let gate = parse_gate(map.get("gate"), &scope, &mut errors);
+        let on_gate_false = parse_on_gate_false(map.get("on_gate_false"), &scope, &mut errors);
         // v1 保留字段：出现即报错，不看取值（02 §2.2.4 / REV-005 #2）。
         let from_output_port = map.get("from_output_port").cloned();
         attach_edge_location(&mut errors, start, index);
@@ -51,6 +56,7 @@ pub(crate) fn parse_edges(value: &Value) -> Result<Vec<GraphEdge>, Vec<DslError>
                 to_node: to_node.unwrap_or_default(),
                 to_input_port: to_input_port.unwrap_or_default(),
                 gate,
+                on_gate_false,
                 from_output_port,
             });
         }
@@ -59,6 +65,36 @@ pub(crate) fn parse_edges(value: &Value) -> Result<Vec<GraphEdge>, Vec<DslError>
         Ok(edges)
     } else {
         Err(errors)
+    }
+}
+
+/// 解析边级 `on_gate_false`：缺失 → `None`（缺省 settle，不回写）；
+/// `"settle"` / `"defer"` → `Some`；其它字符串/非字符串 → `DSL_PARSE_ERROR`（R4 桶）。
+fn parse_on_gate_false(
+    value: Option<&Value>,
+    scope: &str,
+    errors: &mut Vec<DslError>,
+) -> Option<OnGateFalse> {
+    let value = value?;
+    let Some(text) = value.as_str() else {
+        errors.push(msg::wrong_type("on_gate_false", "string", scope, value));
+        return None;
+    };
+    match OnGateFalse::from_name(text) {
+        Some(policy) => Some(policy),
+        None => {
+            errors.push(
+                DslError::new(
+                    DslErrorCode::ParseError,
+                    format!(
+                        "field 'on_gate_false' in {scope} must be one of [settle, defer], got {value}"
+                    ),
+                )
+                .expected(serde_json::json!(ON_GATE_FALSE_VALUES))
+                .actual(value.clone()),
+            );
+            None
+        }
     }
 }
 
@@ -446,4 +482,176 @@ fn cycle_error(cycle: &Cycle<'_>) -> DslError {
     .at_node(node_id)
     .expected("acyclic")
     .actual(serde_json::json!(cycle.nodes))
+}
+
+/// R15：`defer` 边可重入性校验（DR-004 D1 / W2a0 冻结，S12 关闭）。
+///
+/// 对每条 `on_gate_false == "defer"` 的边 `u -> v`：源 `u` 必须可重入，
+/// 即满足以下之一（`G_all` = 顶点为节点、边为**全部边**，含 gate 边与自环；
+/// 这正是与 R13 的 `G'`（只含无 gate 边）不同的地方，见 REV-063 S12）：
+///
+/// 1. `u` 所在强连通分量大小 ≥ 2，且该分量内至少有一条 defer 边（两端点同属该
+///    分量）——返工环 `P -> W -> R -> P` 内的 `P -> W` 与前进边 `P -> 下游`；
+/// 2. 或存在 defer 自环 `u -> u`（大小为 1 的可重入环）。
+///
+/// 按 `edges` 数组顺序取**首个**违规边报一条 `DSL_DEFER_NOT_REENTRANT`
+/// （与 R13 首错风格一致）；定位 `edge_index` + `node_id = u`。无 defer 边的图
+/// 完全不受影响（与 v0.1.0 行为一致）。端点缺失的边跳过（R8 已报错，避免级联）。
+pub(crate) fn check_defer_reentrancy(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<DslError> {
+    if !edges
+        .iter()
+        .any(|edge| edge.on_gate_false == Some(OnGateFalse::Defer))
+    {
+        return Vec::new();
+    }
+    let index_of: BTreeMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.as_str(), index))
+        .collect();
+    let components = StronglyConnectedComponents::new(nodes.len(), edges, &index_of);
+    let mut defer_component = vec![false; components.count()];
+    let mut defer_self_loop = vec![false; nodes.len()];
+    for edge in edges {
+        if edge.on_gate_false != Some(OnGateFalse::Defer) {
+            continue;
+        }
+        let (Some(from), Some(to)) = (
+            index_of.get(edge.from.as_str()).copied(),
+            index_of.get(edge.to_node.as_str()).copied(),
+        ) else {
+            continue;
+        };
+        if from == to {
+            defer_self_loop[from] = true;
+        }
+        if components.same(from, to) {
+            defer_component[components.id_of(from)] = true;
+        }
+    }
+    for (edge_index, edge) in edges.iter().enumerate() {
+        if edge.on_gate_false != Some(OnGateFalse::Defer) {
+            continue;
+        }
+        let Some(from) = index_of.get(edge.from.as_str()).copied() else {
+            continue;
+        };
+        let reentrant = defer_self_loop[from]
+            || (components.size_of(from) >= 2 && defer_component[components.id_of(from)]);
+        if !reentrant {
+            return vec![defer_not_reentrant(edge_index, edge)];
+        }
+    }
+    Vec::new()
+}
+
+fn defer_not_reentrant(edge_index: usize, edge: &GraphEdge) -> DslError {
+    DslError::new(
+        DslErrorCode::DeferNotReentrant,
+        format!(
+            "defer edge source '{}' is not re-entrant: must lie on a cycle containing a defer edge",
+            edge.from
+        ),
+    )
+    .at_edge(edge_index)
+    .at_node(edge.from.clone())
+    .expected("source node on a cycle containing a defer edge")
+    .actual(serde_json::json!({
+        "from": edge.from,
+        "to_node": edge.to_node,
+        "on_gate_false": "defer",
+    }))
+}
+
+/// `G_all` 的强连通分量（Kosaraju 迭代实现，无递归深度风险）。
+///
+/// 顶点按 `nodes` 顺序、邻接按 `edges` 数组顺序遍历，结果确定。
+struct StronglyConnectedComponents {
+    component: Vec<usize>,
+    sizes: Vec<usize>,
+}
+
+impl StronglyConnectedComponents {
+    fn new(node_count: usize, edges: &[GraphEdge], index_of: &BTreeMap<&str, usize>) -> Self {
+        let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+        let mut reverse: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+        for edge in edges {
+            let (Some(&from), Some(&to)) = (
+                index_of.get(edge.from.as_str()),
+                index_of.get(edge.to_node.as_str()),
+            ) else {
+                continue;
+            };
+            adjacency[from].push(to);
+            reverse[to].push(from);
+        }
+        let order = finish_order(&adjacency);
+        let mut component = vec![usize::MAX; node_count];
+        let mut sizes = Vec::new();
+        for start in order.iter().rev() {
+            if component[*start] != usize::MAX {
+                continue;
+            }
+            let id = sizes.len();
+            let mut size = 0;
+            let mut stack = vec![*start];
+            component[*start] = id;
+            while let Some(node) = stack.pop() {
+                size += 1;
+                for predecessor in &reverse[node] {
+                    if component[*predecessor] == usize::MAX {
+                        component[*predecessor] = id;
+                        stack.push(*predecessor);
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        Self { component, sizes }
+    }
+
+    fn id_of(&self, node: usize) -> usize {
+        self.component[node]
+    }
+
+    fn size_of(&self, node: usize) -> usize {
+        self.sizes[self.component[node]]
+    }
+
+    fn same(&self, left: usize, right: usize) -> bool {
+        self.component[left] == self.component[right]
+    }
+
+    fn count(&self) -> usize {
+        self.sizes.len()
+    }
+}
+
+/// Kosaraju 第一遍：DFS 完成顺序（迭代，按顶点/邻接顺序确定）。
+fn finish_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
+    let mut visited = vec![false; adjacency.len()];
+    let mut order = Vec::with_capacity(adjacency.len());
+    for start in 0..adjacency.len() {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(&(node, next)) = stack.last() {
+            if next < adjacency[node].len() {
+                let child = adjacency[node][next];
+                if let Some(frame) = stack.last_mut() {
+                    frame.1 += 1;
+                }
+                if !visited[child] {
+                    visited[child] = true;
+                    stack.push((child, 0));
+                }
+            } else {
+                order.push(node);
+                stack.pop();
+            }
+        }
+    }
+    order
 }

@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "defer-not-reentrant" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "a",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "string", "required": true }],
+      "config": { "module": "workers.a", "function": "run" }
+    },
+    {
+      "id": "done",
+      "type": "end",
+      "inputs": [{ "name": "result", "type": "any", "required": true }],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "a", "to_input_port": "x" },
+    {
+      "from": "a",
+      "to_node": "done",
+      "to_input_port": "result",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "ok", "equals": true }
+      },
+      "on_gate_false": "defer"
+    }
+  ]
+}

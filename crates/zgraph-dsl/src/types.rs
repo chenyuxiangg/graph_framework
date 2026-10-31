@@ -290,7 +290,39 @@ pub struct GateDefinition {
     pub params: Option<Value>,
 }
 
-/// 边声明（02 §2.2.2 `GraphEdge`）。
+/// 边级 `gate=false` 策略（DR-004 D1 / W2a0；缺省 `Settle` 保持 v0.1.0 语义）。
+///
+/// v0.1.0 缺省语义为 `settle`：gate 不通过时目标实例结算为 `Skipped`。W2a 新增
+/// opt-in 的 `defer`：gate 不通过时不结算目标（deferred），供返工环使用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnGateFalse {
+    /// gate=false 时结算目标为 `Skipped`（缺省，v0.1.0 语义）。
+    #[default]
+    Settle,
+    /// gate=false 时目标保持未决（deferred，W2a 返工语义）。
+    Defer,
+}
+
+impl OnGateFalse {
+    /// 全部 2 种策略（文档/测试用）。
+    pub const ALL: [Self; 2] = [Self::Settle, Self::Defer];
+
+    /// JSON 中的 snake_case 名称。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Settle => "settle",
+            Self::Defer => "defer",
+        }
+    }
+
+    /// 从 JSON 字符串解析（未知返回 `None`）。
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|policy| policy.as_str() == name)
+    }
+}
+
+/// 边声明（02 §2.2.2 `GraphEdge`，v0.2 增 `on_gate_false`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphEdge {
     /// 源节点 ID。
@@ -301,6 +333,11 @@ pub struct GraphEdge {
     pub to_input_port: String,
     /// 可选门控。
     pub gate: Option<GateDefinition>,
+    /// 边级 `gate=false` 策略；`None` = 作者未写 = 缺省 [`OnGateFalse::Settle`]。
+    ///
+    /// 保留"作者是否写了"的语义：缺省值不回写 DSL、不参与 `graph_hash`
+    /// （02 §2.8.3：不补齐默认值）；语义默认值在编译期补到产物。
+    pub on_gate_false: Option<OnGateFalse>,
     /// v1 保留字段：必须缺省；出现即 `DSL_UNSUPPORTED_FIELD`（不看取值，保留原始值）。
     pub from_output_port: Option<Value>,
 }

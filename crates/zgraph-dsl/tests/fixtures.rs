@@ -1,6 +1,6 @@
 //! Fixtures 全覆盖测试：每个文件都被引用，坏图命中期望错误码**与定位**。
 //!
-//! 对应 02 §2.4 / §2.7.1 / §2.7.3 与 07 AC-04（M1 口径）：17 个 DSL 码反例、
+//! 对应 02 §2.4 / §2.7.1 / §2.7.3 与 07 AC-04（M1 口径）：18 个 DSL 码反例、
 //! R3 版本/时间戳反例、REV-005 回归反例。fixture 目录为 `tests/fixtures/graphs/`，
 //! 资产目录为 `tests/fixtures/assets/`。
 
@@ -66,7 +66,7 @@ const fn edge(index: usize) -> Loc {
 }
 
 /// 坏图 fixture → 期望错误码 + 期望定位（REV-005 后为强断言）。
-const BAD_CASES: [(&str, DslErrorCode, Loc); 31] = [
+const BAD_CASES: [(&str, DslErrorCode, Loc); 33] = [
     // R1/R2/R3 文档级
     ("bad_parse_error.json", DslErrorCode::ParseError, DOC_LEVEL),
     (
@@ -229,15 +229,27 @@ const BAD_CASES: [(&str, DslErrorCode, Loc); 31] = [
         DslErrorCode::ParseError,
         DOC_LEVEL,
     ),
+    // W2a：边级 on_gate_false
+    (
+        "bad_defer_not_cycle.json",
+        DslErrorCode::DeferNotReentrant,
+        Loc {
+            node: Some("a"),
+            edge: Some(1),
+            port: None,
+        },
+    ),
+    ("bad_defer_value.json", DslErrorCode::ParseError, edge(1)),
 ];
 
-/// 合法 fixture 名单（全部必须通过 R1–R14）。
-const VALID_CASES: [&str; 5] = [
+/// 合法 fixture 名单（全部必须通过 R1–R15）。
+const VALID_CASES: [&str; 6] = [
     "customer_ticket.json",
     "valid_parallel.json",
     "valid_cycle.json",
     "valid_subgraph.json",
     "valid_created_at_offset.json",
+    "valid_gate_defer.json",
 ];
 
 fn fixture_needs_assets(name: &str) -> bool {

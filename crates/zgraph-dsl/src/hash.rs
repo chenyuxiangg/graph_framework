@@ -190,6 +190,11 @@ fn project_edge(edge: &Value) -> Value {
         }
         out.insert("gate".to_string(), Value::Object(projected));
     }
+    // v0.2：仅当作者**显式写了** `on_gate_false` 才进投影；缺省 settle 不补齐
+    // （02 §2.8.3 "不补齐默认值"，保证 v0.1.0 既有图 hash 不变）。
+    if let Some(policy) = edge.get("on_gate_false") {
+        out.insert("on_gate_false".to_string(), policy.clone());
+    }
     if let Some(port) = edge.get("from_output_port") {
         out.insert("from_output_port".to_string(), port.clone());
     }

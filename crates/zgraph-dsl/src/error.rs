@@ -1,7 +1,8 @@
 //! DSL 错误码、错误对象与错误容器。
 //!
 //! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4/§2.7；错误码全集见
-//! `doc/spec-v1.2/00-总纲.md` §0.4（DSL 域 17 个码，本 crate 不新增）。
+//! `doc/spec-v1.2/00-总纲.md` §0.4（DSL 域 18 个码；`DSL_DEFER_NOT_REENTRANT`
+//! 为 W2a 新增，W2a0 回写 00 §0.4）。
 //!
 //! 失败策略（02 §2.1.3）：跨规则 fail-fast，同规则内聚合，最多返回
 //! [`MAX_DSL_ERRORS`] 条；`truncated` 标记是否发生截断。
@@ -14,7 +15,7 @@ use serde_json::Value;
 /// 单次校验最多返回的错误条数（02 §2.1.3）。
 pub const MAX_DSL_ERRORS: usize = 20;
 
-/// DSL 域错误码（00 §0.4 的 17 个 `DSL_*` 码，一一对应）。
+/// DSL 域错误码（00 §0.4 的 18 个 `DSL_*` 码，一一对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DslErrorCode {
     /// 非法 JSON / 类型不符。
@@ -51,6 +52,8 @@ pub enum DslErrorCode {
     UnsupportedNodeType,
     /// 出现 v1 不支持/保留的字段（`on_error`、`from_output_port`）。
     UnsupportedField,
+    /// `on_gate_false="defer"` 的边源节点不在含 defer 边的可重入环上（R15）。
+    DeferNotReentrant,
 }
 
 impl DslErrorCode {
@@ -74,11 +77,12 @@ impl DslErrorCode {
             Self::AgentNotFound => "DSL_AGENT_NOT_FOUND",
             Self::UnsupportedNodeType => "DSL_UNSUPPORTED_NODE_TYPE",
             Self::UnsupportedField => "DSL_UNSUPPORTED_FIELD",
+            Self::DeferNotReentrant => "DSL_DEFER_NOT_REENTRANT",
         }
     }
 
-    /// 全部 17 个 DSL 错误码（文档与测试用）。
-    pub const ALL: [Self; 17] = [
+    /// 全部 18 个 DSL 错误码（文档与测试用）。
+    pub const ALL: [Self; 18] = [
         Self::ParseError,
         Self::MissingField,
         Self::DuplicateNodeId,
@@ -96,6 +100,7 @@ impl DslErrorCode {
         Self::AgentNotFound,
         Self::UnsupportedNodeType,
         Self::UnsupportedField,
+        Self::DeferNotReentrant,
     ];
 }
 
@@ -351,7 +356,7 @@ mod tests {
         let mut names: Vec<&str> = DslErrorCode::ALL.iter().map(|code| code.as_str()).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 17, "00 §0.4 有 17 个 DSL 错误码");
+        assert_eq!(names.len(), 18, "00 §0.4 有 18 个 DSL 错误码（W2a 增 R15）");
         assert!(names.iter().all(|name| name.starts_with("DSL_")));
     }
 }

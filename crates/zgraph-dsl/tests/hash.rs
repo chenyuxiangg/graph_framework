@@ -113,3 +113,68 @@ fn golden_hash_for_customer_ticket_fixture() {
     // golden：锁定 canonical JSON 实现；fixture 内容变更时需同步更新。
     assert_eq!(loaded.graph_hash, "ec320e4244b365ab");
 }
+
+fn fixture(name: &str) -> serde_json::Value {
+    let bytes = std::fs::read(repo_root().join("tests/fixtures/graphs").join(name))
+        .unwrap_or_else(|error| panic!("fixture {name}: {error}"));
+    serde_json::from_slice(&bytes).expect("fixture is valid JSON")
+}
+
+fn load_value(graph: serde_json::Value) -> zgraph_dsl::LoadedGraph {
+    zgraph_dsl::load_graph_value(graph, &Default::default()).expect("graph is valid")
+}
+
+#[test]
+fn golden_hash_for_valid_cycle_fixture_is_unchanged_by_w2a() {
+    // golden 捕获于 W2a 改动前（v0.1.0 语义）：新增的 `on_gate_false` 不得改变
+    // 既有图的 hash（不补齐默认值、未写不投影）。
+    let loaded = load_value(fixture("valid_cycle.json"));
+    assert_eq!(loaded.graph_hash, "0e8911b6b4003c7e");
+    assert!(!loaded.canonical_json().contains("on_gate_false"));
+}
+
+#[test]
+fn omitted_on_gate_false_is_not_backfilled_by_projection() {
+    let base = load_value(fixture("valid_cycle.json"));
+    let mut explicit = fixture("valid_cycle.json");
+    explicit["edges"][1]["on_gate_false"] = json!("settle");
+    let loaded = load_value(explicit);
+    assert_ne!(
+        base.graph_hash, loaded.graph_hash,
+        "explicit settle must differ from omitted (no default backfill)"
+    );
+    assert!(!base.canonical_json().contains("on_gate_false"));
+    assert!(
+        loaded
+            .canonical_json()
+            .contains("\"on_gate_false\":\"settle\""),
+        "canonical projection must keep the explicit value: {}",
+        loaded.canonical_json()
+    );
+}
+
+#[test]
+fn on_gate_false_defer_changes_hash_and_differs_from_settle() {
+    let base = load_value(fixture("valid_cycle.json"));
+    let mut settle = fixture("valid_cycle.json");
+    settle["edges"][1]["on_gate_false"] = json!("settle");
+    let settle = load_value(settle);
+
+    // 自环 defer 合法（R15 的可重入自环分支），确保 hash 用例本身是合法图。
+    let mut defer = fixture("valid_cycle.json");
+    defer["edges"][1]["on_gate_false"] = json!("defer");
+    let defer = load_value(defer);
+
+    assert_ne!(base.graph_hash, defer.graph_hash);
+    assert_ne!(settle.graph_hash, defer.graph_hash);
+    assert!(defer
+        .canonical_json()
+        .contains("\"on_gate_false\":\"defer\""));
+}
+
+#[test]
+fn golden_hash_for_gate_defer_fixture() {
+    let loaded = load_value(fixture("valid_gate_defer.json"));
+    // golden：锁定含 `on_gate_false` 的 canonical 投影（W2a）。
+    assert_eq!(loaded.graph_hash, "2ff1339bd3d6d928");
+}

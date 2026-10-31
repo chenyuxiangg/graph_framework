@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use zgraph_dsl::{
     load_graph, load_graph_value, load_graph_with_options, DslErrorCode, DslErrors, LoadOptions,
-    LoadedGraph,
+    LoadedGraph, OnGateFalse,
 };
 
 fn repo_root() -> PathBuf {
@@ -1280,4 +1280,344 @@ fn rev005_2_missing_agent_reports_first_referencing_node_once() {
         Some("first"),
         "{errors}"
     );
+}
+
+// ---------------------------------------------------------------- R15 / on_gate_false（W2a）
+
+/// 内置 `check_output` gate（R14 合法 params）。
+fn review_gate(path: &str, equals: Value) -> Value {
+    json!({"function": "check_output", "params": {"path": path, "equals": equals}})
+}
+
+/// 带 gate 的 `on_gate_false="defer"` 边。
+fn defer_edge(from: &str, to_node: &str, to_input_port: &str, gate: Value) -> Value {
+    let mut edge = gated_edge(from, to_node, to_input_port, gate);
+    edge["on_gate_false"] = json!("defer");
+    edge
+}
+
+/// 单节点 gated 自环图（无 defer，R15 不得误报）。
+fn gated_self_loop_graph() -> Value {
+    graph_with(
+        json!([
+            start_node("start"),
+            python_node(
+                "loop",
+                json!([input_port("seed", true), input_port("again", true)])
+            )
+        ]),
+        json!([
+            edge("start", "loop", "seed"),
+            gated_edge("loop", "loop", "again", review_gate("more", json!(true)))
+        ]),
+    )
+}
+
+/// SOP 返工图：`P --rework(defer)--> W -> R -> P` 环 +前进边 `P --approved(defer)--> end`。
+fn defer_rework_graph() -> Value {
+    graph_with(
+        json!([
+            start_node("start"),
+            python_node(
+                "p",
+                json!([input_port("task", true), input_port("feedback", true)])
+            ),
+            python_node("w", json!([input_port("comments", true)])),
+            python_node("r", json!([input_port("work", true)])),
+            end_node("done", "result")
+        ]),
+        json!([
+            edge("start", "p", "task"),
+            defer_edge(
+                "p",
+                "done",
+                "result",
+                review_gate("verdict", json!("approved"))
+            ),
+            defer_edge(
+                "p",
+                "w",
+                "comments",
+                review_gate("verdict", json!("rework"))
+            ),
+            edge("w", "r", "work"),
+            edge("r", "p", "feedback")
+        ]),
+    )
+}
+
+#[test]
+fn on_gate_false_helpers_are_stable() {
+    assert_eq!(OnGateFalse::default(), OnGateFalse::Settle);
+    assert_eq!(OnGateFalse::ALL.len(), 2);
+    for policy in OnGateFalse::ALL {
+        assert_eq!(OnGateFalse::from_name(policy.as_str()), Some(policy));
+    }
+    assert_eq!(OnGateFalse::from_name("ignore"), None);
+}
+
+#[test]
+fn on_gate_false_is_none_when_absent_and_kept_when_explicit() {
+    let loaded = load(gated_self_loop_graph()).expect("gated self-loop valid");
+    assert_eq!(loaded.definition.edges[1].on_gate_false, None);
+
+    let mut graph = gated_self_loop_graph();
+    graph["edges"][1]["on_gate_false"] = json!("settle");
+    let loaded = load(graph).expect("explicit settle valid");
+    assert_eq!(
+        loaded.definition.edges[1].on_gate_false,
+        Some(OnGateFalse::Settle)
+    );
+}
+
+#[test]
+fn on_gate_false_invalid_value_or_type_is_parse_error_at_edge() {
+    let mut graph = gated_self_loop_graph();
+    graph["edges"][1]["on_gate_false"] = json!("ignore");
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(errors.first().location.edge_index, Some(1));
+    assert_eq!(errors.first().location.node_id, None);
+    assert!(errors.first().message.contains("on_gate_false"), "{errors}");
+    assert_eq!(
+        errors.first().expected,
+        Some(json!(["settle", "defer"])),
+        "{errors}"
+    );
+    assert_eq!(errors.first().actual, Some(json!("ignore")));
+
+    let mut graph = gated_self_loop_graph();
+    graph["edges"][1]["on_gate_false"] = json!(true);
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(errors.first().location.edge_index, Some(1));
+    assert!(
+        errors.first().message.contains("expects string"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn r15_defer_edges_on_defer_cycle_are_legal() {
+    let loaded = load(defer_rework_graph()).expect("SOP rework graph is valid");
+    let policies: Vec<Option<OnGateFalse>> = loaded
+        .definition
+        .edges
+        .iter()
+        .map(|edge| edge.on_gate_false)
+        .collect();
+    assert_eq!(
+        policies,
+        vec![
+            None,
+            Some(OnGateFalse::Defer),
+            Some(OnGateFalse::Defer),
+            None,
+            None
+        ]
+    );
+}
+
+#[test]
+fn r15_defer_source_is_authorized_by_any_defer_edge_in_its_scc() {
+    // 环 p -> w -> r -> p 内的 defer 边是 w -> r；源 p 虽不是该 defer 边的端点，
+    // 但 p 位于「含 defer 边的环」上（DR-004 D1 措辞）→ p -> done 的 defer 合法。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node(
+                "p",
+                json!([input_port("task", true), input_port("feedback", true)])
+            ),
+            python_node("w", json!([input_port("comments", true)])),
+            python_node("r", json!([input_port("work", true)])),
+            end_node("done", "result")
+        ]),
+        json!([
+            edge("start", "p", "task"),
+            gated_edge("p", "w", "comments", review_gate("go", json!(true))),
+            defer_edge("w", "r", "work", review_gate("ok", json!(true))),
+            edge("r", "p", "feedback"),
+            defer_edge("p", "done", "result", review_gate("ok", json!(true)))
+        ]),
+    );
+    load(graph).expect("source on a defer-bearing cycle is re-entrant");
+}
+
+#[test]
+fn r15_defer_edge_source_without_cycle_is_rejected() {
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("a", json!([input_port("x", true)])),
+            end_node("done", "result")
+        ]),
+        json!([
+            edge("start", "a", "x"),
+            defer_edge("a", "done", "result", review_gate("ok", json!(true)))
+        ]),
+    );
+    let errors = expect_code(graph, DslErrorCode::DeferNotReentrant);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    let first = errors.first();
+    assert_eq!(first.location.edge_index, Some(1));
+    assert_eq!(first.location.node_id.as_deref(), Some("a"));
+    assert!(first.message.contains("not re-entrant"), "{first:?}");
+    assert!(
+        first.expected.is_some() && first.actual.is_some(),
+        "{first:?}"
+    );
+}
+
+#[test]
+fn r15_gated_cycle_without_defer_edge_does_not_authorize_defer() {
+    // SCC {a,b} 大小 2，但环内没有 defer 边（gate 边为 settle）→ defer a→done 非法。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("a", json!([input_port("x", true), input_port("z", true)])),
+            python_node("b", json!([input_port("y", true)])),
+            end_node("done", "result")
+        ]),
+        json!([
+            edge("start", "a", "x"),
+            gated_edge("a", "b", "y", review_gate("go", json!(true))),
+            edge("b", "a", "z"),
+            defer_edge("a", "done", "result", review_gate("ok", json!(true)))
+        ]),
+    );
+    let errors = expect_code(graph, DslErrorCode::DeferNotReentrant);
+    assert_eq!(errors.first().location.edge_index, Some(3));
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("a"));
+}
+
+#[test]
+fn r15_defer_self_loop_is_reentrant() {
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node(
+                "loop",
+                json!([input_port("seed", true), input_port("again", true)])
+            ),
+            end_node("done", "result")
+        ]),
+        json!([
+            edge("start", "loop", "seed"),
+            defer_edge("loop", "loop", "again", review_gate("more", json!(true))),
+            // 源 loop 有 defer 自环 → 该前进 defer 边同样合法。
+            defer_edge("loop", "done", "result", review_gate("ok", json!(true)))
+        ]),
+    );
+    let loaded = load(graph).expect("defer self-loop is re-entrant");
+    assert_eq!(
+        loaded.definition.edges[1].on_gate_false,
+        Some(OnGateFalse::Defer)
+    );
+    assert_eq!(
+        loaded.definition.edges[2].on_gate_false,
+        Some(OnGateFalse::Defer)
+    );
+}
+
+#[test]
+fn r15_first_violating_defer_edge_in_array_order_is_reported() {
+    // 两条互不相关的违规 defer 边 → 只报 edges 数组序的首个（index 1）。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("a", json!([input_port("x", true)])),
+            python_node("b", json!([input_port("y", true)])),
+            end_node("done", "result"),
+            end_node("done2", "other")
+        ]),
+        json!([
+            edge("start", "a", "x"),
+            defer_edge("a", "done", "result", review_gate("ok", json!(true))),
+            edge("start", "b", "y"),
+            defer_edge("b", "done2", "other", review_gate("ok", json!(true)))
+        ]),
+    );
+    let errors = expect_code(graph, DslErrorCode::DeferNotReentrant);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(errors.first().location.edge_index, Some(1));
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("a"));
+}
+
+#[test]
+fn r15_r13_still_reports_ungated_cycle_first() {
+    // R13 保持原样：无 gate 环先报 DSL_CYCLE_DETECTED（R15 不改变其语义）。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            python_node("a", json!([input_port("x", true), input_port("z", true)])),
+            python_node("b", json!([input_port("y", true)])),
+            end_node("done", "result")
+        ]),
+        json!([
+            edge("start", "a", "x"),
+            edge("a", "b", "y"),
+            edge("b", "a", "z"),
+            defer_edge("a", "done", "result", review_gate("ok", json!(true)))
+        ]),
+    );
+    expect_code(graph, DslErrorCode::CycleDetected);
+}
+
+#[test]
+fn r15_violation_inside_subgraph_maps_to_subgraph_invalid() {
+    let mut graph = graph_with(
+        json!([
+            start_node("start"),
+            node(
+                "sub",
+                "subgraph",
+                json!([input_port("q", true)]),
+                json!({"subgraph_id": "inner"})
+            ),
+            end_node("done", "r")
+        ]),
+        json!([edge("start", "sub", "q"), edge("sub", "done", "r")]),
+    );
+    graph["subgraphs"] = json!([{
+        "id": "inner",
+        "nodes": [
+            python_node("pin", json!([input_port("p", true)])),
+            end_node("inner_end", "o")
+        ],
+        "edges": [defer_edge(
+            "pin",
+            "inner_end",
+            "o",
+            review_gate("ok", json!(true))
+        )],
+        "input_mapping": {"q": "pin.p"},
+        "output_mapping": {"r": "inner_end.o"}
+    }]);
+    let errors = expect_code(graph, DslErrorCode::SubgraphInvalid);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert!(
+        errors.first().message.contains("subgraph 'inner'"),
+        "{errors}"
+    );
+    assert!(
+        errors.first().message.contains("not re-entrant"),
+        "{errors}"
+    );
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("pin"));
+    assert_eq!(errors.first().location.edge_index, Some(0));
+}
+
+#[test]
+fn r15_non_defer_graphs_have_no_false_positives() {
+    for name in [
+        "customer_ticket.json",
+        "valid_parallel.json",
+        "valid_cycle.json",
+        "valid_subgraph.json",
+    ] {
+        load_fixture(name).unwrap_or_else(|errors| panic!("{name}: {errors}"));
+    }
+    load(gated_self_loop_graph()).expect("gated cycle without defer is unaffected");
+    load_fixture("valid_gate_defer.json").expect("explicit defer rework fixture is valid");
 }

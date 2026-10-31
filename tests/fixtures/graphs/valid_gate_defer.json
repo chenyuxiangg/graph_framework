@@ -1,0 +1,63 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "gate-defer-rework" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [], "config": {} },
+    {
+      "id": "p",
+      "type": "python_node",
+      "inputs": [
+        { "name": "task", "type": "string", "required": true },
+        { "name": "feedback", "type": "string", "required": true }
+      ],
+      "config": {
+        "module": "workers.review",
+        "function": "parse_verdict_rework"
+      }
+    },
+    {
+      "id": "w",
+      "type": "python_node",
+      "inputs": [{ "name": "comments", "type": "string", "required": true }],
+      "config": { "module": "workers.rework", "function": "work" }
+    },
+    {
+      "id": "r",
+      "type": "python_node",
+      "inputs": [{ "name": "work", "type": "string", "required": true }],
+      "config": { "module": "workers.rework", "function": "revise" }
+    },
+    {
+      "id": "downstream",
+      "type": "end",
+      "inputs": [{ "name": "result", "type": "any", "required": true }],
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "p", "to_input_port": "task" },
+    {
+      "from": "p",
+      "to_node": "downstream",
+      "to_input_port": "result",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "verdict", "equals": "approved" }
+      },
+      "on_gate_false": "defer"
+    },
+    {
+      "from": "p",
+      "to_node": "w",
+      "to_input_port": "comments",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "verdict", "equals": "rework" }
+      },
+      "on_gate_false": "defer"
+    },
+    { "from": "w", "to_node": "r", "to_input_port": "work" },
+    { "from": "r", "to_node": "p", "to_input_port": "feedback" }
+  ]
+}
