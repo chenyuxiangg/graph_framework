@@ -89,3 +89,20 @@ git status --porcelain -> 空
 ## 6. 条件关闭记录（仅“有条件通过”填写）
 
 不适用（结论为 `通过`，无附加条件）。
+
+## 7. 第二评审 · cli 跨模块机械改动（Lead 追加，2026-10-31）
+
+- **评审人**：`lead`（**≠ 作者** `kernel-dev`；该跨模块改动由 Lead 批准，按 AGENTS §2「跨模块改动由 Lead 在评审记录中写明并指定第二评审人」执行）
+- **评审范围**：`crates/zgraph-cli/src/bridge.rs` 的 `node_error_json` 新增 `kernel::NodeError::FanoutExceeded { limit, actual }` arm（`bridge.rs:738-744`）+ `node_error_json_covers_fanout_exceeded` 测试（`bridge.rs:873-890`）；**除此之外 cli 无其它改动**。
+- **核对结论（通过）**：
+  1. **形状兼容**：base 键 `code`（`error.code()` = `NODE_FANOUT_EXCEEDED`）与 `message`（`Display` = `node fan-out {actual} exceeded max_fanout ({limit})`）保持不变；变体键只增 `kind:"FanoutExceeded"`、`limit`、`actual` 三个，与既有 `NodeWorker` 变体“base + 变体键”模式一致，不破坏 06 §6.2.5.1 canonical 形状；未混入 `business_code`/`worker_kind` 等其它变体键。
+  2. **改动最小**：仅一个 match arm + 一条单测；无 cli 参数/退出码/生命周期行为改动；`crates/zgraph-trace/**` 零改动。
+  3. **测试有效**：测试断言 `code`/`kind`/`limit`/`actual`/`message` 五个字段，并显式断言不含它变体键（防止复制粘贴漂移）。
+- **Lead 亲自验证**：
+  ```bash
+  cd /Users/zyzs/lczyzs/code/zgraph/.worktrees/kernel-kernel-dev
+  export CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home
+  cargo test -p zgraph-cli --offline   # 161 passed / 0 failed / 0 ignored
+  git status --porcelain               # 空（仅本评审提交前）
+  ```
+- **结论**：**通过（第二评审）**。cli 机械改动与主审结论合并生效；分支满足合并前置。
