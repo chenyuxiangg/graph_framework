@@ -317,3 +317,13 @@ cd doc/spec-v1.2 && shasum -a 256 0*.md && wc -l 0*.md README.md PROVENANCE.md R
 - 收口增量（rebase 冲突解决 + N-9..N-12）未破坏已完成的内容与结论，**结论维持「通过」**；merge.sh 前置（分支匹配 / `结论：通过` / 无模板占位 / worktree clean / 基于最新 `origin/main`）满足。
 - 残留建议（非阻塞）：**N-13** `PROVENANCE:137`（§2 第 17 条 07 项）仍写「e2e final **将**改单 item rework profile，c/e 规模/断言以 final 为准」（未来时；final 已完成）——建议下次 docs 触碰改为「已改/以 07 AC-14 为准」；**N-14** `progress:5` 仍写「REV-073 有条件通过」（复审已通过）——按 AGENTS §4 于合并后更新为「通过/已完成」。
 - 签字：`reviewer-docs` · 2026-10-31（收口复审）。
+
+
+---
+
+## 9. 收口确认（N-13/N-14 关闭，2026-10-31）
+
+- `git show e80ef07`（2 files +4/−6）：仅 `doc/spec-v1.2/PROVENANCE.md`（§2 第 17 条 07 项「e2e final **将**改…」→「e2e 已在 `main` `e2cba52` 合并，AC-14 c/e 以 07 的单 item profile（5 节点/7 边）口径为准」＝ **N-13**）与 `doc/progress.md`（REV-073「有条件通过」→「**通过**」、下一步 **W2b** ＝ **N-14**）；无代码/测试/其它改动。
+- N-13、N-14 关闭；§8.4 所列残留建议清零。spec 分册行数/SHA-256 不受影响（PROVENANCE §3 **9/9**、00–08=**6385**、含索引=**6668**）。
+- `check.sh` 复跑 PASSED；worktree clean；基于 `origin/main` `e2cba52`（ahead 13，含本评审提交）。**结论维持「通过」**，merge.sh 前置满足。
+- 签字：`reviewer-docs` · 2026-10-31（收口确认）。
