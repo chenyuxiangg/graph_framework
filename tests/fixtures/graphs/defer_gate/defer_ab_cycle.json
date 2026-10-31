@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "defer-ab-cycle",
+    "description": "W2a AC-14 b：A→B→A 两条 gate 环边均 defer，attempt-per-activation 重入"
+  },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [{ "name": "seed", "type": "string", "required": true }],
+      "config": {}
+    },
+    {
+      "id": "A",
+      "type": "python_node",
+      "inputs": [
+        { "name": "seed", "type": "any", "required": true },
+        { "name": "back", "type": "any", "required": false }
+      ],
+      "trigger": "all",
+      "config": { "module": "defer_stub", "function": "a_step" }
+    },
+    {
+      "id": "B",
+      "type": "python_node",
+      "inputs": [{ "name": "from_a", "type": "any", "required": true }],
+      "trigger": "all",
+      "config": { "module": "defer_stub", "function": "b_step" }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "A", "to_input_port": "seed" },
+    {
+      "from": "A",
+      "to_node": "B",
+      "to_input_port": "from_a",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "go", "equals": true }
+      },
+      "on_gate_false": "defer"
+    },
+    {
+      "from": "B",
+      "to_node": "A",
+      "to_input_port": "back",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "next", "equals": true }
+      },
+      "on_gate_false": "defer"
+    }
+  ]
+}

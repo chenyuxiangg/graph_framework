@@ -1,0 +1,131 @@
+[
+  {
+    "seq": 1,
+    "at": "2026-01-01T00:00:00.001Z",
+    "kind": "RunStarted",
+    "severity": "info",
+    "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+    "payload": {
+      "status": "Running",
+      "graph_hash": "1d306ffb07a46182",
+      "user_id": "local"
+    }
+  },
+  {
+    "seq": 2,
+    "at": "2026-01-01T00:00:00.002Z",
+    "kind": "Transition",
+    "severity": "info",
+    "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+    "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+    "node_id": "start",
+    "payload": {
+      "record": {
+        "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+        "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+        "node_id": "start",
+        "attempt": 0,
+        "from": "Pending",
+        "to": "Ready",
+        "reason": "inputs ready",
+        "ts": "2026-01-01T00:00:00.002Z"
+      }
+    }
+  },
+  {
+    "seq": 3,
+    "at": "2026-01-01T00:00:00.002Z",
+    "kind": "Transition",
+    "severity": "info",
+    "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+    "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+    "node_id": "start",
+    "payload": {
+      "record": {
+        "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+        "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+        "node_id": "start",
+        "attempt": 0,
+        "from": "Ready",
+        "to": "Running",
+        "reason": "dispatch",
+        "ts": "2026-01-01T00:00:00.002Z"
+      }
+    }
+  },
+  {
+    "seq": 4,
+    "at": "2026-01-01T00:00:00.002Z",
+    "kind": "Transition",
+    "severity": "info",
+    "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+    "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+    "node_id": "start",
+    "payload": {
+      "record": {
+        "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+        "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+        "node_id": "start",
+        "attempt": 0,
+        "from": "Running",
+        "to": "Completed",
+        "reason": "execution ok",
+        "ts": "2026-01-01T00:00:00.002Z"
+      }
+    }
+  },
+  {
+    "seq": 5,
+    "at": "2026-01-01T00:00:00.002Z",
+    "kind": "GateResult",
+    "severity": "warn",
+    "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+    "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+    "node_id": "start",
+    "payload": {
+      "record": {
+        "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+        "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000001",
+        "node_id": "start",
+        "edge_index": 0,
+        "to_node": "b",
+        "to_port": "x",
+        "gate_fn": "check_output",
+        "passed": false,
+        "error": null,
+        "ts": "2026-01-01T00:00:00.002Z"
+      }
+    }
+  },
+  {
+    "seq": 6,
+    "at": "2026-01-01T00:00:00.002Z",
+    "kind": "Transition",
+    "severity": "info",
+    "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+    "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000002",
+    "node_id": "b",
+    "payload": {
+      "record": {
+        "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+        "instance_id": "0192f0c5-7a1b-7c3d-8e4f-000000000002",
+        "node_id": "b",
+        "attempt": 0,
+        "from": "Pending",
+        "to": "Skipped",
+        "reason": "all_sources_blocked",
+        "ts": "2026-01-01T00:00:00.002Z"
+      }
+    }
+  },
+  {
+    "seq": 7,
+    "at": "2026-01-01T00:00:00.002Z",
+    "kind": "RunFinished",
+    "severity": "info",
+    "run_id": "0192f0c4-7a1b-7c3d-8e4f-000000000001",
+    "payload": {
+      "status": "Completed"
+    }
+  }
+]

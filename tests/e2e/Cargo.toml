@@ -69,3 +69,7 @@ path = "cli_replay.rs"
 [[test]]
 name = "software_team_v1"
 path = "software_team_v1.rs"
+
+[[test]]
+name = "gate_defer"
+path = "gate_defer.rs"

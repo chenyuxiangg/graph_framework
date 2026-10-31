@@ -1,0 +1,34 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "trace-v3-seed",
+    "description": "AC-14 h / ISSUE-104 的 v3 trace seed 生成图：确定性、无 Python/LLM 执行（b 被 gate 拦截后 Skipped），恰好一条 GateResult"
+  },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [{ "name": "message", "type": "string", "required": true }],
+      "config": {}
+    },
+    {
+      "id": "b",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "any", "required": true }],
+      "trigger": "all",
+      "config": { "module": "workers.echo", "function": "run" }
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "b",
+      "to_input_port": "x",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "message", "equals": "never" }
+      }
+    }
+  ]
+}

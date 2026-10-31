@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "defer-blocked",
+    "description": "W2a AC-14 g：R15-valid 变体——defer 自环 + 指向从未实例化节点的 defer 前进边 → 确定性 RUN_DEADLOCK"
+  },
+  "entry_points": ["start"],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [{ "name": "seed", "type": "string", "required": true }],
+      "config": {}
+    },
+    {
+      "id": "a",
+      "type": "python_node",
+      "inputs": [
+        { "name": "seed", "type": "any", "required": true },
+        { "name": "again", "type": "any", "required": false }
+      ],
+      "trigger": "all",
+      "config": { "module": "defer_stub", "function": "stop" }
+    },
+    {
+      "id": "b",
+      "type": "python_node",
+      "inputs": [{ "name": "x", "type": "any", "required": true }],
+      "trigger": "all",
+      "config": { "module": "defer_stub", "function": "b_step" }
+    }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "a", "to_input_port": "seed" },
+    {
+      "from": "a",
+      "to_node": "a",
+      "to_input_port": "again",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "go", "equals": true }
+      },
+      "on_gate_false": "defer"
+    },
+    {
+      "from": "a",
+      "to_node": "b",
+      "to_input_port": "x",
+      "gate": {
+        "function": "check_output",
+        "params": { "path": "go", "equals": true }
+      },
+      "on_gate_false": "defer"
+    }
+  ]
+}
