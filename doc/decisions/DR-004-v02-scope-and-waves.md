@@ -230,3 +230,15 @@
 - trace 迁移 forward-only（D5）；v0.1.0 兼容矩阵（§6.3）；性能基线量化（§6.4）；W1 fake LLM + 手动 real-LLM smoke（W1）；docs 单写、e2e 纳入各波、跨模块第二评审（§4）；W3b 默认排除。
 
 > A 组确认后即冻结；未确认项不进入实现。
+
+---
+
+## 10. 执行记录（追加，不改原决策）
+
+- **2026-10-31 用户确认 A1–A7「按推荐」**：W1–W4 进 v0.2、W5 放 v0.3；W3b durable 默认不做；CLI `decide`/`resume` + trace DB 通道；动态 N 节点级 `foreach` + 单端口有序列表 join；扇出两层缺省无上限；返工 opt-in `parse_verdict_rework` + 两条 defer 边；`v0.2.0`/`M7` + v0.1.0 兼容硬条件。
+- **W1 已交付（2026-10-31）**：
+  - py-worker：`workers.software_team.parse_verdict`（REV-064 通过；合并 `715f13a`）；
+  - e2e：`tests/fixtures/graphs/software_team_v1/**` + `tests/e2e/software_team_v1.rs`（REV-065 通过；合并 `263b3a8`）；
+  - 证据：full 60/100 `3d8d735b1d5e8a1b`；smoke 11/18 `df9341c04063b80a`；exhaust `a8e508deb9c6cf44`；approved smoke `Completed`（11 实例、3 gate passed、artifact 透传）；失败路径 `NODE_PYTHON_EXCEPTION` 与 `HARNESS_MAX_ITERATIONS`；real-LLM smoke `#[ignore]`；
+  - 回归：`cargo test -p zgraph-e2e --test software_team_v1` 7 passed/1 ignored；全 e2e 46 passed/2 ignored；pytest 104 passed；`check.sh` PASSED；merge 门禁（build/test/clippy/pytest）通过。
+- **后续**：W1-docs（本节 + 07 AC-13）完成后，按 §4 顺序进入 W2a0(docs) → W2a → W2b → W3a0 → W3a → W3b(可选) → W4a → W4b。
