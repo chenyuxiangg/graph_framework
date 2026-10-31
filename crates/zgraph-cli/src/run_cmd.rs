@@ -46,8 +46,24 @@
 //! `[seq N] Kind ...` 写到 stderr，不再等 run 结束回读 trace。`--json` 不订阅
 //! （stdout 契约不变）、`-q/--quiet` 不订阅（stderr 保持静默）、`:memory:` 同样走
 //! 旁路；`--stream` 仍负责 `TokenDelta`/`ReasoningDelta` 的原始文本。
+//!
+//! # human 决策消费（W3a / DR-006 §7.3）
+//!
+//! 含 `CompiledHandler::Human` 节点的图、非 `:memory:` 时，run 启动成功后启动
+//! decision consumer **专线程**：每 [`HUMAN_DECISION_POLL_MS`] 用只读连接
+//! （`busy_timeout=1000ms`）查 `DecisionConsumer::pending`；主 run 循环把每一行
+//! pending **一律**提交 `RunControl::HumanDecision`（不按 WaitingHuman 集合过滤；
+//! 内核幂等校验，`applied=false` 同样标 consumed，不得悬挂）。内核确认经
+//! [`bridge::HumanDecisionObserver`] 回传 consumer 线程 → 独立 RW 短事务
+//! `mark_consumed`（`busy_timeout=5000ms`；失败告警 + 保留 NULL 下轮重试）→ stderr
+//! 决策行（`-q/--quiet` 抑制；`applied=false` 记 warning）。run 终态后 consumer
+//! 停止并在退出前 flush 已确认决策；DB 访问全在专线程，不阻塞事件循环、不执行
+//! 用户 Python。无 human 节点的图不启动 consumer（行为逐字节不变）。
+//!
+//! human 图 + `--db :memory:`：启动前预检拒绝 `RUN_ENTRY_INVALID`（exit 3、reason
+//! `trace_required_for_human`、**不产生 run**、不打印 run id；DR-006 §7.3 #7/N10）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -57,7 +73,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -67,23 +83,25 @@ use zgraph_harness::{
     LlmCallSnapshot, LlmProvider, WorkerToolRunner,
 };
 use zgraph_kernel::{
-    CompiledGraph, CompiledHandler, CompiledNode, NodeError, NodeExecution, NodeExecutor, RunError,
-    RunOptions, RunOutcome, RunSpec, RunStatus, StreamingEvent, CODE_RUN_ENTRY_INPUT_MISSING,
-    CODE_RUN_ENTRY_INVALID,
+    CompiledGraph, CompiledHandler, CompiledNode, HumanDecision, HumanDecisionRecord, NodeError,
+    NodeExecution, NodeExecutor, RunControl, RunError, RunOptions, RunOutcome, RunSpec, RunStatus,
+    StreamingEvent, CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID,
 };
 use zgraph_trace::{
-    LlmCallRecord, RecordMode, RecordedOutput, TraceError, TraceHandle, TraceInput, TraceReader,
-    TraceWriter,
+    DecisionConsumer, HumanDecisionRow, LlmCallRecord, RecordMode, RecordedOutput, TraceError,
+    TraceHandle, TraceInput, TraceReader, TraceWriter,
 };
 use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor, WorkerLimits};
 
 use crate::bridge::{
-    self, BridgeError, BridgeObservers, LifecycleObserver, StreamingObserver, TracedRun,
+    self, BridgeError, BridgeObservers, HumanDecisionObserver, LifecycleObserver,
+    StreamingObserver, TracedRun,
 };
 use crate::recovery;
-use crate::trace_cmd::resolve_db_path;
+use crate::trace_cmd::{resolve_db_path, storage_error_detail};
 use crate::{
     EXIT_ENTRY_INPUT, EXIT_INTERRUPTED, EXIT_OTHER, EXIT_STORAGE, EXIT_SUCCESS, EXIT_USAGE,
+    HUMAN_DECISION_POLL_MS,
 };
 
 /// `run --help` 的用法文本。
@@ -822,6 +840,28 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
             return code;
         }
     };
+    // W3a（DR-006 §7.3 #7 / N10）：human 图要求可跨进程读写的 trace DB（decide 与
+    // consumer 都经该库交互）；`--db :memory:` 在**启动前**拒绝——不产生 run、不打印
+    // run id、不启动 consumer（exit 3，与「入口非法不产生 run」同口径）。
+    if memory_db && graph_has_human(&graph) {
+        close_quietly(writer);
+        eprintln!(
+            "error[{CODE_RUN_ENTRY_INVALID}]: human nodes require a cross-process trace \
+             database; --db :memory: cannot be read by 'zgraph decide' \
+             (reason: trace_required_for_human)"
+        );
+        return ExitCode::from(EXIT_ENTRY_INPUT);
+    }
+    // W3a：human 图启动 decision consumer（非 memory；无 human 图的图不启动，行为不变）。
+    let human_consumer = !memory_db && graph_has_human(&graph);
+    let (decision_tx, decision_rx) = mpsc::channel::<HumanDecisionRecord>();
+    let decision_observer = human_consumer.then(|| {
+        let sender = decision_tx.clone();
+        Arc::new(move |record: &HumanDecisionRecord| {
+            // 内核事件循环线程内同步转发（unbounded mpsc 发送不阻塞）；return 值忽略。
+            let _ = sender.send(record.clone());
+        }) as HumanDecisionObserver
+    });
     let trace_handle = writer.handle();
     // run id 由 CLI 预生成：`llm_calls` 记录器在启动前就需要 run_id（快照不含 run）。
     let run_id = uuid::Uuid::now_v7().to_string();
@@ -833,22 +873,46 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         }
     };
     let run_metadata = run_metadata_hook(memory_db, &built, &run_id);
-    let (traced, lifecycle) =
-        match start_run(args, writer, graph, entry_inputs, built.executor, &run_id) {
-            Ok(started) => started,
-            Err(code) => return code,
-        };
+    let (traced, lifecycle) = match start_run(
+        args,
+        writer,
+        graph,
+        entry_inputs,
+        built.executor,
+        &run_id,
+        decision_observer,
+    ) {
+        Ok(started) => started,
+        Err(code) => return code,
+    };
     debug_assert_eq!(traced.run_id(), run_id);
+    // consumer 与 run 同生命周期：run 已启动（可能已产生 RunStarted）后再起专线程。
+    let consumer =
+        human_consumer.then(|| DecisionSession::spawn(&db_path, &run_id, args.quiet, decision_rx));
     wait_and_report(
         args,
         traced,
         lifecycle,
-        memory_db,
-        run_metadata,
-        &db_path,
-        &recovery,
+        consumer,
+        RunFinishContext {
+            memory_db,
+            run_metadata,
+            db_path: &db_path,
+            recovery: &recovery,
+        },
     )
     .await
+}
+
+/// 图是否含人工等待节点（`builtin.human` → [`CompiledHandler::Human`]）。
+///
+/// W3a（DR-006 §2.1）：只有这类图才需要跨进程 trace DB 与 decision consumer；
+/// 无 human 节点的图行为完全不变。
+fn graph_has_human(graph: &CompiledGraph) -> bool {
+    graph
+        .nodes
+        .values()
+        .any(|node| matches!(node.handler, CompiledHandler::Human))
 }
 
 /// 打开 trace 写端并执行启动中止标定（06 §6.8.1；打开/标定失败 → exit 4）。
@@ -937,6 +1001,9 @@ fn lifecycle_output(args: &RunArgs) -> (Option<LifecyclePrinter>, Option<Lifecyc
 }
 
 /// 启动 run 并输出 `created` 行；human 模式在 `created` 之后启动实时打印线程。
+///
+/// `decision_observer`（W3a）仅 human 图非 `:memory:` 时传入：内核每次应用决策后经
+/// 该观察者把确认转发给 decision consumer 线程。
 fn start_run(
     args: &RunArgs,
     writer: TraceWriter,
@@ -944,11 +1011,13 @@ fn start_run(
     entry_inputs: EntryInputs,
     executor: Arc<dyn NodeExecutor>,
     run_id: &str,
+    decision_observer: Option<HumanDecisionObserver>,
 ) -> Result<(TracedRun, Option<LifecyclePrinter>), ExitCode> {
     let (mut lifecycle, lifecycle_observer) = lifecycle_output(args);
     let observers = BridgeObservers {
         streaming: args.stream.then(stream_observer),
         lifecycle: lifecycle_observer,
+        human_decided: decision_observer,
     };
     let spec = RunSpec {
         graph: Arc::clone(&graph),
@@ -981,18 +1050,30 @@ fn start_run(
     Ok((traced, lifecycle))
 }
 
+/// run 收尾上下文（等待期与结束输出的存储/元数据参数）。
+struct RunFinishContext<'a> {
+    /// `--db :memory:`（无跨进程可读库；`runs` 两列不写）。
+    memory_db: bool,
+    /// 关闭写端前的元数据列补写回调（ISSUE-082）。
+    run_metadata: Option<BeforeCloseHook>,
+    /// trace 库路径（`--json.db` 与输出）。
+    db_path: &'a Path,
+    /// 启动中止标定结果（recovered/warnings 进输出）。
+    recovery: &'a recovery::Recovery,
+}
+
 /// 等待 run 结束并输出结果（先收尾实时生命周期行，再输出 run_output/摘要）。
+///
+/// `consumer`（W3a）在 run 终态后停止并 flush 已确认决策的 `consumed_at`。
 async fn wait_and_report(
     args: &RunArgs,
     traced: TracedRun,
     mut lifecycle: Option<LifecyclePrinter>,
-    memory_db: bool,
-    run_metadata: Option<BeforeCloseHook>,
-    db_path: &Path,
-    recovery: &recovery::Recovery,
+    consumer: Option<DecisionSession>,
+    context: RunFinishContext<'_>,
 ) -> ExitCode {
     let started = Instant::now();
-    let outcome = wait_for_run(traced, memory_db, run_metadata).await;
+    let outcome = wait_for_run(traced, consumer, context.memory_db, context.run_metadata).await;
     let duration_ms = duration_millis(started);
     // 先收尾实时行，再输出 run 结果/摘要（stderr 行序稳定、且结果行必然最后出现）。
     if let Some(printer) = lifecycle.take() {
@@ -1006,9 +1087,9 @@ async fn wait_and_report(
         args,
         outcome,
         duration_ms,
-        db_path,
-        &recovery.recovered,
-        &recovery.warnings,
+        context.db_path,
+        &context.recovery.recovered,
+        &context.recovery.warnings,
     )
 }
 /// 加载并编译图；失败时打印 stderr 并返回退出码 2（不产生 run）。
@@ -1160,18 +1241,35 @@ enum RunCompletion {
 ///
 /// `before_close`：关闭写端前的回调（ISSUE-082 补写 run 元数据列）；`:memory:`
 /// 库不写，回调被丢弃。
+///
+/// `consumer`（W3a / DR-006 §7.3）：主循环每轮把 consumer 线程送来的 pending 决策
+/// **一律**提交 `RunControl::HumanDecision`（不按 WaitingHuman 集合过滤）；run
+/// 终态后先停止 consumer（flush 已确认决策的 `consumed_at`）再等待 run 结果，
+/// 保证退出前已消费决策已提交。
 async fn wait_for_run(
     traced: TracedRun,
+    consumer: Option<DecisionSession>,
     memory_db: bool,
     before_close: Option<BeforeCloseHook>,
 ) -> Result<RunCompletion, ExitCode> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let signal_task = tokio::spawn(watch_interrupt(Arc::clone(&interrupted)));
+    let mut submitted: HashSet<String> = HashSet::new();
     while !traced.status().is_terminal() {
         if interrupted.load(Ordering::SeqCst) {
             traced.cancel();
         }
+        if let Some(session) = consumer.as_ref() {
+            while let Ok(rows) = session.pending.try_recv() {
+                submit_human_decisions(&traced, rows, &mut submitted);
+            }
+        }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // run 已终态：停止 consumer 并 flush 已确认决策（未确认行保持 consumed_at=NULL，
+    // 留待 W3b；DR-006 E-6/E-5）。
+    if let Some(session) = consumer {
+        session.finish();
     }
     let completion = if memory_db {
         // ISSUE-082：`:memory:` 无跨进程可读库，版本/模型参数列不写（文档注明）。
@@ -1192,6 +1290,227 @@ async fn wait_for_run(
     };
     signal_task.abort();
     completion.map_err(|error| report_bridge_error(&error))
+}
+
+/// 把一批 pending 决策提交给内核（W3a / DR-006 §7.3 #2）。
+///
+/// **总是提交**：包括 bridge 视角下 instance 已非 `WaitingHuman` 的行（由内核幂等
+/// 校验回报 `applied=false`，consumer 仍标 consumed，不得悬挂）。`submitted` 防止
+/// 同一行在 `mark_consumed` 生效前被重复提交（重复控制只会得到多余拒绝确认）。
+fn submit_human_decisions(
+    traced: &TracedRun,
+    rows: Vec<HumanDecisionRow>,
+    submitted: &mut HashSet<String>,
+) {
+    for row in rows {
+        let instance_key = row.instance_id.clone();
+        if !submitted.insert(instance_key.clone()) {
+            continue;
+        }
+        let decision = match row.decision.as_str() {
+            "approved" => HumanDecision::Approved,
+            "rejected" => HumanDecision::Rejected,
+            other => {
+                eprintln!(
+                    "warning: ignoring human decision with unknown value '{other}' \
+                     for instance {instance_key}"
+                );
+                continue;
+            }
+        };
+        let command = RunControl::HumanDecision {
+            instance_id: row.instance_id,
+            decision,
+            approver: row.approver,
+            reason: row.reason,
+            decision_id: row.decision_id,
+            decided_at: row.decided_at,
+        };
+        if !traced.control(command) {
+            // 控制通道已关闭（run 正在收尾）：该行保持未消费，留待 W3b。
+            submitted.remove(&instance_key);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run 内 decision consumer（W3a / DR-006 §7.3）
+// ---------------------------------------------------------------------------
+
+/// 待标记 `consumed_at` 的确认（`warned` 限制存储告警只打一次）。
+struct PendingMark {
+    record: HumanDecisionRecord,
+    warned: bool,
+}
+
+/// decision consumer 会话（与 run 同生命周期）。
+///
+/// 独立**专线程**做全部 SQLite 访问（RO `pending` 轮询 + RW `mark_consumed` 短事务），
+/// 不阻塞内核事件循环、不执行用户 Python（DR-006 §7.3 #4）。主循环只经
+/// [`TracedRun::control`] 提交命令；确认经 [`HumanDecisionObserver`] 回到本线程。
+struct DecisionSession {
+    /// consumer 线程 → 主循环：待提交的 pending 决策。
+    pending: mpsc::Receiver<Vec<HumanDecisionRow>>,
+    /// 主循环 → consumer 线程的停止信号（drop = 停止）。
+    stop: Option<mpsc::Sender<()>>,
+    /// consumer 线程（`finish` join，保证退出前 flush）。
+    thread: Option<JoinHandle<()>>,
+}
+
+impl DecisionSession {
+    /// 启动 consumer 线程；DB 打开失败只告警（不 fail run），run 侧决策行留待 W3b。
+    fn spawn(
+        db_path: &Path,
+        run_id: &str,
+        quiet: bool,
+        confirmed: mpsc::Receiver<HumanDecisionRecord>,
+    ) -> Self {
+        let (pending_tx, pending) = mpsc::channel::<Vec<HumanDecisionRow>>();
+        let (stop, stop_rx) = mpsc::channel::<()>();
+        let db_path = db_path.to_path_buf();
+        let run_id = run_id.to_string();
+        let thread = std::thread::spawn(move || {
+            decision_consumer_loop(db_path, run_id, quiet, pending_tx, confirmed, stop_rx);
+        });
+        Self {
+            pending,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+
+    /// 停止 poller 并 join（consumer 线程在退出前 flush 已确认决策）。
+    fn finish(mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// consumer 线程主体：轮询 pending → 主循环提交 → 等确认 → `mark_consumed` + stderr 行。
+///
+/// 轮询节奏：每轮先 drain 确认并尝试标记，再查一次 `pending`（RO），最后最多等待
+/// [`HUMAN_DECISION_POLL_MS`] 到下一个确认（收到即处理，延迟远小于轮询间隔）。
+fn decision_consumer_loop(
+    db_path: PathBuf,
+    run_id: String,
+    quiet: bool,
+    pending: mpsc::Sender<Vec<HumanDecisionRow>>,
+    confirmed: mpsc::Receiver<HumanDecisionRecord>,
+    stop: mpsc::Receiver<()>,
+) {
+    let consumer = match DecisionConsumer::open(&db_path) {
+        Ok(consumer) => consumer,
+        Err(error) => {
+            eprintln!(
+                "warning: decision consumer disabled for run {run_id}: {} ({})",
+                error.code(),
+                storage_error_detail(&error)
+            );
+            return;
+        }
+    };
+    let mut retry: Vec<PendingMark> = Vec::new();
+    loop {
+        if stop_disconnected(&stop) {
+            break;
+        }
+        drain_confirmed(&confirmed, &mut retry);
+        flush_confirmed(&consumer, &mut retry, quiet);
+        match consumer.pending(&run_id) {
+            Ok(rows) if !rows.is_empty() => {
+                if pending.send(rows).is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!(
+                    "warning: cannot poll human decisions for run {run_id}: {} ({})",
+                    error.code(),
+                    storage_error_detail(&error)
+                );
+            }
+        }
+        match confirmed.recv_timeout(Duration::from_millis(HUMAN_DECISION_POLL_MS)) {
+            Ok(record) => retry.push(PendingMark {
+                record,
+                warned: false,
+            }),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    // 退出前 flush：已确认决策必须尽量落 consumed_at（DR-006 §7.3 #3）。
+    drain_confirmed(&confirmed, &mut retry);
+    flush_confirmed(&consumer, &mut retry, quiet);
+}
+
+/// 停止信号是否已到（sender 被 drop → `Disconnected`）。
+fn stop_disconnected(stop: &mpsc::Receiver<()>) -> bool {
+    matches!(
+        stop.try_recv(),
+        Ok(()) | Err(mpsc::TryRecvError::Disconnected)
+    )
+}
+
+/// 非阻塞 drain 确认通道（run 收尾前可能已排队多条确认）。
+fn drain_confirmed(confirmed: &mpsc::Receiver<HumanDecisionRecord>, retry: &mut Vec<PendingMark>) {
+    while let Ok(record) = confirmed.try_recv() {
+        retry.push(PendingMark {
+            record,
+            warned: false,
+        });
+    }
+}
+
+/// 尝试为所有待标记确认写 `consumed_at`；成功者移出队列并按 applied 输出 stderr 行。
+///
+/// 失败**不 fail run**（DR-006 §5.3 E-5）：告警一次（首次失败），保留在 `retry` 中等
+/// 下一轮重试，`consumed_at` 保持 NULL。
+fn flush_confirmed(consumer: &DecisionConsumer, retry: &mut Vec<PendingMark>, quiet: bool) {
+    retry.retain_mut(|item| {
+        let consumed_at = crate::decide_cmd::now_rfc3339();
+        match consumer.mark_consumed(&item.record.run_id, &item.record.instance_id, &consumed_at) {
+            Ok(_) => {
+                if !quiet {
+                    print_decision_line(&item.record);
+                }
+                false
+            }
+            Err(error) => {
+                if !item.warned {
+                    item.warned = true;
+                    eprintln!(
+                        "warning: cannot mark human decision consumed for instance {}: {} \
+                         (will retry; consumed_at stays NULL)",
+                        item.record.instance_id,
+                        storage_error_detail(&error)
+                    );
+                }
+                true
+            }
+        }
+    });
+}
+
+/// stderr 实时决策行（`-q/--quiet` 抑制；`applied=false` 记 warning）。
+fn print_decision_line(record: &HumanDecisionRecord) {
+    let decision = record.decision.as_str();
+    if record.applied {
+        eprintln!(
+            "human decision applied: instance={} decision={decision} approver={} decision_id={}",
+            record.instance_id, record.approver, record.decision_id
+        );
+    } else {
+        eprintln!(
+            "warning: human decision not applied: instance={} decision={decision} \
+             reject_reason={}",
+            record.instance_id,
+            record.reject_reason.as_deref().unwrap_or("unknown")
+        );
+    }
 }
 
 /// 监听 SIGINT：只置位标志，取消在 run 循环里执行（避免早到信号丢语义）。
@@ -1540,15 +1859,7 @@ fn report_bridge_error(error: &BridgeError) -> ExitCode {
 
 /// `TraceError` → `error[<CLI 码>]` + 退出码 4。
 fn report_storage_error(error: &TraceError) -> ExitCode {
-    let detail = match error {
-        TraceError::SchemaTooNew { found, supported } => {
-            format!("db version={found}, supported={supported}")
-        }
-        TraceError::Storage(message)
-        | TraceError::NotFound(message)
-        | TraceError::Serialize(message) => message.clone(),
-    };
-    eprintln!("error[{}]: {detail}", error.code());
+    eprintln!("error[{}]: {}", error.code(), storage_error_detail(error));
     ExitCode::from(EXIT_STORAGE)
 }
 
@@ -1560,9 +1871,9 @@ fn close_quietly(writer: TraceWriter) {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_code_for, is_memory_db, lifecycle_detail, llm_call_recorder, output_hash, parse,
-        resolve_entry_inputs, Consumed, FakeLlmMode, ParseState, RecordingExecutor, RunArgs,
-        DEFAULT_USER_ID,
+        exit_code_for, graph_has_human, is_memory_db, lifecycle_detail, llm_call_recorder,
+        output_hash, parse, resolve_entry_inputs, Consumed, FakeLlmMode, ParseState,
+        RecordingExecutor, RunArgs, DEFAULT_USER_ID,
     };
     use serde_json::json;
     use std::future::Future;
@@ -1623,6 +1934,32 @@ mod tests {
     fn compiled_graph(text: &str) -> std::sync::Arc<CompiledGraph> {
         let loaded = zgraph_dsl::load_graph(text.as_bytes()).expect("valid dsl");
         CompiledGraph::compile(&loaded).expect("compiled")
+    }
+
+    /// W3a：只有含 `builtin.human` 节点的图才需要 decision consumer / 跨进程 trace DB；
+    /// 普通 python_node / 无 human 图行为不变。
+    #[test]
+    fn graph_has_human_detects_builtin_human_nodes_only() {
+        let human = json!({
+            "version": "1.0",
+            "metadata": {"name": "human_gate"},
+            "entry_points": ["start"],
+            "nodes": [
+                {"id": "start", "type": "start", "inputs": [], "config": {}},
+                {"id": "review", "type": "python_node",
+                 "inputs": [{"name": "payload", "type": "any", "required": true}],
+                 "config": {"module": "builtin", "function": "human"}},
+                {"id": "end", "type": "end",
+                 "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+            ],
+            "edges": [
+                {"from": "start", "to_node": "review", "to_input_port": "payload"},
+                {"from": "review", "to_node": "end", "to_input_port": "r"}
+            ]
+        })
+        .to_string();
+        assert!(graph_has_human(&compiled_graph(&human)));
+        assert!(!graph_has_human(&compiled_graph(&graph_text())));
     }
 
     #[test]

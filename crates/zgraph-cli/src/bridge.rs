@@ -50,6 +50,16 @@ pub type StreamingObserver = Arc<dyn Fn(&kernel::StreamingEvent) + Send + Sync>;
 /// sink 调用顺序一致（即 trace 落库顺序），但这里拿不到写线程分配的 `seq`。
 pub type LifecycleObserver = Arc<dyn Fn(&trace::TraceInput) + Send + Sync>;
 
+/// 人工决策确认观察者（W3a0 / DR-006 §7.1）：内核应用一次
+/// [`kernel::RunControl::HumanDecision`] 后回调恰一次（applied 或拒绝）。
+///
+/// `zgraph run` 的 decision consumer 用它把确认转发到消费线程（标
+/// `human_decisions.consumed_at` + stderr 实时行）。回调**不写库**、无返回值；
+/// `applied=false` 的 `reject_reason` 只有三值（`instance_missing` /
+/// `not_current` / `not_waiting_human`）。`applied`/`reject_reason` 不落库
+/// （DR-006 §4.2/E-14）。
+pub type HumanDecisionObserver = Arc<dyn Fn(&kernel::HumanDecisionRecord) + Send + Sync>;
+
 /// 桥接层观察者组合（`BridgeObservers` 只承载旁路，不参与落库）。
 #[derive(Default, Clone)]
 pub struct BridgeObservers {
@@ -57,6 +67,8 @@ pub struct BridgeObservers {
     pub streaming: Option<StreamingObserver>,
     /// human 模式：实时生命周期行（ISSUE-085）。
     pub lifecycle: Option<LifecycleObserver>,
+    /// W3a0：人工决策确认转发（run decision consumer）。
+    pub human_decided: Option<HumanDecisionObserver>,
 }
 
 /// kernel `TraceSink` 的 trace 写端适配器。
@@ -65,8 +77,10 @@ pub struct BridgeObservers {
 /// 返回 `false` 让内核累计 `streaming_dropped`。
 ///
 /// 观察者（[`BridgeObservers`]）在落库**之外**再拿到同一份映射结果：`streaming`
-/// 用于 `--stream` 文本，`lifecycle` 用于 human 模式实时生命周期行（ISSUE-085）；
-/// 两者都不写库、不影响落库语义。
+/// 用于 `--stream` 文本，`lifecycle` 用于 human 模式实时生命周期行（ISSUE-085），
+/// `human_decided` 用于 W3a0 人工决策确认（转发给 run 的 decision consumer）；
+/// 三者都不写库、不影响落库语义。**`human_decisions` 表不由本桥写**（C13：
+/// `TraceWriter` 不写决策表，decide/consumer 是独立写者）。
 pub struct TraceBridge {
     handle: trace::TraceHandle,
     observers: BridgeObservers,
@@ -200,6 +214,13 @@ impl kernel::TraceSink for TraceBridge {
 
     fn run_finished(&self, info: kernel::RunFinishedInfo) {
         self.send_event(trace::TraceInput::RunFinished(map_run_finished(&info)));
+    }
+
+    /// W3a0：人工决策确认（**不落库**，只转发给 run decision consumer；DR-006 §7.1/§7.3）。
+    fn human_decided(&self, record: kernel::HumanDecisionRecord) {
+        if let Some(observer) = &self.observers.human_decided {
+            observer(&record);
+        }
     }
 
     /// fail-stop 轮询（06 §6.4.5）：非阻塞取走 trace 写线程的不可恢复错误。
@@ -1018,6 +1039,68 @@ mod tests {
         }
     }
 
+    /// W3a0：`human_decided` 只转发确认给观察者，**不写 trace**（C13：桥不写决策表、
+    /// 决策不是 `TraceEvent`）；无观察者时 no-op（库 API/默认 sink 语义合法）。
+    #[test]
+    fn human_decided_forwards_to_observer_without_writing_trace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observer_seen = Arc::clone(&seen);
+        let observer: super::HumanDecisionObserver = Arc::new(move |record| {
+            observer_seen.lock().expect("lock").push(record.clone());
+        });
+        let bridge = TraceBridge::with_observers(
+            writer.handle(),
+            super::BridgeObservers {
+                human_decided: Some(observer),
+                ..Default::default()
+            },
+        );
+        let record =
+            |applied: bool, reject_reason: Option<&str>| zgraph_kernel::HumanDecisionRecord {
+                run_id: "run-1".to_string(),
+                instance_id: "inst-1".to_string(),
+                decision: zgraph_kernel::HumanDecision::Approved,
+                approver: "alice".to_string(),
+                reason: Some("lgtm".to_string()),
+                decision_id: "0192f0d0-0000-7000-8000-000000000001".to_string(),
+                decided_at: "2026-10-31T10:00:00.000Z".to_string(),
+                applied,
+                reject_reason: reject_reason.map(str::to_string),
+            };
+        bridge.human_decided(record(true, None));
+        bridge.human_decided(record(false, Some("not_waiting_human")));
+        // 无观察者时不得 panic（默认 no-op 语义）。
+        TraceBridge::new(writer.handle()).human_decided(record(false, Some("instance_missing")));
+        writer.flush().expect("flush writer");
+        writer.close().expect("close writer");
+
+        let records = seen.lock().expect("lock");
+        assert_eq!(records.len(), 2, "exactly one callback per confirmation");
+        assert!(records[0].applied);
+        assert_eq!(records[0].reject_reason, None);
+        assert_eq!(records[0].instance_id, "inst-1");
+        assert_eq!(records[0].decision, zgraph_kernel::HumanDecision::Approved);
+        assert_eq!(records[0].approver, "alice");
+        assert_eq!(
+            records[1].reject_reason.as_deref(),
+            Some("not_waiting_human")
+        );
+
+        // 不落库：无 events 行、无 human_decisions 行（决策表由 decide/consumer 写）。
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        assert!(reader
+            .events("run-1", &zgraph_trace::EventQuery::default())
+            .expect("events")
+            .is_empty());
+        assert!(reader
+            .human_decisions("run-1")
+            .expect("human_decisions")
+            .is_empty());
+    }
+
     fn kernel_snapshot() -> InstanceSnapshot {
         InstanceSnapshot {
             run_id: "run-1".to_string(),
@@ -1097,6 +1180,7 @@ mod tests {
             super::BridgeObservers {
                 streaming: None,
                 lifecycle: Some(observer),
+                ..Default::default()
             },
         );
         bridge.run_started(kernel_run_started());

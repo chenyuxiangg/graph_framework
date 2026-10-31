@@ -773,17 +773,24 @@ fn run_finished_detail(payload: &Value) -> String {
     }
 }
 
-/// 把 trace 存储错误映射为 `error[<CLI 码>]: <detail>` 并返回退出码 4。
-fn report_storage_error(error: &TraceError) -> ExitCode {
-    let detail = match error {
+/// trace 存储错误 → 可读 detail（`SchemaTooNew` 展开版本字段，其余取 message）。
+///
+/// 供 `trace`/`replay`/`run`/`decide` 的错误输出与 decision consumer 告警复用，
+/// 保证各子命令的错误文案口径一致。
+pub fn storage_error_detail(error: &TraceError) -> String {
+    match error {
         TraceError::SchemaTooNew { found, supported } => {
             format!("db version={found}, supported={supported}")
         }
         TraceError::Storage(message)
         | TraceError::NotFound(message)
         | TraceError::Serialize(message) => message.clone(),
-    };
-    eprintln!("error[{}]: {detail}", error.code());
+    }
+}
+
+/// 把 trace 存储错误映射为 `error[<CLI 码>]: <detail>` 并返回退出码 4。
+fn report_storage_error(error: &TraceError) -> ExitCode {
+    eprintln!("error[{}]: {}", error.code(), storage_error_detail(error));
     ExitCode::from(EXIT_STORAGE)
 }
 

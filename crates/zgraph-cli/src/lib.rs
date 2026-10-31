@@ -70,6 +70,12 @@ pub const VERBOSE_RUST_LOG_DEBUG: &str = "debug";
 /// `-v/--verbose` 的 `RUST_LOG` 映射：重复（`-vv`）→ `trace`（06 §6.10.1）。
 pub const VERBOSE_RUST_LOG_TRACE: &str = "trace";
 
+/// 人工决策轮询间隔（W3a0 / DR-006 §7.4；`HUMAN_DECISION_POLL_MS`，毫秒）。
+///
+/// run 的 decision consumer 以该间隔用只读连接查 `human_decisions.pending`；
+/// decide 提交后下一轮轮询即可见（WAL）。
+pub const HUMAN_DECISION_POLL_MS: u64 = 200;
+
 /// 用法说明（stdout/stderr 共用）。
 pub const USAGE: &str = "\
 usage: zgraph <command>

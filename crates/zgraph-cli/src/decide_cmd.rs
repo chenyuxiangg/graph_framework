@@ -328,14 +328,7 @@ fn fail(json_output: bool, code: &str, message: &str, exit_code: u8) -> ExitCode
 
 /// 存储错误 → exit 4 `HUMAN_DB_ERROR`（v<5 附「先由 `zgraph run` 迁移」提示）。
 fn fail_db(json_output: bool, error: &TraceError) -> ExitCode {
-    let mut message = match error {
-        TraceError::SchemaTooNew { found, supported } => {
-            format!("database schema version={found}, supported={supported}")
-        }
-        TraceError::Storage(message)
-        | TraceError::NotFound(message)
-        | TraceError::Serialize(message) => message.clone(),
-    };
+    let mut message = crate::trace_cmd::storage_error_detail(error);
     if message.starts_with("unsupported schema version") {
         message.push_str("; run 'zgraph run' to migrate the database first");
     }
