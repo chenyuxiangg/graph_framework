@@ -12,7 +12,7 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（2026-10-31 复审修订：首轮结论为「有条件通过」；条件 C1–C5 已于 **`90fa845`** 全部关闭，复审证据见 §7。以下首轮正文、§2 表格的时点判定与 §3 的 `open` 状态**保留供追溯**，关闭状态以 §6/§7 为准。）
 
 P0=0、**P1=3**、P2=8、P3=8。设计方向正确、总体自洽：触发模型（`builtin.human` 保留 python_node 符号）与 02 §2.5/04 §4.4/§4.7 既有契约一致且不触碰 DSL schema/R1–R16/hash；`WaitingHuman` 生命周期、终止判定、decision consumer、C13 写者模型、trace v5 迁移、拒绝矩阵与 AC-16 a–g 均已冻结到可实现的详细度；E-11 裁决（instance 不存在 → exit 1、存在但非 WaitingHuman → exit 5）在 `85a076d` 中被 Lead 明确记录，且与本评审任务摘要口径一致。
 
@@ -113,8 +113,60 @@ wc -l doc/progress.md                   # 16 行（四块：当前阶段/进行�
 
 | 条件 | 关闭证据（需可复核） | 关闭日期 |
 |---|---|---|
-| C1 修 `WaitingHuman→Completed` 副作用顺序（N1）：写 output/清 deadline → transition（快照携带 output）→ publish；同步 DR §3.2 / 01 §1.2.3 / 03 §3.4.5 | 三处修订后顺序一致，且与 as-built `on_completed`/`finish_builtin` 同序；AC-16 a 的 output 断言语义成立 | 待关闭 |
-| C2 统一 decision consumer 行为（N2）：总是提交 pending 行（kernel `applied=false` 幂等），或明确定义 set-miss 行的 consumed/applied 口径；删除/修正 DR §7.3 与 03 §3.4.5 矛盾 | 两处描述一致；不再存在「集合 miss → 行永不 consumed」的悬挂场景 | 待关闭 |
-| C3 冻结 decide 预检顺序与二次 decide 冲突码（N3）：建议先查决策行 → 恒 `HUMAN_DECISION_EXISTS`；同步 DR §4.4/§4.5、06 §6.10.8、07 AC-16 c | 三处码/顺序一致，AC-16 c 可确定性断言（无时序依赖） | 待关闭 |
-| C4 文档事实/一致性修复（N4/N5/N8）：PROVENANCE §3 合计 6795、增量 +349/−45；spec README 验收 AC-01..AC-16；06 §6.10.1 `--db` 加 decide；03 §3.8 表格恢复 + Cancel 行补 WaitingHuman | 上述位置修订；§3 与 §2 第 20 条/实测一致；Markdown 表格渲染完整 | 待关闭 |
-| C5 设计补全（N6/N7/N9/N10/N11）：`reject_reason` 码命名统一；`instances.input` 快照时点冻结；AC-16 补 reject→终止、decide exit 4、human validate、applied=false 断言（b 的门条件写明）；trace 关闭/库 API 的 human 决策通道冻结；decide 预检可见性方案冻结 | DR/01/03/04/06/07 对应章节修订；AC-16 a–g 覆盖矩阵自洽且可判定；相关 P3 项（N12–N21）中未修项已在 `doc/issues.md` 登记 | 待关闭 |
+| C1 修 `WaitingHuman→Completed` 副作用顺序（N1）：写 output/清 deadline → transition（快照携带 output）→ publish；同步 DR §3.2 / 01 §1.2.3 / 03 §3.4.5 | `DR-006:136`、`01:121`、`03:331-335` 三处均改为「① 写 output ② 清 deadline ③ transition（快照携带 output，finished_at 由 transition 写）④ publish」，并明示「不得先 transition 后写 output」；与 as-built `on_completed`/`finish_builtin` 同序 | **已关闭 2026-10-31（`90fa845`，§7.2）** |
+| C2 统一 decision consumer 行为（N2）：总是提交 pending 行（kernel `applied=false` 幂等），或明确定义 set-miss 行的 consumed/applied 口径；删除/修正 DR §7.3 与 03 §3.4.5 矛盾 | `DR-006:431-433` 与 `03:351` 统一为「对所有 pending 行总是提交 control（不按 bridge WaitingHuman 集合过滤）；set-miss 行也标 consumed，不悬挂」；kernel 幂等校验与 CLI 警告口径一致 | **已关闭 2026-10-31（`90fa845`，§7.2）** |
+| C3 冻结 decide 预检顺序与二次 decide 冲突码（N3）：建议先查决策行 → 恒 `HUMAN_DECISION_EXISTS`；同步 DR §4.4/§4.5、06 §6.10.8、07 AC-16 c | `DR-006:246-252` 预检顺序为 ①决策行→5 `HUMAN_DECISION_EXISTS` ②run→1 ③instance→1 ④非 WaitingHuman→5；`06 §6.10.5` 注 + `§6.10.8` 与 `07:384` AC-16 c 同步，二次 decide 无时序依赖 | **已关闭 2026-10-31（`90fa845`，§7.2）** |
+| C4 文档事实/一致性修复（N4/N5/N8）：PROVENANCE §3 合计与增量、spec README 验收 AC-01..AC-16、06 §6.10.1 `--db` 加 decide、03 §3.8 表格恢复 + Cancel 行补 WaitingHuman、index DR-004 行 | 最终实测：00–08 合计 **6814**、spec 目录 **7144**、相对 main **+370/−47（净 +323）**；§3 的 9/9 SHA-256 与行数实测一致（05/08 未改为原值）；spec README 改 AC-01..AC-16；06 §6.10.1 `--db` 含 decide；03 §3.8 表格完整且 Cancel 行含 WaitingHuman；index DR-004 行含 W3a0 | **已关闭 2026-10-31（`90fa845`，§7.2；条件本文的 6795 为首轮时点数）** |
+| C5 设计补全（N6/N7/N9/N10/N11）：`reject_reason` 码命名统一；`instances.input` 快照时点冻结；AC-16 补 reject→终止、decide exit 4、human validate、applied=false 断言（b 的门条件写明）；trace 关闭/库 API 的 human 决策通道冻结；decide 预检可见性方案冻结 | `DR-006:214/368/438/463-464/501-502/555-557`、`01:135-140/277`、`03:331-351`、`06:462/978/1124`、`07:374-399` 已落实；AC-16 新增 reject_end 变体（gate 显式 rejected）、decide exit 4（DB 不存在/版本不符不建库）、human validate、kernel applied=false/reject_reason、replay≡trace、`expected 4→5` 前置项；ISSUE-126–128 登记 | **已关闭 2026-10-31（`90fa845`，§7.2；残余 P3 见 §7.4）** |
+
+## 7. 条件关闭与复审（2026-10-31）
+
+> 复审对象：**`90fa845`**（条件修复提交，直接父提交 = 评审记录 `a325fd3`；分支 `docs/docs-human-design`；worktree 干净）。本节为最终状态，取代 §1/§2/§5/§6 中「有条件/待关闭/open」的时点陈述；首轮正文保留供追溯。
+
+### 7.1 复审范围与门禁
+
+```bash
+git log --oneline -3            # 90fa845（本批）→ a325fd3（REV-078 首轮评审）→ 85a076d
+git status --porcelain          # 空
+git diff --stat a325fd3..HEAD   # 14 files changed, +140/−87
+git -c core.quotepath=false diff --name-only a325fd3..HEAD   # 全部 doc/**，无 crates/tests/doc/reviews 改动
+git log -1 --format=%B          # 正文含 Review: REV-078 / Agent: docs-dev
+bash scripts/dev/check.sh       # CHECK PASSED
+wc -l doc/progress.md           # 16 行（四块：当前阶段/进行中任务/下一步/阻塞；≤30）
+```
+
+- **新决定只追加不改冻结语义**：`DR-006 §12.2` 新增 **E-12/E-13/E-14**（trace 关闭/库 API、预检可见性、applied 不落库），原 E-1…E-11 与冻结表未改写；DR-004 §10 只追加 1 行（REV-078 条件修复记录），不改原决策；无 as-built 写入。
+
+### 7.2 C1–C5 关闭证据（逐条）
+
+- **C1 ✅**：`DR-006:136` / `01:121` / `03:331-335` 三处统一为「写 output → 清 deadline → transition（快照携带 output；finished_at 由 transition 写）→ publish」，并显式禁止「先 transition 后写 output」（理由引用 as-built `transition_raw` 立即发快照）；**1 处残留**：DR §4.1 流程图（`DR:190-191`）仍按「transition 行在前、output 行在后」排版（见 §7.4 R2）。
+- **C2 ✅**：`DR-006:431-433` 与 `03:351` 一致冻结「对所有 pending 行总是提交 `RunControl::HumanDecision`（不按 bridge 集合过滤）；set-miss 行也标 consumed，不悬挂」；kernel 幂等 `applied=false/reject_reason` 与 CLI stderr 警告口径一致。**新发现**：同批新增的 E-12 的 CLI trace-off 分支引用不存在的 `--no-trace`、且未覆盖 `--db :memory:`（见 §7.4 R1）。
+- **C3 ✅**：`DR-006:246-252` 预检顺序冻结（①决策行→5 `DECISION_EXISTS` 先于一切 ②run→1 ③instance→1 ④非 WaitingHuman→5）；`06 §6.10.5` 注、`06 §6.10.8` 与 `07:384` AC-16 c 同步；二次 decide 无时序依赖。
+- **C4 ✅**：PROVENANCE §3 最终实测 **9/9 SHA-256 + 行数一致**（00 `52c6d2ba…`/330、01 `619ce97d…`/393、02 `f57d257a…`/959、03 `74091c9e…`/595、04 `c4cafcab…`/933、06 `1ecd3393…`/1226、07 `c0bfb90e…`/425；05/08 未改为原值）；00–08 合计 **6814**（`wc -l` 实测）、spec 目录 **7144**（6814+80+228+22）、相对 main 增量 **+370/−47（净 +323）**——均与 §3/§2 第 20–21 条一致；spec README 验收改 **AC-01..AC-16**；`06 §6.10.1` `--db` 含 decide；`03 §3.8` 表格完整（blockquote 移到表后）且 `Cancel` 行含 `WaitingHuman → Cancelled`；`doc/index.md` DR-004 行含 W3a0。**残余**：§2 第 21 条内部「新增 21/删除 2」与实际 numstat（+59/−40，净 +19）不符、重算清单漏列 04（见 §7.4 R3）。
+- **C5 ✅**：`reject_reason` 三值冻结（DR/01/03/06 一致，与 decide `HUMAN_*` 区分）；`instances.input` 冻结在 `Pending→WaitingHuman` 迁移前写全端口快照（DR/01/03/04 一致）；AC-16 补齐：b 的 rejected 边 gate 谓词显式化 + `reject_end` 终止变体、c 的预检顺序/decide exit 4/kernel applied=false、a 的 validate/轮询可见性/replay≡trace、f/g 的库 API/trace 关闭、e 的 `expected 4→5` 前置项；ISSUE-126（applied 不落库）、ISSUE-127（handler 命名残余）、ISSUE-128（--stats）已登记（8 列/日期/编号格式核对通过）。**残余**：`--stats` 事项引用为 ISSUE-127（应为 128，见 §7.4 R3）。
+
+### 7.3 复审验证（评审人实跑）
+
+```bash
+git -c core.quotepath=false diff --name-only a325fd3..HEAD   # 14 files，全部 doc/**（纯文档）
+bash scripts/dev/check.sh                                    # CHECK PASSED（progress 11 非空行/16 行、fmt、diff --check）
+ls doc/spec-v1.2/0*.md | xargs wc -l | tail -1               # 6814
+wc -l doc/spec-v1.2/{README,PROVENANCE,REFERENCES}.md        # 80/228/22 → 合计 7144
+shasum -a 256 doc/spec-v1.2/0*.md                            # 与 §3 表 9/9 一致（05/08 原值）
+```
+
+- 分支仅 1 个新提交（`90fa845`），parent 为评审记录；worktree 干净；未 push/未合并。
+- E-12/E-13/E-14 位于 DR §12.2 追加区，未改写既有冻结语义（C1–C5 的修订属首轮条件关闭范围）。
+
+### 7.4 残余非阻塞发现（无 P0/P1，不构成条件）
+
+| # | 级别 | 位置 | 问题 | 建议 |
+|---|---|---|---|---|
+| R1 | P2 一般（新） | `DR-006:438`（§7.3 #7）、`:555`（E-12）、`:501-502`（AC-16 f/g）；`03:353`、`07:398-399`；关联 `03:65`、`06:912` | **E-12 的 CLI trace-off 分支与既有 CLI 契约不自洽**：① CLI 没有 `--no-trace` 参数（`06 §6.10.3` 参数表与代码均无；仅 `03:65` 有预存旧注释），故「CLI `--no-trace`/等价」当前不可达；② `RUN_ENTRY_INVALID` 在 `00:204`/`03:83`/`06 §6.10.5` 的定义是 entry_points/entry_inputs 错误，E-12 复用其承载「human 图要求 trace」但未在 00/03/06 扩展该码语义（`RunStartError` 有 code/message 可实现，但启动校验表未列）；③ 未覆盖**可达**的 `--db :memory:` 模式（`06:912`：CLI 接受 `:memory:` 但 trace 跨进程不可读）——human 图 + `:memory:` 同样无决策通道，会无限等待（无 timeout 时）。三处需冻结其一 | 建议 docs-dev 小 commit：明确 CLI 是否提供 `--no-trace`（若无则删 CLI 分支，仅保留库 API；若有则补 `06 §6.10.3` flag + `03 §3.2` 启动表 + `00 §0.4` RUN_ENTRY_INVALID 语义扩展）；并把 `--db :memory:` 纳入「human 图拒绝」或明确要求临时文件 DB；或登记 ISSUE-129 由 W3a-docs 处理 |
+| R2 | P3 建议（新） | `DR-006:190-191`（§4.1 流程图） | 流程图仍按「通过 → `WaitingHuman→Completed`」下一行再写 `output={decision,reason}` 排版，与 §3.2/01/03 已冻结的「先写 output 再 transition」顺序在视觉上矛盾；实现者若照图可能先 transition | 将 §4.1 两行调整为「先写 output（快照携带）→ transition → publish」，或加注「顺序以 §3.2 为准」 |
+| R3 | P3 建议（新） | `DR-006:368`、`06:978`；`PROVENANCE:188/204` | ① `--stats` 不增计数的说明引用 **ISSUE-127**（handler 命名），按台账应为 **ISSUE-128**；② PROVENANCE §2 第 21 条写「条件修复 +19 行（新增 21/删除 2）」，与实测 diff（`a325fd3..HEAD` 的 spec 文件 numstat = **+59/−40**、净 +19）不符；同条「重算 00/01/02/03/06/07」漏列 **04**（04 内容与 hash 均已变更，§3 已更新） | 小 commit 修正引用为 ISSUE-128；把「新增 21/删除 2」改为「净 +19 行（spec 文件 numstat +59/−40）」并补列 04；或登记台账 |
+| R4 | P3 建议（新） | `doc/index.md:10`、`doc/progress.md:8`、`DR-004:268`、`DR-006 §14.3`（`617`）、`PROVENANCE:188` | 复审前写下的「C1–C5 关闭后待复审 / 待 reviewer-b 复审转通过」在本次复审通过后成为过期状态；index/DR-004/PROVENANCE 属同分支文档，合并时会带入 main | 建议 docs-dev 在合并前追加一个小 commit，把上述位置改为「复审通过（REV-078，条件修复 `90fa845`，复审记录提交见本记录）」；`doc/progress.md` 可由 Lead 合并后更新（AGENTS §4 口径）。不阻塞设计语义 |
+
+### 7.5 复审结论
+
+**C1–C5 全部关闭，未发现新 P0/P1；最终结论：通过**（§1 已同步；`merge.sh` 可识别）。§7.4 的 R1（P2）与 R2/R3/R4（P3）为**非阻塞残余**：R1 影响 E-12 的 CLI 面与 `:memory:` 场景，建议合并前由 docs-dev 一个小 commit 收口（不改变设计语义、无需再次评审）；若 Lead 决定随 W3a-docs 处理，则登记 ISSUE-129（E-12 契约）并保留本记录结论不变。R2/R3/R4 可在同一小 commit 顺手修正。
