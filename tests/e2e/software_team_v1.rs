@@ -247,7 +247,7 @@ fn edges(graph: &Value) -> &Vec<Value> {
 fn node_by_id<'a>(graph: &'a Value, node_id: &str) -> &'a Value {
     nodes(graph)
         .iter()
-        .find(|node| node["id"] == Value::from(node_id))
+        .find(|node| node["id"].as_str() == Some(node_id))
         .unwrap_or_else(|| panic!("图中缺少节点 {node_id}"))
 }
 
@@ -282,21 +282,21 @@ fn has_edge(graph: &Value, from: &str, to_node: &str, to_port: &str) -> bool {
 
 /// 边上的 gate 是否恰为 approved 不变量 `check_output{path:"verdict", equals:"approved"}`。
 fn is_approved_gate(edge: &Value) -> bool {
-    edge["gate"]["function"] == Value::from("check_output")
-        && edge["gate"]["params"]["path"] == Value::from("verdict")
-        && edge["gate"]["params"]["equals"] == Value::from("approved")
+    edge["gate"]["function"].as_str() == Some("check_output")
+        && edge["gate"]["params"]["path"].as_str() == Some("verdict")
+        && edge["gate"]["params"]["equals"].as_str() == Some("approved")
 }
 
 /// 断言一个设计角色节点：entry 声明 `requirement`，其余每个依赖 item 一个端口。
 fn assert_design_node(graph: &Value, role_id: &str, deps: &[&str]) {
     let node = node_by_id(graph, role_id);
-    assert_eq!(node["type"], Value::from("agent_call"), "{role_id} 类型");
+    assert_eq!(node["type"].as_str(), Some("agent_call"), "{role_id} 类型");
     assert_eq!(
-        node["config"]["agent_id"],
-        Value::from(role_id),
+        node["config"]["agent_id"].as_str(),
+        Some(role_id),
         "{role_id}.agent_id"
     );
-    assert_eq!(node["trigger"], Value::from("all"), "{role_id}.trigger");
+    assert_eq!(node["trigger"].as_str(), Some("all"), "{role_id}.trigger");
     let expected: Vec<String> = if deps.is_empty() {
         vec!["requirement".to_string()]
     } else {
@@ -311,14 +311,14 @@ fn assert_design_node(graph: &Value, role_id: &str, deps: &[&str]) {
     assert_eq!(actual, expected_sorted, "{role_id} 输入端口");
     for port in node["inputs"].as_array().expect("inputs") {
         assert_eq!(
-            port["required"],
-            Value::from(true),
+            port["required"].as_bool(),
+            Some(true),
             "{role_id} 端口必须 required"
         );
     }
     if deps.is_empty() {
         assert_eq!(input_names(node), vec!["requirement".to_string()]);
-        assert_eq!(node["inputs"][0]["type"], Value::from("string"));
+        assert_eq!(node["inputs"][0]["type"].as_str(), Some("string"));
     } else {
         assert_eq!(
             input_names(node),
@@ -332,27 +332,34 @@ fn assert_design_node(graph: &Value, role_id: &str, deps: &[&str]) {
 fn assert_item_pipeline(graph: &Value, role_id: &str, item: &str) {
     let base = format!("{role_id}_{item}");
     let work = node_by_id(graph, &base);
-    assert_eq!(work["type"], Value::from("python_node"), "{base} 类型");
-    assert_eq!(work["config"]["module"], Value::from("software_team_stub"));
+    assert_eq!(work["type"].as_str(), Some("python_node"), "{base} 类型");
     assert_eq!(
-        work["config"]["function"],
-        Value::from(format!("work_{role_id}_{item}"))
+        work["config"]["module"].as_str(),
+        Some("software_team_stub")
+    );
+    let expected_function = format!("work_{role_id}_{item}");
+    assert_eq!(
+        work["config"]["function"].as_str(),
+        Some(expected_function.as_str())
     );
     assert_eq!(input_names(work), vec!["task".to_string()]);
 
     let review = node_by_id(graph, &format!("{base}_review"));
-    assert_eq!(review["type"], Value::from("agent_call"));
-    assert_eq!(review["config"]["agent_id"], Value::from("design_reviewer"));
-    assert_eq!(review["trigger"], Value::from("all"));
+    assert_eq!(review["type"].as_str(), Some("agent_call"));
+    assert_eq!(
+        review["config"]["agent_id"].as_str(),
+        Some("design_reviewer")
+    );
+    assert_eq!(review["trigger"].as_str(), Some("all"));
 
     let parse = node_by_id(graph, &format!("{base}_parse"));
-    assert_eq!(parse["type"], Value::from("python_node"));
+    assert_eq!(parse["type"].as_str(), Some("python_node"));
     assert_eq!(
-        parse["config"]["module"],
-        Value::from("workers.software_team.parse_verdict")
+        parse["config"]["module"].as_str(),
+        Some("workers.software_team.parse_verdict")
     );
-    assert_eq!(parse["config"]["function"], Value::from("run"));
-    assert_eq!(parse["trigger"], Value::from("all"));
+    assert_eq!(parse["config"]["function"].as_str(), Some("run"));
+    assert_eq!(parse["trigger"].as_str(), Some("all"));
 
     assert!(has_edge(graph, role_id, &base, "task"), "{base}: D→W.task");
     assert!(
@@ -472,7 +479,7 @@ fn full_codegen_validates_with_60_nodes_100_edges_and_stable_hash() {
     );
 
     let graph = read_graph(&first);
-    assert_eq!(graph["version"], Value::from("1.0"));
+    assert_eq!(graph["version"].as_str(), Some("1.0"));
     assert_eq!(graph["entry_points"], serde_json::json!(["planer"]));
     assert_eq!(nodes(&graph).len(), FULL_NODE_COUNT);
     assert_eq!(edges(&graph).len(), FULL_EDGE_COUNT);
@@ -482,7 +489,7 @@ fn full_codegen_validates_with_60_nodes_100_edges_and_stable_hash() {
     let type_counts = |node_type: &str| {
         nodes(&graph)
             .iter()
-            .filter(|node| node["type"] == Value::from(node_type))
+            .filter(|node| node["type"].as_str() == Some(node_type))
             .count()
     };
     assert_eq!(type_counts("agent_call"), 11 + 16, "agent_call 节点数");
@@ -520,8 +527,8 @@ fn full_codegen_validates_with_60_nodes_100_edges_and_stable_hash() {
         );
         let target = node_by_id(&graph, &to_node);
         assert_ne!(
-            target["type"],
-            Value::from("python_node"),
+            target["type"].as_str(),
+            Some("python_node"),
             "gate 边目标应为设计角色或 end"
         );
         assert!(!to_port.is_empty(), "gate 边必须有目标端口");
@@ -529,8 +536,8 @@ fn full_codegen_validates_with_60_nodes_100_edges_and_stable_hash() {
 
     // `end` 等 release 的 3 个 item（附录 B：≥1 required、trigger=all）。
     let end = node_by_id(&graph, "end");
-    assert_eq!(end["type"], Value::from("end"));
-    assert_eq!(end["trigger"], Value::from("all"));
+    assert_eq!(end["type"].as_str(), Some("end"));
+    assert_eq!(end["trigger"].as_str(), Some("all"));
     assert_eq!(
         input_names(end),
         FULL_END_DEPS
@@ -586,7 +593,7 @@ fn full_graph_python_symbols_and_agent_assets_resolve() {
     // 32 个 python_node：16 个工作 agent stub + 16 个解析节点（共享 parse_verdict.run）。
     let python_nodes: Vec<(String, String)> = nodes(&graph)
         .iter()
-        .filter(|node| node["type"] == Value::from("python_node"))
+        .filter(|node| node["type"].as_str() == Some("python_node"))
         .map(|node| {
             (
                 node["config"]["module"]
@@ -684,7 +691,7 @@ fn smoke_codegen_is_isomorphic_single_stage_pipeline() {
     let type_counts = |node_type: &str| {
         nodes(&graph)
             .iter()
-            .filter(|node| node["type"] == Value::from(node_type))
+            .filter(|node| node["type"].as_str() == Some(node_type))
             .count()
     };
     assert_eq!(type_counts("agent_call"), 5, "agent_call 节点数");
@@ -702,7 +709,7 @@ fn smoke_codegen_is_isomorphic_single_stage_pipeline() {
     assert!(
         !edges(&graph)
             .iter()
-            .any(|edge| edge["from"] == Value::from("archer")),
+            .any(|edge| edge["from"].as_str() == Some("archer")),
         "archer 是叶节点，不得有出边"
     );
     let gated: Vec<&Value> = edges(&graph)
@@ -720,8 +727,8 @@ fn smoke_codegen_is_isomorphic_single_stage_pipeline() {
             "gate 必须为 approved 不变量: {edge}"
         );
         assert_eq!(
-            edge["to_node"],
-            Value::from("archer"),
+            edge["to_node"].as_str(),
+            Some("archer"),
             "gate 投递目标应为 archer"
         );
     }
