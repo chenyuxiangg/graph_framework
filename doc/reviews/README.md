@@ -63,7 +63,7 @@
 | [REV-058](REV-058-process-m6-ci-clippy.md) | 2026-10-31 | process/cli/docs | `chore/process-m6-ci-clippy` | 通过（merge 门禁 clippy + cli lint + refactor 前缀 + ISSUE-094） | reviewer-a |
 | [REV-060](REV-060-e2e-m6-tool-limits.md) | 2026-10-31 | e2e | `test/e2e-m6-tool-limits` | 通过（e2e 工具+节点共享上限适配） | lead |
 | [REV-061](REV-061-process-m6-wrapup.md) | 2026-10-31 | process/docs | `docs/docs-m6-wrapup` | 通过（M6 收口：台账/进度/索引/baseline/ISSUE-096/097、AC-12 10 次重跑） | reviewer-a |
-| [REV-062](REV-062-docs-software-team-sop-v1.md) | 2026-10-31 | docs | `docs/docs-software-team-sop-v1` | 有条件通过（C1–C5 待关闭：产物交接/失败契约/T-codegen 自洽/附录 A validate/方向表述） | reviewer-sop |
+| [REV-062](REV-062-docs-software-team-sop-v1.md) | 2026-10-31 | docs | `docs/docs-software-team-sop-v1` | 有条件通过（首轮 C1–C5 已关闭、S1–S7 已落实；复审新 C6 待关闭：内部重做产物未进入下游） | reviewer-sop |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
