@@ -134,7 +134,7 @@
 
 17. **W2a 实现回写批次**（2026-10-31，REV-073；分支 `docs/docs-gate-defer-spec`）：
     - **来源**：已合并实现——dsl `fa6ea16`+`bc92951`（REV-069）、trace `27f9200`（REV-070）、py-worker `dd96d89`+`f685178`（REV-068）、kernel `ee4ca27`+cli `6c90a16`（REV-071）；e2e 已合并 `main` `e2cba52`（**REV-072 已通过**，含 N1 后 §7 + 单 item 加固 §8）。本批**按实际实现校准**，不重写 W2a0 冻结决策。
-    - **07**：AC-14 资产路径改 `tests/fixtures/graphs/defer_gate/**` + `tests/fixtures/trace/{schema_v3_seed,v0.1.0_expected_trace,seed_graph,GENERATION}`；测试落点改 `tests/e2e/gate_defer.rs`（a/b/f/g/h 均通过）与 `tests/e2e/software_team_v1.rs`（c/e codegen 静态 + 运行期，REV-072 已通过；e2e final 将改单 item rework profile，c/e 规模/断言以 final 为准）；§7.1/§7.2 行同步。
+    - **07**：AC-14 资产路径改 `tests/fixtures/graphs/defer_gate/**` + `tests/fixtures/trace/{schema_v3_seed,v0.1.0_expected_trace,seed_graph,GENERATION}`；测试落点改 `tests/e2e/gate_defer.rs`（a/b/f/g/h 均通过）与 `tests/e2e/software_team_v1.rs`（c/e codegen 静态 + 运行期，REV-072 已通过）；e2e 已在 `main` `e2cba52` 合并，AC-14 c/e 以 07 的单 item profile（5 节点/7 边）口径为准；§7.1/§7.2 行同步。
     - **01/03/04/06 as-built 注记**：`DeferredReceipt.updated_at` RFC3339 `String`、审计字段当前无读取方；per-port 继承 + `settled_by_node` 清空、不回收继承端口结算；`apply_publish` 四路径/超限 GateResult 不入库/`fail_if_blocked_deferred` message；`GateEvaluation.verdict` 实现口径；DDL 三列表尾追加（列序无语义）、`verdict_json` 损坏**严格报错**（ISSUE-105 待定案）、迁移/只读拒绝实测。
     - **02 as-built 注记**：R15 首错 + `expected/actual` 与冻结模板一致（REV-069 N1/N5）；子图内 R13+R15 跨规则聚合 2 条 `DSL_SUBGRAPH_INVALID`（REV-069 N7，子图为例外）。
     - **08**：§8.9.1 追加 W2a 实现证据表（模块/commit/REV/测试计数/as-built 偏差/台账），不改 8.0–8.9 历史。
