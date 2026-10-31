@@ -170,3 +170,15 @@ shasum -a 256 doc/spec-v1.2/0*.md                            # 与 §3 表 9/9 �
 ### 7.5 复审结论
 
 **C1–C5 全部关闭，未发现新 P0/P1；最终结论：通过**（§1 已同步；`merge.sh` 可识别）。§7.4 的 R1（P2）与 R2/R3/R4（P3）为**非阻塞残余**：R1 影响 E-12 的 CLI 面与 `:memory:` 场景，建议合并前由 docs-dev 一个小 commit 收口（不改变设计语义、无需再次评审）；若 Lead 决定随 W3a-docs 处理，则登记 ISSUE-129（E-12 契约）并保留本记录结论不变。R2/R3/R4 可在同一小 commit 顺手修正。
+
+## 8. R1–R4 收口确认（2026-10-31）
+
+**结论：通过**（仅文档状态/一致性收口，不改变 W3a0 冻结语义）。复审对象 **`73e7596`**（parent `05a5803`；10 files +43/−32，全部 `doc/**`）：
+
+- **R1 ✅**：E-12 已删不可达的 CLI `--no-trace`/等价分支（明确「CLI 不提供、W3a 也不新增」），只保留库 API 口径；新增「human 图 + CLI `--db :memory:` → **启动前预检拒绝** `RUN_ENTRY_INVALID`（exit 3、不产生 run、reason `trace_required_for_human`、不新增错误码）」，并在 `00 §0.4`（`RUN_ENTRY_INVALID` 触发条件）、`03 §3.2`（启动校验表行 1b）、`06 §6.9.1`/`§6.10.3`（`:memory:` 注记）写明；`03:65` 注释已改「仅测试/库 API；CLI 无 --no-trace 参数」；E-12 标注 W3a 实施前置项。
+- **R2 ✅**：DR §4.1 流程图改为「先写 output（快照携带）且清 deadline → transition → 求值出边 gate → publish」，并注「顺序以 §3.2 为准：不得先 transition 后写 output」。
+- **R3 ✅**：`--stats` 引用 ISSUE-127 → **ISSUE-128**（`DR:368`、`06:978`）；PROVENANCE §2 第 21 条重算清单补 **04**，条件修复增量改为 **+59/−40（净 +19）**（与 `a325fd3..HEAD` 实测 numstat 一致）。
+- **R4 ✅**：`doc/index.md`（DR-006 行）、`doc/progress.md`（进行中任务）、`DR-004` §10、`DR-006 §14.3`、`PROVENANCE §5` 的「待复审」已改「复审通过（REV-078，`05a5803`）」。
+- **复核**：`git diff 05a5803..HEAD` 10 files 全 `doc/**`（无代码/测试/doc-reviews）；`check.sh` PASSED；PROVENANCE §3 实测 **9/9 SHA-256 + 行数一致**（00 `a233bd84…`/330、03 `3d7d78bd…`/596、06 `476878e0…`/1226、07 `b7c9f781…`/425，其余未变）；00–08 = **6815**、spec 目录 = **7151**（6815+80+234+22）；相对 main 实测 **+375/−51（净 +324）**、R 小 commit spec **+12/−11（净 +1）**——均与 §3/§2 第 21 条自洽。
+- 非阻塞状态残留（不影响结论）：`doc/progress.md`「当前阶段」行仍写「已提交待评审/合并」、`doc/index.md` reviews 行 REV-078 仍写「本分支待评审」——按 AGENTS §4 由 Lead 合并后更新（或后续 docs 小 commit 收口），不改变冻结语义与本次通过。
+- **R1–R4 收口完成，REV-078 维持「通过」，无新增 P0/P1。**
