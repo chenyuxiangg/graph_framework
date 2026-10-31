@@ -187,8 +187,8 @@ run 进程 decision consumer（RO 轮询 200ms）──▶ pending(run_id)
                          RunControl::HumanDecision{...}  ──▶ kernel 事件循环
                                               │
       kernel 校验：实例存在 ∧ 是 node_current ∧ status=WaitingHuman
-          ├─ 通过 → WaitingHuman→Completed(reason="human_decided")
-          │         output={decision,reason}；求值出边 gate → 普通 publish
+          ├─ 通过 → 先写 output={decision,reason}（快照携带）且清 deadline → `WaitingHuman→Completed(reason="human_decided")`
+          │         → 求值出边 gate → 普通 publish（**顺序以 §3.2 为准：不得先 transition 后写 output**）
           │         → TraceSink::human_decided(applied=true, reject_reason=None)
           └─ 不通过 → 状态不变
                     → TraceSink::human_decided(applied=false, reject_reason=<code>)
@@ -365,7 +365,7 @@ CREATE INDEX IF NOT EXISTS idx_human_decisions_pending
 
 - **人类可读**：在既有事件输出后追加一段决策摘要（若有）：`human_decisions: N (approved A / rejected R; pending P)`，逐行 `instance=… decision=… approver=… decided_at=… consumed_at=… reason=…`；无决策行时**不输出**（默认 run 输出逐字节不变）。
 - **`--json`（NDJSON）**：在事件行之后追加 `{"kind":"HumanDecision", "run_id", "instance_id", "decision", "approver", "reason", "decision_id", "decided_at", "consumed_at"}` 行；顺序按 `(decided_at, decision_id)`；**不写入 `events.kind`**、不改变既有事件行形状；无决策行时输出与 v5 前一致。
-- **pending 行的 `consumed_at`**：`--json` 中恒输出 `"consumed_at": null`（与列语义一致；不省略）；`--stats` **不新增** human 决策计数字段（W3a0 冻结；后续如需要另立，登记 ISSUE-127）。
+- **pending 行的 `consumed_at`**：`--json` 中恒输出 `"consumed_at": null`（与列语义一致；不省略）；`--stats` **不新增** human 决策计数字段（W3a0 冻结；后续如需要另立，登记 ISSUE-128）。
 - `replay --mode=events` 沿用 `trace --json`（含 HumanDecision 行）时，保持「events 回放逐字节复用 trace」的既有口径——**W3a0 冻结**：`replay --mode=events` 的 NDJSON 包含 HumanDecision 行（与 `trace --json` 逐字节一致），但**不消费/不重新要求决策**（回放只读历史事实）；`--mode=outputs` 不受决策影响（按记录输出重放，不需要决策表）。
 
 ---
@@ -435,7 +435,11 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 4. consumer 不阻塞事件循环、不执行用户 Python（I8）；所有 DB 访问为非阻塞/短事务（tokio blocking 线程或等价）。
 5. `--quiet` 抑制 stderr 决策行（不抑制错误）。
 6. 纯等待时 run 进程**保持存活**；Ctrl-C → Cancelled + exit 130（既有取消口径）。
-7. **trace 关闭 / 库 API（冻结，N10）**：CLI `run` 对**含 human 节点**的图要求 trace 开启（默认开启）；若 `trace_enabled=false`（CLI `--no-trace`/等价）→ **启动失败 `RUN_ENTRY_INVALID`（exit 3，reason `trace_required_for_human`）**，避免无决策通道的无限等待。库 API：**不内建 consumer，无 DB 依赖**——调用方直接通过 `RunControl::HumanDecision` 提交决策（`TraceSink` 可实现为 no-op；`applied` 结果仅通过 sink 回传）。
+7. **human 图的 trace DB 要求 / 库 API（冻结，N10；R1 修订）**：
+   - CLI **不提供** `--no-trace` 参数（当前不存在，W3a 也不新增）；`trace_enabled` 仅测试/库构建可用。
+   - **`--db :memory:`（CLI）**：含 human 节点的图要求**可跨进程读写的 trace DB**；`--db :memory:` → **run 启动前预检拒绝**：`RUN_ENTRY_INVALID`、**exit 3、不产生 run**（reason `trace_required_for_human`；与「入口非法不产生 run」同口径；不新增错误码）。拒绝理由：`decide`/consumer 需跨进程读写同一 DB，`:memory:` 不可跨进程读。
+   - **库 API**：不内建 consumer、无 DB 依赖——调用方直接通过 `RunControl::HumanDecision` 提交决策；`TraceSink` 可为 no-op（`trace_enabled=false` 的库场景），`applied` 结果仅通过 sink 回传。
+   - **W3a 实施前置项**：`00 §0.4` 的 `RUN_ENTRY_INVALID` 触发条件、`03 §3.2` 启动校验表、`06 §6.10.3` 的 `:memory:` 注记须同步写明本口径。
 
 ### 7.4 常量
 
@@ -461,7 +465,7 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | L2 | `--record=full` + `replay --mode=outputs` | human 实例输出按 `(node_id,attempt)` 重放；不重新要求人工输入；结果一致 |
 | CLI | decide 全部退出码/`--json` | 与 §4.5/§7.2 逐项一致 |
 | 并发 | decide × run、同实例双 decide | 无失败；同实例恰一 succeed（0），其余 exit 5（含已消费后的二次 decide：`HUMAN_DECISION_EXISTS`） |
-| trace 关闭 | CLI 含 human 图 + `trace_enabled=false` | **启动失败 `RUN_ENTRY_INVALID`（exit 3，`trace_required_for_human`）**；库 API 无此限制（调用方用 control） |
+| human 图 + `:memory:`（CLI） | 含 human 图 + `--db :memory:` | **run 启动前预检拒绝 `RUN_ENTRY_INVALID`（exit 3，reason `trace_required_for_human`），不产生 run**；库 API 无此限制（control 直驱/sink no-op） |
 | 库 API / sink | 无 SQLite、`TraceSink` no-op | human 等待/决策可经 `RunControl::HumanDecision` 驱动；`human_decided` 默认 no-op 合法（applied 仅 sink 可观测）；无 DB 依赖 |
 | L1 replay | 含决策 run 的 `replay --mode=events --json` | 与 `trace --json` **逐字节一致**（含 HumanDecision 行）；回放**不消费/不重新要求**决策 |
 | 保留符号兼容 | 既有图若恰好使用 `builtin.human` python_node | 语义变为 human 等待节点（保留符号）；属**显式语义收紧**，在 02 §2.5 与 DR 记录（W3a 实现后回写兼容说明）；无 human 图不受影响 |
@@ -498,8 +502,8 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | c | **冲突/幂等/非 waiting/退出码 + `--json`** | 无特殊图；复用 a 的 run 快照 | **预检顺序冻结（C3）**：同实例二次 decide（含 run 已 Completed 后）→ 恒 exit **5** `HUMAN_DECISION_EXISTS`（先于一切状态判断）；无决策行时：非 WaitingHuman → exit **5** `HUMAN_INSTANCE_NOT_WAITING`；run 已终态 → exit **1** `HUMAN_RUN_NOT_ACTIVE`；instance 不存在 → exit **1** `HUMAN_INSTANCE_NOT_FOUND`；缺参/非法 decision/空 approver → exit **2**；DB 不存在/损坏/`user_version<5` 只读拒绝 → exit **4** `HUMAN_DB_ERROR`（不创建空库，N20）；`--json` 成功/失败形状逐字段；decision 行恰 1 行（重复未插入）。**kernel 幂等（N9）**：对已非 WaitingHuman 的迟到/重投决策，kernel 单测断言 `human_decided{applied=false, reject_reason ∈ {instance_missing, not_current, not_waiting_human}}`，状态不变 |
 | d | **决策期限超时** | `human_gate/timeout.json`：human 节点 `config.timeout_ms=200`（无 decide） | 到期后实例 `TimedOut` + `error_code=NODE_TIMEOUT`；run `Failed`；`killed_workers` 不增（无 worker）；决策期限从进入 `WaitingHuman` 起算；此时 decide → exit 1；trace 有 `NodeTimedOut` |
 | e | **trace v4→v5 迁移/备份/只读拒绝/v3→v5 链回放** | `tests/fixtures/trace/schema_v3_seed.sql`（既有）+ 新增 v4 seed（W3a 交付）；真 CLI 打开旧库 | `run` 打开 v4 库 → 迁移 v5：备份 `.bak.v4-*` 恰一份、`user_version=5`、`schema_migrations` 1..5、`instances`/`transitions` 行数与数据逐列保留、`human_decisions` 存在；只读 `trace`/`replay` 对 v4 → exit 4 且不迁移；v3 seed → v4 → v5 链后 L1 golden 与迁移前一致；无决策 run 的 `trace --json` 与 v5 前逐字节一致；**含决策 run** 的 `replay --mode=events --json` 与 `trace --json` 逐字节一致（N18）；**既有 e2e 只读断言的 `expected 4` 随 v5 更新为 `expected 5`（N17，W3a 前置）** |
-| f | **decide×run 并发（WAL busy）与库 API 场景** | 真 CLI run 挂起 + 并发触发 decide（同实例 2–10 进程/线程、以及不同实例）；**另有库 API 用例**：无 SQLite、`TraceSink` no-op，调用方直接提交 `RunControl::HumanDecision` | 并发的同实例 decide：恰 **1** 个 exit 0，其余 exit 5（`HUMAN_DECISION_EXISTS`/`HUMAN_INSTANCE_NOT_WAITING`）；`human_decisions` 恰 1 行；run 正常接续、无 `SQLITE_BUSY` 泄漏/存储错误；重复运行 3 次无 flake。库 API：human 等待/决策经 control 驱动、无 DB 依赖；`human_decided` no-op 时行为仍正确（applied 不可观测） |
-| g | **默认图/v0.1.0 golden 不变 / trace 关闭保护** | v0.1.0 fixtures + W1 SOP v1 图 + W2a/W2b 图（无 human）；另 human 图 + `trace_enabled=false` | `graph_hash` 逐字节不变；validate/run 结果与 trace golden 不变；trace v5 后旧 run 回放不变；`instances.status` 不出现 `WaitingHuman`；`human_decisions` 空；`trace --json` 无 HumanDecision 行。human 图 + trace 关闭 → CLI 启动失败 `RUN_ENTRY_INVALID`（exit 3，`trace_required_for_human`）；库 API 不受此限 |
+| f | **decide×run 并发（WAL busy）与库 API 场景** | 真 CLI run 挂起 + 并发触发 decide（同实例 2–10 进程/线程、以及不同实例）；**另有库 API 用例**：无 SQLite（`trace_enabled=false`）、`TraceSink` no-op，调用方直接提交 `RunControl::HumanDecision` | 并发的同实例 decide：恰 **1** 个 exit 0，其余 exit 5（`HUMAN_DECISION_EXISTS`/`HUMAN_INSTANCE_NOT_WAITING`）；`human_decisions` 恰 1 行；run 正常接续、无 `SQLITE_BUSY` 泄漏/存储错误；重复运行 3 次无 flake。库 API：human 等待/决策经 control 驱动、无 DB 依赖；`human_decided` no-op 时行为仍正确（applied 不可观测）；**CLI 不提供 `--no-trace`** |
+| g | **默认图/v0.1.0 golden 不变 / `:memory:` 保护** | v0.1.0 fixtures + W1 SOP v1 图 + W2a/W2b 图（无 human）；另 human 图 + CLI `--db :memory:` | `graph_hash` 逐字节不变；validate/run 结果与 trace golden 不变；trace v5 后旧 run 回放不变；`instances.status` 不出现 `WaitingHuman`；`human_decisions` 空；`trace --json` 无 HumanDecision 行。human 图 + `:memory:` → **启动前预检拒绝 `RUN_ENTRY_INVALID`（exit 3，不产生 run）**；库 API 不受此限（control 直驱/sink no-op） |
 
 ---
 
@@ -552,7 +556,7 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 | E-9 | `decision_id` 生成方 | **CLI decide 侧生成 UUIDv7** 并写入；run consumer 原样透传（审计/日志）；不接受用户指定 |
 | E-10 | trace 输出顺序 | HumanDecision 行在事件行之后、按 `(decided_at, decision_id)`；同一 run 的 decision 行确定性有序 |
 | E-11 | **合同内部不一致（**Lead 2026-10-31 已裁决**）**：task-11 §2.3 写「instance 不存在 → exit 1」，而 §3.4 写「instance 存在且 status=WaitingHuman（否则 exit 5）」——对「instance 不存在」的退出码口径不一致 | **Lead 裁决（2026-10-31）**：按本 DR 冻结口径执行——**instance 不存在 → exit 1**（`HUMAN_INSTANCE_NOT_FOUND`，与 run 不存在同属「目标不存在」）；**instance 存在但 status≠WaitingHuman → exit 5**（`HUMAN_INSTANCE_NOT_WAITING`）。§4.5/06 §6.10.5 口径为准，不再待决（见 §12.3 #5） |
-| E-12 | **trace 关闭 / 库 API 的 human 决策通道（N10）** | CLI `run` 含 human 图要求 trace 开启；`trace_enabled=false` → 启动失败 `RUN_ENTRY_INVALID`（exit 3，`trace_required_for_human`）。库 API：无内建 consumer/无 DB 依赖，调用方直接提交 `RunControl::HumanDecision`；`TraceSink::human_decided` 默认 no-op 合法（§7.3 #7） |
+| E-12 | **human 图的 trace DB 要求 / 库 API 的 human 决策通道（N10；R1 修订）** | CLI **不提供** `--no-trace`（W3a 也不新增）；human 图要求**可跨进程读写的 trace DB**：CLI `--db :memory:` → **启动前预检拒绝 `RUN_ENTRY_INVALID`（exit 3，reason `trace_required_for_human`，不产生 run；不新增错误码）**，并在 00 §0.4/03 §3.2/06 §6.10.3 三处写明。库 API：无内建 consumer/无 DB 依赖（`trace_enabled=false`），调用方直接提交 `RunControl::HumanDecision`，`TraceSink::human_decided` 默认 no-op 合法（§7.3 #7）。**W3a 实施前置项**：上述三处口径与 06 `:memory:` 注记须在 W3a 落地。 |
 | E-13 | **decide 预检可见性（N11）** | 预检以已提交 trace 状态为准；进入 `WaitingHuman` 时 CLI 应尽快 flush 实例快照；decide 早于可见 → 按预检顺序 3/4 exit 1/5，操作者轮询 `instances.status=WaitingHuman` 后重试（AC-16 a 明确轮询） |
 | E-14 | **applied/reject_reason 不落库（N21）** | `human_decisions` 仅存 `consumed_at`；`applied`/`reject_reason` 只经 sink→CLI（stderr/内存），进程退出后不可从 trace 审计；W3b 评估加列/事件（ISSUE-126） |
 
@@ -614,4 +618,4 @@ zgraph decide <run_id> --instance <instance_id> --decision approved|rejected
 - 分支 `docs/docs-human-design`；提交正文含 `Review: REV-078` 与 `Agent: docs-dev`；**本批不 push、不合并**。
 - `bash scripts/dev/check.sh` 必须 PASSED；PROVENANCE §3 的 SHA-256/行数以实测为准；合并前由独立评审人写 `doc/reviews/REV-078-docs-human-design.md`，结论必须为「通过」（AGENTS §3/§4）。
 - W3a 实现完成后由 W3a-docs 做 as-built 回写（新增 PROVENANCE 第 2 条、回写 07 AC-16 测试名/计数、08 §8.7 备注）。
-- **REV-078 条件修复（C1–C5）**：本批在 `docs/docs-human-design` 追加修复提交（C1 副作用顺序/C2 consumer 总是提交/C3 预检顺序与二次 decide 码/C4 文档事实/C5 设计补全）；残留 P3 建议登记 `doc/issues.md`（ISSUE-126 起），由评审人复审后转「通过」。
+- **REV-078 条件修复（C1–C5）**：本批在 `docs/docs-human-design` 追加修复提交（C1 副作用顺序/C2 consumer 总是提交/C3 预检顺序与二次 decide 码/C4 文档事实/C5 设计补全）；残留 P3 建议登记 `doc/issues.md`（ISSUE-126 起）；**复审通过（REV-078，复审记录 `05a5803`）**；R1–R4 复审残留已由合并前小 commit 收口。

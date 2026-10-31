@@ -185,23 +185,29 @@
     - **C4 文档事实/一致性**：PROVENANCE §3 合计 **6795**、增量修正（冻结批次 +349/−45，净 +304）；spec README 验收改 AC-01..AC-16；06 §6.10.1 `--db` 增 decide；03 §3.8 表格恢复 + `Cancel` 行补 `WaitingHuman→Cancelled`；index DR-004 行含 W3a0；PROVENANCE §5 笔误删除。
     - **C5 设计补全**：`reject_reason` 冻结三值 `instance_missing`/`not_current`/`not_waiting_human`（内核 snake_case，与 decide `HUMAN_*` 两套码）；`instances.input` 冻结为「`Pending→WaitingHuman` 迁移前写入全端口快照」；AC-16 补 reject→终止（rejected settle 边→end）、decide exit 4（DB 不存在/损坏/`<5`）、human 图 validate、kernel `applied=false`/`reject_reason`、trace 关闭/库 API（`RunControl` 直驱、sink no-op）、decide 可见性（轮询 DB WaitingHuman）、含决策 run 的 `replay --mode=events` ≡ `trace --json`、既有 e2e `expected 4→5` 实施前置项；DR-006 新增 E-12/E-13/E-14，§14.1 文件清单校正。
     - **台账**：新增 **ISSUE-126**（applied/reject_reason 持久化评估，W3b）、**ISSUE-127**（handler 命名实现侧最终统一，W3a）、**ISSUE-128**（trace `--stats` human 计数后续可选）；既有 113–125 不动。
-    - **重测与落盘**：PROVENANCE §3 重算 00/01/02/03/06/07 的 SHA-256 与行数（冻结 6795 → 条件修复后 **6814 行**，+19；新增 21/删除 2）；`bash scripts/dev/check.sh` PASSED；提交正文 `Review: REV-078` + `Agent: docs-dev`。
-    - 本批次后 00–08 合计 **6814 行**（00 330、01 393、02 959、03 595、04 933、05 1429、06 1226、07 425、08 524）；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7144 行）。
+    - **重测与落盘**：PROVENANCE §3 重算 00/01/02/03/04/06/07 的 SHA-256 与行数（冻结 6795 → 条件修复后 `90fa845` **6814 行**，+19；spec 文件 numstat **+59/−40**（净 +19））；`bash scripts/dev/check.sh` PASSED；提交正文 `Review: REV-078` + `Agent: docs-dev`。
+    - **R1–R4 复审残留修复（2026-10-31，复审通过后合并前小 commit）**：
+      - **R1**：删除 E-12 不可达的 CLI `--no-trace`/等价分支（CLI 不提供该参数、W3a 也不新增），只保留**库 API 口径**（`trace_enabled=false` 无 DB 依赖，调用方直接 `RunControl::HumanDecision`、sink 可 no-op）；新增 **human 图 + CLI `--db :memory:` → run 启动前预检拒绝 `RUN_ENTRY_INVALID`（exit 3、不产生 run、reason `trace_required_for_human`，不新增错误码）**，并在 00 §0.4 `RUN_ENTRY_INVALID` 触发条件、03 §3.2 启动校验表行 1b、06 §6.9.1/§6.10.3 `:memory:` 注记三处写明；E-12 标注「W3a 实施前置项」。
+      - **R2**：DR §4.1 流程图改为「先写 output（快照携带）→ transition → publish」，与 §3.2 冻结顺序一致。
+      - **R3**：`--stats` 引用 ISSUE-127 → **ISSUE-128**（DR/06）；第 21 条重算清单补 **04**；条件修复增量按实测改为 **+59/−40（净 +19）**。
+      - **R4**：index/progress/DR-004/DR-006 §14.3/PROVENANCE 的「待复审」改为「复审通过（REV-078，`05a5803`）」。
+      - **小 commit 后** 00–08 合计 **6815 行**（00 330、01 393、02 959、03 596、04 933、05 1429、06 1226、07 425、08 524；相对 `05a5803` spec numstat **+12/−11，净 +1**）；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7151 行）。
+    - 条件修复后（`90fa845`）00–08 合计 **6814 行**（03 595；其余同 R 修复后除 03 外）；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准。
 
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | 52c6d2babb1cd0bb2de3e3f97601f3064a5009d9ec363d4b8acfb6f70e8d3766 | 330 |
+| `00-总纲.md` | a233bd846984ba61ac10c84d9c4c69afded3f59cbf4622dea523f9d4688d909e | 330 |
 | `01-领域模型与状态机.md` | 619ce97d6119cad8b6c5aab446b91cdaa13d349eb9554e72687b0a29a0feefcf | 393 |
 | `02-DSL与校验.md` | f57d257aabebe0127190b5cd457bc507babc005342c29cfb92cce0b1694b516e | 959 |
-| `03-调度器与生命周期.md` | 74091c9e1348f7391e811774372e12d524aad58255a5577ccaaea1241536bce9 | 595 |
+| `03-调度器与生命周期.md` | 3d7d78bd92e53421ec79ce1938f5eb03cd8f7670da08f24418acf8cd98c5e054 | 596 |
 | `04-节点接口与扩展点.md` | c4cafcab5e58688b12a435914408a879e44d2ebf81fdb490d554721e67de4ef1 | 933 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | 1ecd339345695de109f594390f23137f82148e291cb3d9314f8860ec1e222fdc | 1226 |
-| `07-验收用例.md` | c0bfb90ef887f553f87a9824001d8bfd8a53c27a88b529e72811f93165be4f3e | 425 |
+| `06-存储与可观测.md` | 476878e032cfea496d542913970d03f969fce229e36751febbb025c89c643dbf | 1226 |
+| `07-验收用例.md` | b7c9f78187c3012bc066a90d37ed53aa3c77a26d7a16d664e83eff57084f88d4 | 425 |
 | `08-审计关闭矩阵.md` | 5dc763aa358fad5a7ead77a10dc995f4362433bbe237b2248b4a339234d97f04 | 524 |
 
-> 00–08 合计 **6814 行**（`wc -l` 口径；2026-10-31 **W3a0 设计冻结 + REV-078 条件修复批次后**实测（REV-078；相对 main **净 +323 行**（新增 370/删除 47），见 §2 第 20–21 条；冻结批次 6795 行/§2 第 20 条，条件修复 +19 行（新增 21/删除 2）/§2 第 21 条）；此前 W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7144 行）。
+> 00–08 合计 **6815 行**（`wc -l` 口径；2026-10-31 **W3a0 设计冻结 + REV-078 条件修复 + R1–R4 小 commit 后**实测（REV-078；相对 main **净 +324 行**（新增 375/删除 51），见 §2 第 20–21 条；冻结批次 6795/§2 第 20 条；条件修复 +19（spec numstat +59/−40）/§2 第 21 条；R1–R4 小 commit +1（spec numstat +12/−11））；此前 W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7151 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
@@ -225,4 +231,4 @@ wc -l 0*.md
 - **M6 回写已完成（2026-10-31，REV-057）**：05/06/07/08 正文与 `architecture-v2.md` §5.2 已同步 M6 已实现口径（REV-040/041/042/043/044/047/048/049/050/052/055/056/058/060；REV-061 属 wrapup、仅用于 ISSUE-096 登记）；03 §3.12 与 04 A7/A17/§4.2 的双通道临时口径同步撤销；08 只追加 §8.8 M6 注记（8.0–8.7 历史快照不改）。**ISSUE-082（REV-048）与 ISSUE-088（REV-056）均已合并并回写**；ISSUE-095 保持 open（kernel hostname 口径差）、ISSUE-096 仍 pending（open，待 REV-061 wrapup 合并后置 fixed）；正文无未合并实现的 pending 占位。
 - **W2a0 返工设计冻结已完成（2026-10-31，REV-067）**：00/01/02/03/04/06/07/08 已按 DR-005 冻结 deferrable gate（`on_gate_false`）、R15/`DSL_DEFER_NOT_REENTRANT`、`DeferredReceipt`/attempt-per-activation（per-port 继承 + `settled_by_node` 重置）、trace schema v4、AC-14；SOP 设计稿升 v1.1。**本批是设计冻结，不代表 W2a 实现完成**；实现偏差由 W2a-docs 回写。`doc/architecture-v2.md` 的 `R1–R14`/17 码口径未在本批同步（DR-005 §11 C-7），建议 W2a-docs/process 收口。
 - **W2b spec 回写已完成（2026-10-31，REV-077）**：00/01/02/03/06/07 已按已合并实现（REV-074 dsl / REV-075 kernel+cli / REV-076 e2e）回写 R16 静态扇出上限、`NODE_FANOUT_EXCEEDED` 运行期防御层、`CompiledNode.max_fanout`、`NodeError` canonical JSON 与 07 AC-15；`doc/architecture-v2.md` 顶部注记同步为 R1–R16（历史表述保持冻结）；默认无 `max_fanout` 的图行为/hash/错误序列与 v0.1.0 逐字节一致。台账新增 ISSUE-113–125（113–124 为 REV-074/075/076 P3，125 为 03 §3.2 预存偏差）；`doc/progress.md` 已更新为 W2b 完成、下一步 W3a0；REV-077 复审条件 C1–C4 已由条件修复批次关闭（见 §2 第 19 条）。
-- **W3a0 人工评审设计冻结已完成（2026-10-31，REV-078）**：00/01/02/03/04/06/07 已按 [`DR-006`](../decisions/DR-006-w3a-human-decide-freeze.md) 冻结 human lifecycle（`builtin.human` 保留符号、`WaitingHuman` 非静默等待、decide 自动接续/无 `resume`、`human_decisions`+C13 写者、trace schema v5、CLI decide 退出码 5、AC-16 a–g 设计）。**本批是设计冻结，不代表 W3a 实现完成**；本批不写 as-built，实现偏差由 W3a-docs 回写；07 AC-16 的测试名/计数待实现后补。REV-078 首轮「有条件通过」的 C1–C5 已由条件修复批次关闭（见 §2 第 21 条）；残留 P3 建议登记 ISSUE-126–128。
+- **W3a0 人工评审设计冻结已完成（2026-10-31，REV-078）**：00/01/02/03/04/06/07 已按 [`DR-006`](../decisions/DR-006-w3a-human-decide-freeze.md) 冻结 human lifecycle（`builtin.human` 保留符号、`WaitingHuman` 非静默等待、decide 自动接续/无 `resume`、`human_decisions`+C13 写者、trace schema v5、CLI decide 退出码 5、AC-16 a–g 设计）。**本批是设计冻结，不代表 W3a 实现完成**；本批不写 as-built，实现偏差由 W3a-docs 回写；07 AC-16 的测试名/计数待实现后补。REV-078 首轮「有条件通过」的 C1–C5 已由条件修复批次关闭（见 §2 第 21 条），**复审通过（REV-078，复审记录 `05a5803`）**；R1–R4 复审残留已由合并前小 commit 收口；残留 P3 建议登记 ISSUE-126–128。
