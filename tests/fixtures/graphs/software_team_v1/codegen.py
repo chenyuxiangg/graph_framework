@@ -3,8 +3,6 @@
 来源：`doc/design/software-team-sop-v1.md` §4.1（设计角色依赖矩阵）、§7（N 与 codegen
 规则）、附录 A（单 item 管线骨架）、附录 B（DSL 约束）。
 
-两个 profile 共用同一套生成规则（节点/边命名与 §7 一一对应）：
-
 两个 **mode**（``--mode``，W2a / SOP v1.1）共用同一套节点/边规则：
 
 - ``approved``（缺省，W1 基线）：无 defer 边、解析节点 ``parse_verdict.run``、
@@ -13,7 +11,7 @@
   ``parse_verdict_rework``、环上全部可重入边标 ``on_gate_false:"defer"``、新增
   ``P → W.feedback`` 回边、``W/R/P`` 写 ``config.retry.max_attempts=3``。
 
-两个 profile 的规模：
+三个 profile 的规模：
 
 - ``full``：11 个设计角色 + 16 个工作 agent + 16 个评审 + 16 个解析 + 1 个 ``end``
   = **60 节点 / 100 边**（approved；rework 因 16 条 ``P→W`` 回边为 **60/116**）；
@@ -21,7 +19,11 @@
   设计角色扇出 3 个工作 agent → 3 个评审 → 3 个解析 → ``archer`` 叶节点 =
   **11 节点 / 18 边**（approved；rework 为 **11/21**）；fake LLM 按调用序消费脚本，
   因此 smoke 只保留一条阶段链路（不跑 full）。评审 agent 可用 ``--review-agent``
-  换成 e2e 失败路径变体。
+  换成 e2e 失败路径变体；
+- ``rework-item``：c/e 运行期专用的**单 item** rework 图（``planer → W → R → P →
+  archer``，**5 节点 / 7 边**；等价于 smoke 的一个 item 链）——fake LLM 是**全局
+  调用序**消费，多 item 并发会交错消费 round1/round2 条目，单 item 使 c/e 调用序
+  确定（planer → R(rework) → R(approved) → archer）。**只接受 ``--mode rework``**。
 
 设计约束（附录 B）：
 
@@ -52,6 +54,9 @@
     # rework profile（SOP v1.1，AC-14 c/e）：smoke 11 节点/21 边
     python tests/fixtures/graphs/software_team_v1/codegen.py --profile smoke --mode rework --out /tmp/software_team_smoke_rework.json
 
+    # c/e 单 item rework 运行图（5 节点/7 边；fake LLM 调用序确定）
+    python tests/fixtures/graphs/software_team_v1/codegen.py --profile rework-item --mode rework --out /tmp/software_team_rework_item.json
+
 生成后可用 ``zgraph validate <graph.json> --assets-dir tests/fixtures/graphs/software_team_v1``
 校验（含 R14c agent 资产索引）；e2e 即按此链路执行。
 """
@@ -68,7 +73,8 @@ from typing import Any, Sequence
 GRAPH_VERSION: str = "1.0"
 PROFILE_FULL: str = "full"
 PROFILE_SMOKE: str = "smoke"
-PROFILES: tuple[str, ...] = (PROFILE_FULL, PROFILE_SMOKE)
+PROFILE_REWORK_ITEM: str = "rework-item"
+PROFILES: tuple[str, ...] = (PROFILE_FULL, PROFILE_SMOKE, PROFILE_REWORK_ITEM)
 
 MODE_APPROVED: str = "approved"
 MODE_REWORK: str = "rework"
@@ -90,11 +96,13 @@ REWORK_MAX_ATTEMPTS: int = 3
 REWORK_METADATA_SUFFIX: str = "_rework"
 
 # (profile, mode) → (节点数, 边数)。approved 是 W1 硬基线（hash 逐字节不变）。
+# `rework-item` 只用于 c/e 运行期（fake LLM 全局调用序确定性），仅 rework mode。
 EXPECTED_COUNTS: dict[tuple[str, str], tuple[int, int]] = {
     (PROFILE_FULL, MODE_APPROVED): (60, 100),
     (PROFILE_SMOKE, MODE_APPROVED): (11, 18),
     (PROFILE_FULL, MODE_REWORK): (60, 116),
     (PROFILE_SMOKE, MODE_REWORK): (11, 21),
+    (PROFILE_REWORK_ITEM, MODE_REWORK): (5, 7),
 }
 
 
@@ -149,6 +157,19 @@ SMOKE_ROLES: tuple[Role, ...] = (
     ),
 )
 SMOKE_END_DEPS: tuple[str, ...] = ()
+
+# c/e 单 item rework 运行图：planer → 1 个 W/R/P → archer（downstream 设计角色）。
+#
+# 用途：fake LLM 剧本是**全局按调用序**消费；多 item 流水线并发时，不同 item 的
+# round1/round2 评审调用会交错消费脚本（某 item 可能提前把 round2 的条目当 round1
+# 用），导致 c/e 不稳定。单 item（1 个 planer item）使调用序天然确定：
+# planer → R(round1 rework) → R(round2 approved) → archer；exhaust 为 planer → R×3
+# （第 3 轮 P→W.feedback 放行时 W attempt=3 超限）。
+REWORK_ITEM_ROLES: tuple[Role, ...] = (
+    Role("planer", (), ("specification",)),
+    Role("archer", ("planer.specification",), ()),
+)
+REWORK_ITEM_END_DEPS: tuple[str, ...] = ()
 
 
 def _split_ref(ref: str) -> tuple[str, str]:
@@ -461,6 +482,8 @@ def _profile(profile: str) -> tuple[Sequence[Role], tuple[str, ...]]:
         return FULL_ROLES, FULL_END_DEPS
     if profile == PROFILE_SMOKE:
         return SMOKE_ROLES, SMOKE_END_DEPS
+    if profile == PROFILE_REWORK_ITEM:
+        return REWORK_ITEM_ROLES, REWORK_ITEM_END_DEPS
     raise ValueError(f"unknown profile {profile!r}; expected one of {PROFILES}")
 
 
@@ -475,9 +498,15 @@ def build_graph(
     ``design_reviewer_exhaust``（``max_iterations`` 耗尽的变体）覆盖
     ``HARNESS_MAX_ITERATIONS``，其余结构不变。``mode`` 缺省 ``approved``（W1 基线，
     输出逐字节不变）；``rework`` 追加 SOP v1.1 增量（defer/feedback/max_attempts）。
+    ``profile="rework-item"`` 是 c/e 专用的**单 item** rework 运行图，只接受
+    ``mode="rework"``（保证 fake LLM 全局调用序确定）。
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {MODES}")
+    if profile == PROFILE_REWORK_ITEM and mode != MODE_REWORK:
+        raise ValueError(
+            "profile 'rework-item' 仅供 c/e 单 item rework 运行图，必须 --mode rework"
+        )
     roles, end_deps = _profile(profile)
     nodes = build_nodes(roles, end_deps, review_agent, mode)
     edges = build_edges(roles, end_deps, mode)
@@ -517,7 +546,10 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--profile",
         choices=PROFILES,
         default=PROFILE_FULL,
-        help="full = 60 节点参考图；smoke = 11 节点单阶段链路",
+        help=(
+            "full = 60 节点参考图；smoke = 11 节点单阶段链路；"
+            "rework-item = c/e 专用 5 节点单 item rework 运行图（仅 --mode rework）"
+        ),
     )
     parser.add_argument(
         "--mode",

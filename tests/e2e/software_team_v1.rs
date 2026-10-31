@@ -67,11 +67,21 @@ const FIXTURE_GRAPH_DIR: &str = "software_team_v1";
 const PROFILE_FULL: &str = "full";
 const PROFILE_SMOKE: &str = "smoke";
 
+/// c/e 运行时专用单 item rework profile（5 节点/7 边；fake LLM 调用序确定）。
+const PROFILE_REWORK_ITEM: &str = "rework-item";
+
+/// 单 item rework 图的唯一 item（`planer.specification`）。
+const REWORK_ITEM: &str = "specification";
+
 /// §4.1 参考规模（节点数 / 边数）。
 const FULL_NODE_COUNT: usize = 60;
 const FULL_EDGE_COUNT: usize = 100;
 const SMOKE_NODE_COUNT: usize = 11;
 const SMOKE_EDGE_COUNT: usize = 18;
+
+/// 单 item rework 运行图规模（planer + W/R/P + archer）。
+const REWORK_ITEM_NODE_COUNT: usize = 5;
+const REWORK_ITEM_EDGE_COUNT: usize = 7;
 
 /// §4.1 依赖矩阵（测试侧独立 oracle：`(role, deps, items)`）。
 ///
@@ -1428,7 +1438,8 @@ fn approved_codegen_hashes_match_w1_baselines() {
     }
 }
 
-/// rework 图的 `(role, item)` 清单（full = §4.1 全部 item；smoke = planer 的 3 个）。
+/// rework 图的 `(role, item)` 清单（full = §4.1 全部；smoke = planer 3 个；
+/// rework-item = 唯一 planer item）。
 fn rework_items(profile: &str) -> Vec<(&'static str, &'static str)> {
     if profile == PROFILE_FULL {
         let mut pairs = Vec::new();
@@ -1438,6 +1449,8 @@ fn rework_items(profile: &str) -> Vec<(&'static str, &'static str)> {
             }
         }
         pairs
+    } else if profile == PROFILE_REWORK_ITEM {
+        vec![("planer", REWORK_ITEM)]
     } else {
         SMOKE_ITEMS.iter().map(|item| ("planer", *item)).collect()
     }
@@ -1564,9 +1577,14 @@ fn assert_rework_policy(graph: &Value, profile: &str) {
 #[test]
 fn rework_codegen_validates_with_expected_scale_and_full_defer_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let cases: [(&str, usize, usize); 2] = [
+    let cases: [(&str, usize, usize); 3] = [
         (PROFILE_FULL, FULL_NODE_COUNT, FULL_REWORK_EDGE_COUNT),
         (PROFILE_SMOKE, SMOKE_NODE_COUNT, SMOKE_REWORK_EDGE_COUNT),
+        (
+            PROFILE_REWORK_ITEM,
+            REWORK_ITEM_NODE_COUNT,
+            REWORK_ITEM_EDGE_COUNT,
+        ),
     ];
     for (index, (profile, node_count, edge_count)) in cases.iter().enumerate() {
         let first_dir = dir.path().join(format!("rework-{index}-a"));
@@ -1748,15 +1766,19 @@ fn assert_rework_chain(reader: &TraceReader, run_id: &str, item: &str) {
 }
 
 /// AC-14 c：SOP rework → approved 双轮；attempts 0/1、gate 真实值、下游最终 artifact。
+///
+/// 图统一用 `rework-item`（5 节点/7 边，单 item）：fake LLM 全局按调用序消费，多 item
+/// 并发会交错消费 round1/round2 条目（合并门禁高负载下曾复现 flake）；单 item 的调用序
+/// 天然确定：planer → R(rework) → R(approved) → archer。
 #[test]
 fn smoke_rework_roundtrip_completes_with_attempts_and_final_artifact() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let graph = generate_mode_graph(dir.path(), PROFILE_SMOKE, MODE_REWORK);
+    let graph = generate_mode_graph(dir.path(), PROFILE_REWORK_ITEM, MODE_REWORK);
     let (output, db) = run_smoke(dir.path(), &graph, FAKE_REWORK_ROUNDTRIP);
-    assert_exit(&output, 0, "smoke rework roundtrip run");
+    assert_exit(&output, 0, "rework roundtrip run");
     let payload = json_stdout(&output);
     assert_eq!(payload["status"], json!("Completed"));
-    assert_eq!(payload["run_output"], Value::Null, "smoke 无 end 节点");
+    assert_eq!(payload["run_output"], Value::Null, "无 end 节点");
     let run_id = payload_run_id(&payload);
 
     let reader = TraceReader::open_readonly(&db).expect("reader");
@@ -1770,30 +1792,29 @@ fn smoke_rework_roundtrip_completes_with_attempts_and_final_artifact() {
         "planer 只执行一次"
     );
 
-    for item in SMOKE_ITEMS {
-        assert_rework_chain(&reader, &run_id, item);
-    }
+    assert_rework_chain(&reader, &run_id, REWORK_ITEM);
 
     // archer 拿最终 artifact（最新 W attempt 的整包，feedback.verdict=rework 证明是返工后 attempt）。
     let archer = instances_for(&reader, &run_id, "archer");
     assert_eq!(archer.len(), 1);
     assert_eq!(archer[0].status, TraceInstanceStatus::Completed);
     let archer_input = archer[0].input.as_ref().expect("archer input");
-    for item in SMOKE_ITEMS {
-        assert_eq!(archer_input[item]["verdict"], json!("approved"));
-        assert_eq!(
-            archer_input[item]["artifact"]["feedback"]["verdict"],
-            json!("rework"),
-            "{item}: 下游必须拿到返工后最终 W attempt 的产物"
-        );
-    }
+    assert_eq!(archer_input[REWORK_ITEM]["verdict"], json!("approved"));
+    assert_eq!(
+        archer_input[REWORK_ITEM]["artifact"]["feedback"]["verdict"],
+        json!("rework"),
+        "下游必须拿到返工后最终 W attempt 的产物"
+    );
 }
 
 /// AC-14 e：恒定 rework → W attempt=3 超限 → Failed NODE_INTERNAL；超限 GateResult 不入库。
+///
+/// 单 item（`rework-item`）使调用序与 victim 都确定：planer → R×3 →（第 3 次 rework 的
+/// `P→W.feedback` 放行时 W attempt=3 超限）；无 archer（approved 从未发生）。
 #[test]
 fn smoke_rework_exhaust_fails_after_max_attempts_without_overlimit_gate_result() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let graph = generate_mode_graph(dir.path(), PROFILE_SMOKE, MODE_REWORK);
+    let graph = generate_mode_graph(dir.path(), PROFILE_REWORK_ITEM, MODE_REWORK);
     let (output, db) = run_smoke(dir.path(), &graph, FAKE_REWORK_EXHAUST);
     assert_exit(&output, 1, "超限 run 应 exit 1");
     let payload = json_stdout(&output);
@@ -1802,6 +1823,9 @@ fn smoke_rework_exhaust_fails_after_max_attempts_without_overlimit_gate_result()
     assert_eq!(payload["error"]["code"], json!("NODE_INTERNAL"));
     let run_id = payload_run_id(&payload);
 
+    let victim = format!("planer_{REWORK_ITEM}");
+    let review_id = format!("{victim}_review");
+    let parse_id = format!("{victim}_parse");
     let reader = TraceReader::open_readonly(&db).expect("reader");
     let run = common::run_row(&reader, &run_id);
     assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
@@ -1810,6 +1834,10 @@ fn smoke_rework_exhaust_fails_after_max_attempts_without_overlimit_gate_result()
     assert!(
         message.contains("exceeded max_attempts (3)"),
         "超限 message: {message}"
+    );
+    assert!(
+        message.contains(&victim),
+        "超限 message 必须点名 victim 节点 {victim}: {message}"
     );
 
     let instances = reader.instances(&run_id).expect("instances");
@@ -1828,11 +1856,7 @@ fn smoke_rework_exhaust_fails_after_max_attempts_without_overlimit_gate_result()
         .collect();
     assert_eq!(crashed.len(), 1, "恰一个 W 超限 Crashed: {crashed:?}");
     let crashed = crashed[0];
-    let crashed_item = crashed
-        .node_id
-        .strip_prefix("planer_")
-        .expect("crashed W 节点应形如 planer_<item>");
-    assert!(SMOKE_ITEMS.contains(&crashed_item));
+    assert_eq!(crashed.node_id, victim, "victim 唯一且确定");
     assert_eq!(crashed.attempt, 3, "Crashed attempt = max_attempts");
     assert_eq!(crashed.error_code.as_deref(), Some("NODE_INTERNAL"));
     assert_eq!(
@@ -1840,68 +1864,61 @@ fn smoke_rework_exhaust_fails_after_max_attempts_without_overlimit_gate_result()
         json!("Internal")
     );
 
-    // 并发下其它 item 可能只推进到第 2 轮（run 因首个超限失败而终止）；能确定的硬事实：
-    // ① 任何节点的 attempt 连续从 0 开始（不跳号）；② 超限 victim 必然完成 3 轮 W/R/P；
-    // ③ run 失败后无 Pending/Ready/Running（上面已断言）。
-    let victim_base = crashed.node_id.clone();
-    for item in SMOKE_ITEMS {
-        let base = format!("planer_{item}");
-        for node_id in [&base, &format!("{base}_review"), &format!("{base}_parse")] {
-            let attempts = attempts_of(&reader, &run_id, node_id);
-            let expected: Vec<u32> = (0..attempts.len() as u32).collect();
-            assert_eq!(attempts, expected, "{node_id} attempt 必须从 0 连续");
-        }
-        let parses = instances_for(&reader, &run_id, &format!("{base}_parse"));
-        assert!(
-            parses
-                .iter()
-                .all(|row| row.status == TraceInstanceStatus::Completed
-                    || row.status == TraceInstanceStatus::Cancelled),
-            "{item} P 实例只应 Completed/Cancelled: {parses:?}"
-        );
-    }
+    // 单 item 调用序确定：W/R 完成三轮（0/1/2），P 三轮均 Completed（P2 产出 rework 后触发超限）。
     assert_eq!(
-        attempts_of(&reader, &run_id, &victim_base),
+        attempts_of(&reader, &run_id, &victim),
         vec![0, 1, 2, 3],
-        "超限 victim W：三轮 + Crashed attempt3"
+        "W：三轮 + 超限 attempt3"
     );
     assert_eq!(
-        attempts_of(&reader, &run_id, &format!("{victim_base}_review")),
+        attempts_of(&reader, &run_id, &review_id),
         vec![0, 1, 2],
-        "victim R 完成三轮评审"
+        "R 完成三轮评审"
     );
-    let victim_parses = instances_for(&reader, &run_id, &format!("{victim_base}_parse"));
+    let parses = instances_for(&reader, &run_id, &parse_id);
     assert_eq!(
-        victim_parses
-            .iter()
-            .map(|row| row.attempt)
-            .collect::<Vec<_>>(),
-        vec![0, 1, 2],
-        "victim P 三轮（P2 产出 rework 后触发 W 超限）"
+        parses.iter().map(|row| row.attempt).collect::<Vec<_>>(),
+        vec![0, 1, 2]
     );
+    assert!(parses
+        .iter()
+        .all(|row| row.status == TraceInstanceStatus::Completed));
     assert!(
-        victim_parses
-            .iter()
-            .all(|row| row.status == TraceInstanceStatus::Completed),
-        "victim P 在反馈求值前均 Completed: {victim_parses:?}"
+        instances_for(&reader, &run_id, "archer").is_empty(),
+        "approved 从未发生 → archer 不得实例化"
     );
 
-    // 超限那次 GateResult 不入库：crashed W 的 feedback 边只有前两轮（attempt 0/1）两行。
-    let crash_parse_id = format!("{}_parse", crashed.node_id);
+    // gate_results：forward 三轮均 false+deferred（恒 rework）；feedback 仅前两轮（超限那次不入库）。
     let gates: Vec<GateResultRow> = reader.gate_results(&run_id).expect("gate_results");
+    let forward: Vec<&GateResultRow> = gates
+        .iter()
+        .filter(|row| row.node_id == parse_id && row.to_node == "archer")
+        .collect();
+    assert_eq!(forward.len(), 3, "三轮 forward gate: {forward:?}");
+    for (index, row) in forward.iter().enumerate() {
+        assert_gate(
+            row,
+            (index as u32, false, true, Some(json!("rework"))),
+            "exhaust forward 恒 rework → deferred",
+        );
+    }
     let feedback: Vec<&GateResultRow> = gates
         .iter()
-        .filter(|row| row.node_id == crash_parse_id)
-        .filter(|row| row.to_port == "feedback")
+        .filter(|row| row.node_id == parse_id && row.to_port == "feedback")
         .collect();
     assert_eq!(
         feedback.len(),
         2,
         "超限前只有前两轮 feedback GateResult: {feedback:?}"
     );
-    assert_eq!(
-        feedback.iter().map(|row| row.attempt).collect::<Vec<_>>(),
-        vec![0, 1],
-        "不得出现 attempt=2（超限那次）的 GateResult"
+    assert_gate(
+        feedback[0],
+        (0, true, false, Some(json!("rework"))),
+        "round1 rework 回边放行",
+    );
+    assert_gate(
+        feedback[1],
+        (1, true, false, Some(json!("rework"))),
+        "round2 rework 回边放行",
     );
 }
