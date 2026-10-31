@@ -84,3 +84,18 @@ git log -1 --format=%B ab4b805 / 72036b6              # 均含 Review: REV-080 /
 ## 6. 条件关闭记录（仅「有条件通过」填写）
 
 不适用（结论为 `通过`，无附加条件）。
+
+## 7. 第二评审 · cli 跨模块机械改动（Lead 追加，2026-10-31）
+
+- **评审人**：`lead`（**≠ 作者** `kernel-dev`；该跨模块改动由 Lead 批准，按 AGENTS §2「跨模块改动由 Lead 在评审记录中写明并指定第二评审人」执行）
+- **评审范围**：`crates/zgraph-cli/src/bridge.rs` —— `map_instance_status` 新增 `kernel::InstanceStatus::WaitingHuman => trace::InstanceStatus::WaitingHuman` arm + 函数 doc（W3a0/DR-006 §7.1）+ `map_instance_status_covers_all_kernel_statuses` 全量 9 状态 1:1 映射防遗漏测试（`72036b6`，+54/−1）；**无其它 cli 行为/命令行/输出改动**。
+- **核对结论（通过）**：
+  1. 改动为最小机械透传：新 arm 与既有 8 个 arm 同构；不改变任何既有映射/输出/退出码；`crates/zgraph-cli` 其余文件零改动。
+  2. 测试有效：9 个 kernel 状态逐一断言映射到 trace 同名状态（含 WaitingHuman），可防后续枚举增删漏映射；使用 `as_str` 失败消息便于定位。
+  3. 与 trace crate 的 `WaitingHuman`（schema v5 CHECK 已放开）一致；`instance_snapshot`/`transition` 落库不丢等待态。
+- **Lead 亲自验证**（worktree `.worktrees/kernel-kernel-dev`，`CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home`）：
+  ```bash
+  git diff ab4b805..72036b6 -- crates/zgraph-cli/src/bridge.rs   # 仅 arm + doc + 映射测试
+  cargo test -p zgraph-cli --offline                             # 162 passed / 0 failed
+  ```
+- **结论**：**通过（第二评审）**。cli 机械改动与主审结论合并生效；分支满足合并前置。
