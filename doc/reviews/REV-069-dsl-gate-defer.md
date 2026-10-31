@@ -147,3 +147,33 @@ git diff 7f88614..01b3d28 -- crates/zgraph-dsl/tests | grep -E '^-[^-]'
 - **ISSUE-100（R13/R15 规则）**：本分支 + W2a0 已实质关闭（R13 保持只查无 gate 环；R15 独立用 G_all；S12 环检测细则落地）；待 W2a0 docs 合并后由 Lead 更新台账状态。
 - **合并前置**：分支 base = `origin/main` `7f88614`；按 DR-004 §4（W2a 依赖 W2a0）与 merge.sh 的「基于最新 origin/main」检查，合并前需 origin/main 已含 W2a0 docs（否则 rebase 后重跑门禁）。
 - 未发现必须关闭的阻塞条件；未发现越界改动、冻结文件修改或测试削弱。
+
+## 6. 条件关闭记录（仅"有条件通过"填写）
+
+不适用：首轮结论即为 **通过**，无「有条件通过」待关闭条件；N1–N4 的追加确认见 §7。
+
+## 7. 追加复审（N1–N4 关闭，2026-10-31）
+
+- **复审范围**：`6b73071..a084f2e`（`fix(dsl): R15 错误载荷对齐冻结模板并补类型反例（REV-069 N1–N4）`，作者 `dsl-writer`；4 files, +111/−32：`crates/zgraph-dsl/src/{edges,hash,lib}.rs`、`crates/zgraph-dsl/tests/rules.rs`，无其它模块/fixture 改动）。复审前 worktree clean，分支 ahead 3（`01b3d28` + 评审 `6b73071` + 修复 `a084f2e`）。
+- **N1（建议，已关闭）**：R15 载荷对齐 DR-005 §2.5.2 / 02 §2.4.2 W2a0 冻结模板。脚本逐字比对 DR-005 原文 `expected` 与 CLI 输出 **MATCH=True**；`actual` 形状为 `{"node_id","scc_size","defer_edges"}`，`defer_edges` 按 `edges` 数组序收集（索引递增 = 升序）；`message`/`location` 未变。CLI 实测（`--json`）：
+  - `bad_defer_not_cycle.json`（源不在任何环）→ `edge_index:1`、`node_id:"a"`、`scc_size:1`、`defer_edges:[]`、exit 2；
+  - 等价 `r15_gated_cycle_without_defer_edge_does_not_authorize_defer` 图（SCC `{a,b}` 大小 2、SCC 内无 defer 边）→ `scc_size:2`、`defer_edges:[]`；
+  - `expected = "re-entrant defer source (cycle through source containing a defer edge, or defer self-loop)"`（与冻结模板逐字一致）。
+- **N2（建议，已关闭）**：`tests/rules.rs` 4 处反例已锁定 code/expected/actual 精确值（不再只 `is_some()`）：`r15_defer_edge_source_without_cycle_is_rejected`（message 逐字 + `scc_size:1`/`[]`）、`r15_gated_cycle_without_defer_edge_does_not_authorize_defer`（`scc_size:2`）、`r15_first_violating_defer_edge_in_array_order_is_reported`（首错载荷）、`r15_violation_inside_subgraph_maps_to_subgraph_invalid`（子图收敛后载荷原样保留）；`expected` 以 `R15_EXPECTED` 常量锁定。
+- **N3（建议，已关闭）**：新增 `on_gate_false_non_string_types_are_parse_errors` 表驱动，覆盖 `null`/`1`/`1.5`/`true`/object/array 六类；逐类断言 `DSL_PARSE_ERROR`、`error_count=1`、`edge_index=1`、`node_id=None`、message 含 `expects string`、`expected="string"`、`actual=原值`。原 bool 分支从旧用例移入该表，断言强于原实现。
+- **N4（建议，已关闭）**：`grep -rn "R1–R14\|R1-R14\|R1–R13\|R1-R13" crates/zgraph-dsl/{src,tests}` 仅剩 `hash.rs:18` 的正确表述「R1–R13、R15」；`lib.rs` 模块头改 R1–R15 并补 DR-005 引用、`rules.rs` 模块头改 R1–R15；无 `17 个`/`17 码` 残留。
+- **N5–N8**：按 Lead 裁决**不修**，原记录保留（N5 允许值双源、N6 `GraphEdge` Serialize `None→null`、N7 子图 R13+R15 聚合 2 条、N8 `subgraphs[i]` 措辞），均非阻塞。
+- **回归复核（载荷/注释变更未引起回退）**：
+
+  ```bash
+  cargo test -p zgraph-dsl --offline   # unit 1 + fixtures 5 + hash 11 + rules 68 + doctest 1 = 86 passed, 0 failed
+  cargo test --workspace --offline     # 665 passed, 0 failed, 3 ignored（较首轮 +1，来自新增类型用例）
+  cargo clippy -p zgraph-dsl --all-targets --offline -- -D warnings   # clean（exit 0）
+  cargo fmt --all -- --check           # exit 0
+  bash scripts/dev/check.sh            # CHECK PASSED
+  # v0.1.0 兼容复测（main CLI vs 修复后分支 CLI，逐字节）：
+  # 5 valid：c6cad4f83161b50c / 0e8911b6b4003c7e / b15f162f7f87fd58 / e903b92cf900587c / ec320e4244b365ab —— IDENTICAL
+  # 31 bad --json：stdout/stderr + exit code identical=31 diff=0
+  ```
+
+- **结论：通过（维持）**。N1–N4 已关闭；无新的阻塞/重要问题；本追加段仅改评审记录（评审人未改产品代码/测试）。合并仍须通过 `scripts/dev/merge.sh` 的全量门禁。
