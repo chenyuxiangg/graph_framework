@@ -1,4 +1,4 @@
-//! R1–R15 的规则级测试：每条规则至少一个正例与一个反例（R15 为 W2a 新增）。
+//! R1–R16 的规则级测试：每条规则至少一个正例与一个反例（R15 为 W2a、R16 为 W2b 新增）。
 //!
 //! 通过公开 API（`load_graph_value` / `load_graph_with_options`）驱动，
 //! 断言错误码、定位与 expected/actual；fixtures 在 `fixtures.rs` 中逐文件覆盖。
@@ -1681,4 +1681,384 @@ fn r15_non_defer_graphs_have_no_false_positives() {
     }
     load(gated_self_loop_graph()).expect("gated cycle without defer is unaffected");
     load_fixture("valid_gate_defer.json").expect("explicit defer rework fixture is valid");
+}
+
+// ---------------------------------------------------------------- R16（W2b）
+
+/// 给节点加 `max_fanout` 键（R16 测试图构造用）。
+fn with_max_fanout(mut node: Value, limit: Value) -> Value {
+    node["max_fanout"] = limit;
+    node
+}
+
+/// `start` 出边 2 条（→ a / → b）的合法图；`max_fanout` 可缺省或指定。
+fn fanout_graph(max_fanout: Option<Value>) -> Value {
+    let start = match max_fanout {
+        Some(limit) => with_max_fanout(start_node("start"), limit),
+        None => start_node("start"),
+    };
+    graph_with(
+        json!([
+            start,
+            python_node("a", json!([input_port("x", true)])),
+            python_node("b", json!([input_port("x", true)])),
+            json!({
+                "id": "done",
+                "type": "end",
+                "inputs": [
+                    {"name": "ra", "type": "any", "required": true},
+                    {"name": "rb", "type": "any", "required": true}
+                ],
+                "config": {}
+            })
+        ]),
+        json!([
+            edge("start", "a", "x"),
+            edge("start", "b", "x"),
+            edge("a", "done", "ra"),
+            edge("b", "done", "rb")
+        ]),
+    )
+}
+
+/// `start` 与 `p` 各自超限的图（nodes 顺序 = [start, p, b, c, done]）。
+///
+/// `start` 出度 2、`p` 出度 3，二者 `max_fanout` 均为 1；用于锁定 R16 首错
+/// 按 `nodes` 数组序取第一条。
+fn double_fanout_graph() -> Value {
+    graph_with(
+        json!([
+            with_max_fanout(start_node("start"), json!(1)),
+            with_max_fanout(python_node("p", json!([input_port("x", true)])), json!(1)),
+            python_node("b", json!([input_port("x", true), input_port("y", true)])),
+            python_node("c", json!([input_port("z", true)])),
+            end_node("done", "r")
+        ]),
+        json!([
+            edge("start", "p", "x"),
+            edge("start", "b", "x"),
+            edge("p", "b", "y"),
+            edge("p", "c", "z"),
+            edge("p", "done", "r")
+        ]),
+    )
+}
+
+#[test]
+fn r16_max_fanout_is_optional_and_parsed() {
+    let loaded = load(fanout_graph(Some(json!(2)))).expect("out-degree == max_fanout is legal");
+    let start = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "start")
+        .expect("start node");
+    assert_eq!(start.max_fanout, Some(2));
+    // 未写 max_fanout 的节点保持 None（缺省无上限，v0.1.0 行为）。
+    let missing = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "a")
+        .expect("a node");
+    assert_eq!(missing.max_fanout, None);
+
+    let plain = load(fanout_graph(None)).expect("missing max_fanout means no limit");
+    let start = plain
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "start")
+        .expect("start node");
+    assert_eq!(start.max_fanout, None);
+}
+
+#[test]
+fn r16_max_fanout_none_is_not_serialized_as_null() {
+    let loaded = load(fanout_graph(None)).expect("valid graph");
+    let start = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "start")
+        .expect("start node");
+    let value = serde_json::to_value(start).expect("serialize node");
+    assert!(
+        value.get("max_fanout").is_none(),
+        "None must be skipped by serde: {value}"
+    );
+
+    let loaded = load(fanout_graph(Some(json!(2)))).expect("valid graph");
+    let start = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "start")
+        .expect("start node");
+    let value = serde_json::to_value(start).expect("serialize node");
+    assert_eq!(value.get("max_fanout"), Some(&json!(2)), "{value}");
+}
+
+#[test]
+fn r16_max_fanout_values_must_be_integers_at_least_one() {
+    let invalid_values = [
+        json!(0),
+        Value::from(-1_i64),
+        json!(1.5),
+        json!("2"),
+        Value::Null,
+        json!(true),
+        json!(4_294_967_296_u64),
+    ];
+    for value in invalid_values {
+        let errors = expect_code(fanout_graph(Some(value.clone())), DslErrorCode::ParseError);
+        assert_eq!(errors.error_count, 1, "value {value}: {errors}");
+        let first = errors.first();
+        assert_eq!(
+            first.message,
+            format!("'max_fanout' must be >= 1, got {value}"),
+            "value {value}: {errors}"
+        );
+        assert_eq!(
+            first.location.node_id.as_deref(),
+            Some("start"),
+            "value {value}: {errors}"
+        );
+        assert_eq!(first.location.edge_index, None, "value {value}: {errors}");
+        assert_eq!(first.expected, Some(json!(">= 1")), "value {value}");
+        assert_eq!(first.actual, Some(value.clone()), "value {value}");
+    }
+}
+
+#[test]
+fn r16_out_degree_exceeding_max_fanout_is_parse_error() {
+    let errors = expect_code(fanout_graph(Some(json!(1))), DslErrorCode::ParseError);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    let first = errors.first();
+    assert_eq!(
+        first.message,
+        "node 'start' out-degree 2 exceeds max_fanout 1"
+    );
+    assert_eq!(first.location.node_id.as_deref(), Some("start"));
+    assert_eq!(first.location.edge_index, None);
+    assert_eq!(first.location.port, None);
+    assert_eq!(first.expected, Some(json!("out-degree <= 1")), "{errors}");
+    assert_eq!(first.actual, Some(json!("out-degree 2")), "{errors}");
+}
+
+#[test]
+fn r16_gated_edges_count_toward_out_degree() {
+    // 出度统计覆盖全部边（含 gate 边）：1 条普通边 + 1 条 gate 边 = 2。
+    let mut graph = fanout_graph(Some(json!(2)));
+    graph["edges"][1] = gated_edge("start", "b", "x", review_gate("ok", json!(true)));
+    load(graph.clone()).expect("2 out-edges (one gated) within max_fanout 2");
+
+    graph["nodes"][0]["max_fanout"] = json!(1);
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(
+        errors.first().message,
+        "node 'start' out-degree 2 exceeds max_fanout 1"
+    );
+}
+
+#[test]
+fn r16_first_violating_node_in_nodes_order_is_reported() {
+    let mut graph = double_fanout_graph();
+    let errors = expect_code(graph.clone(), DslErrorCode::ParseError);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("start"));
+    assert_eq!(
+        errors.first().message,
+        "node 'start' out-degree 2 exceeds max_fanout 1"
+    );
+
+    // 把 `p` 提到 nodes[0]：首错随之变为 `p`（不聚合，取 nodes 数组序首错）。
+    let p = graph["nodes"]
+        .as_array_mut()
+        .expect("nodes array")
+        .remove(1);
+    graph["nodes"]
+        .as_array_mut()
+        .expect("nodes array")
+        .insert(0, p);
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("p"));
+    assert_eq!(
+        errors.first().message,
+        "node 'p' out-degree 3 exceeds max_fanout 1"
+    );
+}
+
+#[test]
+fn r16_violation_inside_subgraph_maps_to_subgraph_invalid() {
+    let mut graph = graph_with(
+        json!([
+            start_node("start"),
+            node(
+                "sub",
+                "subgraph",
+                json!([input_port("q", true)]),
+                json!({"subgraph_id": "inner"})
+            ),
+            end_node("done", "r")
+        ]),
+        json!([edge("start", "sub", "q"), edge("sub", "done", "r")]),
+    );
+    graph["subgraphs"] = json!([{
+        "id": "inner",
+        "nodes": [
+            with_max_fanout(
+                python_node("pin", json!([input_port("p", true)])),
+                json!(1)
+            ),
+            json!({
+                "id": "inner_end1",
+                "type": "end",
+                "inputs": [{"name": "o1", "type": "any", "required": true}],
+                "config": {}
+            }),
+            json!({
+                "id": "inner_end2",
+                "type": "end",
+                "inputs": [{"name": "o2", "type": "any", "required": true}],
+                "config": {}
+            })
+        ],
+        "edges": [
+            edge("pin", "inner_end1", "o1"),
+            edge("pin", "inner_end2", "o2")
+        ],
+        "input_mapping": {"q": "pin.p"},
+        "output_mapping": {"r": "inner_end1.o1"}
+    }]);
+    let errors = expect_code(graph, DslErrorCode::SubgraphInvalid);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    let first = errors.first();
+    // R6 口径：code/message 前缀收敛，冻结载荷与内部定位原样保留。
+    assert_eq!(
+        first.message,
+        "subgraph 'inner': node 'pin' out-degree 2 exceeds max_fanout 1"
+    );
+    assert_eq!(first.location.node_id.as_deref(), Some("pin"));
+    assert_eq!(first.location.edge_index, None);
+    assert_eq!(first.expected, Some(json!("out-degree <= 1")), "{errors}");
+    assert_eq!(first.actual, Some(json!("out-degree 2")), "{errors}");
+}
+
+#[test]
+fn r16_runs_after_r15() {
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            with_max_fanout(python_node("p", json!([input_port("x", true)])), json!(1)),
+            python_node("q", json!([input_port("z", true)])),
+            end_node("done", "r")
+        ]),
+        json!([
+            edge("start", "p", "x"),
+            edge("p", "q", "z"),
+            defer_edge("p", "done", "r", review_gate("ok", json!(true)))
+        ]),
+    );
+    // `p` 出度 2 > max_fanout 1，同时 defer 边源不可重入 → R15 先报。
+    let errors = expect_code(graph, DslErrorCode::DeferNotReentrant);
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("p"));
+}
+
+#[test]
+fn r16_runs_before_r14() {
+    let mut graph = fanout_graph(Some(json!(1)));
+    graph["edges"][0] = gated_edge(
+        "start",
+        "a",
+        "x",
+        json!({"function": "gates.hr.need_human"}),
+    );
+    // 未知 gate op（R14）与扇出超限（R16）同时存在 → R16 先报 DSL_PARSE_ERROR。
+    let errors = expect_code(graph, DslErrorCode::ParseError);
+    assert_eq!(
+        errors.first().message,
+        "node 'start' out-degree 2 exceeds max_fanout 1"
+    );
+}
+
+#[test]
+fn r16_max_fanout_is_allowed_on_every_node_type() {
+    // 白名单覆盖全部 5 种节点类型（start/end/python_node/agent_call/subgraph）。
+    let mut graph = graph_with(
+        json!([
+            with_max_fanout(start_node("start"), json!(2)),
+            with_max_fanout(python_node("py", json!([input_port("x", true)])), json!(1)),
+            with_max_fanout(
+                node(
+                    "ag",
+                    "agent_call",
+                    json!([input_port("y", true)]),
+                    json!({"agent_id": "agent-1"})
+                ),
+                json!(1)
+            ),
+            with_max_fanout(
+                node(
+                    "sub",
+                    "subgraph",
+                    json!([input_port("q", true)]),
+                    json!({"subgraph_id": "inner"})
+                ),
+                json!(1)
+            ),
+            json!({
+                "id": "done",
+                "type": "end",
+                "inputs": [
+                    {"name": "ra", "type": "any", "required": true},
+                    {"name": "rb", "type": "any", "required": true},
+                    {"name": "rc", "type": "any", "required": true}
+                ],
+                "config": {},
+                "max_fanout": 3
+            })
+        ]),
+        json!([
+            edge("start", "py", "x"),
+            edge("start", "ag", "y"),
+            edge("py", "done", "ra"),
+            edge("ag", "done", "rb"),
+            edge("sub", "done", "rc")
+        ]),
+    );
+    graph["entry_points"] = json!(["start", "sub"]);
+    graph["subgraphs"] = json!([{
+        "id": "inner",
+        "nodes": [
+            python_node("pin", json!([input_port("p", true)])),
+            end_node("inner_end", "o")
+        ],
+        "edges": [edge("pin", "inner_end", "o")],
+        "input_mapping": {"q": "pin.p"},
+        "output_mapping": {"r": "inner_end.o"}
+    }]);
+    let loaded = load(graph).expect("max_fanout is allowed on every node type");
+    let limits: Vec<(&str, Option<u32>)> = loaded
+        .definition
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.max_fanout))
+        .collect();
+    assert_eq!(
+        limits,
+        vec![
+            ("start", Some(2)),
+            ("py", Some(1)),
+            ("ag", Some(1)),
+            ("sub", Some(1)),
+            ("done", Some(3)),
+        ]
+    );
+    let inner = &loaded.definition.subgraphs[0].nodes;
+    assert_eq!(
+        inner[0].max_fanout, None,
+        "subgraph node without max_fanout"
+    );
 }

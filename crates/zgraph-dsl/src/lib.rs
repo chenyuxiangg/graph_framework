@@ -1,6 +1,6 @@
-//! 图 DSL 的类型、加载、R1–R15 校验与 `graph_hash`（M1 实现；R15 为 W2a 新增）。
+//! 图 DSL 的类型、加载、R1–R16 校验与 `graph_hash`（M1 实现；R15 为 W2a、R16 为 W2b 新增）。
 //!
-//! 语义基准：`doc/spec-v1.2/02-DSL与校验.md`（schema/R1–R15/错误对象/graph_hash）
+//! 语义基准：`doc/spec-v1.2/02-DSL与校验.md`（schema/R1–R16/错误对象/graph_hash）
 //! 与 `doc/decisions/DR-004-v02-scope-and-waves.md` D1、`DR-005`（R15 defer 可重入）；
 //! 落地偏差：`doc/architecture-v2.md` §8 的 **D6**（门控 = Rust 内置 op）与
 //! **D7**（图加载期不 import 用户 Python；`python_node` 只校验格式）。
@@ -82,7 +82,7 @@ impl LoadOptions {
 /// 加载成功的产物：编译前结构 + 图指纹。
 #[derive(Debug, Clone)]
 pub struct LoadedGraph {
-    /// 通过 R1–R15 的图定义。
+    /// 通过 R1–R16 的图定义。
     pub definition: GraphDefinition,
     /// 图指纹（BLAKE3 canonical JSON 前 16 hex）。
     pub graph_hash: String,
@@ -170,7 +170,7 @@ pub fn load_graph_text(text: &str) -> Result<LoadedGraph, DslErrors> {
     load_graph(text.as_bytes())
 }
 
-/// 从已解析的 JSON 值加载图（跳过 R1 的 JSON 解析，仍执行 R2–R15）。
+/// 从已解析的 JSON 值加载图（跳过 R1 的 JSON 解析，仍执行 R2–R16）。
 pub fn load_graph_value(raw: Value, options: &LoadOptions) -> Result<LoadedGraph, DslErrors> {
     // R2：顶层必填/类型/未知键。
     ensure_empty(nodes::check_top_level(&raw))?;
@@ -206,6 +206,8 @@ pub fn load_graph_value(raw: Value, options: &LoadOptions) -> Result<LoadedGraph
     ensure_empty(edges::check_cycles(&node_list, &edge_list))?;
     // R15：defer 边源节点必须可重入（W2a / DR-004 D1；覆盖全部边）。
     ensure_empty(edges::check_defer_reentrancy(&node_list, &edge_list))?;
+    // R16：静态扇出上限（W2b / DR-004 D2；在 R15 之后、R14 之前）。
+    ensure_empty(edges::check_max_fanout(&node_list, &edge_list))?;
     let definition = GraphDefinition {
         version: DSL_SCHEMA_VERSION.to_string(),
         metadata,

@@ -178,3 +178,52 @@ fn golden_hash_for_gate_defer_fixture() {
     // golden：锁定含 `on_gate_false` 的 canonical 投影（W2a）。
     assert_eq!(loaded.graph_hash, "2ff1339bd3d6d928");
 }
+
+#[test]
+fn omitted_max_fanout_is_not_backfilled_by_projection() {
+    // v0.1.0 图（未写 max_fanout）的 hash 与投影逐字节不变。
+    let base = load_value(fixture("valid_parallel.json"));
+    assert!(!base.canonical_json().contains("max_fanout"));
+
+    // 显式写出 max_fanout（合法：出度 2 ≤ 2）→ 进入 canonical 投影，hash 改变。
+    let mut explicit = fixture("valid_parallel.json");
+    explicit["nodes"][0]["max_fanout"] = json!(2);
+    let loaded = load_value(explicit);
+    assert_ne!(base.graph_hash, loaded.graph_hash);
+    assert!(
+        loaded.canonical_json().contains("\"max_fanout\":2"),
+        "canonical projection must keep the explicit value: {}",
+        loaded.canonical_json()
+    );
+}
+
+#[test]
+fn max_fanout_participates_in_hash() {
+    let mut two = fixture("valid_parallel.json");
+    two["nodes"][0]["max_fanout"] = json!(2);
+    let two = load_value(two);
+    let mut three = fixture("valid_parallel.json");
+    three["nodes"][0]["max_fanout"] = json!(3);
+    let three = load_value(three);
+    assert_ne!(two.graph_hash, three.graph_hash);
+}
+
+#[test]
+fn golden_hash_for_valid_parallel_fixture_is_unchanged_by_w2b() {
+    // golden：未写 max_fanout 的既有图 hash（W2b 不改变 v0.1.0 投影）。
+    let loaded = load_value(fixture("valid_parallel.json"));
+    assert_eq!(loaded.graph_hash, "b15f162f7f87fd58");
+    assert!(!loaded.canonical_json().contains("max_fanout"));
+}
+
+#[test]
+fn golden_hash_for_valid_max_fanout_fixture() {
+    // golden：锁定含 `max_fanout` 的 canonical 投影（W2b）。
+    let loaded = load_value(fixture("valid_max_fanout.json"));
+    assert_eq!(loaded.graph_hash, "e05d882cc55aa275");
+    assert!(
+        loaded.canonical_json().contains("\"max_fanout\":2"),
+        "{}",
+        loaded.canonical_json()
+    );
+}

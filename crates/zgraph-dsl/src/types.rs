@@ -279,6 +279,12 @@ pub struct GraphNode {
     pub config: NodeConfig,
     /// 输出端口声明（v1 保留，不参与路由）。
     pub outputs: Vec<OutputPort>,
+    /// 静态扇出上限（W2b / DR-004 D2；可选，整数 ≥1，缺省无上限）。
+    ///
+    /// 语义：加载期 `out_degree(node) <= max_fanout`（R16）。`None` = 作者未写
+    /// （v0.1.0 行为；不补齐默认值、不参与 `graph_hash`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fanout: Option<u32>,
 }
 
 /// 门控定义（02 §2.2.2 `GateDefinition`）。

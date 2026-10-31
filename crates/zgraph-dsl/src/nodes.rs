@@ -1,6 +1,8 @@
 //! R4–R7：节点声明、节点 ID 唯一、子图定义与引用、入口点校验。
 //!
-//! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4.1 R4–R7 与 §2.2.4 键白名单。
+//! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4.1 R4–R7 与 §2.2.4 键白名单；
+//! W2b 增节点级 `max_fanout`（R16 静态扇出上限，实现在 `edges::check_max_fanout`，
+//! 子图侧在 `validate_subgraph_rules` 调用并按 R6 口径收敛）。
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -28,7 +30,15 @@ const TOP_LEVEL_KEYS: [&str; 6] = [
 ];
 const TOP_LEVEL_REQUIRED: [&str; 5] = ["version", "metadata", "entry_points", "nodes", "edges"];
 const METADATA_KEYS: [&str; 4] = ["name", "description", "author", "created_at"];
-const NODE_KEYS: [&str; 6] = ["id", "type", "inputs", "trigger", "config", "outputs"];
+const NODE_KEYS: [&str; 7] = [
+    "id",
+    "type",
+    "inputs",
+    "trigger",
+    "config",
+    "outputs",
+    "max_fanout",
+];
 const INPUT_PORT_KEYS: [&str; 4] = ["name", "type", "required", "description"];
 const OUTPUT_PORT_KEYS: [&str; 3] = ["name", "type", "description"];
 const AGENT_CONFIG_KEYS: [&str; 5] = [
@@ -256,6 +266,7 @@ fn parse_node(value: &Value, index: usize, errors: &mut Vec<DslError>) -> Option
     };
     let inputs = parse_inputs(map, node_id.as_deref(), &scope, errors);
     let trigger = parse_trigger(map, node_type, &scope, errors);
+    let max_fanout = parse_max_fanout(map, errors);
     check_end_constraints(
         node_type,
         inputs.as_deref(),
@@ -276,6 +287,7 @@ fn parse_node(value: &Value, index: usize, errors: &mut Vec<DslError>) -> Option
         trigger,
         config: config?,
         outputs: outputs.unwrap_or_default(),
+        max_fanout,
     })
 }
 
@@ -765,6 +777,29 @@ fn parse_optional_u32(
     Some(number)
 }
 
+/// R4：`max_fanout` 可选正整数（W2b / DR-004 D2）。
+///
+/// 缺省 → `None`（无上限，v0.1.0 行为）；整数 ≥1 → `Some`；0/负数/浮点/字符串/
+/// null/超出 `u32` → `DSL_PARSE_ERROR`（message 模板
+/// `'max_fanout' must be >= 1, got {actual}`；定位由 `attach_node_location` 补 `node_id`）。
+fn parse_max_fanout(map: &Map<String, Value>, errors: &mut Vec<DslError>) -> Option<u32> {
+    let value = map.get("max_fanout")?;
+    if let Some(number) = value.as_u64().and_then(|number| u32::try_from(number).ok()) {
+        if number >= 1 {
+            return Some(number);
+        }
+    }
+    errors.push(
+        DslError::new(
+            DslErrorCode::ParseError,
+            format!("'max_fanout' must be >= 1, got {value}"),
+        )
+        .expected(">= 1")
+        .actual(value.clone()),
+    );
+    None
+}
+
 fn parse_retry(
     value: Option<&Value>,
     scope: &str,
@@ -903,7 +938,7 @@ fn invalid_entry(value: &str, reason: &str) -> DslError {
 
 /// R6：子图定义与引用。
 ///
-/// 子图内部的 R4/R5/R8–R13/R15 违规统一收敛为 `DSL_SUBGRAPH_INVALID`（message
+/// 子图内部的 R4/R5/R8–R13/R15/R16 违规统一收敛为 `DSL_SUBGRAPH_INVALID`（message
 /// 前缀 `subgraph '<id>'`，定位保留内部节点/边信息）；定义非法同时使子图引用校验失败。
 pub(crate) fn check_subgraphs(
     raw: &Value,
@@ -1044,7 +1079,7 @@ fn parse_subgraph(
     })
 }
 
-/// 子图语义校验：形状、节点 ID 唯一、mapping 引用、R8–R13/R15（全部收敛为
+/// 子图语义校验：形状、节点 ID 唯一、mapping 引用、R8–R13/R15/R16（全部收敛为
 /// `DSL_SUBGRAPH_INVALID`）。返回 `false` 表示本子图不可用。
 fn validate_subgraph_rules(
     subgraph_id: &str,
@@ -1078,6 +1113,8 @@ fn validate_subgraph_rules(
     ));
     inner.extend(edges::check_cycles(&body.nodes, &body.edges));
     inner.extend(edges::check_defer_reentrancy(&body.nodes, &body.edges));
+    // R16：静态扇出上限（W2b；在 R15 之后、R14 之前执行）。
+    inner.extend(edges::check_max_fanout(&body.nodes, &body.edges));
     errors.extend(wrap_subgraph_errors(subgraph_id, inner));
     errors.len() == start
 }

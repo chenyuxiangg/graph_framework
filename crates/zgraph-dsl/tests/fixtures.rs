@@ -1,8 +1,8 @@
 //! Fixtures 全覆盖测试：每个文件都被引用，坏图命中期望错误码**与定位**。
 //!
 //! 对应 02 §2.4 / §2.7.1 / §2.7.3 与 07 AC-04（M1 口径）：18 个 DSL 码反例、
-//! R3 版本/时间戳反例、REV-005 回归反例。fixture 目录为 `tests/fixtures/graphs/`，
-//! 资产目录为 `tests/fixtures/assets/`。
+//! R3 版本/时间戳反例、REV-005 回归反例、W2b `max_fanout`（R4 取值 / R16 静态上限）。
+//! fixture 目录为 `tests/fixtures/graphs/`，资产目录为 `tests/fixtures/assets/`。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -66,7 +66,7 @@ const fn edge(index: usize) -> Loc {
 }
 
 /// 坏图 fixture → 期望错误码 + 期望定位（REV-005 后为强断言）。
-const BAD_CASES: [(&str, DslErrorCode, Loc); 33] = [
+const BAD_CASES: [(&str, DslErrorCode, Loc); 35] = [
     // R1/R2/R3 文档级
     ("bad_parse_error.json", DslErrorCode::ParseError, DOC_LEVEL),
     (
@@ -240,16 +240,28 @@ const BAD_CASES: [(&str, DslErrorCode, Loc); 33] = [
         },
     ),
     ("bad_defer_value.json", DslErrorCode::ParseError, edge(1)),
+    // W2b：节点级 max_fanout（R4 取值非法 / R16 静态扇出上限）
+    (
+        "bad_max_fanout_exceeded.json",
+        DslErrorCode::ParseError,
+        node("start"),
+    ),
+    (
+        "bad_max_fanout_value.json",
+        DslErrorCode::ParseError,
+        node("start"),
+    ),
 ];
 
-/// 合法 fixture 名单（全部必须通过 R1–R15）。
-const VALID_CASES: [&str; 6] = [
+/// 合法 fixture 名单（全部必须通过 R1–R16）。
+const VALID_CASES: [&str; 7] = [
     "customer_ticket.json",
     "valid_parallel.json",
     "valid_cycle.json",
     "valid_subgraph.json",
     "valid_created_at_offset.json",
     "valid_gate_defer.json",
+    "valid_max_fanout.json",
 ];
 
 fn fixture_needs_assets(name: &str) -> bool {
@@ -385,4 +397,26 @@ fn valid_cycle_fixture_contains_gated_self_loop() {
         .find(|edge| edge.from == edge.to_node)
         .expect("self loop edge");
     assert!(self_loop.gate.is_some(), "self loop must be gated");
+}
+
+#[test]
+fn valid_max_fanout_fixture_declares_limit_equal_to_out_degree() {
+    let loaded = load("valid_max_fanout.json", false).expect("valid max_fanout graph");
+    let start = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "start")
+        .expect("start node");
+    assert_eq!(start.max_fanout, Some(2), "fixture declares max_fanout=2");
+    let out_degree = loaded
+        .definition
+        .edges
+        .iter()
+        .filter(|edge| edge.from == "start")
+        .count();
+    assert_eq!(
+        out_degree, 2,
+        "fixture start out-degree must equal the limit"
+    );
 }

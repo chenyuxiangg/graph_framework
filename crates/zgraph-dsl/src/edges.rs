@@ -1,9 +1,9 @@
-//! R8–R13、R15：边端点、端口引用、两级唯一性、输入来源、无门控环检测、
-//! defer 边可重入性。
+//! R8–R13、R15、R16：边端点、端口引用、两级唯一性、输入来源、无门控环检测、
+//! defer 边可重入性、静态扇出上限。
 //!
 //! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4.1 R8–R13 与 DR-004 D1（R15，
-//! W2a0 冻结）。说明：边的**结构**检查（键白名单/必填/类型、gate 对象形状、
-//! `on_gate_false` 枚举）在执行 R8 时完成，错误码仍按 02 §2.4.1 的归属分配
+//! W2a0 冻结）、D2（R16，W2b）。说明：边的**结构**检查（键白名单/必填/类型、gate
+//! 对象形状、`on_gate_false` 枚举）在执行 R8 时完成，错误码仍按 02 §2.4.1 的归属分配
 //! （结构错误 → `DSL_PARSE_ERROR`/`DSL_MISSING_FIELD`）。
 
 use std::collections::{BTreeMap, HashSet};
@@ -672,4 +672,47 @@ fn finish_order(adjacency: &[Vec<usize>]) -> Vec<usize> {
         }
     }
     order
+}
+
+/// R16：静态扇出上限（W2b / DR-004 D2；L2 纯函数）。
+///
+/// 对每个节点按 `nodes` 数组序检查 `out_degree(node) <= max_fanout`：
+/// `out_degree` = 以该节点为 `from` 的**全部**边数（含 gate / defer 边）；未写
+/// `max_fanout` 的节点无上限（v0.1.0 行为逐字节不变）。命中首个超限节点报一条
+/// `DSL_PARSE_ERROR`（与 R13/R15 首错风格一致，不聚合；不新增 DSL 错误码）。
+/// 执行顺序：R15 之后、R14 之前。
+///
+/// 子图侧由 `nodes::validate_subgraph_rules` 调用，错误按 R6 口径收敛为
+/// `DSL_SUBGRAPH_INVALID`（message 前缀 `subgraph '<id>': …`，保留内部 `node_id`）。
+pub(crate) fn check_max_fanout(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<DslError> {
+    let mut out_degree: BTreeMap<&str, usize> = BTreeMap::new();
+    for edge in edges {
+        *out_degree.entry(edge.from.as_str()).or_insert(0) += 1;
+    }
+    for node in nodes {
+        let Some(limit) = node.max_fanout else {
+            continue;
+        };
+        let actual = out_degree.get(node.id.as_str()).copied().unwrap_or(0);
+        if actual as u64 > u64::from(limit) {
+            return vec![fanout_exceeded(node, actual, limit)];
+        }
+    }
+    Vec::new()
+}
+
+/// R16 错误载荷（W2b 冻结模板）：message
+/// `node '{id}' out-degree {n} exceeds max_fanout {limit}`；
+/// `expected` = `out-degree <= {limit}`、`actual` = `out-degree {n}`；定位 `node_id`。
+fn fanout_exceeded(node: &GraphNode, actual: usize, limit: u32) -> DslError {
+    DslError::new(
+        DslErrorCode::ParseError,
+        format!(
+            "node '{}' out-degree {actual} exceeds max_fanout {limit}",
+            node.id
+        ),
+    )
+    .at_node(node.id.clone())
+    .expected(format!("out-degree <= {limit}"))
+    .actual(format!("out-degree {actual}"))
 }
