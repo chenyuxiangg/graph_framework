@@ -10,23 +10,15 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：M6 完成（M0–M6 全部交付）
+## 当前状态：v0.2（M7）W2a0 + W2a 已完成
 
-**M6 已交付（2026-10-31，REV-039–061）**：范围 = M5 顺延的 17 个 ISSUE + REV-037 依赖/CI 治理 + AC-12「同一图 10 并发 run」加强用例；波次、分支与 REV 编号见 [`doc/decisions/DR-003-m6-scope-and-waves.md`](doc/decisions/DR-003-m6-scope-and-waves.md)，状态见 [`doc/progress.md`](doc/progress.md)。关键交付：trace 双通道（033）、fail-stop 接线（036）、CLI 退出码统一（059）、依赖治理 + CI `--locked`（068/073/078）、harness 安全（075/077）、实例超时错误码（086）、e2e 质量 + AC-12 同图 10 并发（089）、工具并发共享全局上限（079）、runs 版本/模型参数列（082）、`global_vars` schema v3（087）、human 生命周期实时（085）、函数拆分（081）、主机/EPERM 加固（088）、spec 00–08 回写（057）、merge 门禁 clippy + CLI bin（058/061）。**M0–M6 全部完成**，遗留项见 [`doc/issues.md`](doc/issues.md)。
+**W2a0（设计冻结，REV-067）**：[DR-005](doc/decisions/DR-005-w2a-defer-gate-freeze.md) + spec 00–08 回写（`on_gate_false`、R15/`DSL_DEFER_NOT_REENTRANT`、trace schema v4、SOP v1.1 双 profile、07 AC-14）。
 
-**M0–M5 已完成交付（摘要）**：Cargo workspace（6 个 crate + `tests/e2e` 验收包）、DSL loader/校验（R1–R14）、
-图内核与事件循环、trace/SQLite（L1 回放）、worker supervisor + `WorkerExecutor`（进程组 kill/取消升级/帧超时/并发上限）、
-**Agent Harness**（`agent_call`：`genai 0.7.2` LLM 流式 + Fake provider、tool loop（每次调用一个 Python worker 子进程）、
-上下文预算/裁剪、错误映射、`HarnessExecutor`）、`python/workers` 与 `python/zgraph_worker.tool_runner`、
-spec v1.2 M0–M4 回写（05/00/04/07，REV-023）；AC-08 fake 真链路验收（`tests/e2e/harness_ac08.rs`）+ AC-06/07/09/10 真子进程验收；
-本地双栈测试全绿（M4 收尾基线 `cargo test --workspace` 423 passed / pytest 84 passed）。CI 已配置（`.github/workflows/ci.yml`）。
+**W2a（实现，REV-068–072）**：dsl/trace/py-worker/kernel+cli 已合入 `main`（`e7578f1` 时点）；e2e 分支 `test/e2e-gate-defer`（`d31e5d2`）Phase 2B：`gate_defer` 8/0、`software_team_v1` 11/1 ignored、e2e 58/0/2、workspace 694/0/3。证据见 [07 AC-14](doc/spec-v1.2/07-验收用例.md)、[PROVENANCE](doc/spec-v1.2/PROVENANCE.md)、[progress](doc/progress.md)。
 
-**M5 收尾完成**（DoD 全部达成；口径见 [`doc/decisions/DR-002-m5-cli-replay-recording.md`](doc/decisions/DR-002-m5-cli-replay-recording.md)）：
+**下一步**：W2b（每节点最大扇出限制）→ W3a0 → W3a → W3b(可选) → W4a → W4b（[DR-004](doc/decisions/DR-004-v02-scope-and-waves.md) §4）。
 
-- **已交付并合并到 main**：`zgraph run` 真链路（`--fake-llm[=<script>]` / `--real` / `--record=none|hash|full` / `--json` / 退出码 / `:memory:` / SIGINT，REV-028）；`zgraph replay` L1/L2 与 `llm_calls` 落库（REV-030）；CLI 启动中止标定 / `--json.recovered[]` / `trace` 进行中提示（REV-030）；AC-12 多 run 并发隔离真链路（10 run 同库，REV-029）；e2e AC-01 CLI / L2 replay / 崩溃标定 / ISSUE-076 端到端（REV-032）；ISSUE-061（gate 幻影 attempt，REV-026）、ISSUE-074（结构感知截断，合法 JSON ≤8 KiB，REV-027）、ISSUE-066（worker crash 记录 signal/exit/stderr_tail，REV-031）、ISSUE-076（`declared_timeout_ms` + `timeout_hint` + CLI 转发，REV-026/033/030）、ISSUE-048（终态 pid 提示，REV-034/030）、ISSUE-084（崩溃中止标定 + `recovered[]`，REV-034/030/032）均 **M5 已修**；spec v1.2 M5 回写（00/04/05/06/07/08 + `PROVENANCE`，REV-035）。
-- **本批（REV-036 收尾，已合入）**：台账/进度/README/评审索引/`test-baseline` 收口；最终 `cargo test --workspace` 0 failed、`pytest -q` 84 passed。
-- **M6 承接（见 DR-003）**：DR-002 §7/§9 顺延（ISSUE-033/036/059/073/081 剩余/082 版本列/084→088）+ DR-002 §4 顺延（075/077/079/080）+ REV-028/030/032 新登记（085/086/087/089）+ process 依赖治理/CI 固化（ISSUE-068/078/073，REV-037 顺延 M6）。
-- 范围与落地口径：[`doc/decisions/DR-002-m5-cli-replay-recording.md`](doc/decisions/DR-002-m5-cli-replay-recording.md)；进度：[`doc/progress.md`](doc/progress.md)；遗留项：[`doc/issues.md`](doc/issues.md)。
+**历史里程碑（摘要）**：M0–M6 已完成——Rust 内核 + Python 子进程 worker、DSL loader/校验、内核事件循环、trace/SQLite（L1 回放）、Harness（LLM 流式 + tool loop）、CLI、e2e；M6 收口 trace 双通道/fail-stop/退出码/run 版本列/`global_vars` schema v3 等（REV-039–061）；v0.1.0 已发布（tag `v0.1.0`）；W1 SOP v1（REV-064–066）。遗留项见 [issues](doc/issues.md)。
 
 ## 快速开始
 
@@ -48,7 +40,7 @@ uv run pytest -q
 
 | 路径 | 说明 |
 |---|---|
-| `crates/zgraph-dsl/` | DSL 类型、loader、R1–R14、graph_hash（M1） |
+| `crates/zgraph-dsl/` | DSL 类型、loader、R1–R15（W2a 增 R15）、graph_hash（M1） |
 | `crates/zgraph-kernel/` | 状态机、事件循环、Delivery、门控、run 生命周期（M2） |
 | `crates/zgraph-trace/` | TraceEvent、SQLite、回放（M2） |
 | `crates/zgraph-worker/` | worker 协议、supervisor（进程组/取消/帧超时）、`WorkerExecutor`（M3）；M4 `WorkerFailure::Worker` 装箱 |

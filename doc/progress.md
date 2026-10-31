@@ -2,7 +2,7 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.2（M7）**W2a0 + W2a 已实现完成**——docs（REV-067）、dsl（REV-069）、trace（REV-070）、py-worker（REV-068）、kernel+cli（REV-071）均已合入 `main`（`e7578f1` 时点）；e2e `test/e2e-gate-defer` 处于 Phase 2B（静态用例已过、a/b/f/g 断言待打开、c/e 运行期证据待补）；下一步 **W2b（每节点最大扇出限制）**。
+**当前阶段**：v0.2（M7）**W2a0 + W2a 已实现完成**——docs（REV-067）、dsl（REV-069）、trace（REV-070）、py-worker（REV-068）、kernel+cli（REV-071）均已合入 `main`（`e7578f1` 时点）；e2e `test/e2e-gate-defer` **Phase 2B 完成**（`d31e5d2`：gate_defer 8/0、software_team_v1 11/1 ignored、e2e 58/0/2、workspace 694/0/3，连续 5 轮全绿）；下一步 **W2b（每节点最大扇出限制）**。
 
 | 里程碑 | 状态 | 关键交付 | REV |
 |---|---|---|---|
@@ -14,7 +14,7 @@
 
 **进行中**
 1. W2a-docs（本批，REV-073）：07 AC-14 按实现校准、01/03/04/06 as-built、08 §8.9.1、DR-005 R1–R5、DR-004 §10、PROVENANCE/索引/台账。
-2. e2e Phase 2B：a/b/f/g 去 `#[ignore]`、c/e 运行期证据；合并后由 Lead 提供最终证据，本分支补 1 个 commit（AC-14 c/e 计数、ISSUE-104 fixed、行数/hash 若变）。
+2. e2e Phase 2B 已完成（`d31e5d2`）；本分支已补最终证据 commit（AC-14 c/e、ISSUE-104 fixed、行数/hash 重测）；待 REV-072 与合并。
 
 **下一步**
 - W2b（每节点扇出上限，dsl+kernel+e2e+docs）→ W3a0 → W3a → W3b(可选) → W4a → W4b（DR-004 §4）。
