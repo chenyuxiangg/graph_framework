@@ -9,5 +9,6 @@ from __future__ import annotations
 
 __all__ = [
     "archer",
+    "parse_verdict",
     "planer",
 ]
