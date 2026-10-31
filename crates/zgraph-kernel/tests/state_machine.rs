@@ -4,10 +4,11 @@ mod common;
 
 use zgraph_kernel::{InstanceStatus as S, RecordMode, RunOptions, RunStatus};
 
-const ALL: [S; 8] = [
+const ALL: [S; 9] = [
     S::Pending,
     S::Ready,
     S::Running,
+    S::WaitingHuman,
     S::Completed,
     S::Crashed,
     S::TimedOut,
@@ -18,6 +19,7 @@ const ALL: [S; 8] = [
 #[test]
 fn legal_transitions_matrix() {
     let legal = [
+        (S::Pending, S::WaitingHuman),
         (S::Pending, S::Ready),
         (S::Pending, S::Cancelled),
         (S::Pending, S::Skipped),
@@ -27,6 +29,9 @@ fn legal_transitions_matrix() {
         (S::Running, S::Crashed),
         (S::Running, S::TimedOut),
         (S::Running, S::Cancelled),
+        (S::WaitingHuman, S::Completed),
+        (S::WaitingHuman, S::TimedOut),
+        (S::WaitingHuman, S::Cancelled),
     ];
     let legal_count = legal.len();
     let mut observed = 0;
@@ -77,6 +82,13 @@ fn illegal_transitions_include_terminal_and_skips() {
         (S::Running, S::Pending),
         (S::Running, S::Skipped),
         (S::Running, S::Running),
+        // W3a0：WaitingHuman 不经 Ready/Running、不可被再次等待、无 Crashed/Skipped。
+        (S::WaitingHuman, S::Pending),
+        (S::WaitingHuman, S::Ready),
+        (S::WaitingHuman, S::Running),
+        (S::WaitingHuman, S::WaitingHuman),
+        (S::WaitingHuman, S::Crashed),
+        (S::WaitingHuman, S::Skipped),
     ];
     for (from, to) in illegal {
         assert!(
@@ -93,6 +105,7 @@ fn instance_status_names_and_terminals() {
     assert_eq!(S::Pending.as_str(), "Pending");
     assert_eq!(S::Ready.as_str(), "Ready");
     assert_eq!(S::Running.as_str(), "Running");
+    assert_eq!(S::WaitingHuman.as_str(), "WaitingHuman");
     assert_eq!(S::Completed.as_str(), "Completed");
     assert_eq!(S::Crashed.as_str(), "Crashed");
     assert_eq!(S::TimedOut.as_str(), "TimedOut");
@@ -101,6 +114,20 @@ fn instance_status_names_and_terminals() {
     assert!(!S::Pending.is_terminal());
     assert!(!S::Ready.is_terminal());
     assert!(!S::Running.is_terminal());
+    assert!(!S::WaitingHuman.is_terminal());
+    // W3a0 is_active：等待态与执行态都让 run 保持不静默。
+    for status in [S::Pending, S::Ready, S::Running, S::WaitingHuman] {
+        assert!(status.is_active(), "{} must be active", status.as_str());
+    }
+    for status in [
+        S::Completed,
+        S::Crashed,
+        S::TimedOut,
+        S::Cancelled,
+        S::Skipped,
+    ] {
+        assert!(!status.is_active(), "{} must be terminal", status.as_str());
+    }
 }
 
 #[test]

@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::Value;
 
 use crate::types::{
-    Attempt, EdgeIdx, InstanceId, InstanceStatus, NodeError, NodeId, PortName, RunError, RunId,
-    RunMetrics, RunStatus,
+    Attempt, EdgeIdx, HumanDecision, InstanceId, InstanceStatus, NodeError, NodeId, PortName,
+    RunError, RunId, RunMetrics, RunStatus,
 };
 
 /// 流式事件（节点 `ctx.emit` 产生；只进 trace，不参与数据通道）。
@@ -152,6 +152,35 @@ pub struct GateResultRecord {
     pub ts: String,
 }
 
+/// 人工决策确认记录（W3a0 / DR-006 §7.1；**不是** `TraceEvent`）。
+///
+/// 载荷经 [`TraceSink::human_decided`] 回传 CLI（标 `consumed_at` + stderr 实时行）；
+/// `applied=false` 的 `reject_reason` 取值只有三值
+/// `instance_missing` / `not_current` / `not_waiting_human`（内核 snake_case，
+/// 与 decide 侧 `HUMAN_*` CLI 命名空间是两套码）。`applied`/`reject_reason`
+/// **不落库**（DR-006 §4.2 / E-14）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanDecisionRecord {
+    /// 所属 run。
+    pub run_id: RunId,
+    /// 被决策的实例。
+    pub instance_id: InstanceId,
+    /// 决策值（`approved` / `rejected`）。
+    pub decision: HumanDecision,
+    /// 决策人标识（decide 的 `--approver`，非空）。
+    pub approver: String,
+    /// 决策理由（可空）。
+    pub reason: Option<String>,
+    /// 决策行 ID（UUIDv7，仅审计；由 decide 生成、内核原样透传）。
+    pub decision_id: String,
+    /// 决策写入时刻（UTC RFC3339 毫秒 Z；decide 侧）。
+    pub decided_at: String,
+    /// 内核是否真的应用了该决策。
+    pub applied: bool,
+    /// `applied=false` 的内核机器码（`instance_missing`/`not_current`/`not_waiting_human`）。
+    pub reject_reason: Option<String>,
+}
+
 /// `RunStarted` 载荷（06 §6.3/architecture §5.2 的 run 元数据）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunStartedInfo {
@@ -224,6 +253,13 @@ pub trait TraceSink: Send + Sync {
     ) -> bool;
     /// run 结束（生命周期内最后一条事件，恰一次）。
     fn run_finished(&self, info: RunFinishedInfo);
+
+    /// 人工决策确认（W3a0；**不是** `TraceEvent`，不进 `events.kind`）。
+    ///
+    /// 内核在应用一次 `RunControl::HumanDecision` 后调用恰一次（applied 或拒绝），
+    /// 供 CLI bridge 标 `human_decisions.consumed_at` 并输出实时行。
+    /// 默认 no-op：库调用方/`trace_enabled=false` 场景无需实现（DR-006 §7.3 #7）。
+    fn human_decided(&self, _record: HumanDecisionRecord) {}
 
     /// 取走 trace 写端的**不可恢复**错误文本（fail-stop 轮询；06 §6.4.5）。
     ///
@@ -329,6 +365,8 @@ pub enum TraceCall {
     NodeAbandoned,
     /// `streaming`。
     Streaming,
+    /// `human_decided`（W3a0）。
+    HumanDecided,
     /// `run_finished`。
     RunFinished,
 }
@@ -358,6 +396,8 @@ struct MemoryTraceData {
     timed_out: Vec<TimedOutEvent>,
     abandoned: Vec<AbandonedEvent>,
     streaming: Vec<StreamingCall>,
+    /// `human_decided` 确认记录（W3a0）。
+    human_decided: Vec<HumanDecisionRecord>,
     finished: Vec<RunFinishedInfo>,
     calls: Vec<TraceCall>,
 }
@@ -389,6 +429,7 @@ impl MemoryTraceSink {
             && data.timed_out.is_empty()
             && data.abandoned.is_empty()
             && data.streaming.is_empty()
+            && data.human_decided.is_empty()
             && data.finished.is_empty()
             && data.calls.is_empty()
     }
@@ -431,6 +472,11 @@ impl MemoryTraceSink {
     /// `RunFinished` 列表（应恰好一条）。
     pub fn finished(&self) -> Vec<RunFinishedInfo> {
         self.lock().finished.clone()
+    }
+
+    /// `human_decided` 确认记录列表（W3a0；每次决策恰一条）。
+    pub fn human_decided(&self) -> Vec<HumanDecisionRecord> {
+        self.lock().human_decided.clone()
     }
 
     /// 按调用顺序记录的 sink 方法序列（断言 RunStarted 第一 / RunFinished 最后）。
@@ -525,6 +571,12 @@ impl TraceSink for MemoryTraceSink {
         true
     }
 
+    fn human_decided(&self, record: HumanDecisionRecord) {
+        let mut data = self.lock();
+        data.calls.push(TraceCall::HumanDecided);
+        data.human_decided.push(record);
+    }
+
     fn run_finished(&self, info: RunFinishedInfo) {
         let mut data = self.lock();
         data.calls.push(TraceCall::RunFinished);
@@ -603,6 +655,19 @@ impl Emitter {
             return;
         }
         self.sink.gate_result(record);
+    }
+
+    /// 人工决策确认（W3a0）：与其它 sink 调用同一 `closed` 串行化，保证
+    /// `RunFinished` 仍严格最后（I5）；终态后到达的确认被丢弃（E-6）。
+    pub(crate) fn human_decided(&self, record: HumanDecisionRecord) {
+        if !self.enabled {
+            return;
+        }
+        let closed = self.lock_closed();
+        if *closed {
+            return;
+        }
+        self.sink.human_decided(record);
     }
 
     pub(crate) fn node_timed_out(

@@ -285,3 +285,56 @@ fn compiles_subgraph_node_max_fanout() {
     // 主图 `sub` 未声明 → None（子图的 max_fanout 不冒泡到父图节点）。
     assert_eq!(graph.nodes.get("sub").expect("sub").max_fanout, None);
 }
+
+/// W3a0：`builtin.human` 精确映射为 `CompiledHandler::Human`（不构造 Python handler）；
+/// 其它 `builtin.*` 仍是普通 `Python` handler（不存在隐含前缀）。
+#[test]
+fn compiles_builtin_human_handler() {
+    let text = r#"{
+      "version": "1.0",
+      "metadata": {"name": "human-compile"},
+      "entry_points": ["start"],
+      "nodes": [
+        {"id": "start", "type": "start", "inputs": [], "config": {}},
+        {"id": "human", "type": "python_node",
+         "inputs": [{"name": "payload", "type": "any", "required": true}],
+         "config": {"module": "builtin", "function": "human", "timeout_ms": 250}},
+        {"id": "other_builtin", "type": "python_node",
+         "inputs": [{"name": "x", "type": "any", "required": true}],
+         "config": {"module": "builtin", "function": "other"}},
+        {"id": "worker", "type": "python_node",
+         "inputs": [{"name": "p", "type": "any", "required": true}],
+         "config": {"module": "workers.human", "function": "run"}}
+      ],
+      "edges": [
+        {"from": "start", "to_node": "human", "to_input_port": "payload"},
+        {"from": "start", "to_node": "other_builtin", "to_input_port": "x"},
+        {"from": "human", "to_node": "worker", "to_input_port": "p"}
+      ]
+    }"#;
+    let graph = common::compile_text(text);
+
+    let human = graph.nodes.get("human").expect("human node");
+    assert!(
+        matches!(human.handler, CompiledHandler::Human),
+        "builtin.human must compile to Human handler: {:?}",
+        human.handler
+    );
+    // 期限走 `declared_timeout_ms`（human 缺省无期限，声明值才登记 deadline）。
+    assert_eq!(human.declared_timeout_ms, Some(250));
+    assert_eq!(human.max_attempts, zgraph_dsl::DEFAULT_MAX_ATTEMPTS);
+
+    let other = graph.nodes.get("other_builtin").expect("other builtin");
+    match &other.handler {
+        CompiledHandler::Python {
+            module, function, ..
+        } => {
+            assert_eq!(module, "builtin");
+            assert_eq!(function, "other");
+        }
+        other => panic!("builtin.<other> must stay Python handler: {other:?}"),
+    }
+
+    let worker = graph.nodes.get("worker").expect("worker");
+    assert!(matches!(worker.handler, CompiledHandler::Python { .. }));
+}

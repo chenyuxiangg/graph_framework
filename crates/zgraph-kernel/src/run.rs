@@ -22,6 +22,17 @@
 //! 静默后若 receipt 的目标节点从未实例化 → 确定性 `RUN_DEADLOCK`（DR-005 §3.4）。
 //! 无 defer 边的图（v0.1.0）走既有分支，行为不变（B6）。
 //!
+//! # W3a0：人工等待（`builtin.human`）
+//!
+//! `CompiledHandler::Human` 的节点输入就绪时走 `Pending→WaitingHuman` 旁路
+//! （不经 Ready/Running、不派发、不启动 worker，DR-006 §3.2）；run 保持 `Running`
+//! 且非静默。`RunControl::HumanDecision` 经控制通道到达后，内核校验实例为当前
+//! `WaitingHuman`，按冻结顺序完成（写 output+清 deadline → transition
+//! `Completed(reason="human_decided")` → 普通 publish → `human_decided{applied}`）；
+//! 不匹配时只回报 `applied=false` + 三值 `reject_reason`，不改状态。
+//! 决策期限 = `declared_timeout_ms`（缺省**无期限**；到期 `TimedOut`/`NODE_TIMEOUT`，
+//! `killed_workers` 不增）。纯等待不触发 `RUN_DEADLOCK`/`complete_run`。
+//!
 //! # 关键不变式
 //!
 //! - 状态迁移只经 [`transition`]（唯一入口）：非法迁移 → `RUN_ILLEGAL_TRANSITION`
@@ -30,6 +41,7 @@
 //! - 迟到执行结果（实例已终态）直接丢弃（03 §3.6）。
 //! - `start`/`end`/`subgraph` 不交给执行器：`start` 输出 = 入口注入原样 object；
 //!   `end` 输出 = inputs object 且不 publish；`subgraph` 在派发前被拒绝。
+//! - W3a0：`human` 也不交给执行器——等待/决策完全在事件循环内完成。
 //!
 //! # 线程/运行时
 //!
@@ -48,17 +60,17 @@ use zgraph_dsl::{NodeType, OnGateFalse, Trigger, DEFAULT_NODE_TIMEOUT_MS};
 use crate::context::{NodeContext, NodeContextInit};
 use crate::executor::{CatchPanic, NodeExecutor};
 use crate::gate::{evaluate_gate_for, GateEvaluation};
-use crate::graph::{CompiledEdge, CompiledGraph, CompiledNode};
+use crate::graph::{CompiledEdge, CompiledGraph, CompiledHandler, CompiledNode};
 use crate::trace::{
-    Emitter, GateResultRecord, InstanceSnapshot, RunFinishedInfo, RunStartedInfo, TraceSink,
-    TransitionRecord,
+    Emitter, GateResultRecord, HumanDecisionRecord, InstanceSnapshot, RunFinishedInfo,
+    RunStartedInfo, TraceSink, TransitionRecord,
 };
 use crate::types::{
-    now_rfc3339, Attempt, EdgeIdx, InstanceId, InstanceStatus, NodeError, NodeId, PortName,
-    RecordMode, RunError, RunId, RunMetrics, RunStartError, RunStatus, CODE_NODE_FANOUT_EXCEEDED,
-    CODE_NODE_INTERNAL, CODE_NODE_TIMEOUT, CODE_NODE_TYPE_UNSUPPORTED, CODE_RUN_DEADLOCK,
-    CODE_RUN_DELIVERY_TO_TERMINAL, CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID,
-    CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR,
+    now_rfc3339, Attempt, EdgeIdx, HumanDecision, InstanceId, InstanceStatus, NodeError, NodeId,
+    PortName, RecordMode, RunError, RunId, RunMetrics, RunStartError, RunStatus,
+    CODE_NODE_FANOUT_EXCEEDED, CODE_NODE_INTERNAL, CODE_NODE_TIMEOUT, CODE_NODE_TYPE_UNSUPPORTED,
+    CODE_RUN_DEADLOCK, CODE_RUN_DELIVERY_TO_TERMINAL, CODE_RUN_ENTRY_INPUT_MISSING,
+    CODE_RUN_ENTRY_INVALID, CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR,
 };
 
 // ---------------------------------------------------------------------------
@@ -146,7 +158,7 @@ pub struct RunSpec {
 }
 
 /// 控制命令（03 §3.8；独立 unbounded 通道 + `select! biased` 优先）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunControl {
     /// 暂停派发（在飞继续，投递仍应用）。
     Pause,
@@ -154,6 +166,26 @@ pub enum RunControl {
     Resume,
     /// 取消 run（幂等，只结束一次）。
     Cancel,
+    /// 提交人工决策（W3a0；`builtin.human` 实例的 `WaitingHuman→Completed`）。
+    ///
+    /// 内核校验「实例存在 ∧ 为 `node_current` ∧ `status=WaitingHuman`」；通过则
+    /// 一次性完成 + 普通 publish，否则只回报
+    /// [`crate::TraceSink::human_decided`]`{applied:false, reject_reason}`
+    /// （不改状态、不 fail run，DR-006 §4.1/§4.4）。`Copy` 因本 variant 取消。
+    HumanDecision {
+        /// 被决策的实例（必须是该节点的当前实例且 `WaitingHuman`）。
+        instance_id: InstanceId,
+        /// 决策值（`approved` / `rejected`）。
+        decision: HumanDecision,
+        /// 决策人标识（decide 的 `--approver`，非空）。
+        approver: String,
+        /// 决策理由（可空）。
+        reason: Option<String>,
+        /// 决策行 ID（UUIDv7，仅审计；decide 生成、内核原样透传）。
+        decision_id: String,
+        /// 决策写入时刻（UTC RFC3339 毫秒 Z；decide 侧）。
+        decided_at: String,
+    },
 }
 
 /// run 结束结果（与 `RunFinished` 一致）。
@@ -632,6 +664,21 @@ impl RunLoop {
                 }
             }
             RunControl::Cancel => self.cancel_run(),
+            RunControl::HumanDecision {
+                instance_id,
+                decision,
+                approver,
+                reason,
+                decision_id,
+                decided_at,
+            } => self.apply_human_decision(
+                &instance_id,
+                decision,
+                &approver,
+                reason,
+                &decision_id,
+                &decided_at,
+            ),
         }
     }
 
@@ -665,6 +712,94 @@ impl RunLoop {
     fn set_status(&mut self, status: RunStatus) {
         self.status = status;
         let _ = self.status_tx.send(status);
+    }
+
+    // -- W3a0：人工决策应用（03 §3.4.5 / DR-006 §4）-------------------------
+
+    /// 应用一次 `RunControl::HumanDecision`（只由控制通道进入）。
+    ///
+    /// 校验 → **顺序冻结**的一次性完成：
+    /// ① 写 `output={"decision","reason"}`；② 清 deadline；③ `transition(Completed,
+    /// reason="human_decided")`（快照携带 output）；④ 普通 publish（内置 gate 在
+    /// 事件循环内求值）；⑤ `human_decided{applied:true}`。
+    ///
+    /// 校验不通过：状态不变，只回报 `human_decided{applied:false, reject_reason}`，
+    /// **不 fail run**（重复/迟到/非当前决策是幂等确认，不是框架错误）。
+    fn apply_human_decision(
+        &mut self,
+        instance_id: &str,
+        decision: HumanDecision,
+        approver: &str,
+        reason: Option<String>,
+        decision_id: &str,
+        decided_at: &str,
+    ) {
+        if let Some(reject_reason) = self.human_decision_reject(instance_id) {
+            self.emitter.human_decided(HumanDecisionRecord {
+                run_id: self.run_id.clone(),
+                instance_id: instance_id.to_string(),
+                decision,
+                approver: approver.to_string(),
+                reason,
+                decision_id: decision_id.to_string(),
+                decided_at: decided_at.to_string(),
+                applied: false,
+                reject_reason: Some(reject_reason.to_string()),
+            });
+            return;
+        }
+        let Some(node_id) = self
+            .instances
+            .get(instance_id)
+            .map(|record| record.node_id.clone())
+        else {
+            return;
+        };
+        let output = serde_json::json!({
+            "decision": decision.as_str(),
+            "reason": reason,
+        });
+        // ① output 先写 + ② 清 deadline（不得先 transition：transition_raw 迁移时
+        // 立即构造/发送快照，先迁移会让 instances.output/快照为 NULL）。
+        if let Some(record) = self.instances.get_mut(instance_id) {
+            record.output = Some(output.clone());
+            record.deadline = None;
+        }
+        // ③ Completed（reason=human_decided；finished_at 由 transition 统一写）。
+        if !self.transition_or_fail(instance_id, InstanceStatus::Completed, "human_decided") {
+            return;
+        }
+        // ④ 普通 publish：与 finish_builtin 同构（human 无执行任务、gate 在 loop 内求值）。
+        let graph = self.graph.clone();
+        let evaluations = evaluate_outgoing(&graph, &node_id, &output);
+        self.apply_publish(instance_id, &node_id, &output, &evaluations);
+        // ⑤ 确认（CLI bridge 据此标 consumed_at + stderr 实时行）。
+        self.emitter.human_decided(HumanDecisionRecord {
+            run_id: self.run_id.clone(),
+            instance_id: instance_id.to_string(),
+            decision,
+            approver: approver.to_string(),
+            reason,
+            decision_id: decision_id.to_string(),
+            decided_at: decided_at.to_string(),
+            applied: true,
+            reject_reason: None,
+        });
+    }
+
+    /// 决策应用前的只读校验（顺序冻结，DR-006 §4.1/§4.4）：
+    /// `instance_missing` → `not_current` → `not_waiting_human`。
+    fn human_decision_reject(&self, instance_id: &str) -> Option<&'static str> {
+        let Some(record) = self.instances.get(instance_id) else {
+            return Some("instance_missing");
+        };
+        if self.node_current.get(&record.node_id).map(String::as_str) != Some(instance_id) {
+            return Some("not_current");
+        }
+        if record.status != InstanceStatus::WaitingHuman {
+            return Some("not_waiting_human");
+        }
+        None
     }
 
     /// 终止判定（03 §3.10）：Running 且静默 → 先判 deferred 死锁 → 聚合 end 输出。
@@ -718,17 +853,18 @@ impl RunLoop {
         true
     }
 
-    /// 静默判定：无 Pending/Ready/Running 实例且就绪队列为空。
+    /// 静默判定：无活跃实例（Pending/Ready/Running/**WaitingHuman**）且就绪队列为空。
+    ///
+    /// W3a0（DR-006 §3.5）：`WaitingHuman` 计入活跃等待态——纯人工等待时 run
+    /// **不得**判定静默/完成，必须等 decide、期限或取消。
     fn is_quiescent(&self) -> bool {
         if !self.ready_queue.is_empty() {
             return false;
         }
-        !self.instances.values().any(|record| {
-            matches!(
-                record.status,
-                InstanceStatus::Pending | InstanceStatus::Ready | InstanceStatus::Running
-            )
-        })
+        !self
+            .instances
+            .values()
+            .any(|record| record.status.is_active())
     }
 
     /// 派发就绪实例（03 §3.5；Paused 时冻结）。
@@ -1599,7 +1735,7 @@ impl RunLoop {
         }
     }
 
-    /// Pending → Ready（若就绪）并入队。
+    /// Pending → Ready（若就绪）并入队；W3a0：human 节点改走 `WaitingHuman` 旁路。
     fn maybe_make_ready(&mut self, instance_id: &str) {
         let Some(record) = self.instances.get(instance_id) else {
             return;
@@ -1607,7 +1743,44 @@ impl RunLoop {
         if record.status != InstanceStatus::Pending || !self.is_ready(instance_id) {
             return;
         }
+        let node_id = record.node_id.clone();
+        if self.is_human_node(&node_id) {
+            self.enter_waiting_human(instance_id, &node_id);
+            return;
+        }
         self.mark_ready(instance_id);
+    }
+
+    /// 节点是否为内置人工等待节点（`CompiledHandler::Human`；W3a0）。
+    fn is_human_node(&self, node_id: &str) -> bool {
+        self.graph
+            .nodes
+            .get(node_id)
+            .is_some_and(|node| matches!(node.handler, CompiledHandler::Human))
+    }
+
+    /// W3a0：`Pending→WaitingHuman`（01 §1.2.3 / DR-006 §3.2）。
+    ///
+    /// 顺序冻结：先写 `instances.input` 全端口快照（未到为 `null`；与普通节点
+    /// dispatch 快照同语义），再登记决策期限（仅 `declared_timeout_ms` 声明时；
+    /// 缺省 = **无期限**，显式例外），最后迁移（`started_at`/`started_instant`
+    /// 由 [`Self::transition_raw`] 的等待分支写入）。
+    ///
+    /// 不派发、不启动 worker、不进入 ready_queue。
+    fn enter_waiting_human(&mut self, instance_id: &str, node_id: &str) {
+        let Some(node) = self.graph.nodes.get(node_id).cloned() else {
+            return;
+        };
+        let inputs = self.build_inputs(instance_id, &node);
+        let input_value = serde_json::to_value(inputs).unwrap_or(Value::Null);
+        let deadline = node
+            .declared_timeout_ms
+            .map(|ms| Instant::now() + Duration::from_millis(ms));
+        if let Some(record) = self.instances.get_mut(instance_id) {
+            record.input = Some(input_value);
+            record.deadline = deadline;
+        }
+        let _ = self.transition_or_fail(instance_id, InstanceStatus::WaitingHuman, "human_waiting");
     }
 
     /// 无条件 Pending → Ready 并入队（start 入口/就绪判定通过后）。
@@ -1705,15 +1878,20 @@ impl RunLoop {
         }
     }
 
-    /// 扫描 Running 实例 deadline（到期 → NodeTimedOut → TimedOut → 冷峻失败）。
+    /// 扫描实例 deadline（到期 → NodeTimedOut → TimedOut → 冷峻失败）。
+    ///
+    /// W3a0：`WaitingHuman` 也参与扫描（决策等待期限），但**无 worker 可 kill**：
+    /// 不 abort 任务、`killed_workers` 不增（03 §3.4.5 / DR-006 §2.3）。
     fn check_timeouts(&mut self) {
         let now = Instant::now();
         let expired: Vec<InstanceId> = self
             .instances
             .values()
             .filter(|record| {
-                record.status == InstanceStatus::Running
-                    && record.deadline.is_some_and(|deadline| now >= deadline)
+                matches!(
+                    record.status,
+                    InstanceStatus::Running | InstanceStatus::WaitingHuman
+                ) && record.deadline.is_some_and(|deadline| now >= deadline)
             })
             .map(|record| record.instance_id.clone())
             .collect();
@@ -1722,6 +1900,10 @@ impl RunLoop {
             if self.status.is_terminal() {
                 return;
             }
+            let running = self
+                .instances
+                .get(&instance_id)
+                .is_some_and(|record| record.status == InstanceStatus::Running);
             let elapsed_ms = self
                 .instances
                 .get(&instance_id)
@@ -1731,9 +1913,12 @@ impl RunLoop {
                         .unwrap_or(u64::MAX)
                 })
                 .unwrap_or(0);
-            self.killed_workers += 1;
-            if let Some(task) = self.tasks.remove(&instance_id) {
-                task.abort();
+            // 只有 Running 有在飞执行任务可 kill；human 等待没有 worker。
+            if running {
+                self.killed_workers += 1;
+                if let Some(task) = self.tasks.remove(&instance_id) {
+                    task.abort();
+                }
             }
             self.emitter
                 .node_timed_out(&self.run_id, &instance_id, elapsed_ms, now_rfc3339());
@@ -1760,8 +1945,11 @@ impl RunLoop {
         }
     }
 
-    /// 死锁判定（AC-11）：Running 且无 Running/Ready、队列空、仍有 Pending，
-    /// 且静默超过 `deadlock_grace_ms` → `RUN_DEADLOCK`。
+    /// 死锁判定（AC-11）：Running 且无 Running/Ready/**WaitingHuman**、队列空、
+    /// 仍有 Pending，且静默超过 `deadlock_grace_ms` → `RUN_DEADLOCK`。
+    ///
+    /// W3a0：`WaitingHuman` 是合法等待态（可能正是 Pending 实例等的那次决策），
+    /// 不得触发死锁；由 decide 或决策期限推进（DR-006 §3.4）。
     fn check_deadlock(&mut self) {
         let has_running = self
             .instances
@@ -1772,11 +1960,15 @@ impl RunLoop {
                 .instances
                 .values()
                 .any(|record| record.status == InstanceStatus::Ready);
+        let has_waiting = self
+            .instances
+            .values()
+            .any(|record| record.status == InstanceStatus::WaitingHuman);
         let has_pending = self
             .instances
             .values()
             .any(|record| record.status == InstanceStatus::Pending);
-        if has_running || has_ready || !has_pending {
+        if has_running || has_ready || has_waiting || !has_pending {
             return;
         }
         let silent_ms = u64::try_from(self.last_event_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -2010,7 +2202,9 @@ impl RunLoop {
         let ts = now_rfc3339();
         if let Some(record) = self.instances.get_mut(instance_id) {
             record.status = to;
-            if to == InstanceStatus::Running {
+            // W3a0：`WaitingHuman` 的 `started_at` 是**等待起点**（决策期限从此刻起算，
+            // 03 §3.4.5）；`started_instant` 供期限到期时计算 elapsed_ms。
+            if matches!(to, InstanceStatus::Running | InstanceStatus::WaitingHuman) {
                 record.started_at = Some(ts.clone());
                 record.started_instant = Some(Instant::now());
             }

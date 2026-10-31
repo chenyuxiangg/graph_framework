@@ -124,7 +124,30 @@ pub const CODE_HARNESS_CONTEXT_OVERFLOW: &str = "HARNESS_CONTEXT_OVERFLOW";
 /// 记忆检索/写入失败（降级告警，不终止）。
 pub const CODE_HARNESS_MEMORY_DEGRADED: &str = "HARNESS_MEMORY_DEGRADED";
 
-/// 实例状态（00 §0.3；v1 全部可能产生的状态）。
+/// 人工决策值（W3a0；`builtin.human` 节点 output 的 `decision` 字段 /
+/// `human_decisions.decision` 列；DR-006 §4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HumanDecision {
+    /// 批准：实例正常 `Completed`；后续路由交给图。
+    Approved,
+    /// 驳回：同样是正常 `Completed`（**不隐式 Failed**）；路由交给图。
+    Rejected,
+}
+
+impl HumanDecision {
+    /// 全部 2 种决策（文档/测试用）。
+    pub const ALL: [Self; 2] = [Self::Approved, Self::Rejected];
+
+    /// 与 00 §0.3 / `human_decisions.decision` CHECK 一致的字符串名。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// 实例状态（00 §0.3；v0.2/W3a 全部可能产生的状态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstanceStatus {
     /// 已创建，等待输入。
@@ -133,6 +156,8 @@ pub enum InstanceStatus {
     Ready,
     /// 已派发执行。
     Running,
+    /// 输入就绪、等待人工决策（W3a0；非终态、不执行、不占 worker；01 §1.2.4 / 03 §3.4.5）。
+    WaitingHuman,
     /// 成功（终态）。
     Completed,
     /// 失败（终态）。
@@ -154,12 +179,24 @@ impl InstanceStatus {
         )
     }
 
+    /// 是否为**活跃/等待**状态（非终态且仍让 run 保持不静默）。
+    ///
+    /// W3a0（DR-006 §3.5）：终止判定 `is_quiescent` 必须把 `WaitingHuman` 计入
+    /// 活跃集合——人工等待是合法状态，不是死锁、不得提前完成 run。
+    pub const fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Pending | Self::Ready | Self::Running | Self::WaitingHuman
+        )
+    }
+
     /// 与 00 §0.3 / trace 存储一致的字符串名。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "Pending",
             Self::Ready => "Ready",
             Self::Running => "Running",
+            Self::WaitingHuman => "WaitingHuman",
             Self::Completed => "Completed",
             Self::Crashed => "Crashed",
             Self::TimedOut => "TimedOut",
@@ -168,13 +205,14 @@ impl InstanceStatus {
         }
     }
 
-    /// 01 §1.2.3 迁移矩阵的可执行版本（I2）。
+    /// 01 §1.2.3 迁移矩阵的可执行版本（I2；W3a0 增 `WaitingHuman` 行/列）。
     ///
     /// 只允许矩阵中的迁移；`Pending → Crashed` 等不在矩阵内的组合一律返回 `false`。
     pub const fn can_transition_to(self, to: Self) -> bool {
         matches!(
             (self, to),
-            (Self::Pending, Self::Ready)
+            (Self::Pending, Self::WaitingHuman)
+                | (Self::Pending, Self::Ready)
                 | (Self::Pending, Self::Cancelled)
                 | (Self::Pending, Self::Skipped)
                 | (Self::Ready, Self::Running)
@@ -183,6 +221,9 @@ impl InstanceStatus {
                 | (Self::Running, Self::Crashed)
                 | (Self::Running, Self::TimedOut)
                 | (Self::Running, Self::Cancelled)
+                | (Self::WaitingHuman, Self::Completed)
+                | (Self::WaitingHuman, Self::TimedOut)
+                | (Self::WaitingHuman, Self::Cancelled)
         )
     }
 }
@@ -588,5 +629,57 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    /// W3a0：`WaitingHuman` 非终态、属活跃集合，且状态名与迁移矩阵就位。
+    #[test]
+    fn waiting_human_is_active_and_has_expected_transitions() {
+        assert_eq!(InstanceStatus::WaitingHuman.as_str(), "WaitingHuman");
+        assert!(!InstanceStatus::WaitingHuman.is_terminal());
+        assert!(InstanceStatus::WaitingHuman.is_active());
+        for status in [
+            InstanceStatus::Pending,
+            InstanceStatus::Ready,
+            InstanceStatus::Running,
+            InstanceStatus::WaitingHuman,
+        ] {
+            assert!(status.is_active(), "{} is active", status.as_str());
+        }
+        for status in [
+            InstanceStatus::Completed,
+            InstanceStatus::Crashed,
+            InstanceStatus::TimedOut,
+            InstanceStatus::Cancelled,
+            InstanceStatus::Skipped,
+        ] {
+            assert!(!status.is_active(), "{} is terminal", status.as_str());
+        }
+        assert!(InstanceStatus::Pending.can_transition_to(InstanceStatus::WaitingHuman));
+        for to in [
+            InstanceStatus::Completed,
+            InstanceStatus::TimedOut,
+            InstanceStatus::Cancelled,
+        ] {
+            assert!(InstanceStatus::WaitingHuman.can_transition_to(to));
+        }
+        // WaitingHuman 不经 Ready/Running、不可被再次等待。
+        for to in [
+            InstanceStatus::Pending,
+            InstanceStatus::Ready,
+            InstanceStatus::Running,
+            InstanceStatus::WaitingHuman,
+            InstanceStatus::Crashed,
+            InstanceStatus::Skipped,
+        ] {
+            assert!(!InstanceStatus::WaitingHuman.can_transition_to(to));
+        }
+    }
+
+    /// W3a0：决策值与 `human_decisions.decision` 的 snake_case 字符串一致。
+    #[test]
+    fn human_decision_strings_are_snake_case() {
+        assert_eq!(HumanDecision::ALL.len(), 2);
+        assert_eq!(HumanDecision::Approved.as_str(), "approved");
+        assert_eq!(HumanDecision::Rejected.as_str(), "rejected");
     }
 }

@@ -104,8 +104,8 @@ pub use run::{
     run_to_completion, start_run, RunControl, RunHandle, RunOptions, RunOutcome, RunSpec,
 };
 pub use trace::{
-    AbandonedEvent, GateResultRecord, InstanceSnapshot, MemoryTraceSink, NullTraceSink,
-    RunFinishedInfo, RunStartedInfo, StreamingCall, StreamingEvent, TimedOutEvent, TraceCall,
-    TraceSink, TransitionRecord,
+    AbandonedEvent, GateResultRecord, HumanDecisionRecord, InstanceSnapshot, MemoryTraceSink,
+    NullTraceSink, RunFinishedInfo, RunStartedInfo, StreamingCall, StreamingEvent, TimedOutEvent,
+    TraceCall, TraceSink, TransitionRecord,
 };
 pub use types::*;

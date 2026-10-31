@@ -60,13 +60,20 @@ pub struct CompiledNode {
 
 /// 编译后的节点处理入口。
 ///
-/// `start`/`end`/`subgraph` 由内核内置处理，不交给 [`crate::executor::NodeExecutor`]。
+/// `start`/`end`/`human`/`subgraph` 由内核内置处理，不交给
+/// [`crate::executor::NodeExecutor`]。
 #[derive(Debug, Clone)]
 pub enum CompiledHandler {
     /// 入口标记节点：输出 = 入口注入整包 object。
     Start,
     /// 终点节点：输出 = inputs object，且不 publish。
     End,
+    /// 人工等待节点（W3a0）：`python_node` 保留符号 `builtin.human`（DR-006 §2/§4）。
+    ///
+    /// 不执行用户代码、不启动 worker、不 import：输入就绪即 `Pending→WaitingHuman`，
+    /// 由 [`crate::RunControl::HumanDecision`] 推进一次 `WaitingHuman→Completed`
+    /// 并走普通 publish（01 §1.2.4 / 03 §3.4.5）。
+    Human,
     /// Python 节点（v2 在 worker 子进程执行；M2 由 FakeExecutor 覆盖）。
     Python {
         /// 点分模块路径。
@@ -310,8 +317,20 @@ fn compile_handler(node: &GraphNode) -> Result<CompiledHandlerSpec, CompileError
     }
 }
 
+/// `builtin.human` 保留符号的 module 部分（W3a0；02 §2.5 / 04 §4.4.5）。
+const HUMAN_MODULE: &str = "builtin";
+/// `builtin.human` 保留符号的 function 部分（精确匹配，无隐含前缀）。
+const HUMAN_FUNCTION: &str = "human";
+
 /// 编译 Python handler。
+///
+/// W3a0（DR-006 §2.1）：`module == "builtin" && function == "human"` **精确匹配**
+/// → [`CompiledHandler::Human`]（不构造 Python handler、不注册 worker 符号、
+/// 不做 import）；其它 `builtin.*` 仍是普通 python_node。
 fn compile_python_handler(config: &PythonNodeConfig) -> CompiledHandler {
+    if config.module == HUMAN_MODULE && config.function == HUMAN_FUNCTION {
+        return CompiledHandler::Human;
+    }
     CompiledHandler::Python {
         module: config.module.clone(),
         function: config.function.clone(),
