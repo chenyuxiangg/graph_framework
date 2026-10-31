@@ -115,3 +115,19 @@ grep -c '^| ISSUE-' doc/issues.md                         # 140；ISSUE-129–14
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（结论为 `通过`，无附加条件）。
+
+## 7. P3 收口确认（2026-11-01）
+
+> 复审对象：作者收口提交 **`7991e73`**（父 `d5df1e8`；`git diff d5df1e8..7991e73` = **10 files，纯 `doc/**`**，+21/−17）。评审人对 §3 的 N1–N7 做快速确认（非全文复审）。
+
+**结论：通过**（P3 残留已收口；分支最终评审状态以此节为准）
+
+- **N1 ✅** `HumanDecisionRecord` 实为 **9 字段**：`01:7`（banner）、`01:289`（§1.5 as-built）、`PROVENANCE:201`（§2 第22条）三处已由「10 字段」改为「9 字段」；`01` SHA-256 重算为 `5f13262255a97c8b6792cbd1c848295c3d4378ac1be9c0d3f1ad9e1fab159152`（行数 **398** 不变）。
+- **N2 ✅** DR-004 §10：恢复原 W3a0「后续」行，再以独立「W3a 实现已交付」段追加；`git diff main...HEAD -- DR-004` = **+2/−0（无删除行，纯追加）**；DR-006 §15 `main...HEAD` 删除行 = **0**（仍纯追加）。
+- **N3 ✅** 08 §8.10.2 增补 **#8 kernel `HumanDecision`/`HumanDecisionRecord`（additive）**、**#9 trace `DecisionPrecheck`（additive）**；08 行数 **561→564**、SHA-256 重算为 `9450d7a9a16ca3fe627c243fa6ae0a311d8210318735752ea51ebd7e4f9e2143`。（遗留微瑕：#10 与既有 #6 内容重复，属描述冗余 P3，不影响结论，可后续清理。）
+- **N4 ✅** `07:57` 「a3 静态」→「**静态 3**」；`07` SHA-256 重算为 `9cc44593399b72c6a308e503daf71998db735e279b17d013822216f9c8913a97`（行数 **429** 不变）。
+- **N5 ✅** ISSUE-127 标 **fixed**，并注明「REV-080/084：01 历史名 `HandlerRef::Human` = 实现名 `CompiledHandler::Human`（同一实现），kernel 侧以 `CompiledHandler::Human` 为准」。
+- **N6 ✅** PROVENANCE §2 第22条口径明确为 **00–08 numstat +103/−32（净 +71）** 与 **全 spec 目录 numstat +138/−50（净 +88）**；评审实测一致（`git diff --numstat main...HEAD`）。
+- **N7 ✅** 5 处「REV-084 本分支待评审/评审人待定」已同步为「通过（REV-084，`d5df1e8`）」：`progress:5`（「已通过」）、`progress:8`、`index:22`、`DR-006:638`、`08:544`、`PROVENANCE:208`；`doc/reviews/README.md` **未动**。
+- **门禁复核 ✅**：PROVENANCE §3 脚本复核 —— 00–08 合计 **6886** 行、含 README/PROVENANCE/REFERENCES 合计 **7239** 行；**9/9 SHA-256 + 行数全部实测一致（ALL_MATCH）**；`bash scripts/dev/check.sh` **PASSED**；`git diff d5df1e8..HEAD` 全部 `doc/**`（无代码/测试/配置）；worktree 干净。
+- **合并建议**：满足 merge.sh 前置（结论通过、worktree 干净、origin/main 为祖先、无新增失败）；P3 收口后本分支可合并，W3a 完整收口，下一步 W4a（W3b durable resume 可选、需用户确认）。
