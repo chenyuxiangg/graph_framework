@@ -6,7 +6,7 @@
 | [`decisions/DR-002-m5-cli-replay-recording.md`](decisions/DR-002-m5-cli-replay-recording.md) | **M5 落地决策**：CLI `run`/`replay` 口径、L2 记录与重放、ISSUE-061/066/076 修复方案、wave 计划与 M6 排除项 |
 | [`decisions/DR-003-m6-scope-and-waves.md`](decisions/DR-003-m6-scope-and-waves.md) | **M6 范围/波次决策**：17 个顺延 ISSUE 的模块、REV 编号、跨模块方案与验收 DoD（M6 **已完成**） |
 | [`architecture-v2.md`](architecture-v2.md) | **架构蓝图 v2**：进程模型、NDJSON 协议、可复现分级、代码布局、里程碑 |
-| [`design/software-team-sop-v1.md`](design/software-team-sop-v1.md) | **software_team SOP 设计稿 v1**：设计角色主链 + 工作 agent + per-item 评审；人工评审/图级返工/动态 N 延期 v0.2 |
+| [`design/software-team-sop-v1.md`](design/software-team-sop-v1.md) | **software_team SOP 设计稿 v1**：设计角色依赖 DAG + 工作 agent + per-item 评审；人工评审/图级返工/动态 N 延期 v0.2 |
 | [`spec-v1.2/`](spec-v1.2/README.md) | **语义基准**（9 分册）：DSL/状态机/调度/Harness/存储/验收/审计关闭（落地按 DR-001 替换 PyO3 为 worker 子进程） |
 | [`analysis/`](analysis/) | 冻结期归档材料：可行性评估、决策记录 01、v1.1 规格审计、spike 报告 + 源码、两份技术调研 |
 | [`spec-v1.2/PROVENANCE.md`](spec-v1.2/PROVENANCE.md) | 规格来源、冻结/回填记录、SHA-256 与行数 |

@@ -29,7 +29,7 @@
 | 并行 | 单主线 + 旁路 worker | 每个设计角色扇出 N 个工作 agent；跨角色按依赖并发 |
 | 评审 | 5 条 manual 边 + 人工 `trigger-edge` | **评审 agent 节点**（共享 `design_reviewer` 资产），无人工等待 |
 | 文件端口 | `iport/oport` 文件存在性 | 端口是类型化数据值；产物内容随 agent output 传递 |
-| 返工 | 自环重跑 | 评审 agent 内部 tool loop 有限重做；**图级返工框架 v0.2** |
+| 返工 | 自环重跑 | **v1 不做重做**：评审不通过 → `P` 抛错 → run `Failed`；图级返工框架 v0.2 |
 | 共享评审队列 | 无 | v1 不做（每个工作 agent 配独立评审节点）；共享队列框架 v0.2 |
 
 > 依据：用户 2026-10-31 确认的设计方向——设计角色为主链关键节点、设计角色派发工作 agent、评审由共享 `design_reviewer` 资产的评审节点执行（设计角色定义评审标准并对结论负责，而非由设计 agent 亲自评审）；人工评审/图级有限返工/每节点最大扇出限制/动态 N 另起版本。
@@ -46,10 +46,10 @@
 | D4 | 节点间用**边**传数据；节点实例独立超时/独立 trace；重试仅自环（`retry.max_attempts`），v1 不使用自环 | 边 + gate 表达「评审通过才放行」；普通节点失败即 `Crashed`→run `Failed` |
 | D5 | 评审结论由 `python_node`（`P`）解析成结构化字段；`P` 负责**强制失败** | `agent_call` 输出固定四字段、`content` 为字符串；gate 只能读 JSON 路径 |
 | D6 | 下游节点 `trigger: "all"`，等齐依赖 item 后才执行 | 「inputs 没到就等」= Pending 语义 |
-| D7 | 评审 agent 内部负责有限重做；`max_iterations` 是 **LLM 调用轮次预算**（默认 10，上限 50），重做的 tool call 计入该预算 | 图级回环不可用；内部重做不新增图节点 |
+| D7 | 评审 agent 的 tool loop 只做**只读验证**（跑检查/测试、对照需求），**不修改工作 agent 产物**；v1 不做重做。`max_iterations` 是 **LLM 调用轮次预算**（默认 10，上限 50） | 工作 agent 的 output 不可变（04 §4.5），评审无法回写；图级重做留 v0.2 |
 | D8 | v1 只保留 **approved 路径**；评审最终不通过 → `P` 抛异常 → `NODE_PYTHON_EXCEPTION` → `Crashed` → run `Failed` | gate=false 只会结算边 + 级联 `Skipped`，run 仍可能 `Completed`，不能作为失败机制 |
 | D9 | N 编译期固定；N 变化时由 codegen 在 run 前生成图 JSON | 图是静态的；不依赖运行期动态 fan-out |
-| D10 | 工作 agent 的产物以**数据值**传递（文档内容/路径清单/结构化结果） | 当前无 artifact 端口；gate 无文件系统访问 |
+| D10 | 工作 agent 的产物以**数据值**传递（文档内容/路径清单/结构化结果） | 当前无框架级 artifact 端口/存储；gate 无文件系统访问 |
 | D11 | 工作 agent 优先复用已有实现（如 `python/workers/software_team/{planer,archer}.py` 的纯函数），确需 LLM 时用 `agent_call` | 避免重复实现；`python_node` 无 LLM 成本 |
 
 ---
@@ -60,11 +60,12 @@
 
 ```text
 上游依赖 item 的 P 节点 ──gate(approved)──▶ D_i          （D_i 的每个依赖 item 一个输入端口）
-D_i ──fan-out──▶ W_{i,1} ──▶ R_{i,1} ──▶ P_{i,1} ──gate(approved)──▶ 下游 D_k / end
-   ├──fan-out──▶ W_{i,2} ──▶ R_{i,2} ──▶ P_{i,2} ──gate(approved)──▶ 下游 D_k / end
-   │                 ⋮            ⋮            ⋮
-   ├──fan-out──▶ W_{i,N} ──▶ R_{i,N} ──▶ P_{i,N} ──gate(approved)──▶ 下游 D_k / end
+D_i ──fan-out──▶ W_{i,1} ──┬─▶ R_{i,1} ──▶ P_{i,1} ──gate(approved)──▶ 下游 D_k / end
+   ├──fan-out──▶ W_{i,2} ──┼─▶ R_{i,2} ──▶ P_{i,2} ──gate(approved)──▶ 下游 D_k / end
+   │                 ⋮      │        ⋮            ⋮
+   ├──fan-out──▶ W_{i,N} ──┴─▶ R_{i,N} ──▶ P_{i,N} ──gate(approved)──▶ 下游 D_k / end
    └──(评审上下文)──▶ R_{i,1..N}（D_i 的整包输出投递给每个评审节点）
+                     W_{i,j} ──▶ P_{i,j}.artifact（产物直送解析节点，独立于评审结论）
 ```
 
 - `D_i`：设计角色 agent；输入 = 其依赖 item（每 item 一个端口，`trigger: "all"`）；输出 = 本阶段任务包（整包广播给所有出边）。
@@ -119,7 +120,7 @@ sto ─approved─▶ qa ─approved─▶ release ─approved─▶ end
 
 ## 5. Gate、评审与失败契约
 
-### 5.1 评审结论与内部重做
+### 5.1 评审结论（v1 不重做）
 
 评审 agent 必须在 `content` 中输出可解析 JSON（示例）：
 
@@ -128,8 +129,9 @@ sto ─approved─▶ qa ─approved─▶ release ─approved─▶ end
 ```
 
 - `verdict = "approved"`：进入解析节点，正常放行。
-- `verdict = "rework"`：评审 agent 在**自己的 tool loop 内**调用修复工具重做（重做 tool call 计入 `max_iterations` 轮次预算），然后重新评审。
-- 达到 `max_iterations` 仍不通过 → 评审 agent 返回 `HARNESS_MAX_ITERATIONS` → 实例 `Crashed` → run `Failed`。
+- 其它值（如 `"rework"`）：`P` 视为评审不通过并**抛异常** → `NODE_PYTHON_EXCEPTION` → `Crashed` → run `Failed`；v1 **不执行重做**（工作 agent 的 output 不可变，评审无法回写；图级重做见 §9）。
+- 评审 agent 的 tool loop 只能调用**只读检查工具**（跑测试/lint/需求对照）；不得写文件或修改工作 agent 产物。
+- 达到 `max_iterations` 仍无法给出结论 → `HARNESS_MAX_ITERATIONS` → 实例 `Crashed` → run `Failed`。
 - 评审不得返回其它 `verdict` 值；**不要**把"不通过"表达成 gate=false（见 §5.3）。
 
 ### 5.2 解析节点 `P` 的契约（关闭 C1/C2）
@@ -153,7 +155,7 @@ sto ─approved─▶ qa ─approved─▶ release ─approved─▶ end
 ### 5.4 下游等待
 
 - `D_k` / `end` 的 `inputs` 全部 `required: true`，`trigger: "all"`；未到齐则 Pending。
-- 「inputs 不达标」在 v1 由评审 agent 内部重做消化；**不存在「等一份新的合格输入」的图级机制**（gate=false 不会等待；最终不通过 = run Failed）。
+- 「inputs 不达标」在 v1 **没有"等一份新的合格输入"机制**：评审不通过即 `P` 抛错 → run Failed；重做/回环见 §9（框架 v0.2）。
 
 ---
 
@@ -162,7 +164,7 @@ sto ─approved─▶ qa ─approved─▶ release ─approved─▶ end
 | 资产 `id` | 类型 | 作用 | 关键配置 |
 |---|---|---|---|
 | `planer` / `archer` / `mde` / `te` / `mte` / `ste` / `fo` / `mto` / `sto` / `qa` / `release` | 设计角色 agent | 持有阶段目标、评审标准与任务包 | `role_prompt_file`、`constraints_file`、`input_mapping`、`max_iterations` |
-| `design_reviewer` | 评审 agent（共享） | 评审单个 item；必要时内部重做 | 固定 JSON 输出 prompt；`tools` 含检查/修复工具；`max_iterations` 10–20；`node_timeout_ms` 300000 |
+| `design_reviewer` | 评审 agent（共享） | 评审单个 item；tool loop 只做**只读检查**，不修改产物 | 固定 JSON 输出 prompt；`tools` 仅含只读检查工具；`max_iterations` 10–20；`node_timeout_ms` 300000 |
 | `*_work` | 工作 agent | 产出该 item 的文档/测试 | `agent_call`（需 LLM）或 `python_node`（确定性任务） |
 
 - **只有 `agent_call` 节点通过 `agent_id` 引用资产**；`python_node` 用 `module` + `function`，`start`/`end` 用 `{}`。
@@ -182,7 +184,8 @@ items(role) = §4.1 的产出 item 列表；deps(role) = §4.1 的依赖 item �
 
 # 1) 节点
 for role in roles:
-    D[role] = agent_call(agent_id=role, inputs=每个 dep item 一个端口, trigger="all")
+    dep_ports = [每个 dep item 一个端口] 或（planer）[requirement 端口]   # entry 输入由 run 注入
+    D[role] = agent_call(agent_id=role, inputs=dep_ports, trigger="all")
     for item in items(role):
         W[role][item] = agent_call 或 python_node   # 见 §6 复用
         R[role][item] = agent_call(agent_id="design_reviewer",
@@ -190,7 +193,7 @@ for role in roles:
         P[role][item] = python_node(module="workers.software_team.parse_verdict", function="run",
                                     inputs=[review, artifact], trigger="all")
 end = end(inputs=release 的 3 个 item 端口, trigger="all")
-entry_points = [planer]
+entry_points = [planer]          # planer 的 requirement 由 RunSpec.entry_inputs 注入，不生成入边
 
 # 2) 边
 for role in roles:
@@ -209,7 +212,7 @@ for role in roles:
 - 端口名必须匹配 `^[A-Za-z_][A-Za-z0-9_]*$`（不能使用文件路径）；每个下游端口对应一个依赖 item。
 - `(from,to_node)` 与 `(to_node,to_input_port)` 各自唯一 → 每个 item 用独立端口。
 - 生成后必须 `zgraph validate` 通过（§11）。
-- N=3 的参考图规模：60 节点 / 100 边（§4.1）。
+- 按 §4.1 的 N_i 展开（工作 agent 合计 16 个）的参考图规模：**60 节点 / 100 边**。
 
 ---
 
@@ -244,8 +247,8 @@ for role in roles:
 ## 10. 已知限制与风险
 
 - **无人工审批**：若 SOP 要求人签字（需求评审/发布审批），v1 只能由 agent 代评或拆到图外。
-- **无图级返工环**：评审不通过只能内部重做；超出预算则 run Failed。
-- **无 artifact 端口**：文档以数据值传递；如需落盘由工具/工作 agent 写文件，但内核与 gate 不可见（gate 不能查文件）。
+- **无图级返工环**：评审不通过即 `P` 抛错 → run Failed；v1 没有重做通道（图级返工见 §9）。
+- **无框架级 artifact 端口/存储**：文档以数据值传递；如需落盘由工具/工作 agent 写文件，但内核与 gate 不可见（gate 不能查文件）。
 - **评审 JSON 脆弱性（关闭 S4）**：评审 `content` 可能被 `max_tokens` 截断（`stop_reason=MaxTokens` 属正常返回）或带 Markdown 围栏；`P` 解析失败 → `Crashed` → run `Failed`。需在 prompt 中约束纯 JSON，并在 `P` 中给出明确错误信息。
 - **评审超时预算（关闭 S4）**：评审 agent 多轮 tool loop 与单次 LLM 60s、实例默认 180s 的关系需显式配置；建议评审节点 `node_timeout_ms=300000`、`max_iterations≤20`。
 - **LLM 并发无全局限流**：N 个工作 agent / 设计角色会并发发起 LLM 调用；provider 限流需外部控制（减小 N / 串行化依赖）。
@@ -260,12 +263,12 @@ for role in roles:
 
 > 本设计稿的 v1 验收；框架 v0.2 能力（§9）另行验收。
 
-1. `zgraph validate` 通过 §7 codegen 生成的 N=3 参考图（含 agent 资产索引）。
+1. `zgraph validate` 通过 §7 codegen 生成的参考图（按 §4.1 的 N_i，含 agent 资产索引）。
 2. fake LLM 脚本驱动端到端：设计角色 → N 工作 agent → N 评审 → approved gate → 下游设计角色；断言每个 item 有独立实例与 trace。
 3. **产物传播**：断言下游设计角色收到的 `artifact` 是工作 agent 的完整产物（不是评审摘要）。
 4. **失败路径**：评审 agent 达到 `max_iterations` → run `Failed`（`HARNESS_MAX_ITERATIONS`）；`P` 收到非 approved / 非法 JSON → `NODE_PYTHON_EXCEPTION` → run `Failed`；断言不出现"gate 拦截后 run Completed(null)"被误当成失败。
 5. **等待语义**：下游 `trigger=all` 节点在某依赖 item 未批准时保持 Pending。
-6. **规模/成本**：N=3 参考图（60 节点/100 边）的 LLM 调用次数、worker 子进程数、run 时长基线。
+6. **规模/成本**：按 §4.1 的 N_i 生成的参考图（60 节点/100 边）的 LLM 调用次数、worker 子进程数、run 时长基线。
 
 ---
 
@@ -322,7 +325,7 @@ for role in roles:
 - 节点 id 1–64 字符 `[A-Za-z0-9_.-]`；端口名必须是 Python 标识符。
 - `(from,to_node)` 与 `(to_node,to_input_port)` 各自唯一 → 每 item 用独立端口/节点。
 - 非 entry 节点入边 ≥1；`trigger=all` 时每个 `required` 端口都要有入边。
-- 带 gate 的环合法，但**带出口的环当前不可运行**（两种失效模式见 §9.2）→ v1 不使用任何环。
+- 带 gate 的环合法，但**带出口的环当前不可运行**（两种失效模式见 §9 第 2 项）→ v1 不使用任何环。
 - `agent_call` 的 `agent_id` 必须在资产索引中存在；`python_node` 只校验 `module.function` 格式，import 在 worker 启动期。
 - `end` 必须 ≥1 个 `required` 输入且 `trigger=all`（本设计 3 个）。
 - `subgraph` 加载期通过、运行期拒绝（v1 不使用）。
