@@ -73,7 +73,8 @@
 | [REV-069](REV-069-dsl-gate-defer.md) | 2026-10-31 | dsl | `feat/dsl-gate-defer` | 通过（W2a 边级 `on_gate_false` + R15；v0.1.0 5 valid/31 bad CLI 输出与 hash 逐字节不变；N1–N4 于 `a084f2e` 关闭、N5–N8 非阻塞建议） | reviewer-b |
 | [REV-070](REV-070-trace-gate-defer.md) | 2026-10-31 | trace（含 Lead 批准 cli 机械改动） | `feat/trace-gate-defer` | 通过（GateResult v4/payload/v3→v4 迁移；trace 63、cli 160、workspace 650 passed；S1–S5 非阻塞建议；第二评审 lead 已追加确认） | reviewer-a |
 | [REV-071](REV-071-kernel-deferrable-gate.md) | 2026-10-31 | kernel（含 Lead 批准 cli bridge 透传） | `feat/kernel-deferrable-gate` | 通过（deferrable gate/attempt-per-activation/dormant + GateResult 三字段真实来源；kernel 107、cli 160、workspace 682/0/3、e2e 46/2；N1–N7 非阻塞建议；第二评审 reviewer-a 追加 §7） | reviewer-b（主审） |
-| [REV-072](REV-072-e2e-gate-defer.md) | 2026-10-31 | e2e | `test/e2e-gate-defer` | 通过（W2a AC-14 a/b/c/e/f/g/h 真链路；e2e 58/0/2、workspace 694/0/3；v0.1.0 seed 独立复现 schema 31/31 且 golden 一致；N1–N4 非阻塞建议） | reviewer-a |
+| [REV-072](REV-072-e2e-gate-defer.md) | 2026-10-31 | e2e | `test/e2e-gate-defer` | 通过（W2a AC-14 a/b/c/e/f/g/h 真链路；e2e 58/0/2、workspace 694/0/3；v0.1.0 seed 独立复现 schema 31/31 且 golden 一致；N1–N4 非阻塞建议；§7 N1 关闭 + §8 单 item profile 加固增量复核通过） | reviewer-a |
+| [REV-073](REV-073-docs-gate-defer-spec.md) | 2026-10-31 | docs | `docs/docs-gate-defer-spec` | **通过**（W2a 实现回写/e2e 校准/as-built/08 §8.9.1/台账/PROVENANCE；S-1..S-4 + N-1…N-8 已关闭，复审通过；单 item profile 校准） | reviewer-docs |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 

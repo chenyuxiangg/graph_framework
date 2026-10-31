@@ -1,0 +1,167 @@
+# REV-073 · docs · W2a 实现回写（AC-14 校准 / as-built / 08 §8.9.1 / 台账 / PROVENANCE）
+
+> 独立评审记录：评审人 `reviewer-docs`，**≠ 作者**（AGENTS §3）。本记录只写评审结论与证据，不含对 spec/设计稿/代码的修改。
+> 评审基准：已合并实现（`main` `e7578f1` 时点：dsl/trace/py-worker/kernel+cli）+ e2e Phase 2B（`test/e2e-gate-defer`，产品终证 `d31e5d2`、评审 `2b2efb2`、N1 修复 `301b91f`）+ DR-005 冻结语义 + REV-067…072 记录。**不信作者自述，逐项对照真实代码/测试/断言**。
+
+- **分支**：`docs/docs-gate-defer-spec`
+- **作者**：`docs-writer`（5 提交：`20a9b89` 07/01/02/03/04/06 回写、`46c8b3d` DR-005 R1–R5 + 08 §8.9.1 + PROVENANCE 第 17 条、`6b8eb9a` 索引/架构/进度/台账 ISSUE-104..109、`d6561ac` e2e 终证/台账/PROVENANCE 终测、`0eef2e3` 登记 ISSUE-110/111；正文均含 `Review: REV-073` / `Agent: docs-writer`）
+- **评审人**：`reviewer-docs`（**≠ 作者**；主审，独立评审）
+- **变更范围**：`e7578f1..0eef2e3`，**16 files +181/−97**：根 `README.md`（Lead 已授权）与 `doc/**`（DR-004 §10、DR-005、architecture-v2 注记、index、issues、progress、spec 01/02/03/04/06/07/08、PROVENANCE、spec README）；无代码/测试/配置/`CLAUDE.md`/`doc/reviews/**` 改动。增量 `0eef2e3`：6 files +12/−7（issues/progress/08/PROVENANCE/spec README/DR-004 §10），仅 ISSUE-110/111 登记与 e2e 跨批事实
+- **评审时间**：2026-10-31
+- **关联**：DR-004 §10（执行记录）；DR-005（W2a0 冻结 + R1–R5）；REV-072（e2e W2a 验收，`2b2efb2` 通过、`301b91f` N1 修复）；REV-067/068/069/070/071；07 AC-14；PROVENANCE §2 第 17 条；ISSUE-104..111、ISSUE-062
+
+## 1. 结论
+
+**结论：有条件通过**
+
+方向判定：本批把 **W2a 实现（已合并 `main` `e7578f1`）与 e2e Phase 2B 的真实结果**回写进 07 AC-14、01/02/03/04/06 as-built、08 §8.9.1、DR-005 R1–R5、DR-004 §10、PROVENANCE §2 第 17 条与 §3、台账与 progress/README；**W2a0 冻结语义未被重写**，DR-004 原决策未改；PROVENANCE 9 个分册 SHA-256 与行数实测一致（00–08 **6385**、含索引 **6668**、08=**524**），`check.sh` PASSED，范围仅 `doc/**`+根 README。as-built 主体（`updated_at: String`、per-port 继承+`settled_by_node` 清空、`InstanceBuffer` 无实例级 settled、`apply_publish` 四路径、超限 sink 关闭、`fail_if_blocked_deferred` 顺序/message、`GateEvaluation.verdict` 规则、DDL 表尾列序、`verdict_json` 严格报错、R15 首错/载荷/子图聚合、迁移 v3→v4）逐项与 `main` 代码 / REV-068…071/072 复核一致。
+
+但独立核对发现 **4 条重要**问题（均为可执行的文档校准错误，无阻塞实现项，但会误导 W2b/后续读者与 e2e 断言），故不能给「通过」。条件如下（关闭后增量复审转「通过」）：
+
+1. **S-1（重要）AC-14 g 与本批 as-built 资产/断言不符**：`defer_blocked.json` 的两条 defer 边实际均为 `check_output{path:"go",equals:true}`（`a` 的 `stop` 输出 `{"go": false}`，故运行期 false），文档却写 `manual default false`/「恒 false」；且文档断言 `gate_results`「恰 2 行且均 passed=false/deferred=true」，实测为 **3 行**（`start→a` 无 gate 1 行 passed + 自环/a→b 2 行 deferred）。落点 `07:299/:301`、`DR-005:592`。
+2. **S-2（重要）「连续 5 轮全绿」证据口径不实**：REV-072 §4 记录的是 `gate_defer + software_team_v1` **连跑 3 次**、`smoke_rework` 过滤**连跑 5 次**；无「e2e 58/0/2、workspace 694/0/3 全量 5 轮」记录。该表述见 `07:257/:316`、`08:512`、`DR-004:251`、`DR-005:595`、`PROVENANCE:143`、`progress:5`。
+3. **S-3（重要）超限 GateResult 表述自相矛盾**：「resolve 失败的那条边完全不产生 GateResult」与同段「victim `P→W.feedback` 只有 attempt 0/1 两行」「该边更早轮次 GateResult（如有）」冲突；正确口径 = **超限那次求值不产生**，该边更早轮次行保留（e 为 2 行），仅当首轮即超限（h 的 `max_attempts=1` 自环）时该边 0 行。落点 `07:288`、`03:186/:261`、`DR-005:341/:382`、`08:520`、`DR-004:251`、`PROVENANCE:143`。
+4. **S-4（重要）Phase 2B「进行中/待」残留与同批「已通过」矛盾**：`PROVENANCE:136`「Phase 2B 进行中，最终证据另补」、`:137`「a/b/f/g … `#[ignore]` 待 Phase 2B」、`07:19`「运行期待 Phase 2B」、`spec README:65`「e2e Phase 2B 最终证据另补」——而同一提交后文 `07:257` 已写「Phase 2B 已通过」，且 REV-072 记录（e2e 分支 `2b2efb2`）已通过。应统一为「Phase 2B 已通过」并同步 `08:512`/`DR-004:251`/`progress:17` 的「待 REV-072」为「REV-072 已通过、待合并」。
+
+另有 8 条**建议**（N-1…N-8，见 §3）：PROVENANCE「增量 95 行」实测不符、dsl 首轮计数 85/664（末态 86/665）、issues 表格空行断裂、progress 非四块结构、08 §8.9.1「不改 8.0–8.9」措辞、full 60/116 运行期覆盖口径、README 历史摘要、e2e HEAD/REV-072 引用时点。均不阻塞，但需修复或登记台账。
+
+## 2. 四维评审
+
+| 维度 | 结论 | 依据（文件/行/实测） |
+|---|---|---|
+| 功能正确性 | ⚠️（S-1…S-4 备注） | AC-14 a/b/c/e/f/h 与 e2e 实测逐项复核**一致**：a（`gate_defer.rs:656-712`：attempt0/1、同边两行 `passed/deferred/verdict=true/false`、attempt1 继承 `seed`、`again=attempt0 output`）；b（`:714-750`：A/B 0/1、A→B 两行放行、B→A 第二行 false+deferred）；f（`:752-779`：dormant、`verdict=true` 原始路径值）；e（`software_team_v1.rs:1794-1907`：恰一 Crashed W attempt=3、victim 不写死、超限 feedback 边 attempt 0/1 两行、无残留非终态）；c（`:1752-1790` + `assert_rework_chain`：W/R/P 0/1、前进/回退边真实值、P1 消费 round2 review、archer 最终 artifact）；h（`gate_defer.rs:286-630`：迁移/备份/旧行默认/旧 payload v3/只读 exit4/L1 golden/新 run 三键/超限自环 0 行）。缺口：S-1 g 的图与行数断言错误；S-2 稳定性证据口径不实；S-3/S-4 表述矛盾（非实现偏差）。as-built 注（01:204、02:67/612、03:264、04:708、06:302/698）与 `main` 代码逐项吻合（见 §4.4） |
+| 代码结构合理性（文档/计划结构） | ⚠️（N-4/N-5 备注） | 16 文件全部在 Lead 授权范围（`doc/**` + 根 README）；按「07→01/02/03/04/06→DR/08/PROVENANCE→索引/台账→收口」分层提交，commit 粒度合理；08 采用「§8.9 W2a0 注记 + §8.9.1 W2a 实现证据」分册，未重写 8.0–8.8 历史；architecture-v2 仅加 banner 注记；DR-004 只追加 §10、不改 D1–D7。缺口：progress 新增「进行中」「遗留 ISSUE」两块（非四块结构，N-4）；issues 表格被空行断开（N-3） |
+| 逻辑性 | ⚠️（S-3/S-4 备注） | PROVENANCE §2 第 17 条 / §3 与实测一致（9/9 SHA-256、行数 6385/6668、08=524）；「W2a0 设计冻结 ≠ W2a 实现」的分层表述清晰；08 §8.9.1 模块-commit-REV-计数-台账四列与 REV-068…072 记录一致（除 dsl 首轮计数、e2e 待 REV-072 两处时点问题）；DR-005 R1–R5 修正落实（§6.4 超限证据、§7 h L1 拆分、§3.4 行 9、§3.3 伪代码 3/4/8、§12.3 commit 数）；ISSUE-104 fixed 有 e2e 产品提交+REV-072 支撑；ISSUE-105…109 内容与 REV-070/071/069/068 建议一一对应。缺口：S-3/S-4 内部矛盾；N-1/N-2 数字与时点 |
+| 可读性 | ✅（S-1/S-4、N-6/N-7 备注） | 中文术语一致（as-built/attempt-per-activation/deferred/dormant）；表格/代码块规范；交叉引用（DR-005 §7 a–h、REV-072、ISSUE-104..111、PROVENANCE 第 17 条）实测可解析；无未替换模板占位；新增 §8.9.1/§2 第 17 条编号连续。瑕疵：S-1 描述与文件不符、S-4 残留「待 Phase 2B」、README 历史压缩为 1 段摘要（N-6） |
+
+## 3. 发现清单
+
+> 级别口径：**阻塞** = 必须修复后才能给「通过」；**重要** = 必须修复或登记 ISSUE；**建议** = 可后置，但需修复或进台账。
+
+| # | 级别 | 位置 | 问题 | 建议 | 状态 |
+|---|---|---|---|---|---|
+| S1 | 重要 | `doc/spec-v1.2/07-验收用例.md:299`、`:301`；`doc/decisions/DR-005-w2a-defer-gate-freeze.md:592` | AC-14 g 的 as-built 图描述与 fixture 不符：实际 `tests/fixtures/graphs/defer_gate/defer_blocked.json` 两条 defer 边均为 `check_output{path:"go",equals:true}`（`py/defer_stub.py::stop` 返回 `{"go": False}`），文档写 `manual default false` /「恒 false」；且断言 `gate_results` 恰 2 行且均 `passed=false/deferred=true`，而 `gate_defer.rs::blocked_deferred_receipt_fails_with_run_deadlock:809-818` 断言 **3 行**（`start→a` 无 gate 1 行 passed + 自环 + a→b 2 行 deferred） | 改为 as-built：两条 defer 边 gate = `check_output{path:"go",equals:true}`（`a` 输出 `go=false`）；`gate_results` 3 行（1 无 gate passed + 2 deferred），并对照该测试复跑 | open |
+| S2 | 重要 | `07:257`、`07:316`、`08:512`、`DR-004:251`、`DR-005:595`、`PROVENANCE:143`、`doc/progress.md:5` | 「e2e 58/0/2、workspace 694/0/3，连续 5 轮全绿」与 REV-072 §4 证据不符：REV-072 记录 `gate_defer + software_team_v1` 连跑 **3 次**、`smoke_rework` 过滤连跑 **5 次**；无全量套件 5 轮记录 | 改为 REV-072 实际口径（3 次两 target + 5 次 smoke_rework 过滤），或补全量 5 轮的运行日志/命令证据后保留「5 轮」 | open |
+| S3 | 重要 | `07:288`、`03-调度器与生命周期.md:186`、`:261`、`DR-005:341`、`:382`、`08:520`、`DR-004:251`、`PROVENANCE:143` | 超限 GateResult 表述自相矛盾：既写「resolve 失败的那条边完全不产生 GateResult / 失败边 0 行」，又写「该边更早轮次 GateResult（如有）」；`07:288` 同句内又写「victim 的 `P→W.feedback` 边只有 attempt 0/1 两行」 | 统一为：「**超限那次求值**不产生 GateResult（sink 已关）；该边更早轮次的行保留（e 为 attempt 0/1 两行）；仅当首轮即超限（h 的 `max_attempts=1` 自环）时该边 0 行」 | open |
+| S4 | 重要 | `PROVENANCE:136`、`:137`、`07:19`、`doc/spec-v1.2/README.md:65`；并同步 `08:512`、`DR-004:251`、`progress:17` | Phase 2B 残留陈述与同批「已通过」矛盾：PROVENANCE 来源写「Phase 2B 进行中，最终证据另补」、07 写「a/b/f/g `#[ignore]` 待 Phase 2B」、07 资产表写「运行期待 Phase 2B」、spec README 写「最终证据另补」；而 `07:257` 已写「Phase 2B 已通过」，REV-072 已通过（e2e 分支 `2b2efb2`，无新增 `#[ignore]`） | 统一为「Phase 2B 已通过（e2e 分支 `d31e5d2`、REV-072 `2b2efb2`；最终 HEAD `301b91f` 仅 N1 断言收紧）」；`待 REV-072` 改为「REV-072 已通过、待合并」 | open |
+| N1 | 建议 | `PROVENANCE:161` | 「00/01/…/08 增量 95 行」与实测不符：00–08 由 6334→**6385**（净 +51）；本批 00–08 diff 为 +87/−36 | 改「增量 51 行（新增 87/删除 36）」或删去增幅数字 | open |
+| N2 | 建议 | `08:508`、`DR-004:247` | dsl 测试计数取 REV-069 首轮 85/664；N1–N4 修复后末态为 86/665（REV-069 §7） | 用末态 86/665，或写明「首轮 85/664 → 复审 86/665」 | open |
+| N3 | 建议 | `doc/issues.md:118` | ISSUE-109 与 ISSUE-110 之间多一个空行，把 ISSUE-110/111 与主表断开（Markdown 渲染断表，8 列表头丢失） | 删除空行，保持 104–111 连续同一表格 | open |
+| N4 | 建议 | `doc/progress.md:7-25` | 结构非「四块」：现有「当前阶段 / 里程碑表 / 进行中 / 下一步 / 阻塞 / 遗留 ISSUE」六块，且「遗留 ISSUE」与 `doc/issues.md` 台账重复（AGENTS §5 要求只保留四块） | 合并为「当前阶段 / 进行中任务 / 下一步 / 阻塞」四块；里程碑表与遗留 ISSUE 列表移到 DR/issues 引用（保持 ≤30 行） | open |
+| N5 | 建议 | `08:501` vs `08:496` | §8.9.1 头注称「不改 8.0–8.9 历史」，但同批把 §8.9 的 ISSUE-104 行改为 fixed（状态更新） | 头注补「§8.9 状态行同步更新除外」，或把状态变更只放 §8.9.1/台账 | open |
+| N6 | 建议 | `07:256-257`、`DR-004 §3 W2a DoD` | e2e c/e 运行期用 smoke 11/21（full 60/116 仅 validate/结构/hash）；DR-004 W2a DoD 写「真实 SOP v1 图 rework e2e」，两者口径需确认（W1 有 smoke 先例） | 在 07/08 明示「full 60/116 运行期未覆盖（沿用 W1 smoke 先例）」并由 Lead 确认，或登记 ISSUE | open |
+| N7 | 建议 | `README.md:13-22`（历史摘要 `:21`） | README 状态段把原 M5/M6 详细段压缩为「历史里程碑（摘要）」1 段；若 Lead 的「M0–M6 历史保留」指保留原段落，则属内容缩减 | 保留摘要 + 指向 DR-003/REV 索引的链接即可（当前已可追溯）；如要求原样保留则恢复简表 | open |
+| N8 | 建议 | `08:512`、`DR-004:251`、`progress:17`、`doc/index.md:21` | 语料时点：e2e 证据固定 `d31e5d2`，而 e2e 分支 HEAD 已 `301b91f`（REV-072 N1 修复，仅收紧 g message 断言）；REV-072 记录已存在（`2b2efb2`，通过）但文档仍写「待 REV-072」 | e2e 合并/rebase 时同步为最终 HEAD +「REV-072 已通过」；`doc/index.md` 的 REV-073 行在记录合并后更新 | open |
+
+## 4. 验证命令与结果
+
+### 4.1 范围、提交约定、增量 commit
+
+```bash
+cd /Users/zyzs/lczyzs/code/zgraph/.worktrees/docs-docs-w2a
+git status --porcelain --branch          # ## docs/docs-gate-defer-spec...origin/main [ahead 5]；评审前 clean
+git rev-parse HEAD origin/main           # 0eef2e37… / e7578f15…
+git log --oneline origin/main..HEAD
+# 0eef2e3 docs(process): 登记 ISSUE-110（REV-072 N2/N3）
+# d6561ac docs(docs): W2a 收口——e2e 证据/台账/README/PROVENANCE 终测
+# 6b8eb9a docs(process): W2a 收口——索引/架构注记/进度/台账 ISSUE-104..109
+# 46c8b3d docs(docs): DR-005 R1–R5 修正 + 08 §8.9.1 实现证据 + PROVENANCE 第 17 条
+# 20a9b89 docs(docs): W2a 实现回写 07 AC-14 校准 + 01/02/03/04/06 as-built
+git log origin/main..HEAD --format=%B | grep -c "Review: REV-073"   # 5
+git log origin/main..HEAD --format=%B | grep -c "Agent: docs-writer" # 5
+git diff --name-status origin/main...HEAD | wc -l                    # 16
+git diff --shortstat origin/main...HEAD                              # 16 files changed, 181 insertions(+), 97 deletions(-)
+git diff --name-status 0eef2e3^..0eef2e3                             # 6 files（issues/progress/08/PROVENANCE/spec README/DR-004）
+git diff --shortstat 0eef2e3^..0eef2e3                               # 6 files changed, 12 insertions(+), 7 deletions(-)
+git diff --name-only origin/main...HEAD | grep -E 'CLAUDE|\.rs$|\.py$|Cargo|scripts/|schemas/|doc/reviews/' || echo "(none)"
+# (none) → 无代码/测试/配置/CLAUDE/评审记录改动；16 文件均为 doc/** + 根 README（Lead 授权）
+```
+
+### 4.2 PROVENANCE 实测（SHA-256 / 行数）
+
+```bash
+cd doc/spec-v1.2
+shasum -a 256 0*.md
+# 00 ce92145f…d25c5（309）
+# 01 710f6c8f…bf85d（346）
+# 02 04820a7d…30928（935）
+# 03 85cc0408…e155b（489）
+# 04 46247060…ad513（906）
+# 05 52f35e7b…bf42（1429，未改）
+# 06 8ab4b5e2…c9ee（1117）
+# 07 6c13370a…f5bf7（330）
+# 08 7afb8c72…a793f（524）
+wc -l 0*.md | tail -1                                   # 6385
+wc -l 0*.md README.md PROVENANCE.md REFERENCES.md | tail -1  # 6668
+```
+
+- 9 个 SHA-256 与 `PROVENANCE.md:151-159` §3 表**逐字一致**；行数表（PROVENANCE §3 与 `spec-v1.2/README.md:24-32`）与本实测一致（含 08=524、07=330）。
+- `PROVENANCE` §2 第 17 条已记录本批（2026-10-31、REV-073、分支、范围、e2e 终证、台账、00–08 6385）✓；§2 第 15 条已恢复首轮 6308（REV-067 R7 关闭）✓。
+- 唯一数字瑕疵：§3 脚注「增量 95 行」与实测净 +51 不符（N1）。
+
+### 4.3 一致性 grep 与文件级核对
+
+```bash
+grep -n "Phase 2B\|待 REV-072\|连续 5 轮" doc/**/*.md doc/*.md README.md   # S-2/S-4/N8 残留点（见 §3）
+grep -n "manual default false\|恰 2 行" doc/spec-v1.2/07-验收用例.md doc/decisions/DR-005-w2a-defer-gate-freeze.md  # S-1
+grep -n "^| ISSUE-10[4-9]\|^| ISSUE-11[01]" doc/issues.md   # 104–111 连续；104 fixed/105–111 open
+grep -n "REV-072" doc/issues.md doc/spec-v1.2/08-审计关闭矩阵.md doc/decisions/DR-004-v02-scope-and-waves.md doc/index.md doc/progress.md  # 引用存在；时点待同步（N8）
+grep -n "R1–R15\|18 个 DSL 码" README.md doc/architecture-v2.md doc/spec-v1.2/02-DSL与校验.md  # README 目录 R1–R15 ✓；architecture 仅 banner 注记 ✓
+```
+
+- **AC-14 a/b/c/e/f/h 与 e2e 断言逐条对照一致**（见 §2 依据行号；`gate_defer.rs:656-824`、`software_team_v1.rs:1565-1907`）；g 见 S-1。
+- **as-built 注与 `main` 代码对照**（§4.4）全部吻合；06 DDL 三列确在表尾（`schema.rs:206-222`），`migrate_step(3)` 用 `GATE_RESULTS_V4_COLUMNS`（`:393-396`），`map_gate_row`/`parse_json_opt` 严格报错（`reader.rs:759-780`、`model.rs:479-486`）。
+- **08 §8.9.1 / DR-004 §10 证据表**：docs/dsl/trace/py-worker/kernel+cli 的 commit/REV/计数与 REV-067…071 记录一致；e2e 行与 REV-072 一致（8/0、11/1、58/0/2、694/0/3）——除 dsl 首轮 85/664（N2）、e2e「待 REV-072」（N8）、5 轮口径（S-2）。
+- **台账**：ISSUE-100/101 已 fixed 且引用 REV-067/069、REV-068 正确；ISSUE-104 fixed（e2e 提交+REV-072 支撑）✓；105–109 open 内容与 REV-070/071/069/068 建议对应 ✓；110（REV-072 N2/N3）、111（e2e trace fixture 路径归属）内容合理 ✓；ISSUE-062 保持 open ✓；编号 104–111 连续、无重复；仅 N3 的空行断表。
+- **DR-004 §10**：只追加执行记录，原 D1–D7/§3 决策未改 ✓。
+- **architecture-v2**：仅顶部 banner 注记（指向 02 R15 / 00 §0.4 18 码），D1–D12 未改 ✓。
+- **根 README**：状态段 `README.md:13-22` 实测 10 行（10–15 合规）；含 M0–M6 历史摘要、W2a0/W2a/下一步 W2b；目录 `crates/zgraph-dsl` 已改 **R1–R15** ✓。
+- **progress**：25 行（≤30）✓；「当前阶段 / 下一步 W2b / 阻塞（无硬阻塞）」准确；结构见 N4。
+
+### 4.4 e2e 证据交叉核验（只读 `test/e2e-gate-defer`，不修改）
+
+```bash
+cd /Users/zyzs/lczyzs/code/zgraph/.worktrees/e2e-e2e-writer
+git log --oneline -6
+# 301b91f test(e2e): 收紧 AC-14 g deadlock message 断言（REV-072 N1）
+# 2b2efb2 docs(review): REV-072 e2e W2a 返工验收（主审 reviewer-a，通过）
+# d31e5d2 … / 4e79562 / b80ea74 / 8ec09f1 / e7578f1
+# 说明：本评审时 e2e HEAD 已 301b91f（docs 证据固定 d31e5d2；N1 仅收紧 message 断言）
+grep -n "fn blocked_deferred_receipt_fails_with_run_deadlock" -A 45 tests/e2e/gate_defer.rs
+# 3 行 GateResult（start→a 无 gate 1 + 自环/a→b deferred 2）；message 断言 edge [2]/target [b]；
+grep -n "fn smoke_rework_" -A 120 tests/e2e/software_team_v1.rs
+# c/e 断言与 07 一致；超限 feedback 边 attempts 0/1 两行
+# 对照结果：07 a/b/c/e/f/h、DR-005 §7 a/b/c/e/f/h、DR-004 §10 计数与测试一致；
+#           07/DR §7 g 的 manual/「恰 2 行」与 fixture/测试不一致（S-1）
+# 稳定性证据：REV-072 §4「gate_defer + software_team_v1 连跑 3 次、smoke_rework 过滤 5 次」→ S-2
+# 读 REV-072：结论 通过；N1（g message 断言弱化）已由 301b91f 修复；N2/N3 由 ISSUE-110 承接；N4 由 07 落点更新关闭
+```
+
+### 4.5 门禁
+
+```bash
+cd /Users/zyzs/lczyzs/code/zgraph/.worktrees/docs-docs-w2a
+bash scripts/dev/check.sh     # CHECK PASSED（exit 0；含身份/冻结文件/禁用文件/语法/fmt/diff-check）
+git diff --check              # 通过（无空白错误）
+```
+
+- 本分支为纯文档改动（16 files 均 `doc/**` + 根 README），未跑 `cargo test`/`pytest`（合并门禁会跑）；as-built 复核使用 `main` 已合并代码与 e2e 只读分支，不修改二者。
+
+## 5. 遗留问题
+
+- **条件未关闭**：S-1…S-4 关闭前结论保持「有条件通过」，不得合并；关闭后增量复审转「通过」。
+- **建议项**：N-1…N-8 建议在本分支顺手修（N-1/N-2/N-3/N-4 为小改；N-5/N-6/N-7/N-8 为措辞/时点/口径），或登记 ISSUE 后置。
+- **跨批（非本分支可独立完成）**：
+  - e2e 分支 **REV-072 已通过**（`2b2efb2`），产品终证 `d31e5d2`，N1 修复 `301b91f`；本分支后续在 e2e 合并后 rebase 时需按最终 HEAD 复核 `d31e5d2` 引用与 `待 REV-072` 措辞（N8 / S-4）。
+  - ISSUE-110（REV-072 N2/N3：rework L2 outputs 无直接 e2e、4 个测试函数 >60 行）与 ISSUE-111（AGENTS §2 e2e 路径清单缺 `tests/fixtures/trace/**`）已登记；ISSUE-111 需 process/docs 后续同步 AGENTS §2 路径清单。
+  - full 60/116 SOP rework 图运行期覆盖率（N-6）需 Lead 确认沿用 W1 smoke 先例或登记 ISSUE。
+- 未发现：越界/禁用/冻结文件改动、未评审代码、历史决策被改写（DR-004 原决策、architecture D1–D12、08 §8.0–8.8 均未改）、模板占位、不可执行的悬空引用。
+
+## 6. 条件关闭记录（仅「有条件通过」填写）
+
+| 条件 | 关闭证据（需可复核） | 关闭日期 |
+|---|---|---|
+| S-1 AC-14 g as-built 图/行数修正（check_output{path:"go"}、3 行 gate_results） | 07:299/301 + DR-005:592 修订；`gate_defer.rs::blocked_deferred_receipt_fails_with_run_deadlock` 复跑一致 | 待 |
+| S-2 「连续 5 轮全绿」改为 REV-072 实测口径或补日志 | 07:257/316、08:512、DR-004:251、DR-005:595、PROVENANCE:143、progress:5 修订后与 REV-072 §4 一致 | 待 |
+| S-3 超限 GateResult 表述统一 | 07:288、03:186/261、DR-005:341/382、08:520、DR-004:251、PROVENANCE:143 统一为「该次求值不产生；更早轮次行保留；首轮即超限时 0 行」 | 待 |
+| S-4 Phase 2B 残留陈述清理（含「待 REV-072」） | PROVENANCE:136/137、07:19、spec README:65、08:512、DR-004:251、progress:17 改为「Phase 2B 已通过 / REV-072 已通过、待合并」 | 待 |
