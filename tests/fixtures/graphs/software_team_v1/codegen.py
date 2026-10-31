@@ -7,9 +7,10 @@
 
 - ``full``：11 个设计角色 + 16 个工作 agent + 16 个评审 + 16 个解析 + 1 个 ``end``
   = **60 节点 / 100 边**（参考图；e2e 只做 ``zgraph validate`` 与规模断言）；
-- ``smoke``：缩小但同构的单阶段链路——``planer`` 设计角色扇出 3 个工作 agent →
-  3 个评审 → 3 个解析 → ``archer`` 叶节点 = **11 节点 / 18 边**；fake LLM 按调用序
-  消费脚本，因此 smoke 只保留一条阶段链路（不跑 full）。
+- ``smoke``：缩小但同构的**合成单阶段链路**（不是 §4.1 矩阵的子集）——``planer``
+  设计角色扇出 3 个工作 agent → 3 个评审 → 3 个解析 → ``archer`` 叶节点 =
+  **11 节点 / 18 边**；fake LLM 按调用序消费脚本，因此 smoke 只保留一条阶段链路
+  （不跑 full）。评审 agent 可用 ``--review-agent`` 换成 e2e 失败路径变体。
 
 设计约束（附录 B）：
 
@@ -168,14 +169,14 @@ def _work_node(role: Role, item: str) -> dict[str, Any]:
     }
 
 
-def _review_node(role: Role, item: str) -> dict[str, Any]:
-    """评审节点：共享 ``design_reviewer`` 资产，``spec`` + ``result`` 到齐才执行。"""
+def _review_node(role: Role, item: str, review_agent: str) -> dict[str, Any]:
+    """评审节点：共享 ``review_agent`` 资产（缺省 ``design_reviewer``），``spec`` + ``result`` 到齐才执行。"""
     return {
         "id": f"{_item_base(role, item)}_review",
         "type": "agent_call",
         "inputs": [_input("spec", "any"), _input("result", "any")],
         "trigger": "all",
-        "config": {"agent_id": REVIEWER_AGENT},
+        "config": {"agent_id": review_agent},
     }
 
 
@@ -201,14 +202,18 @@ def _end_node(end_deps: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
-def build_nodes(roles: Sequence[Role], end_deps: tuple[str, ...]) -> list[dict[str, Any]]:
+def build_nodes(
+    roles: Sequence[Role],
+    end_deps: tuple[str, ...],
+    review_agent: str = REVIEWER_AGENT,
+) -> list[dict[str, Any]]:
     """按 §7 规则展开节点：``D`` + 每个 item 的 ``W/R/P`` + 可选 ``end``。"""
     nodes: list[dict[str, Any]] = []
     for role in roles:
         nodes.append(_design_node(role))
         for item in role.items:
             nodes.append(_work_node(role, item))
-            nodes.append(_review_node(role, item))
+            nodes.append(_review_node(role, item, review_agent))
             nodes.append(_parse_node(role, item))
     if end_deps:
         nodes.append(_end_node(end_deps))
@@ -277,10 +282,15 @@ def _profile(profile: str) -> tuple[Sequence[Role], tuple[str, ...]]:
     raise ValueError(f"unknown profile {profile!r}; expected one of {PROFILES}")
 
 
-def build_graph(profile: str) -> dict[str, Any]:
-    """生成一个 profile 的图定义，并自检节点/边规模（§4.1 参考规模）。"""
+def build_graph(profile: str, review_agent: str = REVIEWER_AGENT) -> dict[str, Any]:
+    """生成一个 profile 的图定义，并自检节点/边规模（§4.1 参考规模）。
+
+    ``review_agent`` 缺省 ``design_reviewer``；e2e 失败路径可用
+    ``design_reviewer_exhaust``（``max_iterations`` 耗尽的变体）覆盖
+    ``HARNESS_MAX_ITERATIONS``，其余结构不变。
+    """
     roles, end_deps = _profile(profile)
-    nodes = build_nodes(roles, end_deps)
+    nodes = build_nodes(roles, end_deps, review_agent)
     edges = build_edges(roles, end_deps)
     expected = EXPECTED_COUNTS[profile]
     actual = (len(nodes), len(edges))
@@ -310,7 +320,7 @@ def render(graph: dict[str, Any]) -> str:
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    """解析 ``--profile`` / ``--out``。"""
+    """解析 ``--profile`` / ``--out`` / ``--review-agent``。"""
     parser = argparse.ArgumentParser(description="software_team SOP v1 e2e 图 codegen")
     parser.add_argument(
         "--profile",
@@ -324,13 +334,21 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help="输出 JSON 文件路径（缺省写 stdout）",
     )
+    parser.add_argument(
+        "--review-agent",
+        default=REVIEWER_AGENT,
+        help=(
+            "评审 agent 资产 id（缺省 design_reviewer；e2e 失败路径可用 "
+            "design_reviewer_exhaust 覆盖 HARNESS_MAX_ITERATIONS）"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """写图 JSON；``--out`` 缺省时输出到 stdout。"""
     args = parse_args(argv)
-    graph = build_graph(args.profile)
+    graph = build_graph(args.profile, args.review_agent)
     text = render(graph)
     if args.out is None:
         sys.stdout.write(text)

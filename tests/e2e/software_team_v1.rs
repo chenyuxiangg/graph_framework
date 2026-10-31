@@ -25,7 +25,10 @@
 //! - **approved 链路**：smoke 的 planer → 3 工作 → 3 评审 → 3 解析 → archer 全 Completed；
 //!   每 item 独立实例；`P.artifact` 原样透传 W 产物（不是评审摘要）；approved gate 放行；
 //! - **失败路径**：评审 rework / 非法 JSON → `P` 抛错 → 实例 Crashed
-//!   （`NODE_PYTHON_EXCEPTION`）→ run Failed（不把 gate=false 的 Completed(null) 当失败）；
+//!   （`NODE_PYTHON_EXCEPTION`）；评审 `max_iterations` 耗尽 → `HARNESS_MAX_ITERATIONS`；
+//!   两种都 → run Failed（不把 gate=false 的 Completed(null) 当失败）；
+//! - **full 图符号/资产加载**（REV-065 S1）：32 个 `python_node` 的 `module.function` 在
+//!   运行期 `PYTHONPATH` 下真 import 可取属性；13 个 agent 资产 JSON 可解析、id 与图引用一致；
 //! - **手动 real-LLM smoke**（DR-004 §3 W1 / S1）：`#[ignore]`，**不进 CI**；显式
 //!   `ZGRAPH_REAL_LLM=1` + `DEEPSEEK_API_KEY` 时用真模型跑同一 smoke 图，只验证 prompt
 //!   约束（评审纯 JSON）与链路能到 Completed，**不能替代**上面的 fake 确定性断言。
@@ -71,6 +74,10 @@ const SMOKE_NODE_COUNT: usize = 11;
 const SMOKE_EDGE_COUNT: usize = 18;
 
 /// §4.1 依赖矩阵（测试侧独立 oracle：`(role, deps, items)`）。
+///
+/// **单一来源**：`tests/fixtures/graphs/software_team_v1/codegen.py` 的 `FULL_ROLES`
+/// 是生成图的权威数据；本常量是**独立手写副本**，只用设计稿 §4.1 作为 oracle 校验
+/// codegen 产物（防 codegen 与设计稿同时漂移），不是运行期数据源。
 const DESIGN_MATRIX: &[(&str, &[&str], &[&str])] = &[
     ("planer", &[], &["specification"]),
     (
@@ -116,8 +123,11 @@ const DESIGN_MATRIX: &[(&str, &[&str], &[&str])] = &[
 /// full profile 的 `end` 依赖（release 的 3 个 item）。
 const FULL_END_DEPS: &[&str] = &["release.notes", "release.changelog", "release.guide"];
 
-/// smoke profile 的 3 个 planer 工作 item（单阶段链路）。
+/// smoke profile 的 3 个 planer 工作 item（**合成单阶段链路，不是 §4.1 依赖矩阵的子集**）。
 const SMOKE_ITEMS: &[&str] = &["specification", "requirement_analysis", "iter_plan"];
+
+/// `HARNESS_MAX_ITERATIONS` 失败路径的评审 agent 变体（`max_iterations=1` + `echo` 工具）。
+const REVIEW_AGENT_EXHAUST: &str = "design_reviewer_exhaust";
 
 // ---------------------------------------------------------------------------
 // fixture / codegen / validate 辅助
@@ -135,12 +145,18 @@ fn codegen_path() -> PathBuf {
 
 /// 执行 codegen，返回生成的图 JSON 路径（`--out`）。
 fn generate_graph(dir: &Path, profile: &str) -> PathBuf {
+    generate_graph_with(dir, profile, &[])
+}
+
+/// 执行 codegen 并追加额外参数（如 `--review-agent design_reviewer_exhaust`）。
+fn generate_graph_with(dir: &Path, profile: &str, extra_args: &[&str]) -> PathBuf {
     let out = dir.join(format!("graph_{profile}.json"));
     let output = Command::new(common::python_program())
         .arg(codegen_path())
         .args(["--profile", profile])
         .arg("--out")
         .arg(&out)
+        .args(extra_args)
         .env(common::PYTHONDONTWRITEBYTECODE, "1")
         .current_dir(common::repo_root())
         .output()
@@ -382,6 +398,41 @@ fn unique_edge_triples(graph: &Value) -> BTreeSet<(String, String, String)> {
     triples
 }
 
+/// R14b 加载期只校验 `module.function` 格式、不 import；本辅助在**运行期**用同口径的
+/// `PYTHONPATH`（仓库 `python/` + fixture `py/`）真正 import 并取属性，补齐 full 图的
+/// 符号可加载性（REV-065 S1）。
+fn assert_python_symbols_importable(symbols: &[(String, String)]) {
+    let payload = serde_json::to_string(symbols).expect("serialize python symbols");
+    let script = r#"
+import importlib
+import json
+import sys
+
+for module_name, function_name in json.loads(sys.argv[1]):
+    module = importlib.import_module(module_name)
+    attribute = getattr(module, function_name)
+    assert callable(attribute), f"{module_name}.{function_name} is not callable"
+print("ok")
+"#;
+    let python_path =
+        std::env::join_paths([common::repo_root().join("python"), fixture_dir().join("py")])
+            .expect("join PYTHONPATH");
+    let output = Command::new(common::python_program())
+        .args(["-c", script, &payload])
+        .env("PYTHONPATH", python_path)
+        .env(common::PYTHONDONTWRITEBYTECODE, "1")
+        .current_dir(common::repo_root())
+        .output()
+        .expect("spawn python import check");
+    assert!(
+        output.status.success(),
+        "full 图 python_node 符号导入失败（exit={:?}）\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // full profile：60 节点 / 100 边，两次生成一致
 // ---------------------------------------------------------------------------
@@ -517,6 +568,98 @@ fn full_codegen_validates_with_60_nodes_100_edges_and_stable_hash() {
 }
 
 // ---------------------------------------------------------------------------
+// full 图符号/资产加载（REV-065 S1；不 run full 图）
+// ---------------------------------------------------------------------------
+
+/// REV-065 S1：full 图的 32 个 `python_node` 符号可 import、12 个被引用 agent 资产可解析。
+///
+/// `zgraph validate` 的 R14b 只校验 `module.function` **格式**、不 import（02 §2.6.2），
+/// 因此这里用运行期同口径 `PYTHONPATH` 真正 import 并取可调用属性；agent 资产则断言
+/// `agents/*.json` 可解析、文件名与 `id` 一致、`role_prompt_file` 存在、图引用的
+/// `agent_id` 全部命中（不跑 full 图）。
+#[test]
+fn full_graph_python_symbols_and_agent_assets_resolve() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph_path = generate_graph(dir.path(), PROFILE_FULL);
+    let graph = read_graph(&graph_path);
+
+    // 32 个 python_node：16 个工作 agent stub + 16 个解析节点（共享 parse_verdict.run）。
+    let python_nodes: Vec<(String, String)> = nodes(&graph)
+        .iter()
+        .filter(|node| node["type"] == Value::from("python_node"))
+        .map(|node| {
+            (
+                node["config"]["module"]
+                    .as_str()
+                    .expect("module")
+                    .to_string(),
+                node["config"]["function"]
+                    .as_str()
+                    .expect("function")
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(python_nodes.len(), 32, "16 工作 agent + 16 解析节点");
+    let distinct: BTreeSet<&(String, String)> = python_nodes.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        16 + 1,
+        "16 个不同工作项函数 + 1 个共享解析函数"
+    );
+    assert_python_symbols_importable(&python_nodes);
+
+    // agent 资产：13 个文件可解析（12 个被 full 图引用 + design_reviewer_exhaust 失败路径变体）。
+    let agents_dir = fixture_dir().join("agents");
+    let mut assets: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(&agents_dir).expect("读取 agents 目录") {
+        let path = entry.expect("agents 目录项").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读取资产 {} 失败: {error}", path.display()));
+        let asset: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("资产 {} 不是合法 JSON: {error}", path.display()));
+        let asset_id = asset["id"].as_str().expect("asset.id");
+        assert_eq!(
+            Some(asset_id),
+            path.file_stem().and_then(|stem| stem.to_str()),
+            "资产文件名应与 id 一致: {}",
+            path.display()
+        );
+        let prompt_file = asset["role_prompt_file"]
+            .as_str()
+            .expect("asset.role_prompt_file");
+        assert!(
+            agents_dir.join(prompt_file).is_file(),
+            "资产 {asset_id} 的 role_prompt_file 不存在: {prompt_file}"
+        );
+        assert!(
+            assets.insert(asset_id.to_string()),
+            "agent 资产 id 重复: {asset_id}"
+        );
+    }
+    let referenced: BTreeSet<String> = nodes(&graph)
+        .iter()
+        .filter_map(|node| node["config"]["agent_id"].as_str())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(referenced.len(), 12, "11 个设计角色 + 共享 design_reviewer");
+    for agent_id in &referenced {
+        assert!(
+            assets.contains(agent_id),
+            "图引用的 agent 资产不存在: {agent_id}"
+        );
+    }
+    assert_eq!(
+        assets.len(),
+        referenced.len() + 1,
+        "assets 目录 = 12 个被引用资产 + design_reviewer_exhaust 变体"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // smoke profile：11 节点 / 18 边（单阶段链路，同构）
 // ---------------------------------------------------------------------------
 
@@ -618,6 +761,9 @@ const FAKE_REWORK: &str = "fake_llm_rework.json";
 
 /// 非法 JSON 剧本（`review.content` 不可解析 → `P` 抛错）。
 const FAKE_INVALID_JSON: &str = "fake_llm_invalid_json.json";
+
+/// 预算耗尽剧本：`calls[1..]` 都是 `tool_calls`（评审 `max_iterations=1` → `HARNESS_MAX_ITERATIONS`）。
+const FAKE_MAX_ITERATIONS: &str = "fake_llm_max_iterations.json";
 
 /// `zgraph run` 的 smoke 公共参数（真 CLI + 真 kernel + 真 Python worker 子进程）。
 ///
@@ -962,6 +1108,121 @@ fn smoke_invalid_review_json_crashes_parse_and_fails_run() {
     let dir = tempfile::tempdir().expect("tempdir");
     let graph = generate_graph(dir.path(), PROFILE_SMOKE);
     assert_parse_failure_path(dir.path(), &graph, FAKE_INVALID_JSON, "not valid JSON");
+}
+
+/// 评审 agent `max_iterations` 耗尽 → `HARNESS_MAX_ITERATIONS` → 实例 Crashed → run Failed。
+///
+/// 证据（REV-065 C1；DR-004 W1 验收要求的失败路径）：
+///
+/// - 评审 agent 用独立变体 `design_reviewer_exhaust`（`max_iterations=1`，`tools=["echo"]`），
+///   不动既有 `design_reviewer` 资产；
+/// - fake 剧本 `calls[0]` 给 planer 文本响应，`calls[1..]` 都是 `tool_calls`（`echo`）：
+///   评审完成 1 次 LLM 调用 + 1 次工具执行后，下一轮预算检查命中上限
+///   （05 §5.5.2：`max_iterations` 是 LLM 调用轮次预算）；
+/// - 断言 run/CLI/实例/trace 四面一致，且 approved gate 未放行、archer 未执行。
+#[test]
+fn smoke_reviewer_max_iterations_crashes_review_and_fails_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = generate_graph_with(
+        dir.path(),
+        PROFILE_SMOKE,
+        &["--review-agent", REVIEW_AGENT_EXHAUST],
+    );
+    let (output, db) = run_smoke(dir.path(), &graph, FAKE_MAX_ITERATIONS);
+    assert_exit(&output, 1, "max_iterations 耗尽 run 应 exit 1");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["ok"], json!(false));
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(payload["run_output"], Value::Null);
+    assert_eq!(
+        payload["error"]["code"],
+        json!("HARNESS_MAX_ITERATIONS"),
+        "CLI --json.error.code"
+    );
+    let run_id = payload_run_id(&payload);
+
+    let reader = TraceReader::open_readonly(&db).expect("打开 trace 只读连接");
+    common::assert_lifecycle_shape(&reader, &run_id);
+    let run = common::run_row(&reader, &run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
+    assert_eq!(
+        run.error_code.as_deref(),
+        Some("HARNESS_MAX_ITERATIONS"),
+        "runs.error_code"
+    );
+
+    // 3 个评审实例都创建；至少一个 Crashed（其余并发实例被 run Failed 取消）。
+    let instances = reader.instances(&run_id).expect("query instances");
+    let review_rows: Vec<&InstanceRow> = instances
+        .iter()
+        .filter(|row| row.node_id.ends_with("_review"))
+        .collect();
+    assert_eq!(review_rows.len(), SMOKE_ITEMS.len(), "3 个评审实例");
+    let crashed: Vec<&InstanceRow> = review_rows
+        .iter()
+        .copied()
+        .filter(|row| row.status == TraceInstanceStatus::Crashed)
+        .collect();
+    assert!(
+        !crashed.is_empty(),
+        "至少一个评审实例应 Crashed: {review_rows:?}"
+    );
+    for row in &crashed {
+        assert_eq!(
+            row.error_code.as_deref(),
+            Some("HARNESS_MAX_ITERATIONS"),
+            "{} 实例错误码",
+            row.node_id
+        );
+        let error = row.error.as_ref().expect("Crashed 实例应有 error JSON");
+        assert_eq!(error["code"], json!("HARNESS_MAX_ITERATIONS"));
+        assert_eq!(error["kind"], json!("Harness"));
+        assert_eq!(error["harness_kind"], json!("MaxIterations"));
+        assert_eq!(
+            error["detail"]["max_iterations"],
+            json!(1),
+            "生效上限来自 design_reviewer_exhaust"
+        );
+        assert_eq!(
+            error["detail"]["pending_tool_calls"],
+            json!(["echo"]),
+            "证据：失败前已执行 tool loop（不是未调用就失败）"
+        );
+    }
+    assert!(
+        review_rows
+            .iter()
+            .all(|row| row.status != TraceInstanceStatus::Completed),
+        "评审实例不得 Completed"
+    );
+
+    // 评审没有产出 verdict → 解析节点全部未执行；approved gate 未放行；archer 未执行。
+    assert!(
+        instances
+            .iter()
+            .filter(|row| row.node_id.ends_with("_parse"))
+            .all(|row| row.status != TraceInstanceStatus::Completed),
+        "解析节点不得 Completed"
+    );
+    assert!(
+        instances
+            .iter()
+            .filter(|row| row.node_id == "archer")
+            .all(|row| row.status != TraceInstanceStatus::Completed),
+        "archer 不得 Completed"
+    );
+    let gates = reader.gate_results(&run_id).expect("query gate_results");
+    assert!(
+        gates
+            .iter()
+            .filter(|gate| gate.gate_fn.as_deref() == Some("check_output"))
+            .all(|gate| !gate.passed),
+        "approved gate 不得放行: {gates:?}"
+    );
+    assert!(
+        gates.iter().all(|gate| gate.to_node != "archer"),
+        "评审失败时不应有投递指向 archer: {gates:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

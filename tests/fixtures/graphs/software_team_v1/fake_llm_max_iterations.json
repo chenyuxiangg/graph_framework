@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "chunk_chars": 8,
+  "chunk_delay_ms": 0,
+  "calls": [
+    {
+      "kind": "text",
+      "content": "阶段任务包：需求分析 → 规格说明（smoke）",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 12
+      }
+    },
+    {
+      "kind": "tool_calls",
+      "content": null,
+      "stop_reason": "ToolCalls",
+      "tool_calls": [
+        {
+          "call_id": "call_echo_1",
+          "name": "echo",
+          "args": {
+            "note": "review-step"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 150,
+        "completion_tokens": 8
+      }
+    },
+    {
+      "kind": "tool_calls",
+      "content": null,
+      "stop_reason": "ToolCalls",
+      "tool_calls": [
+        {
+          "call_id": "call_echo_1",
+          "name": "echo",
+          "args": {
+            "note": "review-step"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 150,
+        "completion_tokens": 8
+      }
+    },
+    {
+      "kind": "tool_calls",
+      "content": null,
+      "stop_reason": "ToolCalls",
+      "tool_calls": [
+        {
+          "call_id": "call_echo_1",
+          "name": "echo",
+          "args": {
+            "note": "review-step"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 150,
+        "completion_tokens": 8
+      }
+    }
+  ],
+  "failures": []
+}
