@@ -115,6 +115,9 @@ pub struct TransitionRecord {
 }
 
 /// 门控结果记录（01 §1.5 / 04 §4.6.4；每条出边每次 publish 恰好一条）。
+///
+/// W2a0（DR-005 §4.1）：新增 [`Self::deferred`]/[`Self::attempt`]/[`Self::verdict`]
+/// 三个已冻结字段（04 §4.6.4 例外：只增这三个、仍不记录求值耗时）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GateResultRecord {
     /// 所属 run。
@@ -135,6 +138,16 @@ pub struct GateResultRecord {
     pub passed: bool,
     /// 求值异常描述。
     pub error: Option<String>,
+    /// 本次求值是否触发 defer（= `!passed && 边 on_gate_false == Defer`）。
+    ///
+    /// 是**本次求值结果**而非边的静态属性（边属性可从 `edge_index` 查
+    /// [`crate::CompiledEdge::on_gate_false`]，不重复入库）。
+    pub deferred: bool,
+    /// **发布者实例**的 attempt（非自环/未重入为 0）。
+    pub attempt: Attempt,
+    /// 门控判定值（仅内置 `check_output`/`compare` 且 `params.path` 为字符串）；
+    /// 只用于 trace/回放辅助，**不得**作为路由判据（路由只看 `passed`）。
+    pub verdict: Option<Value>,
     /// 求值时刻（UTC RFC3339 毫秒 Z）。
     pub ts: String,
 }

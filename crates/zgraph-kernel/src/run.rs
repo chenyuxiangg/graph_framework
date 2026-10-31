@@ -13,6 +13,15 @@
 //!   因此内置 `start/end` 的求值在事件循环内也安全）。
 //! - **I7/I8**：gate 异常只拦截边，不使 run Failed；事件循环不执行用户 Python。
 //!
+//! # W2a0：deferrable gate + attempt-per-activation（opt-in）
+//!
+//! `CompiledEdge.on_gate_false == OnGateFalse::Defer` 的边 gate=false 时**不结算**
+//! 目标入边、不触发 Skipped 级联，只更新 [`DeferredReceipt`]（DR-005 §3.1/§3.2）；
+//! gate=true 且目标当前实例已 `Completed` 时按 attempt-per-activation 新建重入实例
+//! （按端口继承上代 buffer + 清空节点级 settled 集，DR-005 §3.2 补全规则）；
+//! 静默后若 receipt 的目标节点从未实例化 → 确定性 `RUN_DEADLOCK`（DR-005 §3.4）。
+//! 无 defer 边的图（v0.1.0）走既有分支，行为不变（B6）。
+//!
 //! # 关键不变式
 //!
 //! - 状态迁移只经 [`transition`]（唯一入口）：非法迁移 → `RUN_ILLEGAL_TRANSITION`
@@ -26,7 +35,7 @@
 //!
 //! [`start_run`] 会 `tokio::spawn` 事件循环任务，**必须在 Tokio 运行时上下文中调用**。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,7 +43,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use zgraph_dsl::{NodeType, Trigger, DEFAULT_NODE_TIMEOUT_MS};
+use zgraph_dsl::{NodeType, OnGateFalse, Trigger, DEFAULT_NODE_TIMEOUT_MS};
 
 use crate::context::{NodeContext, NodeContextInit};
 use crate::executor::{CatchPanic, NodeExecutor};
@@ -356,6 +365,27 @@ struct InstanceBuffer {
     required: HashSet<PortName>,
 }
 
+/// 一条 defer 边最近一次「deferred 决策」的挂账记录（W2a0 / DR-005 §3.1，01 §1.4.1）。
+///
+/// **不因后续放行删除**（"最近一次 deferred 决策"语义）：dormant 判定只看目标节点
+/// **当前实例**状态（DR-005 §3.4），因此历史 receipt 不会造成误判。
+struct DeferredReceipt {
+    /// 边号（`CompiledGraph.edges` 下标）。
+    edge_index: EdgeIdx,
+    /// 做出 deferred 决策的发布者实例。
+    #[allow(dead_code)]
+    // W2a0 冻结的审计字段：v2 内核暂无读取方（错误 message 只含 edge/target 以保持确定性）。
+    source_instance: InstanceId,
+    /// 发布者实例 attempt（审计/排障）。
+    #[allow(dead_code)]
+    source_attempt: Attempt,
+    /// 边目标节点（= `CompiledEdge.to_node`）。
+    target_node: NodeId,
+    /// 最近一次 deferred 决策时刻（UTC RFC3339 毫秒 Z）。
+    #[allow(dead_code)]
+    updated_at: String,
+}
+
 /// 执行任务 → 事件循环的回传事件（01 §1.7）。
 enum RuntimeEvent {
     /// 节点成功（含 off-loop 已求值的全部出边 gate 结果）。
@@ -383,6 +413,9 @@ struct RunLoop {
     node_current: HashMap<NodeId, InstanceId>,
     buffers: HashMap<InstanceId, InstanceBuffer>,
     settled_by_node: HashMap<NodeId, HashSet<EdgeIdx>>,
+    /// defer 边挂账（W2a0；BTreeMap = 按 `EdgeIdx` 升序，保证 dormant/死锁判定与
+    /// 错误 message 的确定性）。
+    deferred_receipts: BTreeMap<EdgeIdx, DeferredReceipt>,
     ready_queue: VecDeque<InstanceId>,
     tasks: HashMap<InstanceId, JoinHandle<()>>,
     last_event_at: Instant,
@@ -433,6 +466,7 @@ impl RunLoop {
             node_current: HashMap::new(),
             buffers: HashMap::new(),
             settled_by_node: HashMap::new(),
+            deferred_receipts: BTreeMap::new(),
             ready_queue: VecDeque::new(),
             tasks: HashMap::new(),
             last_event_at: Instant::now(),
@@ -624,7 +658,12 @@ impl RunLoop {
         let _ = self.status_tx.send(status);
     }
 
-    /// 终止判定（03 §3.10）：Running 且静默 → 聚合 end 输出并 `Completed`。
+    /// 终止判定（03 §3.10）：Running 且静默 → 先判 deferred 死锁 → 聚合 end 输出。
+    ///
+    /// W2a0（DR-005 §3.4 / B4）：静默后如果还有 receipt 的目标节点**从未实例化**，
+    /// 该 defer 边永远不可能再交付 → 确定性 `RUN_DEADLOCK`（静默后不会再有新事件，
+    /// 因此不依赖 `deadlock_grace_ms`）；否则 `complete_run()`（目标实例已
+    /// `Completed`/`Skipped` → dormant，不阻塞）。暂停中不判定（status 早退）。
     fn check_termination(&mut self) -> Option<RunOutcome> {
         if self.status != RunStatus::Running {
             return None;
@@ -632,8 +671,42 @@ impl RunLoop {
         if !self.is_quiescent() {
             return None;
         }
+        if self.fail_if_blocked_deferred() {
+            return self.final_outcome.take();
+        }
         self.complete_run();
         self.final_outcome.take()
+    }
+
+    /// 静默后仍被 blocked 的 deferred receipt → 确定性 `RUN_DEADLOCK`（返回是否失败）。
+    ///
+    /// 只有「receipt 目标节点当前实例不存在（从未实例化）」才阻塞；实例存在时静默
+    /// 意味着它已是终态，`Completed`/`Skipped` 都视为 dormant（DR-005 §3.4 判定表）。
+    /// edge 升序（`BTreeMap`）与 target 去重保证 message 确定性。
+    fn fail_if_blocked_deferred(&mut self) -> bool {
+        let mut edges: Vec<String> = Vec::new();
+        let mut targets: Vec<NodeId> = Vec::new();
+        for receipt in self.deferred_receipts.values() {
+            if self.node_current.contains_key(&receipt.target_node) {
+                continue;
+            }
+            edges.push(receipt.edge_index.to_string());
+            if !targets.contains(&receipt.target_node) {
+                targets.push(receipt.target_node.clone());
+            }
+        }
+        if edges.is_empty() {
+            return false;
+        }
+        self.fail_run(RunError::new(
+            CODE_RUN_DEADLOCK,
+            format!(
+                "deferred receipt(s) blocked on edge(s) [{}]: target node(s) [{}] never instantiated",
+                edges.join(", "),
+                targets.join(", ")
+            ),
+        ));
+        true
     }
 
     /// 静默判定：无 Pending/Ready/Running 实例且就绪队列为空。
@@ -977,13 +1050,14 @@ impl RunLoop {
     /// 应用已求值的出边 gate 结果：门控记录 → 寻址 → 写 buffer/结算 → 就绪或 Skipped。
     ///
     /// **gate 拦截的投递不寻址**（ISSUE-061 / REV-026）：`GateResultRecord` 只依赖
-    /// edge/from/求值结果，不依赖目标实例；先判 `passed` 再 `resolve_target`，
-    /// 被拦截的投递就不会创建自环 attempt+1 的幻影实例，也不会因"投递到终态"
-    /// 或"自环超过 max_attempts"而 fail run（01 §1.4 的 `BlockedDelivery.to_instance`
-    /// 本就是 `Option`；03 §3.4.2 的 blocked 分支只结算入边 + Skipped 级联）。
+    /// edge/from/求值结果，不依赖目标实例；先判 `passed` 再寻址，被拦截的投递就不会
+    /// 创建自环 attempt+1 的幻影实例，也不会因"投递到终态"或"超过 max_attempts"而 fail run。
     ///
-    /// 放行分支仍保持 01 §1.4 的「先寻址再写 GateResult」顺序：寻址失败
-    /// （`RUN_DELIVERY_TO_TERMINAL` 等）不产生 GateResult，与既有测试/语义一致。
+    /// 放行分支保持 01 §1.4 的「先寻址再写 GateResult」顺序：寻址失败
+    /// （`RUN_DELIVERY_TO_TERMINAL` 等）不产生 GateResult。W2a0（DR-005 §3.3）沿用该
+    /// 顺序，只把 defer 边的寻址换成 attempt-per-activation；超限在寻址内创建 Crashed
+    /// 实例 + fail_run 后返回该实例，外层仍照常写 GateResult（与既有自环超限同序，
+    /// 但 sink 已关闭 → 该条不落 trace，冻结口径见 DR-005 §3.3）。
     fn apply_publish(
         &mut self,
         from_instance: &str,
@@ -1007,15 +1081,29 @@ impl RunLoop {
                 ));
                 return;
             };
+            let defer_edge = edge.on_gate_false == OnGateFalse::Defer;
             if !evaluation.passed {
+                // 两条 blocked 路径都先记录 GateResult（不可丢），再决定结算/挂账；
+                // 均不寻址（W2a0：defer 边 false 只写 receipt，不结算、不 Skipped）。
                 self.emit_gate_result(from_instance, from_node, &edge, evaluation);
+                if defer_edge {
+                    self.record_deferred_receipt(from_instance, &edge);
+                    continue;
+                }
                 self.settle_edge(&edge.to_node, edge.index);
                 self.maybe_skip_after_settle(&edge.to_node);
                 continue;
             }
-            let target = match self.resolve_target(from_instance, &edge.to_node, edge.index) {
-                Some(target) => target,
-                None => return,
+            // 放行：settle 边走 v0.1.0 寻址；defer 边走 attempt-per-activation。
+            let target = if defer_edge {
+                self.resolve_defer_target(from_instance, &edge)
+            } else {
+                self.resolve_target(from_instance, &edge.to_node, edge.index)
+            };
+            let Some(target) = target else {
+                // 寻址失败（`RUN_DELIVERY_TO_TERMINAL`）→ fail_run 已在 resolve 内完成，
+                // 不产生 GateResult；超限路径返回 Crashed 实例，不走这里。
+                return;
             };
             self.emit_gate_result(from_instance, from_node, &edge, evaluation);
             self.buffer_write(&target, &edge.to_port, output.clone());
@@ -1028,6 +1116,9 @@ impl RunLoop {
     }
 
     /// 记录一条 GateResult（不可丢 trace；只依赖 edge/from/求值结果，不依赖目标实例）。
+    ///
+    /// W2a0：`deferred` 是**本次求值结果**（`!passed && 边为 Defer`）；`attempt` 取
+    /// 发布者实例 attempt；`verdict` 由 off-loop 求值阶段一并取出（DR-005 §4.1）。
     fn emit_gate_result(
         &mut self,
         from_instance: &str,
@@ -1035,6 +1126,8 @@ impl RunLoop {
         edge: &CompiledEdge,
         evaluation: &GateEvaluation,
     ) {
+        let attempt = self.instances.get(from_instance).map_or(0, |r| r.attempt);
+        let deferred = !evaluation.passed && edge.on_gate_false == OnGateFalse::Defer;
         self.emitter.gate_result(GateResultRecord {
             run_id: self.run_id.clone(),
             instance_id: from_instance.to_string(),
@@ -1045,8 +1138,30 @@ impl RunLoop {
             gate_fn: edge.gate.as_ref().map(|gate| gate.function.clone()),
             passed: evaluation.passed,
             error: evaluation.error.clone(),
+            deferred,
+            attempt,
+            verdict: evaluation.verdict.clone(),
             ts: now_rfc3339(),
         });
+        self.last_event_at = Instant::now();
+    }
+
+    /// 写入/覆盖一条 defer 边的挂账记录（W2a0 / DR-005 §3.1）。
+    ///
+    /// 仅 defer 边 gate=false 时调用；同一 `EdgeIdx` 重复 deferred → 覆盖并刷新时刻；
+    /// **放行不删除**（dormant 只看目标节点当前实例状态）。
+    fn record_deferred_receipt(&mut self, from_instance: &str, edge: &CompiledEdge) {
+        let source_attempt = self.instances.get(from_instance).map_or(0, |r| r.attempt);
+        self.deferred_receipts.insert(
+            edge.index,
+            DeferredReceipt {
+                edge_index: edge.index,
+                source_instance: from_instance.to_string(),
+                source_attempt,
+                target_node: edge.to_node.clone(),
+                updated_at: now_rfc3339(),
+            },
+        );
         self.last_event_at = Instant::now();
     }
 
@@ -1068,18 +1183,25 @@ impl RunLoop {
                     .get(&instance_id)
                     .is_some_and(|record| record.status.is_terminal());
                 if terminal {
-                    self.fail_run(RunError::new(
-                        CODE_RUN_DELIVERY_TO_TERMINAL,
-                        format!(
-                            "delivery on edge {edge_index} targets terminal instance of node '{to_node}'"
-                        ),
-                    ));
-                    return None;
+                    return self.fail_delivery_to_terminal(to_node, edge_index);
                 }
                 Some(instance_id)
             }
             None => self.create_instance(to_node, 0, None),
         }
+    }
+
+    /// `RUN_DELIVERY_TO_TERMINAL` 冷峻失败（寻址阶段失败 → 不产生 GateResult）。
+    fn fail_delivery_to_terminal(
+        &mut self,
+        to_node: &str,
+        edge_index: EdgeIdx,
+    ) -> Option<InstanceId> {
+        self.fail_run(RunError::new(
+            CODE_RUN_DELIVERY_TO_TERMINAL,
+            format!("delivery on edge {edge_index} targets terminal instance of node '{to_node}'"),
+        ));
+        None
     }
 
     /// 自环：每次投递新建实例 `attempt+1`；超过 `max_attempts` → 新实例 Crashed。
@@ -1108,6 +1230,191 @@ impl RunLoop {
             return created;
         }
         self.create_instance(to_node, attempt, None)
+    }
+
+    // -- W2a0：defer 边寻址与 attempt-per-activation --------------------------
+
+    /// defer 边放行时的寻址（W2a0 / DR-005 §3.2 决策矩阵行 5–8）。
+    ///
+    /// - 自环：`attempt = source.attempt + 1`（B3，不双重递增）；
+    /// - 非自环：目标无实例 → 惰性 attempt0（复用 [`Self::resolve_target`]）；
+    ///   目标 `Completed` 且类型为 `end` → `RUN_DELIVERY_TO_TERMINAL`（B2，不 attempt+1）；
+    ///   其它 `Completed` → `attempt = 目标当前实例.attempt + 1` 重入；
+    ///   目标终态非 `Completed` → `RUN_DELIVERY_TO_TERMINAL`（防御）；非终态 → 当前实例。
+    ///
+    /// 返回 `None` 表示已在内部 `fail_run`（`RUN_DELIVERY_TO_TERMINAL`）。
+    fn resolve_defer_target(
+        &mut self,
+        from_instance: &str,
+        edge: &CompiledEdge,
+    ) -> Option<InstanceId> {
+        if edge.from == edge.to_node {
+            return self.resolve_defer_self_loop(from_instance, edge);
+        }
+        let Some(current) = self.node_current.get(&edge.to_node).cloned() else {
+            return self.resolve_target(from_instance, &edge.to_node, edge.index);
+        };
+        let current_status = self.instances.get(&current).map(|record| record.status);
+        match current_status {
+            Some(InstanceStatus::Completed) => {
+                let is_end = self
+                    .graph
+                    .nodes
+                    .get(&edge.to_node)
+                    .is_some_and(|node| node.node_type == NodeType::End);
+                if is_end {
+                    return self.fail_delivery_to_terminal(&edge.to_node, edge.index);
+                }
+                let current_attempt = self.instances.get(&current).map_or(0, |r| r.attempt);
+                self.resolve_defer_reentry(edge, current_attempt.saturating_add(1), &current)
+            }
+            Some(status) if status.is_terminal() => {
+                self.fail_delivery_to_terminal(&edge.to_node, edge.index)
+            }
+            _ => Some(current),
+        }
+    }
+
+    /// defer 自环：attempt 语义保持 `source.attempt + 1`（不双重递增）；超限 → Crashed。
+    fn resolve_defer_self_loop(
+        &mut self,
+        from_instance: &str,
+        edge: &CompiledEdge,
+    ) -> Option<InstanceId> {
+        let source_attempt = self.instances.get(from_instance).map_or(0, |r| r.attempt);
+        let attempt = source_attempt.saturating_add(1);
+        let max_attempts = self
+            .graph
+            .nodes
+            .get(&edge.to_node)
+            .map_or(1, |node| node.max_attempts);
+        if attempt >= max_attempts {
+            let message = format!(
+                "self-loop of node '{}' exceeded max_attempts ({max_attempts})",
+                edge.to_node
+            );
+            let run_error = RunError::new(
+                CODE_NODE_INTERNAL,
+                format!("{message} on edge {}", edge.index),
+            );
+            return self.create_crashed_reentry(edge, attempt, message, run_error);
+        }
+        self.create_reentry_instance(edge, attempt, from_instance)
+    }
+
+    /// defer（非自环）重入：`attempt = 目标当前实例.attempt + 1`；超限 → Crashed。
+    fn resolve_defer_reentry(
+        &mut self,
+        edge: &CompiledEdge,
+        attempt: Attempt,
+        previous_instance: &str,
+    ) -> Option<InstanceId> {
+        let max_attempts = self
+            .graph
+            .nodes
+            .get(&edge.to_node)
+            .map_or(1, |node| node.max_attempts);
+        if attempt >= max_attempts {
+            let message = format!(
+                "defer re-entry of node '{}' exceeded max_attempts ({max_attempts}) on edge {} (attempt {attempt})",
+                edge.to_node, edge.index
+            );
+            let run_error = RunError::new(CODE_NODE_INTERNAL, message.clone());
+            return self.create_crashed_reentry(edge, attempt, message, run_error);
+        }
+        self.create_reentry_instance(edge, attempt, previous_instance)
+    }
+
+    /// 超限：创建 Crashed 实例（`NodeError::Internal`）并 `fail_run(NODE_INTERNAL)`。
+    ///
+    /// 与既有自环超限（[`Self::resolve_self_loop`]）同序：先创建实例、再 fail_run；
+    /// 外层随后仍会调用 `emit_gate_result`，但 sink 已关闭，故该条不落 trace
+    /// （W2a0 冻结口径，DR-005 §3.3）。
+    fn create_crashed_reentry(
+        &mut self,
+        edge: &CompiledEdge,
+        attempt: Attempt,
+        crash_message: String,
+        run_error: RunError,
+    ) -> Option<InstanceId> {
+        let created = self.create_instance(
+            &edge.to_node,
+            attempt,
+            Some(NodeError::Internal {
+                message: crash_message,
+            }),
+        );
+        self.fail_run(run_error);
+        created
+    }
+
+    /// 创建 defer 重入实例：新 Pending 实例 + 按端口继承 + 清空节点级 settled 集。
+    ///
+    /// 顺序（DR-005 §3.2 补全规则 / Lead 2026-10-31 裁决）：
+    /// 1. [`Self::create_instance`]：Pending、`required` 从节点声明重建、写快照、
+    ///    更新 `node_current`；
+    /// 2. 清空 `settled_by_node[target]`，让新代重新结算自己的入边（否则上一代
+    ///    "全部入边已结算"会让新 Pending 实例被 `maybe_skip_after_settle` 误判 `Skipped`）；
+    /// 3. **按端口继承**：只继承「该端口声明入边 `on_gate_false != Defer`」的
+    ///    `values`/`arrived`（深拷贝）；入边为 defer 的端口必须由当前这一代重投，
+    ///    否则目标会拿上一代输入提前就绪（stale-input，缺陷 A）。
+    fn create_reentry_instance(
+        &mut self,
+        edge: &CompiledEdge,
+        attempt: Attempt,
+        previous_instance: &str,
+    ) -> Option<InstanceId> {
+        let instance_id = self.create_instance(&edge.to_node, attempt, None)?;
+        self.settled_by_node.remove(&edge.to_node);
+        self.inherit_reentry_inputs(&instance_id, previous_instance, &edge.to_node);
+        Some(instance_id)
+    }
+
+    /// 把上一代实例 buffer 中「非 defer 入边端口」的值继承到重入实例。
+    ///
+    /// 继承通过 `buffer_write` 完成（同时写入 `values` 与 `arrived`）。继承的非 defer
+    /// 入边**不回填**节点级 settled 集：这些边的上游已完成、不会重投，节点可能永远
+    /// "非全结算"——不影响就绪（只看 buffer arrived），且避免 skip 级联误触发。
+    fn inherit_reentry_inputs(
+        &mut self,
+        new_instance: &str,
+        previous_instance: &str,
+        node_id: &str,
+    ) {
+        let Some(previous_values) = self
+            .buffers
+            .get(previous_instance)
+            .map(|buffer| buffer.values.clone())
+        else {
+            return;
+        };
+        let inherited = self.inherited_ports(node_id, &previous_values);
+        for (port, value) in inherited {
+            self.buffer_write(new_instance, &port, value);
+        }
+    }
+
+    /// 目标节点中「上一代已到达且入边 `on_gate_false != Defer`」的端口与值。
+    fn inherited_ports(
+        &self,
+        node_id: &str,
+        previous_values: &HashMap<PortName, Value>,
+    ) -> Vec<(PortName, Value)> {
+        let Some(node) = self.graph.nodes.get(node_id) else {
+            return Vec::new();
+        };
+        node.inputs
+            .iter()
+            .filter_map(|port| {
+                let value = previous_values.get(&port.name)?;
+                let edge_index = self.graph.edge_index().incoming_edge(node_id, &port.name)?;
+                let source = self.graph.edges.get(edge_index)?;
+                if source.on_gate_false == OnGateFalse::Defer {
+                    return None;
+                }
+                Some((port.name.clone(), value.clone()))
+            })
+            .collect()
     }
 
     /// 创建实例（惰性/自环/入口共用）；`crash` 为 Some 时直接以 Crashed 创建。
@@ -1713,6 +2020,8 @@ fn evaluate_outgoing(graph: &CompiledGraph, node_id: &str, output: &Value) -> Ve
                     edge_index: *edge_index,
                     passed: true,
                     error: None,
+                    // W2a0：无 gate 边没有「判定值」（DR-005 §4.1）。
+                    verdict: None,
                 },
                 Some(gate) => evaluate_gate_for(*edge_index, gate, output),
             };

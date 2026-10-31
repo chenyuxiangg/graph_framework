@@ -225,3 +225,97 @@ fn gate_is_pure_does_not_mutate_output() {
     );
     assert_eq!(output, snapshot);
 }
+
+fn verdict(op: &str, params: Value, output: Value) -> Option<Value> {
+    evaluate_gate(&gate(op, params), &output).verdict
+}
+
+/// W2a0：`check_output` 的 verdict 是路径原始值（即便 gate 判定不通过）。
+#[test]
+fn check_output_verdict_is_path_value_even_when_gate_blocks() {
+    assert_eq!(
+        verdict(
+            "check_output",
+            json!({"path": "verdict", "equals": "approved"}),
+            json!({"verdict": "rework"})
+        ),
+        Some(json!("rework"))
+    );
+    assert_eq!(
+        verdict(
+            "check_output",
+            json!({"path": "nested.value", "exists": true}),
+            json!({"nested": {"value": false}})
+        ),
+        Some(json!(false)),
+        "exists 判定通过时也取路径值"
+    );
+}
+
+/// 路径不存在 / 中间非 object → verdict=None（不是错误，只是没有判定值）。
+#[test]
+fn verdict_is_none_when_path_missing_or_intermediate_not_object() {
+    assert_eq!(
+        verdict(
+            "check_output",
+            json!({"path": "missing", "equals": 1}),
+            json!({})
+        ),
+        None
+    );
+    assert_eq!(
+        verdict(
+            "check_output",
+            json!({"path": "a.b.c", "equals": 1}),
+            json!({"a": {"b": [1]}})
+        ),
+        None
+    );
+}
+
+/// W2a0：`compare` 同样取 `params.path` 的路径值。
+#[test]
+fn compare_verdict_is_path_value() {
+    assert_eq!(
+        verdict(
+            "compare",
+            json!({"path": "n", "op": "gt", "value": 2}),
+            json!({"n": 3})
+        ),
+        Some(json!(3))
+    );
+    assert_eq!(
+        verdict(
+            "compare",
+            json!({"path": "v", "op": "in", "value": [1]}),
+            json!({"v": 1})
+        ),
+        Some(json!(1))
+    );
+}
+
+/// manual / 非字符串 path / 求值异常 → verdict=None（DR-005 §4.1）。
+#[test]
+fn manual_and_error_evaluations_have_no_verdict() {
+    assert_eq!(
+        verdict("manual", json!({"default": true}), json!({"v": 1})),
+        None
+    );
+    assert_eq!(
+        verdict(
+            "check_output",
+            json!({"path": 1, "equals": 1}),
+            json!({"v": 1})
+        ),
+        None
+    );
+    assert_eq!(
+        verdict(
+            "check_output",
+            json!({"path": "v", "in": "x"}),
+            json!({"v": 1})
+        ),
+        None,
+        "path 是 string 但求值异常 → None"
+    );
+}

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use zgraph_dsl::{
     AgentCallConfig, ExecClass, GraphEdge, GraphMetadata, GraphNode, InputPort, LoadedGraph,
-    NodeConfig, NodeType, OutputPort, PythonNodeConfig, SubgraphDefinition, Trigger,
+    NodeConfig, NodeType, OnGateFalse, OutputPort, PythonNodeConfig, SubgraphDefinition, Trigger,
     DEFAULT_MAX_ATTEMPTS, DEFAULT_NODE_TIMEOUT_MS,
 };
 
@@ -98,6 +98,12 @@ pub struct CompiledEdge {
     pub to_port: PortName,
     /// 可选门控（None = 恒放行）。
     pub gate: Option<CompiledGate>,
+    /// 边级「门控失败策略」（W2a0 / DR-005 §2.4）：DSL `on_gate_false` 的编译期
+    /// 补齐值；作者未写时为 [`OnGateFalse::Settle`]（v0.1.0 语义）。
+    ///
+    /// `Settle`：gate=false → 结算目标入边 + `maybe_skip` 级联（v0.1.0）；
+    /// `Defer`：gate=false → 只写 deferred receipt（不结算、不 Skipped）。
+    pub on_gate_false: OnGateFalse,
 }
 
 /// 边索引（01 §1.1.2；取代 v1.1 的自引用 `EdgeRef`）。
@@ -336,6 +342,8 @@ fn compile_edges(edges: &[GraphEdge]) -> Result<Vec<CompiledEdge>, CompileError>
             to_node: edge.to_node.clone(),
             to_port: edge.to_input_port.clone(),
             gate,
+            // W2a0：DSL 缺省 `None` 在编译期补齐为 `Settle`（不回写 DSL、不参与 hash）。
+            on_gate_false: edge.on_gate_false.unwrap_or_default(),
         });
     }
     Ok(compiled)

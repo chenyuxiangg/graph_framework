@@ -4,7 +4,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use zgraph_dsl::{ExecClass, GateOp, NodeType, Trigger};
+use zgraph_dsl::{ExecClass, GateOp, NodeType, OnGateFalse, Trigger};
 use zgraph_kernel::{CompiledGraph, CompiledHandler};
 
 #[test]
@@ -182,4 +182,40 @@ fn compile_returns_arc_with_stable_hash() {
     let second = CompiledGraph::compile(&loaded).expect("compile");
     assert_eq!(first.graph_hash, second.graph_hash);
     assert_eq!(first.dsl_json, second.dsl_json);
+}
+
+/// W2a0：`CompiledEdge.on_gate_false` 编译期补齐——缺省 `Settle`、显式 `defer` 保留。
+#[test]
+fn compiles_on_gate_false_policy_and_defaults() {
+    let text = r#"{
+      "version": "1.0",
+      "metadata": {"name": "defer-policy"},
+      "entry_points": ["start"],
+      "nodes": [
+        {"id": "start", "type": "start", "inputs": [], "config": {}},
+        {"id": "loop", "type": "python_node",
+         "inputs": [
+           {"name": "seed", "type": "any", "required": true},
+           {"name": "again", "type": "any", "required": false}
+         ],
+         "config": {"module": "m", "function": "f"}}
+      ],
+      "edges": [
+        {"from": "start", "to_node": "loop", "to_input_port": "seed"},
+        {"from": "loop", "to_node": "loop", "to_input_port": "again",
+         "gate": {"function": "manual", "params": {}},
+         "on_gate_false": "defer"}
+      ]
+    }"#;
+    let graph = common::compile_text(text);
+    assert_eq!(graph.edges[0].on_gate_false, OnGateFalse::Settle);
+    assert_eq!(graph.edges[1].on_gate_false, OnGateFalse::Defer);
+
+    // 显式 "settle" 与缺省同语义（hash 差异属 DSL 层，本测试只锁定编译产物）。
+    let explicit = text.replace(
+        r#""on_gate_false": "defer""#,
+        r#""on_gate_false": "settle""#,
+    );
+    let graph = common::compile_text(&explicit);
+    assert_eq!(graph.edges[1].on_gate_false, OnGateFalse::Settle);
 }

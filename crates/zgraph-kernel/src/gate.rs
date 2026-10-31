@@ -14,6 +14,9 @@
 //! - 任何求值异常（参数形状不对、比较类型不匹配）→ `passed=false` + `error` 描述，
 //!   **绝不**向上抛错或使 run Failed（I7）。
 //! - `GateEvaluation.error` 会进入 `GateResultRecord.error` 供 trace/severity 使用。
+//! - **W2a0（DR-005 §4.1）**：`check_output`/`compare` 且 `params.path` 为字符串时，
+//!   `GateEvaluation.verdict` 取 `output` 在该点分路径上的原始值；其余（含求值异常）
+//!   为 `None`。`verdict` 只进 trace/排障，**不参与路由**（路由只看 `passed`）。
 //!
 //! # 各 op 语义
 //!
@@ -76,7 +79,10 @@ impl CompiledGate {
 }
 
 /// 单条出边的 gate 求值结果（01 §1.7；随 `NodeCompleted` 回传，事件循环只应用）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// W2a0：新增 [`Self::verdict`]（仅 trace/排障用，**不得**作为路由判据；路由只看
+/// [`Self::passed`](Self::passed)，DR-005 §4.1）。
+#[derive(Debug, Clone, PartialEq)]
 pub struct GateEvaluation {
     /// 被求值的边（`CompiledGraph.edges` 下标）。
     pub edge_index: EdgeIdx,
@@ -84,6 +90,10 @@ pub struct GateEvaluation {
     pub passed: bool,
     /// 求值异常描述（类型错误/参数错误时 Some；合法 False 返回为 None）。
     pub error: Option<String>,
+    /// 门控判定值（W2a0 / DR-005 §4.1）：仅内置 `check_output`/`compare` 且
+    /// `params.path` 为字符串时，取发布者 `output` 在该点分路径上的原始值；
+    /// 路径不存在/中间非 object/求值异常/`manual`/无 gate → `None`。
+    pub verdict: Option<Value>,
 }
 
 /// 求值门控（无 `EdgeIndex` 上下文的便捷入口）。
@@ -97,6 +107,7 @@ pub fn evaluate_gate(gate: &CompiledGate, output: &Value) -> GateEvaluation {
 /// 求值指定边上的门控（发布路径使用；`edge_index` 原样写入结果）。
 ///
 /// 纯函数：只读 `gate.params` 与 `output`，不发事件、不改数据（I7）。
+/// `verdict` 在同一次求值内一并取出（W2a0；事件循环不二次读 `output`）。
 pub fn evaluate_gate_for(
     edge_index: EdgeIdx,
     gate: &CompiledGate,
@@ -107,10 +118,31 @@ pub fn evaluate_gate_for(
         GateOp::Compare => evaluate_compare(gate, output),
         GateOp::Manual => evaluate_manual(gate),
     };
+    let verdict = evaluate_verdict(gate, output, error.is_some());
     GateEvaluation {
         edge_index,
         passed,
         error,
+        verdict,
+    }
+}
+
+/// 提取门控判定值（W2a0 / DR-005 §4.1；仅 trace/排障，不参与路由）。
+///
+/// 只对内置 `check_output`/`compare` 生效：`params` 是 object 且 `params.path`
+/// 是字符串时，返回 `output` 在该点分路径上的原始值（路径不存在/中间非 object →
+/// `None`）；`manual`、`params.path` 非字符串、本次求值已报错 → `None`。
+fn evaluate_verdict(gate: &CompiledGate, output: &Value, has_error: bool) -> Option<Value> {
+    if has_error {
+        return None;
+    }
+    match gate.op {
+        GateOp::CheckOutput | GateOp::Compare => {
+            let params = gate.params.as_object()?;
+            let path = params.get("path").and_then(Value::as_str)?;
+            resolve_path(output, path).cloned()
+        }
+        GateOp::Manual => None,
     }
 }
 
