@@ -107,21 +107,36 @@
     - **DR-004**：追加 §10 执行记录（用户 2026-10-31 确认 A1–A7「按推荐」+ W1 交付证据）；DR 不属于 spec 分册，不参与 §3 hash 清单。
     - 其余 00–06/08 分册未改；本批次后按 §3 重新实测 07 SHA-256/行数与合计（**6051 行**）。
 
+15. **W2a0 返工设计冻结批次**（2026-10-31，REV-067；分支 `docs/docs-rework-design`）：
+    - **来源**：DR-004 §3 W2a0 / §5 D1 / §3 W2a DoD / §6；REV-063 C9/C11/S12；用户 2026-10-31 确认 A1–A7。**本批是设计冻结（docs only）**，不宣称 W2a 实现完成；语义冻结见 [`../decisions/DR-005-w2a-defer-gate-freeze.md`](../decisions/DR-005-w2a-defer-gate-freeze.md)（评审编号 REV-067，记录由评审人撰写）。
+    - **00**：banner 增 W2a0 批次；§0.3 增 `OnGateFalse` 枚举（`Settle`/`Defer`，Default=Settle）；§0.4 DSL 域新增第 18 码 `DSL_DEFER_NOT_REENTRANT`（17→18）并补运行期 defer 注记（`RUN_DELIVERY_TO_TERMINAL`/`RUN_DEADLOCK`/`NODE_INTERNAL` 复用）；§0.5 `DEFAULT_MAX_ATTEMPTS` 语义扩为「自环与 defer 重入统一上限」；§0.7 增 gate=false/目标已 Completed 两条消歧；§0.8 07 行改 AC-01..AC-14。
+    - **01**：banner 增 W2a0；`CompiledEdge.on_gate_false`（缺省编译期补齐）；§1.2.2 寻址表增 defer 挂账/attempt-per-activation 行；新增 **§1.4.1 `DeferredReceipt`** 与 per-port 继承/`settled_by_node` 重置规则；§1.5 `GateResultRecord` 增 `deferred`/`attempt`/`verdict`；§1.6 `RunState.deferred_receipts`（BTreeMap）；§1.7 `GateEvaluation.verdict`；§1.3 buffer 初始化注记。
+    - **02**：banner 增 W2a0；§2.2.1 增 `on_gate_false` 行与 `max_attempts` 语义；§2.2.2/§2.2.4 白名单 + serde S-2/S-5/S-6；§2.2.3 类型桶；§2.3.3 自查表增 R15（不适用）；§2.1.2/§2.1.3 L2 增 R15、执行顺序 `R1→R13→R15→R14`；§2.4 标题/总表/模板/正反例/裁定（D-02-11/12）同步 R15 与 `DSL_DEFER_NOT_REENTRANT`；§2.7 码数 18/顺序；§2.8.2/§2.8.3 hash 前置与 `on_gate_false` 投影；§2.9.2/§2.9.3 编译映射；§2.10/§2.11 同步。
+    - **03**：banner 增 W2a0；§3.4.1 gate 求值返回 `verdict`；§3.4.2 应用摘要；新增 **§3.4.3 defer 边应用与 attempt-per-activation**（决策矩阵、按端口继承 + settled 重置、end/自环/超限、伪代码）；§3.6 注记；§3.9.3/§3.10 dormant 与确定性 `RUN_DEADLOCK`；§3.15 矩阵补 4 行。
+    - **04**：banner 增 W2a0；§4.6.4 `GateResultRecord` 增三字段并明确「不记耗时」仍有效、后续新增须升 spec 版本。
+    - **06**：banner 增 W2a0；trace schema **v4**（`TRACE_SCHEMA_VERSION=4`）；§6.2.2 v4 口径 + M6 v3 历史口径保留；§6.2.8 DDL 增 `deferred`/`attempt`/`verdict_json` 并修订 04 §4.6.4 引文；§6.2.10 查询模式；§6.2.12 payload 映射；§6.3.3 deferred 不改 severity；§6.7 迁移改 v4（新库单事务 1/2/3/4、逐版本、备份/回滚/只读拒绝）；§6.10.2 validate R1–R15；§6.10.4/§6.10.6/§6.10.7 回放与 `--json` 注记。
+    - **07**：banner 增 W2a0；新增 **AC-14（a–h）**并加入 §7.1/§7.2 与 DoD；AC-04 码数 17→18 + `defer_not_reentrant.json` 反例；Pass 标准 AC-01..AC-14；DoD「15 条校验」。
+    - **08**：只追加 **§8.9 W2a0 注记**（不动 8.0–8.8 历史快照）；登记 ISSUE-100 设计层关闭、ISSUE-101 承接、architecture-v2 跨册残留（C-7）。
+    - **SOP**：`doc/design/software-team-sop-v1.md` 升 **v1.1**（approved-only v1 语义不变 + rework v1.1：双 profile、环上可重入边全 defer、`P→W.feedback` 回边、`max_attempts` 预算、codegen `--mode`、§9/§10/§11 同步；DR-005 §6）。
+    - **索引/README**：`doc/spec-v1.2/README.md` 行数/状态注记同步；`doc/index.md` 增 DR-005 行、SOP 描述改 v1.1、reviews 范围补 REV-062–066 与 REV-067 待评审。
+    - **冲突/补全**（DR-005 §11）：C-1 B1 buffer 继承（**Lead 2026-10-31 裁决**：per-port 继承 + 重入实例清空 `settled_by_node`）、C-2 `W.feedback` 可选端口、C-3/C-5 04 §4.6.4 例外、C-4 R15 执行顺序例外、C-6 DR-004 两条 defer 边为最小子集、C-7 architecture-v2 残留不改；E-1–E-5 边界冻结（E-3 receipt 不消费）。**v3 seed（`tests/fixtures/trace/schema_v3_seed.sql`）W1 未交付，改由 W2a e2e 交付**（W1 遗留缺口，Lead 已登记 ISSUE）。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6308 行**）。
+
 ## 3. 文件清单（SHA-256 + 行数）
 
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | a9b12764821a8476d965f5351d6d9a1d274c8d47b603a2e641fcb8f54fdd12aa | 294 |
-| `01-领域模型与状态机.md` | accb0e481fbd101a00a03a8a95518862b6f6232745667959e4bb646fbe28c283 | 302 |
-| `02-DSL与校验.md` | 30d9ba6794407f6e13c3cf88a5c276f821b1cf30034c33801eb172a6e48c947e | 913 |
-| `03-调度器与生命周期.md` | 4aaca988e89b91881c5aa17df83f778ecb21a656e21594589a321bae6a6be9c0 | 390 |
-| `04-节点接口与扩展点.md` | 625095fff24e769f4c8e4fe019ac50d186e86657b37b6f7c3ed05d9b22d29377 | 895 |
+| `00-总纲.md` | 1877e0c9415671aabf814cab46ecd0e76681ab9c1863dabcc34a6b0352a53366 | 309 |
+| `01-领域模型与状态机.md` | 6aacb0e415fbfb9004913a06d026ce4eb40ad7257b81e6355b3bbe00519ec48b | 343 |
+| `02-DSL与校验.md` | ea707c54a444399da5de4fd5d192f3cfeb951578b94027ac244d761b5df821c6 | 930 |
+| `03-调度器与生命周期.md` | d27e7a3b6374c91591305d9fb5bbf7ec867c855371f1b356dd7e8032533c2257 | 467 |
+| `04-节点接口与扩展点.md` | 2255ae77fbb8f878eddd90ac0a45528f4b628ddc59a026c4e24cf320d75c7f1c | 903 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | 2dc8793a3df49a0b9a4e5a04d14f3af8aa570cd02c4d89fcb237aab991279dbb | 1096 |
-| `07-验收用例.md` | a02afcd5b2a42a3afcbd34a2947d7e9238632c892c0f576c982af4b06273ff92 | 254 |
-| `08-审计关闭矩阵.md` | 16e274c5b9948f5c0a843af4ceefe103727b025c83b66f9d47acbe3274d57213 | 478 |
+| `06-存储与可观测.md` | 6e7fa2248e948ed9ebeeafcb055c0c25e4fa678a1324bdd9d3d3d396749bf9c6 | 1108 |
+| `07-验收用例.md` | 73c5c426585d51b60e3534397b7edd80afcee6520c03564ae83187dde63c0ad1 | 322 |
+| `08-审计关闭矩阵.md` | 020b020361b47aafd94608a36a10d87c7a74f73aaf89ee0f586366d046cbe917 | 497 |
 
-> 00–08 合计 **6051 行**（`wc -l` 口径；2026-10-31 **W1 SOP v1 回写批次后**实测（仅 07 AC-13；见 §2 第 14 条）；此前 M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准。
+> 00–08 合计 **6308 行**（`wc -l` 口径；2026-10-31 **W2a0 返工设计冻结批次后**实测（00/01/02/03/04/06/07/08；见 §2 第 15 条）；此前 W1 SOP v1 批次为 6051 行、M6 批次为 6038 行（分支 `docs/docs-m6-writeback`、评审 REV-057，base 含 M6 实现 REV-040–060 + REV-061 wrapup，REV-048/ISSUE-082 合并 `main` `5192168`、REV-056/ISSUE-088 合并 `main` `3d227fc`）的本地 `main`）；含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 6568 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
@@ -143,3 +158,4 @@ wc -l 0*.md
 - **M5 ISSUE-066 回写已完成（2026-10-30，REV-035 第三批）**：03 §3.15 / 06 §6.2.5.1 / architecture §8.2 已回写 `NODE_WORKER_CRASH` 的 `signal`/`exit_code`/`stderr_tail` 证据字段与边界；08 §8.7 记 ISSUE-066 fixed（REV-031）；台账状态由 Lead 收口。
 - **REV-035 评审条件已关闭（2026-10-30）**：C1/C2/C3 + 建议已在同一分支追加提交（未改写评审记录）；等待 reviewer-a 复审翻「通过」。
 - **M6 回写已完成（2026-10-31，REV-057）**：05/06/07/08 正文与 `architecture-v2.md` §5.2 已同步 M6 已实现口径（REV-040/041/042/043/044/047/048/049/050/052/055/056/058/060；REV-061 属 wrapup、仅用于 ISSUE-096 登记）；03 §3.12 与 04 A7/A17/§4.2 的双通道临时口径同步撤销；08 只追加 §8.8 M6 注记（8.0–8.7 历史快照不改）。**ISSUE-082（REV-048）与 ISSUE-088（REV-056）均已合并并回写**；ISSUE-095 保持 open（kernel hostname 口径差）、ISSUE-096 仍 pending（open，待 REV-061 wrapup 合并后置 fixed）；正文无未合并实现的 pending 占位。
+- **W2a0 返工设计冻结已完成（2026-10-31，REV-067）**：00/01/02/03/04/06/07/08 已按 DR-005 冻结 deferrable gate（`on_gate_false`）、R15/`DSL_DEFER_NOT_REENTRANT`、`DeferredReceipt`/attempt-per-activation（per-port 继承 + `settled_by_node` 重置）、trace schema v4、AC-14；SOP 设计稿升 v1.1。**本批是设计冻结，不代表 W2a 实现完成**；实现偏差由 W2a-docs 回写。`doc/architecture-v2.md` 的 `R1–R14`/17 码口径未在本批同步（DR-005 §11 C-7），建议 W2a-docs/process 收口。
