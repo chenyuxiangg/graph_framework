@@ -25,7 +25,10 @@
 //! - **approved 链路**：smoke 的 planer → 3 工作 → 3 评审 → 3 解析 → archer 全 Completed；
 //!   每 item 独立实例；`P.artifact` 原样透传 W 产物（不是评审摘要）；approved gate 放行；
 //! - **失败路径**：评审 rework / 非法 JSON → `P` 抛错 → 实例 Crashed
-//!   （`NODE_PYTHON_EXCEPTION`）→ run Failed（不把 gate=false 的 Completed(null) 当失败）。
+//!   （`NODE_PYTHON_EXCEPTION`）→ run Failed（不把 gate=false 的 Completed(null) 当失败）；
+//! - **手动 real-LLM smoke**（DR-004 §3 W1 / S1）：`#[ignore]`，**不进 CI**；显式
+//!   `ZGRAPH_REAL_LLM=1` + `DEEPSEEK_API_KEY` 时用真模型跑同一 smoke 图，只验证 prompt
+//!   约束（评审纯 JSON）与链路能到 Completed，**不能替代**上面的 fake 确定性断言。
 //!
 //! fake 剧本按**调用序**消费（05 §5.3.4 / harness `fake.rs`）：smoke 的执行顺序是确定的
 //! （planer 唯一先执行 → 3 个评审并发但结论内容相同 → archer 等 3 个 approved 到齐），
@@ -616,11 +619,11 @@ const FAKE_REWORK: &str = "fake_llm_rework.json";
 /// 非法 JSON 剧本（`review.content` 不可解析 → `P` 抛错）。
 const FAKE_INVALID_JSON: &str = "fake_llm_invalid_json.json";
 
-/// `zgraph run` 的 smoke 参数：真 CLI + fake LLM + 真 Python worker 子进程。
+/// `zgraph run` 的 smoke 公共参数（真 CLI + 真 kernel + 真 Python worker 子进程）。
 ///
 /// `--python-path` 顺序：仓库 `python/`（`zgraph_worker` + `workers.software_team.parse_verdict`）
-/// → fixture `py/`（工作 agent stub `software_team_stub`）；fake 脚本按调用序消费。
-fn smoke_run_args(graph: &Path, db: &Path, fake: &str) -> Vec<String> {
+/// → fixture `py/`（工作 agent stub `software_team_stub`）；LLM provider 由调用方追加。
+fn smoke_run_base_args(graph: &Path, db: &Path) -> Vec<String> {
     let assets = fixture_dir();
     vec![
         "run".to_string(),
@@ -639,9 +642,22 @@ fn smoke_run_args(graph: &Path, db: &Path, fake: &str) -> Vec<String> {
         arg(&common::repo_root().join("python")),
         "--python-path".to_string(),
         arg(&assets.join("py")),
-        format!("--fake-llm={}", assets.join(fake).display()),
         "--json".to_string(),
     ]
+}
+
+/// fake-LLM smoke 参数：在公共参数上追加 `--fake-llm=<脚本>`（按调用序消费）。
+fn smoke_run_args(graph: &Path, db: &Path, fake: &str) -> Vec<String> {
+    let mut args = smoke_run_base_args(graph, db);
+    args.push(format!("--fake-llm={}", fixture_dir().join(fake).display()));
+    args
+}
+
+/// real-LLM 手动 smoke 参数：在公共参数上追加 `--real`（真实 DeepSeek，需 API key）。
+fn real_smoke_run_args(graph: &Path, db: &Path) -> Vec<String> {
+    let mut args = smoke_run_base_args(graph, db);
+    args.push("--real".to_string());
+    args
 }
 
 /// 跑一次 smoke；返回 CLI 输出与 trace DB 路径。
@@ -946,4 +962,148 @@ fn smoke_invalid_review_json_crashes_parse_and_fails_run() {
     let dir = tempfile::tempdir().expect("tempdir");
     let graph = generate_graph(dir.path(), PROFILE_SMOKE);
     assert_parse_failure_path(dir.path(), &graph, FAKE_INVALID_JSON, "not valid JSON");
+}
+
+// ---------------------------------------------------------------------------
+// real-LLM 手动 smoke（`#[ignore]`，不进 CI；DR-004 §3 W1 / S1）
+// ---------------------------------------------------------------------------
+
+/// real-LLM smoke 的显式开关（与 `harness_ac08` 的 `ac08b_real_llm_manual` 同口径）。
+const ZGRAPH_REAL_LLM_ENV: &str = "ZGRAPH_REAL_LLM";
+
+/// 真实 DeepSeek 的 API key 环境变量（与 agent 资产 `model.api_key_env` 一致）。
+const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+
+/// **手动** real-LLM smoke：fake LLM 链路之外，用真实 DeepSeek 跑一遍 smoke 图。
+///
+/// 定位（DR-004 §3 W1 / S1）：
+///
+/// - **不进 CI**（`#[ignore]`），默认不执行；只有显式 `--ignored` 且设置
+///   `ZGRAPH_REAL_LLM=1` 与 `DEEPSEEK_API_KEY` 时才真正发起网络调用，否则打印
+///   `[skip]` 并返回；
+/// - **不能替代** fake 链路的确定性断言：fake 用例负责编排/门控/产物透传/失败路径；
+///   本用例只验证真实模型下 prompt 约束（评审 content 为纯 JSON）与整条 smoke 链路
+///   能走到 `Completed`，用于人工验收 prompt 质量/模型行为；
+/// - 只断言**模型无关**的结构事实：run `Completed`、11 个实例 `Completed`、3 个评审
+///   content 可解析且 `verdict=approved`、`P.artifact` 原样透传 W 产物、approved gate
+///   放行；不断言 comments 文案（模型输出不稳定）。
+///
+/// 手动执行：
+///
+/// ```bash
+/// ZGRAPH_REAL_LLM=1 DEEPSEEK_API_KEY=<key> \
+///   CARGO_HOME=<repo>/.cargo-home ZGRAPH_PYTHON=<repo>/.venv/bin/python \
+///   cargo test -p zgraph-e2e --test software_team_v1 -- --ignored --nocapture real_llm_smoke
+/// ```
+#[test]
+#[ignore = "manual: 需 ZGRAPH_REAL_LLM=1 与 DEEPSEEK_API_KEY（真实 DeepSeek 网络调用，不进 CI）"]
+fn real_llm_smoke_manual() {
+    if std::env::var(ZGRAPH_REAL_LLM_ENV).as_deref() != Ok("1") {
+        eprintln!("[skip] 未设置 ZGRAPH_REAL_LLM=1，跳过真实模型 smoke");
+        return;
+    }
+    if std::env::var(DEEPSEEK_API_KEY_ENV)
+        .map(|key| key.trim().is_empty())
+        .unwrap_or(true)
+    {
+        eprintln!("[skip] 缺少 DEEPSEEK_API_KEY，跳过真实模型 smoke");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = generate_graph(dir.path(), PROFILE_SMOKE);
+    let db = dir.path().join("real_llm_smoke.db");
+    let output = run_cli(&real_smoke_run_args(&graph, &db), dir.path());
+    assert!(
+        output.status.success(),
+        "real-LLM smoke 未 Completed（exit={:?}）\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        stderr_text(&output)
+    );
+    let payload = json_stdout(&output);
+    assert_eq!(payload["ok"], json!(true));
+    assert_eq!(payload["status"], json!("Completed"));
+    let run_id = payload_run_id(&payload);
+
+    let reader = TraceReader::open_readonly(&db).expect("打开 trace 只读连接");
+    common::assert_lifecycle_shape(&reader, &run_id);
+    let instances = reader.instances(&run_id).expect("query instances");
+    assert_eq!(
+        instances.len(),
+        SMOKE_NODE_COUNT,
+        "11 个节点各一个实例: {instances:?}"
+    );
+    assert!(
+        instances
+            .iter()
+            .all(|row| row.status == TraceInstanceStatus::Completed),
+        "real-LLM smoke 的实例应全 Completed: {instances:?}"
+    );
+
+    let planer_content = assert_agent_package(
+        &completed_instance(&reader, &run_id, "planer")
+            .output_json
+            .expect("planer output"),
+    );
+    assert!(
+        !planer_content.trim().is_empty(),
+        "真实模型的设计角色 content 不应为空"
+    );
+
+    for item in SMOKE_ITEMS {
+        let review_content = assert_agent_package(
+            &completed_instance(&reader, &run_id, &format!("planer_{item}_review"))
+                .output_json
+                .expect("评审 output"),
+        );
+        let review_json: Value = serde_json::from_str(&review_content).unwrap_or_else(|error| {
+            panic!("真实模型评审 content 必须是 JSON（design_reviewer prompt 约束）: {error}\n{review_content}")
+        });
+        assert_eq!(
+            review_json["verdict"],
+            json!("approved"),
+            "真实模型评审未输出 approved（v1 无返工通道 → P 会抛错）: {review_content}"
+        );
+
+        let work_output = completed_instance(&reader, &run_id, &format!("planer_{item}"))
+            .output_json
+            .expect("工作 agent output");
+        let parse_output = completed_instance(&reader, &run_id, &format!("planer_{item}_parse"))
+            .output_json
+            .expect("解析节点 output");
+        assert_eq!(
+            parse_output["artifact"], work_output,
+            "真实模型评审链路下 P.artifact 仍须原样透传 W 产物"
+        );
+    }
+
+    let gates = reader.gate_results(&run_id).expect("query gate_results");
+    let approved_gates: Vec<&GateResultRow> = gates
+        .iter()
+        .filter(|gate| gate.gate_fn.as_deref() == Some("check_output"))
+        .collect();
+    assert_eq!(
+        approved_gates.len(),
+        SMOKE_ITEMS.len(),
+        "3 条 approved gate 投递: {approved_gates:?}"
+    );
+    assert!(
+        approved_gates.iter().all(|gate| gate.passed),
+        "真实模型 smoke 的 approved gate 应全部放行: {approved_gates:?}"
+    );
+
+    let archer_content = assert_agent_package(
+        &completed_instance(&reader, &run_id, "archer")
+            .output_json
+            .expect("archer output"),
+    );
+    assert!(
+        !archer_content.trim().is_empty(),
+        "archer 叶节点 content 不应为空"
+    );
+    eprintln!(
+        "[ok] real-LLM smoke: run={run_id} Completed, {} 个 approved item 走到 archer",
+        SMOKE_ITEMS.len()
+    );
 }

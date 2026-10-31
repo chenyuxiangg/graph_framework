@@ -23,6 +23,20 @@
 实现是**纯函数**（``build_graph`` / ``build_nodes`` / ``build_edges``）+ ``main``，
 只用 stdlib：无随机数、无时间戳、字典按构造顺序序列化，同参数两次生成字节级一致
 （e2e 断言两次生成的 graph_hash 相同）。
+
+用法（在仓库根执行）::
+
+    # full 参考图（60 节点/100 边）→ 文件
+    python tests/fixtures/graphs/software_team_v1/codegen.py --profile full --out /tmp/software_team_full.json
+
+    # smoke 单阶段链路（11 节点/18 边）→ 文件
+    python tests/fixtures/graphs/software_team_v1/codegen.py --profile smoke --out /tmp/software_team_smoke.json
+
+    # 省略 --out 时输出到 stdout；--profile 缺省为 full
+    python tests/fixtures/graphs/software_team_v1/codegen.py --profile smoke
+
+生成后可用 ``zgraph validate <graph.json> --assets-dir tests/fixtures/graphs/software_team_v1``
+校验（含 R14c agent 资产索引）；e2e 即按此链路执行。
 """
 
 from __future__ import annotations
