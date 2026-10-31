@@ -79,6 +79,7 @@
 | [REV-075](REV-075-kernel-max-fanout.md) | 2026-10-31 | kernel（含 cli 跨模块机械 arm） | `feat/kernel-max-fanout` | 通过（W2b 运行期每激活扇出上限 + `NODE_FANOUT_EXCEEDED`/canonical JSON；kernel 110、`--features test-hooks` 120、cli 161；P3 建议 → ISSUE-117–120；第二评审 lead 已追加 cli arm） | reviewer-b（主审）+ lead（cli 第二评审） |
 | [REV-076](REV-076-e2e-max-fanout.md) | 2026-10-31 | e2e | `test/e2e-max-fanout` | 通过（W2b AC-15 a/b/c 真链路：静态反例/正例/运行期 test-hooks；`max_fanout` 6/0、e2e 64/0/2、workspace 725/0/3；P3 建议 → ISSUE-121–124） | reviewer-a |
 | [REV-077](REV-077-docs-fanout-spec.md) | 2026-10-31 | docs | `docs/docs-fanout-spec` | 通过（条件关闭见记录 §6；W2b spec 00/01/02/03/06/07 回写 + PROVENANCE 第 18 条 + AC-15/索引/台账；C1–C4 于条件修复提交关闭） | reviewer-b |
+| [REV-078](REV-078-docs-human-design.md) | 2026-10-31 | docs | `docs/docs-human-design` | 通过（首轮有条件通过 → C1–C5 关闭 + R1–R4 收口后复审通过；W3a0 设计冻结：DR-006 + spec 00/01/02/03/04/06/07 冻结 + trace v5/decide 契约 + AC-16 设计） | reviewer-b |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
@@ -92,3 +93,5 @@
 - M6（已全部合并到 main，2026-10-31）：REV-039（kickoff/DR-003）、REV-040–045（W1）、REV-046（W1 收口）、REV-047–056（W2/W3：fail-stop、runs 两列、global_vars、human 实时、079 共享限流、081 拆分、086 e2e、088 主机加固）、REV-057（spec 回写）、REV-058（merge 门禁 clippy，计划外）、REV-060（e2e 工具共享上限适配，计划外）、REV-061（wrapup）。**REV-051、REV-059 未创建**（ISSUE-080 并入 REV-057；059 编号未使用）。跨模块：REV-047/048/049/052 为多模块（Lead 批准 + 第二评审 reviewer-a）；REV-057/058/061 为 docs/process。
 
 - W2b（已全部合并到 main，2026-10-31）：REV-074（dsl `max_fanout` + R16，dsl-dev/reviewer-a）、REV-075（kernel 运行期每激活扇出上限 + `NODE_FANOUT_EXCEEDED` + cli 机械 arm，kernel-dev；reviewer-b 主审 + lead cli 第二评审）、REV-076（e2e AC-15 静态/正例/运行期 test-hooks，e2e-dev/reviewer-a）、REV-077（docs spec 回写 00/01/02/03/06/07 + PROVENANCE 第 18 条 + AC-15/索引/台账，docs-dev/reviewer-b；首轮有条件通过，C1–C4 于条件修复提交关闭后复审通过）。
+
+- W3a0（已全部合并到 main，2026-10-31）：REV-078（docs 设计冻结：DR-006 + spec 00/01/02/03/04/06/07 冻结 + AC-16 a–g 设计 + trace schema v5/decide 契约，docs-dev/reviewer-b；首轮有条件通过 → C1–C5 关闭 + R1–R4 收口后复审通过）。下一步 W3a 实现（trace v5 → kernel WaitingHuman → cli decide/consumer → e2e AC-16）。
