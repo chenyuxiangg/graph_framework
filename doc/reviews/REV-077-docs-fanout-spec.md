@@ -11,7 +11,7 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（2026-10-31 复审修订：首轮结论为「有条件通过」；条件 C1–C4 与 P3 已于 **`d8bd58e`** 全部关闭，复审证据见 §7。以下首轮正文、§2 表格的 ⚠️ 时点判定、§3 的 `open` 时点状态与 §5 首轮条件陈述**保留供追溯**，关闭状态以 §6/§7 为准。）
 
 as-built 主体正确、可追溯性完整：R16 静态层与运行期 §3.4.4 的语义/错误码/模板/计数口径与已合并实现（`220f53c`/`a4cb1b1`/`9a91076` 时点）逐条吻合；07 AC-15 引用的测试文件、6+6+2 个用例名与实测计数真实；PROVENANCE §3 的 9 个分册 SHA-256 与行数**实测 9/9 一致**；DR-004 §10 只追加不改原决策；progress 15 行四块；issues 113–124 追加合规；**无代码/测试/评审记录改动**。
 
@@ -110,7 +110,66 @@ git log --oneline -14：... 1fa4cc0 feat(dsl) → 220f53c docs(review) REV-074
 
 | 条件 | 关闭证据（需可复核） | 关闭日期 |
 |---|---|---|
-| C1 修 06 §6.10.2 validate 规则集（N1）：`R1–R16` + `R1→R13→R15→R16→R14` + `--structure-only` 含 R16 | `doc/spec-v1.2/06-存储与可观测.md:833` 修订后与 02 §2.1.2/§2.7.4 一致，`grep -n "R1–R15"` 在 06 无命中 | 待关闭 |
-| C2 修 02 §2.6.1 子图校验摘要（N2）：611/622 补 R15/R16（或改 00:183 引用为 §2.4.1 R6），与 §2.4.1 R6 行一致 | 两处修订后 02 内 `grep "R4/R5/R8–R13"` 仅剩合法历史语境；00:183 引用成立 | 待关闭 |
-| C3 修 03 §3.4.4 trace 证据措辞（N3）：改为实例快照/`instances` 行（无 Transition 记录），§3.15 同口径 | `03:291`/`:519` 修订后与 `bridge.rs:141-145`、`run.rs:1486-1543` 一致 | 待关闭 |
-| C4 关闭 C1–C3 后重测并同步：C1/C2 涉及 02/06（C3 涉及 03）的 SHA-256 变化 → 更新 PROVENANCE §3 对应 SHA-256（行数若变同步 §2 第 18 条/spec README 行数表）；重跑 `bash scripts/dev/check.sh` 与 `cargo test -p zgraph-e2e --test max_fanout` 全绿；提交信息正文含 `Review: REV-077` / `Agent: docs-dev` | 复审段贴出新 SHA-256/行数与命令结果 | 待关闭 |
+| C1 修 06 §6.10.2 validate 规则集（N1）：`R1–R16` + `R1→R13→R15→R16→R14` + `--structure-only` 含 R16 | `doc/spec-v1.2/06-存储与可观测.md:833` 现为「02 R1–R16；`R1→R13→R15→R16→R14`；`--structure-only` 只跑 R1–R13 + R15 + R16」；`grep "R1–R15\|R1→R13→R15→R14"` 在 06 **0 命中** | **已关闭 2026-10-31（`d8bd58e`，§7.2）** |
+| C2 修 02 §2.6.1 子图校验摘要（N2）：611/622 补 R15/R16（或改 00:183 引用为 §2.4.1 R6），与 §2.4.1 R6 行一致 | `02:611/622` 已补 **R15/R16**（子图内违规收敛 `DSL_SUBGRAPH_INVALID`、保留内部 `node_id`），与 §2.4.1 R6 行一致；`00:183` 引用改为「主图见 §2.4.1 R16；子图递归含 R15/R16 见 §2.6.1 / §2.4.1 R6」，不再落空 | **已关闭 2026-10-31（`d8bd58e`，§7.2）** |
+| C3 修 03 §3.4.4 trace 证据措辞（N3）：改为实例快照/`instances` 行（无 Transition 记录），§3.15 同口径 | `03:291` 改为 **Crashed 实例快照**（`instances` upsert；**不产生** `transitions`/`events` 行；证据 = `instances` 行 + `error` JSON + `RunFinished.error`），`03:519` §3.15 同口径；与 `bridge.rs:141-145`、`run.rs:1486-1543` 一致 | **已关闭 2026-10-31（`d8bd58e`，§7.2）** |
+| C4 关闭 C1–C3 后重测并同步：PROVENANCE §3 SHA-256（行数若变同步 §2 第 18 条/spec README 行数表）；重跑门禁；提交正文含 `Review: REV-077`/`Agent: docs-dev` | PROVENANCE §2 第 19 条 + §3 重算：00/02/03/06/07 的 SHA-256 与行数实测一致；00–08 仍 **6491**、spec 目录 **6795**；`check.sh` PASSED、`cargo test -p zgraph-e2e --test max_fanout` **6/0**；提交正文含 `Review: REV-077`/`Agent: docs-dev` | **已关闭 2026-10-31（`d8bd58e`，§7.3）** |
+
+## 7. 条件关闭与复审（2026-10-31）
+
+> 复审对象：`d8bd58e`（条件修复批次，直接父提交 = 评审提交 `757833f`；内容基线 `ef090f2`）。本节为最终状态，取代 §1/§2/§5/§6 中「有条件/待关闭/open」的**时点陈述**；首轮正文不删，供追溯。
+
+### 7.1 复审范围与范围门禁
+
+```bash
+git log --oneline -4        # d8bd58e（本批）→ 757833f（REV-077 首轮评审）→ ef090f2 → c9dad2a
+git diff --stat 757833f..d8bd58e   # 11 files changed, 35 insertions(+), 21 deletions(-)
+git -c core.quotepath=false diff --name-only 757833f..d8bd58e
+# 11 个路径全部 doc/**（architecture/index/issues/progress/reviews-README + 00/02/03/06/07/PROVENANCE）
+# 无 crates/**、tests/**、doc/reviews/REV-*.md 之外的改动；工作区 clean
+git log -1 --format=%B      # 正文含 Review: REV-077 / Agent: docs-dev
+```
+
+### 7.2 条件与 P3 逐条关闭证据
+
+- **C1（N1）✅**：`06:833` 已改为「Loader 全量校验（02 R1–R16；执行顺序 `R1→R13→R15→R16→R14`）；`--structure-only` 只跑 R1–R13 + R15 + R16（02 §2.7.4）」；`grep -n "R1–R15\|R1→R13→R15→R14" doc/spec-v1.2/06-存储与可观测.md` → **0 命中**；与 02 §2.1.2/§2.7.4 一致。
+- **C2（N2）✅**：`02:611` 子图表定义校验与 `02:622` as-built 注均补 **R15/R16**（并写明收敛 `DSL_SUBGRAPH_INVALID`、保留内部 `node_id`/`edge_index`），与 §2.4.1 R6 行一致；`00:183` 引用改为「主图见 02 §2.4.1 R16；子图递归含 R15/R16 见 02 §2.6.1 / §2.4.1 R6」，引用不再落空。
+- **C3（N3）✅**：`03:291` 改为 **Crashed 实例快照**（`instances` 行 upsert；**不产生** `transitions`/`events` 行；证据 = `instances` 行 + `error` JSON + `RunFinished.error`；明确「不要按 `transitions` 查询」）；`03:519` §3.15 矩阵同口径（实例快照 `Crashed`）。与 as-built `create_instance(..., crash)` 只 emit `instance_snapshot`（`run.rs:1486-1543`）、CLI 桥接「快照只 upsert instances」（`bridge.rs:141-145`）一致。
+- **P3 ✅**：N4 `07:357` 已改「**12 个 target**」（与 `tests/e2e/Cargo.toml` 的 12 个 `[[test]]`、`cargo test -p zgraph-e2e` 的 12 条 Running 一致）；N5 已登记 **ISSUE-125**（docs/P3/open/2026-10-31，8 列格式与既有行一致，仅追加不改旧行，注明「预存偏差，后续 docs 批次校准」）；N6 `03:286` 已精确化为「执行节点经 `NodeCompleted` off-loop / 内置节点 `finish_builtin` in-loop」；N7 `architecture-v2:7` 标题改为「**W2a/W2b 实现回写注记**（REV-073；W2b 追加 REV-077）」。
+- **Lead 要求的索引收口 ✅**：`doc/reviews/README.md` 追加 **REV-074/075/076/077 四行**（表格 6 列与既有 75 行一致；分支/评审人/结论格式核对：074 reviewer-a、075 reviewer-b（主审）+ lead（cli 第二评审）、076 reviewer-a、077 reviewer-b，与各 REV 记录一致）并追加底部 **W2b 收口段**（REV-074–077 模块/作者/评审人/结论）；`doc/index.md` 与 `doc/progress.md` 已更新为最终态（progress **15 行**、四块、≤30）。
+  - **REV-077 行措辞同步判断**：该行现为「通过（条件关闭见记录 §6；…C1–C4 于条件修复提交关闭）」。本节把记录结论翻为「通过」后**该措辞仍准确**，**无需 docs-dev 追加 commit**（若追求完整可选把「§6」写成「§6/§7」，非必要）。
+
+### 7.3 复审验证（评审人实跑）
+
+```bash
+git -c core.quotepath=false diff --name-only 757833f..HEAD   # 11 files，全部 doc/**（纯文档）
+bash scripts/dev/check.sh                                    # CHECK PASSED
+cargo test -p zgraph-e2e --test max_fanout                   # 6 passed / 0 failed
+shasum -a 256 <00..08>; wc -l <00..08 README PROVENANCE REFERENCES>  # 与 PROVENANCE §3 逐项比对
+```
+
+**PROVENANCE §3 重算实测（条件修复后）**：
+
+| 文件 | SHA-256（实测 = §3 记录） | 行数 | 结论 |
+|---|---|---|---|
+| 00-总纲.md | `f32eba90627a75f4…` | 317 | ✅ |
+| 02-DSL与校验.md | `33c7028f2dcf547b…` | 950 | ✅ |
+| 03-调度器与生命周期.md | `033b87f6ee95aba6…` | 526 | ✅ |
+| 06-存储与可观测.md | `be9ceac8a65268ea…` | 1119 | ✅ |
+| 07-验收用例.md | `ed4371639bb9c29e…` | 372 | ✅ |
+| 01/04/05/08（未改） | 与 §3 原值逐一相同 | 348/906/1429/524 | ✅ |
+
+- 00–08 合计 **6491** 行（与 §3 一致）；`doc/spec-v1.2/` 目录合计 **6795** 行（实测 `wc -l` = 6491 + README 79 + PROVENANCE 203 + REFERENCES 22，与 §3「当前 6795」一致）；
+- §2 第 **19** 条已登记条件修复批次（C1–C4/P3/重测/落盘），编号连续、内容与本节一致；
+- `doc/issues.md` 仅追加 ISSUE-125 一行（12+1 行、8 列、日期/状态正确，既有行未改）；`doc/progress.md` 15 行四块。
+
+### 7.4 复审结论
+
+**C1–C4 与非阻塞 P3 全部关闭，最终结论：通过**（§1 已同步；merge.sh 可识别「结论：通过」）。无非阻塞条件残留，可直接进入合并流程。
+
+非阻塞残留观察（不构成条件，建议后续 docs 批次顺手处理）：
+
+1. **P3 措辞**：PROVENANCE §2 第 19 条写「base = `ef090f2`」，而条件修复提交 `d8bd58e` 的直接父提交实为评审提交 `757833f`（`ef090f2` 为 docs 内容基线）。不影响复核；后续可写「内容基线 ef090f2 / 直接父 757833f」。
+2. **P3 可选**：`doc/reviews/README.md` REV-077 行可选择性引用 §7；当前措辞已准确，无需为合并改文件。
+3. **ISSUE-125 保持 open**（预存 §3.2 TestHooks/RunOptions 偏差，按计划后续 docs 批次校准，不阻塞 W2b）。
+4. **08 未追加 W2b 注记**：合同 §D5 未要求，保持 v1.1 审计历史快照，符合 append-only 口径，无需动作。
