@@ -242,3 +242,12 @@
   - 证据：full 60/100 `3d8d735b1d5e8a1b`；smoke 11/18 `df9341c04063b80a`；exhaust `a8e508deb9c6cf44`；approved smoke `Completed`（11 实例、3 gate passed、artifact 透传）；失败路径 `NODE_PYTHON_EXCEPTION` 与 `HARNESS_MAX_ITERATIONS`；real-LLM smoke `#[ignore]`；
   - 回归：`cargo test -p zgraph-e2e --test software_team_v1` 7 passed/1 ignored；全 e2e 46 passed/2 ignored；pytest 104 passed；`check.sh` PASSED；merge 门禁（build/test/clippy/pytest）通过。
 - **后续**：本分支（W1-docs）合并后，按 §4 顺序进入 W2a0(docs) → W2a → W2b → W3a0 → W3a → W3b(可选) → W4a → W4b。
+- **W2a0 设计冻结已交付（2026-10-31）**：REV-067（首轮有条件通过 → `749e9ee` 条件修复 → `b5363c4`/`0580bc7` 复审通过）；产出 [`DR-005`](DR-005-w2a-defer-gate-freeze.md)、spec 00/01/02/03/04/06/07/08 W2a0 回写、SOP 设计稿 v1.1、AC-14（a–h）设计冻结；v0.1.0 行为/hash 不变。
+- **W2a 实现已交付（2026-10-31，`main` `e7578f1` 时点）**：
+  - dsl：`fa6ea16` + `bc92951`（N1–N4 对齐）；REV-069（`06063cf`/`192473a`，通过）——边级 `on_gate_false`、R15（`G_all`+SCC）、错误载荷按冻结模板、v0.1.0 5 valid/31 bad hash/输出逐字节不变；`cargo test -p zgraph-dsl` 85、workspace 664/0/3。
+  - trace：`27f9200`；REV-070（`a746525`/`ea645d8`，通过；cli 机械改动第二评审 lead）——`GateResultRecord`/`GateResultRow` 三字段、schema v4（v3→v4 逐版本迁移/备份/只读拒绝）、payload 三键；trace 63、cli 160、workspace 650/0/3。
+  - py-worker：`dd96d89` + `f685178`（S2/S3）；REV-068（`2b32f22`/`61ba5a3`，通过）——`parse_verdict_rework`（`approved/rework` 闭集、8 个 `ValueError` 分支、v1 不变）；`test_parse_verdict` 86、pytest 170。
+  - kernel + cli：`ee4ca27` + `6c90a16`；REV-071（`46226fc`/`e7578f1`，通过；第二评审 reviewer-a）——defer 决策矩阵/attempt-per-activation（自环 `源+1`、非自环 `目标当前+1`）/per-port 继承 + `settled_by_node` 重置/`end` 特例/超限 Crashed+`NODE_INTERNAL`（该次 GateResult 不入库）/dormant+确定性 `RUN_DEADLOCK`；cli `bridge.rs::map_gate_result` 接真实 `deferred/attempt/verdict`；kernel 107、cli 160、workspace 682/0/3、e2e 46/2。
+  - e2e（进行中，Phase 2B 待合并）：`test/e2e-gate-defer`：`tests/fixtures/graphs/defer_gate/**`（a/b/f/g）、`tests/fixtures/trace/{schema_v3_seed.sql,v0.1.0_expected_trace.json,seed_graph.json,GENERATION.md}`（h/ISSUE-104）、`gate_defer.rs`（h 已通过；a/b/f/g `#[ignore]` 待 Phase 2B）、codegen `--mode rework`（full 60/116、smoke 11/21；c/e 静态已通过）。
+  - 遗留：**ISSUE-104**（v3 seed；e2e 已补，随合并置 fixed）、**ISSUE-105**（`verdict_json` 损坏读取口径待定案）、**ISSUE-106**（trace 测试强度/命名/DDL 守卫）、**ISSUE-107**（kernel N1–N7）、**ISSUE-108**（dsl N5–N8）、**ISSUE-109**（py-worker S1）；ISSUE-100/101 → fixed；ISSUE-062 保持 open（本批不修）；`architecture-v2.md` 历史口径仅加 banner 注记。
+- **后续**：W2a 合并后按 §4 顺序进入 W2b（每节点最大扇出限制）→ W3a0 → W3a → W3b(可选) → W4a → W4b。

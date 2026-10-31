@@ -295,7 +295,7 @@ apply_completed(src, output, evaluations):                 # 执行任务回传�
 
       # ---- 分支 2：gate 通过（先 resolve，成功后才 emit）----
       target = resolve_target(src, edge)                   # 内部先 resolve_defer_reentry(edge)：
-                                                           #   NotApplicable → 现行 resolve（3/4/8/9）
+                                                           #   NotApplicable → 现行 resolve（3/4/8；行 9 走 resolve_defer_reentry 的 Failed）
                                                            #   Created(inst) → 该实例（成功 reentry 或超限 Crashed）
                                                            #   Failed        → None（RUN_DELIVERY_TO_TERMINAL，含 end 特例）
       if target is None: return                            # resolve 失败：**不产生 GateResult**
@@ -366,7 +366,7 @@ if is_quiescent(run):
 | 不存在（从未实例化） | **blocking** → `RUN_DEADLOCK`（不依赖 `deadlock_grace`；理由：静默后不可能再有新事件） |
 | 存在且 `Completed` | **dormant**：不阻塞 → 正常 `Completed` |
 | 存在且非终态 | 不可能处于静默（有 Pending/Ready/Running 实例）；若因 pause 等边界不静默，走现行机制 |
-| 存在且终态非 `Completed`（`Crashed`/`TimedOut`/`Skipped`） | `Crashed`/`TimedOut` ⇒ run 已冷峻 Failed（不可达）；`Skipped` ⇒ 视为 **dormant**（终态不可能再投递；若后续放行则按行 8 `RUN_DELIVERY_TO_TERMINAL`）（§11 边界 E-2） |
+| 存在且终态非 `Completed`（`Crashed`/`TimedOut`/`Skipped`） | `Crashed`/`TimedOut` ⇒ run 已冷峻 Failed（不可达）；`Skipped` ⇒ 视为 **dormant**（终态不可能再投递；若后续放行则按决策矩阵**行 9** `RUN_DELIVERY_TO_TERMINAL`）（§11 边界 E-2） |
 
 - **误判防护**：rework 进行中有活跃实例 → 不静默；approved 路径回边 false 的 receipt 目标已 `Completed` → dormant；SOP approved-only 图（无 defer）无 receipt → 完全不变。
 - 看门狗仍保留既有「无活跃实例 + Pending 存在 + 超过 `deadlock_grace`」的检测（03 §3.9.3）；B4 的确定性死锁是**额外**、更早的判据。
@@ -567,7 +567,7 @@ codegen：`--mode approved|rework`（缺省 `approved`，保持 W1 字节级可�
 | 写入口 | rework profile codegen 对 `W/R/P` 节点写 `config.retry.max_attempts`（缺省 3；可参数化但 e2e 固定 3） |
 | 语义 | 每节点实例 attempt 上限；`W/R/P` 分别计数（不共享预算） |
 | 默认预算 | `3` → 每节点最多 3 次实例（0/1/2）→ 最多 **2 次 rework**；第 3 次 rework 在 `P→W` 放行时 `W` 新实例 attempt=3 ≥ 3 → `Crashed(Internal)` → run `Failed(NODE_INTERNAL)` |
-| 超限证据 | trace 有 `W` 的 Crashed 实例（attempt=3）、`GateResult`（P→W 边）、run `Failed` + `NODE_INTERNAL`；其他非终态实例 `Cancelled` |
+| 超限证据 | `W` 的 Crashed 实例（attempt=3，`kind=Internal`）+ **之前轮次**已产生的 `P→W` `GateResult` 行 + run `Failed` + `NODE_INTERNAL`；**超限该次 GateResult 不入库**（`fail_run` 关 sink，外层 emit no-op，见 §3.5/§7 e）；其他非终态实例 `Cancelled` |
 | approved-only | 不写该字段也不标 defer（缺省常量生效）→ 与 W1 一致 |
 
 ### 6.5 延期/限制同步（E5）
@@ -583,14 +583,16 @@ codegen：`--mode approved|rework`（缺省 `approved`，保持 W1 字节级可�
 
 | # | 场景 | 图/资产 | 关键断言 |
 |---|---|---|---|
-| a | **自环 defer 返工** | `tests/fixtures/graphs/defer_self_loop.json`：`start → loop`，`loop --gate(defer)--> loop.again`；`loop` 输入 `seed`(required，start→loop 注入) + `again`(**required:false**，只能由自环供源；若 required 则首轮 `trigger=all` 永不就绪——ISSUE-062 同型坑)；Python stub 第 1 次输出 `{continue:true}`、第 2 次 `{continue:false}` | run `Completed`；`loop` 实例 attempt `0/1`；attempt1 因**按端口继承**拿到 `seed`（`again` 由自环重投）；`gate_results` 两行（同一边）：**attempt0 `passed=true/deferred=false`**、**attempt1 `passed=false/deferred=true`**；随后目标节点当前实例已 `Completed` → `deferred_receipt` dormant → run 正常 `Completed`；无 `RUN_DEADLOCK` |
-| b | **A→B→A 回边返工** | `defer_ab_cycle.json`：`start→A`，`A --gate(defer)--> B`，`B --gate(defer)--> A`；**两条环边至少一条带 gate**（打断 R13 的无门控环；建议两条都带 gate，例如 `check_output` 判 A/B 的输出标志），`A`/`B` 的循环端口 `required:false`（入口/终止方式由 e2e 实现定，契约：R13/R15 均须通过）；`start→A` 用 settle 边供首次输入 | A attempt `0/1`、B attempt `0/1`；run `Completed`；R15 通过（`SCC={A,B}` 含 defer 边）；R13 通过（无无 gate 环） |
-| c | **SOP v1 rework e2e** | `software_team_v1` codegen `--mode rework` + `parse_verdict_rework` + fake LLM（rework→approved 脚本；**调用序可判定**） | run `Completed`；`W/R/P` attempts `0/1`；trace `gate_results` 含 `deferred=true`（approved 前进边 false）、`attempt`、`verdict="rework"/"approved"`；下游拿到最终 artifact（`P.artifact` 透传，非评审摘要）；`parse_verdict_rework` 输出 `verdict=rework` 不抛错；**P 的新一轮执行必须消费新一轮 R 的 `review`**（fake LLM 调用序锁定：若 P 用旧 review 提前执行，会消耗错误脚本条目而失败——直接验证 per-port 不继承） |
+| a | **自环 defer 返工** | `tests/fixtures/graphs/defer_gate/defer_self_loop.json`：`start → loop`，`loop --gate(check_output{path:"continue",equals:true}, defer)--> loop.again`；`loop` 输入 `seed`(required，start→loop 注入) + `again`(**required:false**，只能由自环供源；若 required 则首轮 `trigger=all` 永不就绪——ISSUE-062 同型坑)；Python stub 第 1 次输出 `{continue:true}`、第 2 次 `{continue:false}` | run `Completed`；`loop` 实例 attempt `0/1`；attempt1 因**按端口继承**拿到 `seed`（`again` 由自环重投）；`gate_results` 两行（同一边）：**attempt0 `passed=true/deferred=false`**、**attempt1 `passed=false/deferred=true`**；随后目标节点当前实例已 `Completed` → `deferred_receipt` dormant → run 正常 `Completed`；无 `RUN_DEADLOCK` |
+| b | **A→B→A 回边返工** | `tests/fixtures/graphs/defer_gate/defer_ab_cycle.json`：`start→A`，`A --gate(defer)--> B`，`B --gate(defer)--> A`；**两条环边均带 gate**（打断 R13 的无门控环；as-built 为 `check_output` 判 A/B 输出标志），`A`/`B` 的循环端口 `required:false`（入口/终止方式由 e2e 实现定，契约：R13/R15 均须通过）；`start→A` 用 settle 边供首次输入 | A attempt `0/1`、B attempt `0/1`；run `Completed`；R15 通过（`SCC={A,B}` 含 defer 边）；R13 通过（无无 gate 环） |
+| c | **SOP v1 rework e2e** | `software_team_v1` codegen `--mode rework`（**full 60/116、smoke 11/21**；approved 60/100、11/18 不变）+ `parse_verdict_rework` + fake LLM（rework→approved 脚本；**调用序可判定**）。**as-built（REV-073）**：codegen 静态断言已通过（`tests/e2e/software_team_v1.rs::rework_codegen_validates_with_expected_scale_and_full_defer_policy`）；运行期证据待 e2e Phase 2B | run `Completed`；`W/R/P` attempts `0/1`；trace `gate_results` 含 `deferred=true`（approved 前进边 false）、`attempt`、`verdict="rework"/"approved"`；下游拿到最终 artifact（`P.artifact` 透传，非评审摘要）；`parse_verdict_rework` 输出 `verdict=rework` 不抛错；**P 的新一轮执行必须消费新一轮 R 的 `review`**（fake LLM 调用序锁定：若 P 用旧 review 提前执行，会消耗错误脚本条目而失败——直接验证 per-port 不继承） |
 | d | **回归不变** | v0.1.0 全部 fixture（`crates/zgraph-dsl/tests/fixtures.rs` golden）+ W1 approved-only 图 | `graph_hash` 逐字节不变；validate/run 结果、trace golden 不变；无 defer 字段的图 `deferred=0`（迁移后旧库亦然） |
-| e | **超 max_attempts** | rework profile + fake LLM 恒定 `rework` | run `Failed` + `NODE_INTERNAL`；`Crashed` 实例 attempt = `max_attempts`（=3）；`instances.error.kind=Internal`；非终态实例 `Cancelled`；**不断言超限那次的 GateResult**（sink 已关闭、不入库，见 §3.5）；证据 = Crashed 实例 + 之前 GateResult + `RunFinished{Failed}` |
-| f | **dormant 正常完成** | `defer_self_loop.json` 变体：gate 恒 false（defer）→ 只挂账 | run `Completed`（不误报 `RUN_DEADLOCK`）：receipt 目标实例存在且 `Completed` → dormant |
-| g | **blocked deferred → 死锁（R15-valid 变体）** | `defer_blocked.json`（**必须通过 R15**）：`start→a`；`a --gate(manual default false, on_gate_false:"defer")--> a.again`（`again` required:false，**defer 自环**给 `a` 一个可重入来源）；`a --gate(恒 false, on_gate_false:"defer")--> b.x`（`b` 非 entry、`x` required 仅由该边供源）。运行后 a 有两条 receipt：`a→a` 目标 a 已 `Completed` → dormant；`a→b` 目标 b 从未实例化 → blocked | 静默后**立即** `Failed` + `RUN_DEADLOCK`（不等 `deadlock_grace`）；`error.message` 含 edge 索引与 target node；`b` 无实例。**注**：若删掉 defer 自环，`a` 不在含 defer 边的环上 → `zgraph validate` 先报 `DSL_DEFER_NOT_REENTRANT`（R15 设计意图，不可用该骨架做 blocked 用例） |
-| h | **schema v4 迁移与回放** | v3 seed（`tests/fixtures/trace/schema_v3_seed.sql`，**W2a e2e 交付**；W1 遗留缺口）→ 迁移 v4；defer 图新库 | 迁移后 `user_version=4` + `schema_migrations` 1..4 + 备份 `.bak.v3-*`；旧行取默认 `deferred=0/attempt=0/verdict=NULL`；只读 `trace` 对 v3 拒绝（exit 4）；L1 events 回放含新字段；L2 outputs 语义不变 |
+| e | **超 max_attempts** | rework profile + fake LLM 恒定 `rework`（codegen 已写 `W/R/P` `config.retry.max_attempts=3`，静态已断言；运行期证据待 Phase 2B） | run `Failed` + `NODE_INTERNAL`；`Crashed` 实例 attempt = `max_attempts`（=3）；`instances.error.kind=Internal`；非终态实例 `Cancelled`；**不断言超限那次的 GateResult**（sink 已关闭、不入库，见 §3.5）；证据 = Crashed 实例 + 之前 GateResult + `RunFinished{Failed}` |
+| f | **dormant 正常完成** | `defer_gate/defer_self_loop.json` 的内存变体（e2e 改 gate `equals=false` 后写临时图）：gate 恒 false（defer）→ 只挂账 | run `Completed`（不误报 `RUN_DEADLOCK`）：`loop` 仅 attempt0、自环边 1 行 `passed=false/deferred=true`；receipt 目标实例存在且 `Completed` → dormant |
+| g | **blocked deferred → 死锁（R15-valid 变体）** | `tests/fixtures/graphs/defer_gate/defer_blocked.json`（**必须通过 R15**）：`start→a`；`a --gate(manual default false, on_gate_false:"defer")--> a.again`（`again` required:false，**defer 自环**给 `a` 一个可重入来源）；`a --gate(恒 false, on_gate_false:"defer")--> b.x`（`b` 非 entry、`x` required 仅由该边供源）。运行后 a 有两条 receipt：`a→a` 目标 a 已 `Completed` → dormant；`a→b` 目标 b 从未实例化 → blocked | 静默后**立即** `Failed` + `RUN_DEADLOCK`（不等 `deadlock_grace`）；`error.message` 含 edge 索引与 target node；`b` 无实例。**注**：若删掉 defer 自环，`a` 不在含 defer 边的环上 → `zgraph validate` 先报 `DSL_DEFER_NOT_REENTRANT`（R15 设计意图，不可用该骨架做 blocked 用例） |
+| h | **schema v4 迁移与回放** | v3 seed（`tests/fixtures/trace/{schema_v3_seed.sql,v0.1.0_expected_trace.json,seed_graph.json,GENERATION.md}`，**W2a e2e 交付**；W1 遗留缺口 ISSUE-104）→ 迁移 v4；defer 图新库 | 迁移后 `user_version=4` + `schema_migrations` 1..4 + 备份 `.bak.v3-*`；**旧行**取默认 `deferred=0/attempt=0/verdict=NULL` 且历史 `events.payload` 保持 v3 形态；**新 run** payload 含三键；只读 `trace` 对 v3 拒绝（exit 4）；**L1 events：历史 run 逐字节复用旧 payload、新 run 含三键**；L2 outputs 语义不变 |
+
+> **as-built（W2a 实现，REV-073）**：AC-14 资产已落 `tests/fixtures/graphs/defer_gate/` 与 `tests/fixtures/trace/`；`tests/e2e/gate_defer.rs` 覆盖 a/b/f/g（断言已写、`#[ignore]` 待 e2e Phase 2B 打开）与 h（已运行通过：迁移/旧 payload/只读拒绝/L1 golden）；`tests/e2e/software_team_v1.rs` 覆盖 c/e 的 codegen 静态断言（full 60/116、smoke 11/21、defer 统一规则、`max_attempts=3`），c/e 运行期证据待 Phase 2B。实现证据汇总见 spec 08 §8.9.1。
 
 ### 7.1 测试落点（W2a）
 
@@ -718,7 +720,7 @@ codegen：`--mode approved|rework`（缺省 `approved`，保持 W1 字节级可�
 
 ### 12.3 提交与评审
 
-- 分支 `docs/docs-rework-design`；提交正文含 `Review: REV-067` 与 `Agent: docs-writer`；逻辑拆 3 个 commit（设计 DR+SOP / spec 00–03 / spec 06–08+索引）。
+- 分支 `docs/docs-rework-design`；提交正文含 `Review: REV-067` 与 `Agent: docs-writer`；**3 个逻辑 commit**（设计 DR+SOP / spec 00–03 / spec 06–08+索引）+ **1 个 REV-067 条件修复 commit**（`749e9ee`）；W2a 实现回写（REV-073）在 `docs/docs-gate-defer-spec` 分支另计。
 - `bash scripts/dev/check.sh` 必须 PASSED；PROVENANCE §3 的 SHA-256/行数以实测为准。
 - 合并前由独立评审人写 `doc/reviews/REV-067-docs-rework-design.md`，结论必须为「通过」（AGENTS §3/§4）。
 
