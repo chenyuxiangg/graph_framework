@@ -510,9 +510,11 @@ pub(crate) fn check_defer_reentrancy(nodes: &[GraphNode], edges: &[GraphEdge]) -
         .map(|(index, node)| (node.id.as_str(), index))
         .collect();
     let components = StronglyConnectedComponents::new(nodes.len(), edges, &index_of);
-    let mut defer_component = vec![false; components.count()];
+    // `defer_edges_in_component[c]`：SCC `c` 内两端点同属该分量的 defer 边索引
+    // （按 edges 数组序 = 升序；供 R15 判定与错误载荷 `actual.defer_edges`）。
+    let mut defer_edges_in_component: Vec<Vec<usize>> = vec![Vec::new(); components.count()];
     let mut defer_self_loop = vec![false; nodes.len()];
-    for edge in edges {
+    for (edge_index, edge) in edges.iter().enumerate() {
         if edge.on_gate_false != Some(OnGateFalse::Defer) {
             continue;
         }
@@ -526,7 +528,7 @@ pub(crate) fn check_defer_reentrancy(nodes: &[GraphNode], edges: &[GraphEdge]) -
             defer_self_loop[from] = true;
         }
         if components.same(from, to) {
-            defer_component[components.id_of(from)] = true;
+            defer_edges_in_component[components.id_of(from)].push(edge_index);
         }
     }
     for (edge_index, edge) in edges.iter().enumerate() {
@@ -536,16 +538,30 @@ pub(crate) fn check_defer_reentrancy(nodes: &[GraphNode], edges: &[GraphEdge]) -
         let Some(from) = index_of.get(edge.from.as_str()).copied() else {
             continue;
         };
-        let reentrant = defer_self_loop[from]
-            || (components.size_of(from) >= 2 && defer_component[components.id_of(from)]);
+        let component_id = components.id_of(from);
+        let defer_edges = &defer_edges_in_component[component_id];
+        let reentrant =
+            defer_self_loop[from] || (components.size_of(from) >= 2 && !defer_edges.is_empty());
         if !reentrant {
-            return vec![defer_not_reentrant(edge_index, edge)];
+            return vec![defer_not_reentrant(
+                edge_index,
+                edge,
+                components.size_of(from),
+                defer_edges,
+            )];
         }
     }
     Vec::new()
 }
 
-fn defer_not_reentrant(edge_index: usize, edge: &GraphEdge) -> DslError {
+/// R15 错误载荷（DR-005 §2.5.2 冻结模板）：`expected` 为完整可重入条件串，
+/// `actual` = `{node_id, scc_size, defer_edges}`（`defer_edges` 升序）。
+fn defer_not_reentrant(
+    edge_index: usize,
+    edge: &GraphEdge,
+    scc_size: usize,
+    defer_edges: &[usize],
+) -> DslError {
     DslError::new(
         DslErrorCode::DeferNotReentrant,
         format!(
@@ -555,11 +571,13 @@ fn defer_not_reentrant(edge_index: usize, edge: &GraphEdge) -> DslError {
     )
     .at_edge(edge_index)
     .at_node(edge.from.clone())
-    .expected("source node on a cycle containing a defer edge")
+    .expected(
+        "re-entrant defer source (cycle through source containing a defer edge, or defer self-loop)",
+    )
     .actual(serde_json::json!({
-        "from": edge.from,
-        "to_node": edge.to_node,
-        "on_gate_false": "defer",
+        "node_id": edge.from,
+        "scc_size": scc_size,
+        "defer_edges": defer_edges,
     }))
 }
 

@@ -1,4 +1,4 @@
-//! R1–R14 的规则级测试：每条规则至少一个正例与一个反例。
+//! R1–R15 的规则级测试：每条规则至少一个正例与一个反例（R15 为 W2a 新增）。
 //!
 //! 通过公开 API（`load_graph_value` / `load_graph_with_options`）驱动，
 //! 断言错误码、定位与 expected/actual；fixtures 在 `fixtures.rs` 中逐文件覆盖。
@@ -1284,6 +1284,10 @@ fn rev005_2_missing_agent_reports_first_referencing_node_once() {
 
 // ---------------------------------------------------------------- R15 / on_gate_false（W2a）
 
+/// R15 冻结 `expected`（DR-005 §2.5.2；02 §2.4.2）。
+const R15_EXPECTED: &str =
+    "re-entrant defer source (cycle through source containing a defer edge, or defer self-loop)";
+
 /// 内置 `check_output` gate（R14 合法 params）。
 fn review_gate(path: &str, equals: Value) -> Value {
     json!({"function": "check_output", "params": {"path": path, "equals": equals}})
@@ -1371,7 +1375,7 @@ fn on_gate_false_is_none_when_absent_and_kept_when_explicit() {
 }
 
 #[test]
-fn on_gate_false_invalid_value_or_type_is_parse_error_at_edge() {
+fn on_gate_false_unknown_value_is_parse_error_at_edge() {
     let mut graph = gated_self_loop_graph();
     graph["edges"][1]["on_gate_false"] = json!("ignore");
     let errors = expect_code(graph, DslErrorCode::ParseError);
@@ -1385,16 +1389,41 @@ fn on_gate_false_invalid_value_or_type_is_parse_error_at_edge() {
         "{errors}"
     );
     assert_eq!(errors.first().actual, Some(json!("ignore")));
+}
 
-    let mut graph = gated_self_loop_graph();
-    graph["edges"][1]["on_gate_false"] = json!(true);
-    let errors = expect_code(graph, DslErrorCode::ParseError);
-    assert_eq!(errors.error_count, 1, "{errors}");
-    assert_eq!(errors.first().location.edge_index, Some(1));
-    assert!(
-        errors.first().message.contains("expects string"),
-        "{errors}"
-    );
+#[test]
+fn on_gate_false_non_string_types_are_parse_errors() {
+    // N3（REV-069）：所有非字符串 JSON 类型都落 R4 类型桶（`expected:"string"`），
+    // 不得被误当成枚举值或静默忽略。
+    for value in [
+        json!(null),
+        json!(1),
+        json!(1.5),
+        json!(true),
+        json!({"x": 1}),
+        json!([]),
+    ] {
+        let mut graph = gated_self_loop_graph();
+        graph["edges"][1]["on_gate_false"] = value.clone();
+        let errors = expect_code(graph, DslErrorCode::ParseError);
+        assert_eq!(errors.error_count, 1, "value {value}: {errors}");
+        assert_eq!(
+            errors.first().location.edge_index,
+            Some(1),
+            "value {value}: {errors}"
+        );
+        assert_eq!(errors.first().location.node_id, None, "value {value}");
+        assert!(
+            errors.first().message.contains("expects string"),
+            "value {value}: {errors}"
+        );
+        assert_eq!(
+            errors.first().expected,
+            Some(json!("string")),
+            "value {value}"
+        );
+        assert_eq!(errors.first().actual, Some(value.clone()), "value {value}");
+    }
 }
 
 #[test]
@@ -1462,9 +1491,15 @@ fn r15_defer_edge_source_without_cycle_is_rejected() {
     let first = errors.first();
     assert_eq!(first.location.edge_index, Some(1));
     assert_eq!(first.location.node_id.as_deref(), Some("a"));
-    assert!(first.message.contains("not re-entrant"), "{first:?}");
-    assert!(
-        first.expected.is_some() && first.actual.is_some(),
+    assert_eq!(
+        first.message,
+        "defer edge source 'a' is not re-entrant: must lie on a cycle containing a defer edge"
+    );
+    // N1/N2（REV-069）：锁定 DR-005 §2.5.2 冻结载荷（源不在任何环上 → size 1、无 defer 边）。
+    assert_eq!(first.expected, Some(json!(R15_EXPECTED)), "{first:?}");
+    assert_eq!(
+        first.actual,
+        Some(json!({"node_id": "a", "scc_size": 1, "defer_edges": []})),
         "{first:?}"
     );
 }
@@ -1487,8 +1522,16 @@ fn r15_gated_cycle_without_defer_edge_does_not_authorize_defer() {
         ]),
     );
     let errors = expect_code(graph, DslErrorCode::DeferNotReentrant);
-    assert_eq!(errors.first().location.edge_index, Some(3));
-    assert_eq!(errors.first().location.node_id.as_deref(), Some("a"));
+    assert_eq!(errors.error_count, 1, "{errors}");
+    let first = errors.first();
+    assert_eq!(first.location.edge_index, Some(3));
+    assert_eq!(first.location.node_id.as_deref(), Some("a"));
+    assert_eq!(first.expected, Some(json!(R15_EXPECTED)), "{first:?}");
+    assert_eq!(
+        first.actual,
+        Some(json!({"node_id": "a", "scc_size": 2, "defer_edges": []})),
+        "{first:?}"
+    );
 }
 
 #[test]
@@ -1540,8 +1583,15 @@ fn r15_first_violating_defer_edge_in_array_order_is_reported() {
     );
     let errors = expect_code(graph, DslErrorCode::DeferNotReentrant);
     assert_eq!(errors.error_count, 1, "{errors}");
-    assert_eq!(errors.first().location.edge_index, Some(1));
-    assert_eq!(errors.first().location.node_id.as_deref(), Some("a"));
+    let first = errors.first();
+    assert_eq!(first.location.edge_index, Some(1));
+    assert_eq!(first.location.node_id.as_deref(), Some("a"));
+    assert_eq!(first.expected, Some(json!(R15_EXPECTED)), "{first:?}");
+    assert_eq!(
+        first.actual,
+        Some(json!({"node_id": "a", "scc_size": 1, "defer_edges": []})),
+        "{first:?}"
+    );
 }
 
 #[test]
@@ -1606,6 +1656,17 @@ fn r15_violation_inside_subgraph_maps_to_subgraph_invalid() {
     );
     assert_eq!(errors.first().location.node_id.as_deref(), Some("pin"));
     assert_eq!(errors.first().location.edge_index, Some(0));
+    // 子图收敛只换 code/message 前缀，冻结载荷原样保留。
+    assert_eq!(
+        errors.first().expected,
+        Some(json!(R15_EXPECTED)),
+        "{errors}"
+    );
+    assert_eq!(
+        errors.first().actual,
+        Some(json!({"node_id": "pin", "scc_size": 1, "defer_edges": []})),
+        "{errors}"
+    );
 }
 
 #[test]

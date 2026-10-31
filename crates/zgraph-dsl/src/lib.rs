@@ -1,7 +1,7 @@
 //! 图 DSL 的类型、加载、R1–R15 校验与 `graph_hash`（M1 实现；R15 为 W2a 新增）。
 //!
-//! 语义基准：`doc/spec-v1.2/02-DSL与校验.md`（schema/R1–R14/错误对象/graph_hash）
-//! 与 `doc/decisions/DR-004-v02-scope-and-waves.md` D1（R15 defer 可重入）；
+//! 语义基准：`doc/spec-v1.2/02-DSL与校验.md`（schema/R1–R15/错误对象/graph_hash）
+//! 与 `doc/decisions/DR-004-v02-scope-and-waves.md` D1、`DR-005`（R15 defer 可重入）；
 //! 落地偏差：`doc/architecture-v2.md` §8 的 **D6**（门控 = Rust 内置 op）与
 //! **D7**（图加载期不 import 用户 Python；`python_node` 只校验格式）。
 //!

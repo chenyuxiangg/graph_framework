@@ -15,7 +15,7 @@ pub const GRAPH_HASH_LEN: usize = 16;
 
 /// 计算 `graph_hash`。
 ///
-/// 调用前置：图已通过 R1–R13（loader 内部保证）；本函数不会失败。
+/// 调用前置：图已通过 R1–R13、R15（loader 内部保证）；本函数不会失败。
 pub fn graph_hash(raw: &Value) -> String {
     let canonical = canonical_projection(raw);
     let digest = blake3::hash(canonical_json(&canonical).as_bytes())
