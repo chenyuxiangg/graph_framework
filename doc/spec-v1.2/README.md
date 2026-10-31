@@ -28,7 +28,7 @@
 | 05 | [05-AgentHarness](05-AgentHarness.md) | 1429 | AgentConfig、LlmProvider(genai)、六状态机、上下文预算、ToolDef、错误映射、流式、AgentProvider | 流式唯一接口；预算冷峻；重试仅建立阶段；iteration=LLM 轮次；output 固定四字段 |
 | 06 | [06-存储与可观测](06-存储与可观测.md) | 1117 | SQLite DDL v1（8 表 + v2 L2 记录表/列）、seq 语义、双通道写线程、Streaming 聚合、CLI 契约、崩溃标定 | 落聚合分段而非逐 token；`events.seq` 权威；崩溃标 `Failed+interrupted`；`NodeError` JSON canonical（§6.2.5.1）；不做断点续跑；**W2a0**：trace schema v4（`gate_results.deferred/attempt/verdict_json`，§6.7 迁移） |
 | 07 | [07-验收用例](07-验收用例.md) | 330 | AC-01..AC-14 + DoD 检查单 | 示例图/gate/Skipped/trace/坏图/冷峻/超时/不阻塞/真 LLM/并行/暂停取消/死锁/多 run/software_team SOP v1/**deferrable gate + 有限返工（W2a0）** |
-| 08 | [08-审计关闭矩阵](08-审计关闭矩阵.md) | 523 | 76 条逐条关闭状态 + 37 条一致性复核 + 可开工判定 + **§8.6 回填记录** + §8.9 W2a0 注记 + §8.9.1 W2a 实现证据 | 60 已关闭 / 6 部分 / 7 延后 / 3 不适用；回填后 **10/10 可开工**；§8.9/§8.9.1 只追加增量（不改历史快照） |
+| 08 | [08-审计关闭矩阵](08-审计关闭矩阵.md) | 524 | 76 条逐条关闭状态 + 37 条一致性复核 + 可开工判定 + **§8.6 回填记录** + §8.9 W2a0 注记 + §8.9.1 W2a 实现证据 | 60 已关闭 / 6 部分 / 7 延后 / 3 不适用；回填后 **10/10 可开工**；§8.9/§8.9.1 只追加增量（不改历史快照） |
 
 ## 建议阅读顺序
 

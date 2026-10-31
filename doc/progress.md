@@ -22,4 +22,4 @@
 **阻塞**
 - 无硬阻塞。环境仍须 `CARGO_HOME=<repo>/.cargo-home` + 离线；merge 门禁偶发 ISSUE-091 假失败（重跑通过）。
 
-**遗留 ISSUE**：ISSUE-090（harness 脱敏）、091（时序 flaky）、093（共享 target）、095（kernel host）、098/099（文档/发布口径）、102（e2e reviewer 输入）、103（PROVENANCE 范围）、104–109（W2a 新增，见 `doc/issues.md`）；ISSUE-100/101 已 fixed，ISSUE-062 保持 open。
+**遗留 ISSUE**：ISSUE-090（harness 脱敏）、091（时序 flaky）、093（共享 target）、095（kernel host）、098/099（文档/发布口径）、102（e2e reviewer 输入）、103（PROVENANCE 范围）、104–111（W2a/REV-072 新增；104 fixed，见 `doc/issues.md`）；ISSUE-100/101 已 fixed，ISSUE-062 保持 open。
