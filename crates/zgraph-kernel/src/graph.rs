@@ -49,6 +49,13 @@ pub struct CompiledNode {
     /// 自环/重试允许的最大尝试次数（`retry.max_attempts`，否则
     /// [`DEFAULT_MAX_ATTEMPTS`]）；`attempt` 从 0 起。
     pub max_attempts: u32,
+    /// 每激活最大扇出（W2b / DR-004 §3；DSL `max_fanout`，缺省 `None` = 无上限）。
+    ///
+    /// 运行期作为**防御性**上限：[`crate::run`] 在应用一次激活的出边之前统计
+    /// `GateEvaluation.passed` 数，超过本值即 `NODE_FANOUT_EXCEEDED`。
+    /// 静态层（DSL R16）已保证合法图 `out_degree <= max_fanout`，此处只兜底
+    /// 程序化构图 / 动态扇出（W4）。
+    pub max_fanout: Option<u32>,
 }
 
 /// 编译后的节点处理入口。
@@ -245,6 +252,9 @@ fn compile_node(node: &GraphNode) -> Result<CompiledNode, CompileError> {
         declared_timeout_ms,
         timeout_ms,
         max_attempts,
+        // W2b 阶段 1：DSL `max_fanout` 字段尚未合入本基线，接线在阶段 2 补齐；
+        // 缺省 `None` 即 v0.1.0 行为（无运行期扇出上限）。
+        max_fanout: None,
     })
 }
 

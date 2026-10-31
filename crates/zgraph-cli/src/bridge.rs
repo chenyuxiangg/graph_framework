@@ -735,6 +735,12 @@ pub fn node_error_json(error: &kernel::NodeError) -> Value {
                 object.insert("stderr_tail".to_string(), json!(tail));
             }
         }
+        // W2b（DR-004 §3）：运行期扇出超限的机械 arm；形状只增 `limit`/`actual`。
+        kernel::NodeError::FanoutExceeded { limit, actual } => {
+            object.insert("kind".to_string(), json!("FanoutExceeded"));
+            object.insert("limit".to_string(), json!(limit));
+            object.insert("actual".to_string(), json!(actual));
+        }
     }
     Value::Object(object)
 }
@@ -862,6 +868,23 @@ mod tests {
         assert!(handshake.get("signal").is_none());
         assert!(handshake.get("exit_code").is_none());
         assert!(handshake.get("stderr_tail").is_none());
+    }
+
+    /// W2b：运行期扇出超限 arm 输出稳定形状（`code`/`message`/`kind`/`limit`/`actual`）。
+    #[test]
+    fn node_error_json_covers_fanout_exceeded() {
+        let value = node_error_json(&NodeError::FanoutExceeded {
+            limit: 1,
+            actual: 2,
+        });
+        assert_eq!(value["code"], "NODE_FANOUT_EXCEEDED");
+        assert_eq!(value["kind"], "FanoutExceeded");
+        assert_eq!(value["limit"], 1);
+        assert_eq!(value["actual"], 2);
+        assert_eq!(value["message"], "node fan-out 2 exceeded max_fanout (1)");
+        // 只增 limit/actual，不引入其它变体的键。
+        assert!(value.get("business_code").is_none());
+        assert!(value.get("worker_kind").is_none());
     }
 
     #[test]

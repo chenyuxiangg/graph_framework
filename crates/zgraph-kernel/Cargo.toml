@@ -28,3 +28,9 @@ tempfile.workspace = true
 name = "test_hooks"
 path = "tests/test_hooks.rs"
 required-features = ["test-hooks"]
+
+# W2b：每激活扇出上限（运行期反例只能用 `test_hooks.force_max_fanout` 构造）。
+[[test]]
+name = "max_fanout"
+path = "tests/max_fanout.rs"
+required-features = ["test-hooks"]

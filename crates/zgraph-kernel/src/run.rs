@@ -55,8 +55,8 @@ use crate::trace::{
 };
 use crate::types::{
     now_rfc3339, Attempt, EdgeIdx, InstanceId, InstanceStatus, NodeError, NodeId, PortName,
-    RecordMode, RunError, RunId, RunMetrics, RunStartError, RunStatus, CODE_NODE_INTERNAL,
-    CODE_NODE_TIMEOUT, CODE_NODE_TYPE_UNSUPPORTED, CODE_RUN_DEADLOCK,
+    RecordMode, RunError, RunId, RunMetrics, RunStartError, RunStatus, CODE_NODE_FANOUT_EXCEEDED,
+    CODE_NODE_INTERNAL, CODE_NODE_TIMEOUT, CODE_NODE_TYPE_UNSUPPORTED, CODE_RUN_DEADLOCK,
     CODE_RUN_DELIVERY_TO_TERMINAL, CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID,
     CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR,
 };
@@ -73,6 +73,11 @@ pub struct TestHooks {
     pub disable_settle: bool,
     /// 覆盖所有节点的实例超时（毫秒），用于快速超时用例。
     pub force_node_timeout_ms: Option<u64>,
+    /// 强制收紧每激活扇出上限（W2b 测试钩子）；有效上限 = `min(节点 max_fanout, 本值)`。
+    ///
+    /// DSL 静态层（R16）已拒绝 `out_degree > max_fanout` 的图，因此运行期反例
+    /// 只能用本钩子构造（或程序化构图）。
+    pub force_max_fanout: Option<u32>,
     /// 每次 watchdog tick 发送一个 `Instant`（AC-07 ticker 间隔断言）。
     pub tick_probe: Option<mpsc::UnboundedSender<Instant>>,
 }
@@ -432,6 +437,8 @@ struct RunLoop {
     options: RunOptions,
     disable_settle: bool,
     force_timeout_ms: Option<u64>,
+    /// W2b：每激活扇出上限的测试钩子（非 `test-hooks` 构建恒 `None`）。
+    force_max_fanout: Option<u32>,
     tick_probe: Option<mpsc::UnboundedSender<Instant>>,
     final_outcome: Option<RunOutcome>,
 }
@@ -454,7 +461,8 @@ impl RunLoop {
             options,
         } = spec;
         let emitter = Emitter::new(sink, options.trace_enabled);
-        let (disable_settle, force_timeout_ms, tick_probe) = hook_values(&options);
+        let (disable_settle, force_timeout_ms, force_max_fanout, tick_probe) =
+            hook_values(&options);
         Self {
             run_id,
             graph,
@@ -483,6 +491,7 @@ impl RunLoop {
             options,
             disable_settle,
             force_timeout_ms,
+            force_max_fanout,
             tick_probe,
             final_outcome: None,
         }
@@ -1049,6 +1058,9 @@ impl RunLoop {
 
     /// 应用已求值的出边 gate 结果：门控记录 → 寻址 → 写 buffer/结算 → 就绪或 Skipped。
     ///
+    /// W2b（DR-004 §3）：入口先校验每激活扇出上限（[`Self::reject_fanout_exceeded`]）；
+    /// 超限直接返回，该激活不产生任何 GateResult、不应用任何边。
+    ///
     /// **gate 拦截的投递不寻址**（ISSUE-061 / REV-026）：`GateResultRecord` 只依赖
     /// edge/from/求值结果，不依赖目标实例；先判 `passed` 再寻址，被拦截的投递就不会
     /// 创建自环 attempt+1 的幻影实例，也不会因"投递到终态"或"超过 max_attempts"而 fail run。
@@ -1065,6 +1077,11 @@ impl RunLoop {
         output: &Value,
         evaluations: &[GateEvaluation],
     ) {
+        // W2b（DR-004 §3）：应用任何边之前先做每激活扇出上限校验；超限时该激活
+        // **不产生任何 GateResult、不应用任何边**，只创建 Crashed 实例并 fail run。
+        if self.reject_fanout_exceeded(from_instance, from_node, evaluations) {
+            return;
+        }
         let mut ordered: Vec<&GateEvaluation> = evaluations.iter().collect();
         ordered.sort_by_key(|evaluation| evaluation.edge_index);
         for evaluation in ordered {
@@ -1113,6 +1130,54 @@ impl RunLoop {
             // 拦截而永远无法就绪；若此时全部入边已结算 → 必须转 Skipped（01 §1.2.3）。
             self.maybe_skip_after_settle(&edge.to_node);
         }
+    }
+
+    /// W2b：每激活扇出上限的运行期防御性校验（DR-004 §3 / spec 03）。
+    ///
+    /// `actual` = 本次激活 `passed` 的 `GateEvaluation` 数（含 defer 边放行，
+    /// 不论最终是否真正投递/挂账）；有效上限 = `min(节点 max_fanout, test-hooks
+    /// force)`，二者都缺省时无上限 → 恒放行（v0.1.0 行为逐字节不变）。
+    ///
+    /// 超限：为源节点创建 `attempt = 源实例 attempt + 1` 的 Crashed 实例（与自环
+    /// `max_attempts` 超限同序：先 create 再 fail_run），然后冷峻失败；返回 `true`
+    /// 表示调用方必须直接返回（**不产生 GateResult、不应用任何边**）。
+    fn reject_fanout_exceeded(
+        &mut self,
+        from_instance: &str,
+        from_node: &str,
+        evaluations: &[GateEvaluation],
+    ) -> bool {
+        let actual =
+            u32::try_from(evaluations.iter().filter(|e| e.passed).count()).unwrap_or(u32::MAX);
+        let declared = self
+            .graph
+            .nodes
+            .get(from_node)
+            .and_then(|node| node.max_fanout)
+            .unwrap_or(u32::MAX);
+        let limit = self
+            .force_max_fanout
+            .map_or(declared, |forced| declared.min(forced));
+        if actual <= limit {
+            return false;
+        }
+        let attempt = self
+            .instances
+            .get(from_instance)
+            .map_or(0, |record| record.attempt)
+            .saturating_add(1);
+        self.create_instance(
+            from_node,
+            attempt,
+            Some(NodeError::FanoutExceeded { limit, actual }),
+        );
+        self.fail_run(RunError::new(
+            CODE_NODE_FANOUT_EXCEEDED,
+            format!(
+                "node '{from_node}' fan-out {actual} exceeded max_fanout ({limit}) in a single activation"
+            ),
+        ));
+        true
     }
 
     /// 记录一条 GateResult（不可丢 trace；只依赖 edge/from/求值结果，不依赖目标实例）。
@@ -2034,10 +2099,16 @@ fn evaluate_outgoing(graph: &CompiledGraph, node_id: &str, output: &Value) -> Ve
 #[cfg(feature = "test-hooks")]
 fn hook_values(
     options: &RunOptions,
-) -> (bool, Option<u64>, Option<mpsc::UnboundedSender<Instant>>) {
+) -> (
+    bool,
+    Option<u64>,
+    Option<u32>,
+    Option<mpsc::UnboundedSender<Instant>>,
+) {
     (
         options.test_hooks.disable_settle,
         options.test_hooks.force_node_timeout_ms,
+        options.test_hooks.force_max_fanout,
         options.test_hooks.tick_probe.clone(),
     )
 }
@@ -2046,8 +2117,13 @@ fn hook_values(
 #[cfg(not(feature = "test-hooks"))]
 fn hook_values(
     _options: &RunOptions,
-) -> (bool, Option<u64>, Option<mpsc::UnboundedSender<Instant>>) {
-    (false, None, None)
+) -> (
+    bool,
+    Option<u64>,
+    Option<u32>,
+    Option<mpsc::UnboundedSender<Instant>>,
+) {
+    (false, None, None, None)
 }
 
 /// 宿主主机名（trace 的 `owner_host`；取不到时 `unknown`）。

@@ -79,6 +79,12 @@ pub const CODE_NODE_PYTHON_EXCEPTION: &str = "NODE_PYTHON_EXCEPTION";
 /// 框架不变量违反 / handler panic。
 pub const CODE_NODE_INTERNAL: &str = "NODE_INTERNAL";
 
+/// 单次激活放行的出边数超过节点 `max_fanout`（W2b / DR-004 §3）。
+///
+/// 运行期防御性校验：静态层（DSL R16）已保证合法图 `out_degree <= max_fanout`，
+/// 本码只兜底程序化构图 / 动态扇出（W4）。
+pub const CODE_NODE_FANOUT_EXCEEDED: &str = "NODE_FANOUT_EXCEEDED";
+
 /// 非 Harness 资产加载失败。
 pub const CODE_NODE_CONFIG_ERROR: &str = "NODE_CONFIG_ERROR";
 
@@ -456,6 +462,17 @@ pub enum NodeError {
         /// stderr 尾部（≤ 1 KiB，按字符边界截断；空则 `None`）。
         stderr_tail: Option<String>,
     },
+    /// 单次激活的放行扇出超过节点 `max_fanout`（W2b / DR-004 §3）。
+    ///
+    /// 由事件循环在应用该激活任何出边之前产生：该激活不产生 `GateResult`、
+    /// 不应用任何边；源节点按 `attempt = 源实例 attempt + 1` 创建 Crashed 实例。
+    #[error("node fan-out {actual} exceeded max_fanout ({limit})")]
+    FanoutExceeded {
+        /// 本次激活的有效上限（`min(节点 max_fanout, test-hooks force)`）。
+        limit: u32,
+        /// 本次激活实际放行的出边数（`GateEvaluation.passed == true` 计数）。
+        actual: u32,
+    },
 }
 
 impl NodeError {
@@ -470,6 +487,7 @@ impl NodeError {
             Self::Config { .. } => CODE_NODE_CONFIG_ERROR,
             Self::Internal { .. } => CODE_NODE_INTERNAL,
             Self::NodeWorker { kind, .. } => kind.code(),
+            Self::FanoutExceeded { .. } => CODE_NODE_FANOUT_EXCEEDED,
         }
     }
 }
@@ -552,5 +570,23 @@ mod tests {
         };
         assert_eq!(*exit_code, Some(7));
         assert_eq!(stderr_tail.as_deref(), Some("tail"));
+    }
+
+    /// W2b：扇出超限错误码与 `Display` 稳定（trace/cli 依赖），载荷可逐字段读取。
+    #[test]
+    fn fanout_exceeded_keeps_code_and_display() {
+        let error = NodeError::FanoutExceeded {
+            limit: 1,
+            actual: 2,
+        };
+        assert_eq!(CODE_NODE_FANOUT_EXCEEDED, "NODE_FANOUT_EXCEEDED");
+        assert_eq!(error.code(), CODE_NODE_FANOUT_EXCEEDED);
+        assert_eq!(error.to_string(), "node fan-out 2 exceeded max_fanout (1)");
+        match &error {
+            NodeError::FanoutExceeded { limit, actual } => {
+                assert_eq!((*limit, *actual), (1, 2));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }
