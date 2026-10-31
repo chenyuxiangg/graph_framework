@@ -115,3 +115,47 @@ bash scripts/dev/check.sh                                         # CHECK PASSED
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（本记录结论为「通过」，无未关闭条件；N1–N7 为非阻塞建议）。
+
+## 7. 第二评审（跨模块 cli 机械改动，reviewer-a）
+
+> 本段只复核 Lead 批准的 cli 跨模块机械接线（`crates/zgraph-cli/src/bridge.rs`）；kernel 语义主审见 §1–§6。第二评审独立作出，不采信作者/主审自述。
+
+### 7.1 范围核对
+
+- 特性提交范围 `61ba5a3..6c90a16` = **9 files +1415/−29**：kernel 8 files（+1410/−22）+ cli **1 file**（`crates/zgraph-cli/src/bridge.rs` **+5/−7**）。本段追加前 HEAD = `46226fc`（主审评审提交，仅 `doc/reviews/**` 2 files，非产品代码）。
+- `git diff 61ba5a3..6c90a16 -- crates/zgraph-cli` 逐 hunk：仅 `map_gate_result` 把 `record.deferred` / `record.attempt` / `record.verdict.clone()` 逐字段赋给 `trace::GateResultRecord`（替换 trace 分支过渡值 `false/0/None`）+ 注释更新；删除行仅为过渡态注释/3 个占位值，**无其它 cli 逻辑/测试/文档改动**。
+- 类型匹配：kernel `Attempt = u32`（`crates/zgraph-kernel/src/types.rs:28`）→ trace `attempt: u32`；`deferred: bool`、`verdict: Option<serde_json::Value>` 两侧同型；`GateResultRecord` 13 字段 1:1，无字段遗漏/错配（编译 + 逐行核对）。
+- 未越界：kernel 分支未改 trace crate（v4 已在 main `61ba5a3` 就绪）、未改 dsl/harness/worker/doc/`CLAUDE.md`/`Cargo.*`。
+
+### 7.2 独立验证（自跑，不采信自述）
+
+```bash
+export CARGO_HOME=/Users/zyzs/lczyzs/code/zgraph/.cargo-home
+git status --porcelain --branch   # ## feat/kernel-deferrable-gate...origin/main [ahead 3]；clean
+cargo test -p zgraph-cli --offline    # 160 passed / 0 failed
+cargo test -p zgraph-kernel --offline # 107 passed / 0 failed（defer_gate 6、defer_reentry 4、gate +4、compile +1）
+cargo test --workspace --offline      # 682 passed / 0 failed / 3 ignored（65 个 test binary，含 e2e）
+cargo fmt --all -- --check            # exit 0
+cargo clippy --workspace --all-targets --offline -- -D warnings  # exit 0
+bash scripts/dev/check.sh             # CHECK PASSED（exit 0）
+```
+
+- 计数口径：**682** = workspace 全量（cli 160、kernel 107 已含其内）；与主审 §4.2 一致。
+- 独立复核说明：上述命令在 worktree 私有 target 上重跑；未依赖主审日志或作者自述。
+
+### 7.3 真 CLI 端到端抽查（独立证据，未改仓库任何文件）
+
+在 `/tmp` 构造自环 defer 图（`workers.echo` + `check_output` 路径取值；defer 自环满足 R15 可重入），用本 worktree `target/debug/zgraph` + 真 python worker 走 `run` → trace DB → `trace --json`：
+
+1. **deferred=true 实测**：`passed=false, deferred=true, attempt=0, verdict="b"`；DB `gate_results` 与 `trace --json` payload 一致，severity=`warn`；人类文本列格式无新增。
+2. **attempt 真实值**（`retry.max_attempts=4` 重入）：b instances attempt 0–3 `Completed`、attempt4 `Crashed/NODE_INTERNAL`；`gate_results` 仅 attempt **0/1/2**（超限那次 emit 在 `fail_run` 关闭 sink 后为 no-op，符合 DR-005 §3.3）；`trace --json` 的 attempt=0/1/2、verdict="b"。
+3. **attempt 来源**：`gate_results g JOIN instances i ON i.instance_id=g.instance_id` → `g.attempt == i.attempt` 全吻合（0/0、1/1、2/2；start 0/0）→ attempt = 发布者实例 attempt。
+4. **复杂 verdict 原样透传**：gate path 取对象时 DB `verdict_json` 与 `trace --json` 均为 `{"seed":{"task":"hi"},"again":null}`（非过渡 null）。
+
+→ cli 已把内核真实 `deferred/attempt/verdict` 写入 trace v4 并由 `trace --json` 带出，未见 `false/0/None` 过渡残留。
+
+### 7.4 结论与建议
+
+- **第二评审结论：跨模块 cli 改动可接受，无阻塞**（纯字段透传、无 cli 语义变更；与 DR-005 §4.1 一致；不附加合并条件）。
+- **N1（第二评审建议，非阻塞）**：自动化跨模块证据缺口——本分支 cli 测试仍只断言 trace v4 默认值（`false/0/null`），真实 defer 值链路目前无自动化测试。建议 `e2e` 分支（AC-14 h）在 `trace --json`/trace DB 断言真实 `deferred/attempt/verdict` 与「超限那次 GateResult 不入库」；本段已用真 CLI 手工验证，本分支无需新增测试。
+- 工作树 clean；第二评审未改产品/测试，仅追加本段；未 merge/push/切 main。
