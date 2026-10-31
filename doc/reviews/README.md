@@ -67,7 +67,7 @@
 | [REV-063](REV-063-docs-v02-kickoff.md) | 2026-10-31 | docs | `docs/docs-v02-kickoff` | 通过（r5 关闭 C1–C13/S11；S12 环检测细则为非阻塞建议） | reviewer-sop |
 | [REV-064](REV-064-py-worker-software-team-parse-verdict.md) | 2026-10-31 | py-worker | `feat/py-worker-software-team-parse-verdict` | 通过（W1 v1 parse_verdict：approved/透传/异常契约；44 passed；S1/S2 非阻塞建议） | reviewer-sop |
 | [REV-065](REV-065-e2e-software-team-v1.md) | 2026-10-31 | e2e | `test/e2e-software-team-v1` | 通过（C1 HARNESS_MAX e2e 关闭；target 7 passed/1 ignored、全 e2e 46/2；S1/S3 落实，S2 非阻塞建议；clippy cmp_owned 修复 df0a300 增量确认） | reviewer-sop |
-| [REV-066](REV-066-docs-sop-v1-ac.md) | 2026-10-31 | docs | `docs/docs-sop-v1-ac` | 有条件通过（DR §10/07 AC-13/PROVENANCE 事实核对通过；C1 PROVENANCE 编号重复、C2 AC-13 未入 §7.2/§7.3、C3 spec README 过期；S1–S3 建议） | reviewer-sop |
+| [REV-066](REV-066-docs-sop-v1-ac.md) | 2026-10-31 | docs | `docs/docs-sop-v1-ac` | 通过（C1–C3 关闭、S1–S3 落实；07 a02afcd5…/254、合计 6051；S4 非阻塞建议） | reviewer-sop |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
