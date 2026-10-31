@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "chunk_chars": 8,
+  "chunk_delay_ms": 0,
+  "calls": [
+    {
+      "kind": "text",
+      "content": "阶段任务包：需求分析 → 规格说明（smoke）",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 12
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"verdict\": \"approved\", \"comments\": \"设计覆盖了需求项 R1–R5\"}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 140,
+        "completion_tokens": 10
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"verdict\": \"approved\", \"comments\": \"设计覆盖了需求项 R1–R5\"}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 140,
+        "completion_tokens": 10
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"verdict\": \"approved\", \"comments\": \"设计覆盖了需求项 R1–R5\"}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 140,
+        "completion_tokens": 10
+      }
+    },
+    {
+      "kind": "text",
+      "content": "已收到 3 份 approved 设计产物，进入下一阶段（smoke 叶节点）",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 160,
+        "completion_tokens": 14
+      }
+    }
+  ],
+  "failures": []
+}

@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "chunk_chars": 8,
+  "chunk_delay_ms": 0,
+  "calls": [
+    {
+      "kind": "text",
+      "content": "阶段任务包：需求分析 → 规格说明（smoke）",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 12
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"verdict\": \"rework\", \"comments\": \"接口覆盖不足：缺少错误码定义\"}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 140,
+        "completion_tokens": 10
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"verdict\": \"rework\", \"comments\": \"接口覆盖不足：缺少错误码定义\"}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 140,
+        "completion_tokens": 10
+      }
+    },
+    {
+      "kind": "text",
+      "content": "{\"verdict\": \"rework\", \"comments\": \"接口覆盖不足：缺少错误码定义\"}",
+      "stop_reason": "EndTurn",
+      "usage": {
+        "prompt_tokens": 140,
+        "completion_tokens": 10
+      }
+    }
+  ],
+  "failures": []
+}

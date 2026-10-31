@@ -1,16 +1,19 @@
-//! W1（v0.2 / M7）software_team SOP v1 e2e：codegen 参考图 validate + 规模/确定性断言。
+//! W1（v0.2 / M7）software_team SOP v1 e2e：codegen 参考图 validate + fake LLM 端到端。
 //!
-//! 语义基准：`doc/design/software-team-sop-v1.md` §4.1（设计角色依赖矩阵）、§7（N 与
-//! codegen 规则）、§11.1（`zgraph validate` 通过参考图）、附录 A/B；
-//! `doc/decisions/DR-004-v02-scope-and-waves.md` §3 W1。
+//! 语义基准：`doc/design/software-team-sop-v1.md` §3（D→W→R→P→下游）、§4.1（设计角色
+//! 依赖矩阵）、§5.1–§5.3（P 契约 / approved gate / 失败语义）、§7（N 与 codegen 规则）、
+//! §11（v1 落地验收）、附录 A/B；`doc/decisions/DR-004-v02-scope-and-waves.md` §3 W1。
 //!
-//! 数据通路（真链路）：
+//! 数据通路（真链路，禁止 mock kernel / worker / trace / CLI）：
 //!
 //! ```text
 //! tests/fixtures/graphs/software_team_v1/codegen.py（stdlib 纯函数）
 //!   → 图 JSON（full = 60 节点/100 边；smoke = 11 节点/18 边）
 //!   → 真 `zgraph` 二进制 `validate --assets-dir tests/fixtures/graphs/software_team_v1`
 //!     （R1–R14 全跑，含 R14c agent 资产索引）
+//!   → 真 `zgraph run --fake-llm=<script>`：fake LLM + 真 kernel + 真 Python worker
+//!     （工作 agent stub `software_team_stub` / 解析节点 `workers.software_team.parse_verdict`）
+//!     + 真 SQLite trace → TraceReader
 //! ```
 //!
 //! 断言口径：
@@ -19,11 +22,18 @@
 //! - **确定性**：同 profile 两次生成字节级一致，`graph_hash` 相同（DR-004 W1 DoD）；
 //! - **结构**：11 个设计角色 + 16 个工作/评审/解析节点 + `end`；每个 item 的 5 条内部边
 //!   与 approved gate 投递边齐备（§7 规则，测试侧用 §4.1 矩阵独立复算）；
-//! - **smoke 同构**：单阶段链路 `planer → 3 工作 → 3 评审 → 3 解析 → archer`，`archer`
-//!   是无出边的叶节点（其 run 语义由 fake LLM 用例覆盖）。
+//! - **approved 链路**：smoke 的 planer → 3 工作 → 3 评审 → 3 解析 → archer 全 Completed；
+//!   每 item 独立实例；`P.artifact` 原样透传 W 产物（不是评审摘要）；approved gate 放行；
+//! - **失败路径**：评审 rework / 非法 JSON → `P` 抛错 → 实例 Crashed
+//!   （`NODE_PYTHON_EXCEPTION`）→ run Failed（不把 gate=false 的 Completed(null) 当失败）。
+//!
+//! fake 剧本按**调用序**消费（05 §5.3.4 / harness `fake.rs`）：smoke 的执行顺序是确定的
+//! （planer 唯一先执行 → 3 个评审并发但结论内容相同 → archer 等 3 个 approved 到齐），
+//! 因此不用 sleep / 不断言评审之间的先后。
 //!
 //! 稳定性约定：codegen 用 `python3`/`ZGRAPH_PYTHON` 执行（与 e2e 其它 Python 断言同口径，
-//! 不写 `__pycache__`）；每个用例独立 `tempfile::TempDir`。
+//! 不写 `__pycache__`）；每个用例独立 `tempfile::TempDir` 与独立 trace DB；CLI 自带完成
+//! 语义（子进程退出即判定），不猜时序。
 
 #![cfg(unix)]
 
@@ -36,9 +46,13 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use cli_support::{arg, assert_exit, repo_root, run_cli, stderr_text};
+use zgraph_trace::{
+    GateResultRow, InstanceRow, InstanceStatus as TraceInstanceStatus, TraceReader,
+};
+
+use cli_support::{arg, assert_exit, json_stdout, repo_root, run_cli, stderr_text};
 
 /// e2e fixture 目录名（`tests/fixtures/graphs/software_team_v1`）。
 const FIXTURE_GRAPH_DIR: &str = "software_team_v1";
@@ -571,4 +585,365 @@ fn smoke_codegen_is_isomorphic_single_stage_pipeline() {
             "planer.{item} 的 approved 投递边应指向 archer.{item}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// smoke run：fake LLM 端到端（approved 链路 + 失败路径）
+// ---------------------------------------------------------------------------
+
+/// smoke 入口输入（`planer.requirement` 由 run 注入；SOP 附录 B entry 语义）。
+const SMOKE_INPUTS: &str = r#"{"planer":{"requirement":"构建一个最小软件团队 SOP 冒烟链路"}}"#;
+
+/// fake 剧本 `fake_llm_approved.json` 的 `calls[0]`：planer 任务包（planer 唯一先执行）。
+const PLANER_CONTENT: &str = "阶段任务包：需求分析 → 规格说明（smoke）";
+
+/// fake 剧本 `calls[1..=3]`：3 个评审共用的 approved 结论（内容相同 → 并发次序无关）。
+const REVIEW_CONTENT: &str =
+    "{\"verdict\": \"approved\", \"comments\": \"设计覆盖了需求项 R1–R5\"}";
+
+/// 评审结论里的 comments（解析节点 `P` 从 `review.content` 解析）。
+const REVIEW_COMMENTS: &str = "设计覆盖了需求项 R1–R5";
+
+/// fake 剧本 `calls[4]`：archer 叶节点任务包（3 个 approved item 到齐后才执行）。
+const ARCHER_CONTENT: &str = "已收到 3 份 approved 设计产物，进入下一阶段（smoke 叶节点）";
+
+/// approved 剧本（success 路径）。
+const FAKE_APPROVED: &str = "fake_llm_approved.json";
+
+/// rework 剧本（`verdict != approved` → `P` 抛错）。
+const FAKE_REWORK: &str = "fake_llm_rework.json";
+
+/// 非法 JSON 剧本（`review.content` 不可解析 → `P` 抛错）。
+const FAKE_INVALID_JSON: &str = "fake_llm_invalid_json.json";
+
+/// `zgraph run` 的 smoke 参数：真 CLI + fake LLM + 真 Python worker 子进程。
+///
+/// `--python-path` 顺序：仓库 `python/`（`zgraph_worker` + `workers.software_team.parse_verdict`）
+/// → fixture `py/`（工作 agent stub `software_team_stub`）；fake 脚本按调用序消费。
+fn smoke_run_args(graph: &Path, db: &Path, fake: &str) -> Vec<String> {
+    let assets = fixture_dir();
+    vec![
+        "run".to_string(),
+        arg(graph),
+        "--inputs".to_string(),
+        SMOKE_INPUTS.to_string(),
+        "--db".to_string(),
+        arg(db),
+        "--assets-dir".to_string(),
+        arg(&assets),
+        "--tools-dir".to_string(),
+        arg(&assets.join("tools")),
+        "--python".to_string(),
+        common::python_program(),
+        "--python-path".to_string(),
+        arg(&common::repo_root().join("python")),
+        "--python-path".to_string(),
+        arg(&assets.join("py")),
+        format!("--fake-llm={}", assets.join(fake).display()),
+        "--json".to_string(),
+    ]
+}
+
+/// 跑一次 smoke；返回 CLI 输出与 trace DB 路径。
+fn run_smoke(dir: &Path, graph: &Path, fake: &str) -> (Output, PathBuf) {
+    let db = dir.join(format!("{fake}.db"));
+    let output = run_cli(&smoke_run_args(graph, &db, fake), dir);
+    (output, db)
+}
+
+/// `--json` 输出里的 run_id。
+fn payload_run_id(payload: &Value) -> String {
+    payload["run_id"]
+        .as_str()
+        .expect("--json run_id")
+        .to_string()
+}
+
+/// 断言 agent_call 的四字段整包（05 §5.9.2），返回 `content`。
+fn assert_agent_package(value: &Value) -> String {
+    let object = value.as_object().expect("agent output 应为对象");
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["content", "iterations", "stop_reason", "usage"],
+        "agent 输出必须恰好是四字段整包"
+    );
+    let content = value["content"]
+        .as_str()
+        .expect("content 字符串")
+        .to_string();
+    assert!(!content.is_empty(), "content 不得为空");
+    assert!(value["iterations"].as_u64().is_some_and(|n| n >= 1));
+    assert!(
+        value["usage"]["total_tokens"]
+            .as_u64()
+            .is_some_and(|total| total > 0),
+        "usage.total_tokens 必须 > 0"
+    );
+    content
+}
+
+/// 按节点 id 取**唯一** Completed 实例（per-item 实例断言：每个节点恰一条 trace 行）。
+fn completed_instance(reader: &TraceReader, run_id: &str, node_id: &str) -> InstanceRow {
+    let rows: Vec<InstanceRow> = reader
+        .instances(run_id)
+        .expect("query instances")
+        .into_iter()
+        .filter(|row| row.node_id == node_id)
+        .collect();
+    assert_eq!(rows.len(), 1, "节点 {node_id} 应恰一个实例");
+    let row = rows.into_iter().next().expect("instance row");
+    assert_eq!(
+        row.status,
+        TraceInstanceStatus::Completed,
+        "节点 {node_id} 应 Completed"
+    );
+    assert_eq!(row.error_code, None, "节点 {node_id} 不应有错误码");
+    row
+}
+
+/// 断言一个 item 的 W/R/P 链路 + 产物透传（SOP §3 / §11.2–§11.3）。
+fn assert_approved_item_chain(
+    reader: &TraceReader,
+    run_id: &str,
+    item: &str,
+    planer_output: &Value,
+) {
+    let base = format!("planer_{item}");
+
+    // W：工作 agent 收到 D 的整包任务包，产出该 item 的 artifact。
+    let work_output = completed_instance(reader, run_id, &base)
+        .output_json
+        .clone()
+        .expect("工作 agent output");
+    assert_eq!(work_output["kind"], json!("software_team_work"));
+    assert_eq!(work_output["role"], json!("planer"));
+    assert_eq!(work_output["item"], json!(item));
+    assert_eq!(
+        work_output["task"], *planer_output,
+        "W 必须收到 D 的整包任务包"
+    );
+
+    // R：评审 agent 消费 approved 剧本（内容相同，并发次序不影响断言）。
+    let review_output = completed_instance(reader, run_id, &format!("{base}_review"))
+        .output_json
+        .clone()
+        .expect("评审 agent output");
+    let review_content = assert_agent_package(&review_output);
+    assert_eq!(
+        review_content, REVIEW_CONTENT,
+        "3 个评审都消费 approved 剧本"
+    );
+    let review_json: Value =
+        serde_json::from_str(&review_content).expect("评审 content 应为合法 JSON");
+    assert_eq!(review_json["verdict"], json!("approved"));
+    assert_eq!(review_json["comments"], json!(REVIEW_COMMENTS));
+
+    // P：解析 verdict + **原样透传** W 的完整产物（不是评审摘要）。
+    let parse_output = completed_instance(reader, run_id, &format!("{base}_parse"))
+        .output_json
+        .clone()
+        .expect("解析节点 output");
+    assert_eq!(parse_output["verdict"], json!("approved"));
+    assert_eq!(parse_output["comments"], json!(REVIEW_COMMENTS));
+    assert_eq!(
+        parse_output["artifact"], work_output,
+        "P 必须原样透传 W 的完整产物"
+    );
+    assert_ne!(
+        parse_output["artifact"], review_output,
+        "P.artifact 不得是评审输出（评审摘要）"
+    );
+    assert_eq!(
+        parse_output["artifact"]["task"], *planer_output,
+        "artifact 必须保留上游任务包"
+    );
+}
+
+/// approved 链路：planer → 3 工作 → 3 评审 → 3 解析 → archer，产物透传 + approved gate。
+#[test]
+fn smoke_run_approved_pipeline_propagates_artifacts_and_enforces_gate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = generate_graph(dir.path(), PROFILE_SMOKE);
+    let (output, db) = run_smoke(dir.path(), &graph, FAKE_APPROVED);
+    assert_exit(&output, 0, "smoke approved run");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["ok"], json!(true));
+    assert_eq!(payload["status"], json!("Completed"));
+    assert_eq!(
+        payload["run_output"],
+        Value::Null,
+        "无 end 节点 → run_output=null（01 §1.9；smoke 以 archer 叶节点收尾）"
+    );
+    let run_id = payload_run_id(&payload);
+
+    let reader = TraceReader::open_readonly(&db).expect("打开 trace 只读连接");
+    common::assert_lifecycle_shape(&reader, &run_id);
+    let run = common::run_row(&reader, &run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Completed);
+    assert_eq!(run.error_code, None);
+
+    // per-item 实例：11 个节点各恰一条 Completed 实例（每 item 独立 W/R/P）。
+    let instances = reader.instances(&run_id).expect("query instances");
+    assert_eq!(instances.len(), SMOKE_NODE_COUNT, "11 个节点各一个实例");
+    assert!(
+        instances
+            .iter()
+            .all(|row| row.status == TraceInstanceStatus::Completed),
+        "Completed run 的所有实例都应 Completed: {instances:?}"
+    );
+
+    // planer 是唯一先执行节点 → fake 剧本 calls[0] 必然分给它（调用序确定）。
+    let planer_output = completed_instance(&reader, &run_id, "planer")
+        .output_json
+        .expect("planer output");
+    assert_eq!(assert_agent_package(&planer_output), PLANER_CONTENT);
+
+    for item in SMOKE_ITEMS {
+        assert_approved_item_chain(&reader, &run_id, item, &planer_output);
+    }
+
+    // archer 叶节点：3 个 approved item 到齐才执行（trigger=all），输入是 P 的整包输出。
+    let archer = completed_instance(&reader, &run_id, "archer");
+    let archer_input = archer.input.as_ref().expect("archer input 快照");
+    for item in SMOKE_ITEMS {
+        assert_eq!(
+            archer_input[item]["verdict"],
+            json!("approved"),
+            "{item} 必须是 approved 投递"
+        );
+        assert_eq!(
+            archer_input[item]["artifact"]["kind"],
+            json!("software_team_work"),
+            "{item} 必须携带工作 agent 产物"
+        );
+    }
+    let archer_output = archer.output_json.expect("archer output");
+    assert_eq!(assert_agent_package(&archer_output), ARCHER_CONTENT);
+
+    // approved gate 生效：3 条 P→archer 投递均 check_output 放行。
+    let gates: Vec<GateResultRow> = reader.gate_results(&run_id).expect("query gate_results");
+    let to_archer: Vec<&GateResultRow> = gates
+        .iter()
+        .filter(|gate| gate.to_node == "archer")
+        .collect();
+    assert_eq!(to_archer.len(), SMOKE_ITEMS.len(), "3 条 approved 投递");
+    for gate in to_archer {
+        assert!(gate.passed, "approved gate 应放行: {gate:?}");
+        assert_eq!(gate.gate_fn.as_deref(), Some("check_output"));
+        assert!(
+            SMOKE_ITEMS.contains(&gate.to_port.as_str()),
+            "目标端口应为 item 端口: {}",
+            gate.to_port
+        );
+        assert!(gate.error.is_none(), "放行的 gate 不应有错误: {gate:?}");
+    }
+    assert!(
+        gates.iter().all(|gate| gate.passed),
+        "Completed run 不应有被拦截的投递"
+    );
+}
+
+/// 评审失败路径（rework / 非法 JSON）的统一断言。
+///
+/// SOP §5.2：`P` 对非 approved / 非法 JSON **抛 Python 异常** → 实例 Crashed
+/// （`NODE_PYTHON_EXCEPTION`）→ run Failed；**不允许**把 gate=false 的「run Completed
+/// (null)」当成失败（§5.3）。
+fn assert_parse_failure_path(dir: &Path, graph: &Path, fake: &str, exception_fragment: &str) {
+    let (output, db) = run_smoke(dir, graph, fake);
+    assert_exit(&output, 1, "评审失败 run 应 exit 1");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["ok"], json!(false));
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(payload["run_output"], Value::Null);
+    assert_eq!(payload["error"]["code"], json!("NODE_PYTHON_EXCEPTION"));
+    let run_id = payload_run_id(&payload);
+
+    let reader = TraceReader::open_readonly(&db).expect("打开 trace 只读连接");
+    common::assert_lifecycle_shape(&reader, &run_id);
+    let run = common::run_row(&reader, &run_id);
+    assert_eq!(run.status, zgraph_trace::RunStatus::Failed);
+    assert_eq!(
+        run.error_code.as_deref(),
+        Some("NODE_PYTHON_EXCEPTION"),
+        "runs.error_code"
+    );
+
+    let instances = reader.instances(&run_id).expect("query instances");
+    let parse_rows: Vec<&InstanceRow> = instances
+        .iter()
+        .filter(|row| row.node_id.ends_with("_parse"))
+        .collect();
+    assert!(!parse_rows.is_empty(), "至少创建了一个解析节点实例");
+    let crashed: Vec<&InstanceRow> = parse_rows
+        .iter()
+        .copied()
+        .filter(|row| row.status == TraceInstanceStatus::Crashed)
+        .collect();
+    assert!(
+        !crashed.is_empty(),
+        "解析节点必须 Crashed（NODE_PYTHON_EXCEPTION），实际: {parse_rows:?}"
+    );
+    for row in &crashed {
+        assert_eq!(
+            row.error_code.as_deref(),
+            Some("NODE_PYTHON_EXCEPTION"),
+            "{} 实例错误码",
+            row.node_id
+        );
+        let error = row.error.as_ref().expect("Crashed 实例应有 error JSON");
+        assert_eq!(error["kind"], json!("PythonException"));
+        let exception = error["exception"].as_str().expect("error.exception 摘要");
+        assert!(
+            exception.contains(exception_fragment),
+            "异常摘要应含 {exception_fragment:?}: {exception}"
+        );
+    }
+    assert!(
+        parse_rows
+            .iter()
+            .all(|row| row.status != TraceInstanceStatus::Completed),
+        "失败的解析节点不得 Completed"
+    );
+
+    // 下游 archer 不得执行；approved gate 不得放行任何投递（失败由 P 抛错承担）。
+    assert!(
+        instances
+            .iter()
+            .filter(|row| row.node_id == "archer")
+            .all(|row| row.status != TraceInstanceStatus::Completed),
+        "archer 不得 Completed"
+    );
+    let gates = reader.gate_results(&run_id).expect("query gate_results");
+    // 普通投递（gate_fn=None）可能已放行（planer→W/R 等），但 approved gate（`check_output`）
+    // 不得放行任何投递；解析未产出 verdict 时也不应有边投递给 archer。
+    let approved_gates: Vec<&GateResultRow> = gates
+        .iter()
+        .filter(|gate| gate.gate_fn.as_deref() == Some("check_output"))
+        .collect();
+    assert!(
+        approved_gates.iter().all(|gate| !gate.passed),
+        "P 抛错时不应有放行的 approved gate: {approved_gates:?}"
+    );
+    assert!(
+        gates.iter().all(|gate| gate.to_node != "archer"),
+        "解析未产出 verdict 时不应有投递指向 archer: {gates:?}"
+    );
+}
+
+/// 评审 `verdict != approved`（rework）→ `P` 抛 ValueError → NODE_PYTHON_EXCEPTION / run Failed。
+#[test]
+fn smoke_rework_verdict_crashes_parse_and_fails_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = generate_graph(dir.path(), PROFILE_SMOKE);
+    assert_parse_failure_path(dir.path(), &graph, FAKE_REWORK, "not approved");
+}
+
+/// 评审 `content` 非法 JSON → `P` 抛 ValueError → NODE_PYTHON_EXCEPTION / run Failed。
+#[test]
+fn smoke_invalid_review_json_crashes_parse_and_fails_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let graph = generate_graph(dir.path(), PROFILE_SMOKE);
+    assert_parse_failure_path(dir.path(), &graph, FAKE_INVALID_JSON, "not valid JSON");
 }
