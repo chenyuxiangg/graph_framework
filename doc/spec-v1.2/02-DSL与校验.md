@@ -57,7 +57,7 @@
 | 约定 | 规则 |
 |---|---|
 | 跨规则 | **fail-fast**：首个失败的规则终止后续规则；执行顺序 = `R1→R13→R15→R14`（W2a0 起；R15 必须在 L3 的 R14 前，见 §2.1.2），可测试 |
-| 同规则内 | **聚合**：按 `nodes`/`edges` 数组顺序收集全部违反项 |
+| 同规则内 | **聚合**：按 `nodes`/`edges` 数组顺序收集全部违反项。**例外（W2a0）**：R15 按 `edges` 数组序取**首错**（与 R13 风格一致，不聚合；见 §2.4.1 R15） |
 | 上限 | `MAX_DSL_ERRORS = 20`；超出截断并置 `truncated=true` |
 | 自动修复 | **MUST NOT**（图定义错误是设计错误，用户修） |
 | 部分加载 | **MUST NOT**：任一错误 → 无 `CompiledGraph`、无 run（`zgraph run` exit 2，不创建 run 记录） |
@@ -400,9 +400,9 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | **R1** | JSON 可解析 | `DSL_PARSE_ERROR` | `serde_json::from_slice::<Value>(bytes)` 成功 **且** 顶层为 object | `{}`（message 带 line/column） |
 | **R2** | 顶层必填/类型/未知键 | `DSL_MISSING_FIELD` / `DSL_PARSE_ERROR` | 预扫描：`top` 含 `{version,metadata,entry_points,nodes,edges}`（缺→MISSING）；`entry_points`/`nodes` 为非空数组、`metadata` object、`edges` 数组；顶层键 ⊆ 白名单（§2.2.4） | `{}` |
 | **R3** | version 与 metadata | `DSL_PARSE_ERROR` / `DSL_MISSING_FIELD` | `version == "1.0"`；`metadata.name` 非空；`created_at?` 若存在 → UTC RFC3339；`description/author?` string；未知键拒绝 | `{}`（缺 name 时 `{}`） |
-| **R4** | 节点/边声明合法 | `DSL_MISSING_FIELD` / `DSL_INVALID_PORT` / `DSL_UNSUPPORTED_NODE_TYPE` / `DSL_UNSUPPORTED_FIELD` / `DSL_PARSE_ERROR` | 逐节点（数组序）：键白名单；`id` 格式；`type` ∈ 5 枚举（其它字符串 → `DSL_UNSUPPORTED_NODE_TYPE`）；`inputs` 端口结构（名唯一/非空/Python 标识符、`type` 枚举、`required` bool）；`trigger` 枚举；`outputs` 若存在 → 端口结构（节点内唯一）；`config` 按 `type` 白名单与必填；`start` 的 `inputs` 允许 0..N（结构同普通节点）且 `start.trigger` 若给出必须 `"all"`；`end.inputs ≥1 且 ≥1 required` 且 `end.trigger` 必须 `"all"`；`on_error` 出现 → `DSL_UNSUPPORTED_FIELD`。**逐边（W2a0）**：键白名单；`on_gate_false?` 若存在必须 ∈ `{"settle","defer"}`（其它字符串/非字符串 → `DSL_PARSE_ERROR`） | `node_id`（+`port`）；边级 `edge_index` |
+| **R4** | 节点/边声明合法 | `DSL_MISSING_FIELD` / `DSL_INVALID_PORT` / `DSL_UNSUPPORTED_NODE_TYPE` / `DSL_UNSUPPORTED_FIELD` / `DSL_PARSE_ERROR` | 逐节点（数组序）：键白名单；`id` 格式；`type` ∈ 5 枚举（其它字符串 → `DSL_UNSUPPORTED_NODE_TYPE`）；`inputs` 端口结构（名唯一/非空/Python 标识符、`type` 枚举、`required` bool）；`trigger` 枚举；`outputs` 若存在 → 端口结构（节点内唯一）；`config` 按 `type` 白名单与必填；`start` 的 `inputs` 允许 0..N（结构同普通节点）且 `start.trigger` 若给出必须 `"all"`；`end.inputs ≥1 且 ≥1 required` 且 `end.trigger` 必须 `"all"`；`on_error` 出现 → `DSL_UNSUPPORTED_FIELD`。**逐边（W2a0）**：键白名单；`on_gate_false?` 若存在必须 ∈ `{"settle","defer"}`（其它字符串/非字符串 → `DSL_PARSE_ERROR`）。**注（N-11）**：本行只冻结**错误码归属**（R4 类型桶）；边结构解析可在 R8 阶段执行（与 `crates/zgraph-dsl/src/edges.rs` 头注释一致），但不得改变多错图的 `errors[0]`/`error_count` 顺序 | `node_id`（+`port`）；边级 `edge_index` |
 | **R5** | 节点 ID 唯一 | `DSL_DUPLICATE_NODE_ID` | 命名空间内（主图 / 每个子图）`Set<id>` 检查 | `node_id`（message 带两个下标） |
-| **R6** | 子图定义与引用 | `DSL_SUBGRAPH_INVALID` | `subgraphs?`：`id` 图内唯一；每项键/必填齐全；`nodes ≥1`；**至少 1 个 `type="end"`**（不要求恰好 1 个）、**不得含 `start`**；递归执行 R4/R5/R8–R13、**R15**（命名空间=子图；**R7 不适用**——子图无 `entry_points`；R12 的 entry 豁免节点 = `input_mapping` 值中的内部节点）；`input_mapping` 值形如 `"<node_id>.<port>"` 且节点/端口存在；`output_mapping` 值指向 **end 节点已声明端口**；**若存在 `type="subgraph"` 节点，其 `config.subgraph_id` 必须命中某个子图定义** | `node_id`=子图 id / 引用方节点（message 前缀 `subgraphs[i]`） |
+| **R6** | 子图定义与引用 | `DSL_SUBGRAPH_INVALID` | `subgraphs?`：`id` 图内唯一；每项键/必填齐全；`nodes ≥1`；**至少 1 个 `type="end"`**（不要求恰好 1 个）、**不得含 `start`**；递归执行 R4/R5/R8–R13、**R15**（命名空间=子图；**子图内 R15 违规收敛为 `DSL_SUBGRAPH_INVALID`**，message `subgraph '<id>': …`，`location` 保留内部 `node_id`/`edge_index`；**R7 不适用**——子图无 `entry_points`；R12 的 entry 豁免节点 = `input_mapping` 值中的内部节点）；`input_mapping` 值形如 `"<node_id>.<port>"` 且节点/端口存在；`output_mapping` 值指向 **end 节点已声明端口**；**若存在 `type="subgraph"` 节点，其 `config.subgraph_id` 必须命中某个子图定义** | `node_id`=子图 id / 引用方节点（message 前缀 `subgraphs[i]`） |
 | **R7** | entry_points 有效 | `DSL_INVALID_ENTRY` | 每项 ∈ 节点集；非 `end`；无重复；每个 `start` 节点必须被列入（允许多个 start，04 §4.4.2） | `node_id`（= 违规入口/`start` 节点） |
 | **R8** | 边端点合法 | `DSL_INVALID_EDGE_REF` | 逐边（数组序）：`from`/`to_node` 存在；`from.type != end`；`to_node.type != start`；`to_node ∉ entry_points`（入口节点输入只能外部注入） | `edge_index` + `node_id` |
 | **R9** | 端口引用合法 | `DSL_INVALID_PORT` / `DSL_UNSUPPORTED_FIELD` / `DSL_PARSE_ERROR` | `to_input_port` ∈ `to_node.inputs[*].name`；**`from_output_port` 出现即 `DSL_UNSUPPORTED_FIELD`**（v1 MUST 缺省；v2 启用时改为"∈ from.outputs 的已声明端口"）；`gate.params?` 必须是 object | `edge_index` + `node_id` + `port` |
@@ -411,7 +411,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | **R12** | 输入来源完整 | `DSL_UNCONNECTED_INPUT` | 对每个 **非 entry** 节点：入边数 ≥1；`trigger=all` → 每个 `required:true` 端口有入边；`trigger=any` → ≥1 个 `required` 端口有入边（无 required 端口时 → ≥1 个端口有入边）。豁免：主图 `entry_points` 节点（含 start）、子图 `input_mapping` 值指向的内部节点 | `node_id`（+`port`） |
 | **R13** | 无门控环检测 | `DSL_CYCLE_DETECTED` | 构造 `G'` = 顶点为节点、边为**无 gate 的边**（**自环计入**）；对 `G'` 做 DFS 三色标记（顶点按 `nodes` 序、邻接按 `edges` 序）→ 发现回边即环。**W2a0 不变**：defer 不豁免环检测，R13 仍只查无 gate 环 | `edge_index`（环内最小索引边）+ `node_id`（环起点） |
 | **R14** | 外部引用解析 | `DSL_SYMBOL_NOT_FOUND` / `DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT` / `DSL_AGENT_NOT_FOUND` | (a) **gate**：格式 → 内置 op 查表 → `params` 契约 → 跨类冲突（§2.5；D6/D7）；**python_node 只做 `module/function` 格式校验，不 import**（导入/签名在 worker 启动期 → `NODE_WORKER_IMPORT`）；(b) `agent_call.agent_id` 在资产索引中存在（未提供资产根时跳过，§2.6.3）。**`subgraph` 节点不在此拒绝**（加载期通过，运行期 run 启动后、实例创建前报 `NODE_TYPE_UNSUPPORTED`，§2.6.1） | `edge_index`（gate）/ `node_id`（资产） |
-| **R15** | defer 边源可重入（**L2；在 R14 之前执行**） | `DSL_DEFER_NOT_REENTRANT` | 对每条 `on_gate_false="defer"` 的边 `(u→v)`：在 `G_all`（顶点=全部节点，边=**全部边**，含 gate 边与自环）上求 `S = SCC(u)`；通过条件 = 「存在 defer 自环 `u→u`」或「`|S| ≥ 2` 且 `S` 内存在 defer 边（两端点 ∈ `S`）」；否则报错。与 R13 独立（R13 用 `G'`，R15 用 `G_all`；R13 先判） | `edge_index`（该 defer 边）+ `node_id`（= 源 `u`） |
+| **R15** | defer 边源可重入（**L2；在 R14 之前执行**） | `DSL_DEFER_NOT_REENTRANT` | 对每条 `on_gate_false="defer"` 的边 `(u→v)`：在 `G_all`（顶点=全部节点，边=**全部边**，含 gate 边与自环）上求 `S = SCC(u)`；通过条件 = 「存在 defer 自环 `u→u`」或「`|S| ≥ 2` 且 `S` 内存在 defer 边（两端点 ∈ `S`）」；否则报错。与 R13 独立（R13 用 `G'`，R15 用 `G_all`；R13 先判）。**同规则内取 `edges` 数组序首错**（不聚合，与 R13 一致） | `edge_index`（该 defer 边）+ `node_id`（= 源 `u`） |
 
 ### 2.4.2 错误信息模板与定位（message 为英文稳定模板，M-11）
 
@@ -429,7 +429,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | `DSL_DUPLICATE_EDGE` | `duplicate edge {from} -> {to_node}: edges[{first}] and edges[{dup}]` | `edge_index` + `node_id` | `graph.json: edges[i]` |
 | `DSL_DUPLICATE_PORT_SOURCE` | `duplicate input source for '{node_id}.{port}': edges[{first}] and edges[{dup}]` | `edge_index` + `node_id` + `port` | `graph.json: edges[i]` |
 | `DSL_UNCONNECTED_INPUT` | `input '{node_id}.{port}' has no incoming edge`；`node '{node_id}' has no incoming edge` | `node_id`（+`port`） | `graph.json: node 'X'` |
-| `DSL_SUBGRAPH_INVALID` | `subgraph '{subgraph_id}': {detail}`（`no_end`/`duplicate_id`/`bad_mapping_ref`/`duplicate_node_id`/`cycle`） | `node_id`=子图 id | `graph.json: subgraphs[i]` |
+| `DSL_SUBGRAPH_INVALID` | `subgraph '{subgraph_id}': {detail}`（`no_end`/`duplicate_id`/`bad_mapping_ref`/`duplicate_node_id`/`cycle`/**`defer_not_reentrant`**） | `node_id`=子图 id | `graph.json: subgraphs[i]` |
 | `DSL_CYCLE_DETECTED` | `ungated data cycle: {n1} -> {n2} -> ... -> {n1} (edges: [{indices}])` | `edge_index` + `node_id` | `graph.json: edges[i]` |
 | `DSL_SYMBOL_NOT_FOUND` | `symbol '{symbol}' not found: {detail}`（`bad_format`/`unknown_builtin_op`） | `node_id`（python_node 格式非法）或 `edge_index`（gate） | `graph.json: node 'X'.config` / `graph.json: edges[i].gate` |
 | `DSL_SIGNATURE_MISMATCH` | `signature mismatch for '{symbol}': expected {expected}, actual {actual}`（仅内置 gate op 的 `params` 契约） | `edge_index`（gate） | `graph.json: edges[i].gate` |

@@ -156,14 +156,14 @@ fail(e) → DSL_DEFER_NOT_REENTRANT，location = {edge_index: e.index, node_id: 
   - `|SCC(u)| >= 2` 且 `SCC(u)` 内存在 `defer` 边（两端点同属该 SCC）；或
   - 存在 `defer` 自环 `u → u`。
 - 复杂度上界：每个命名空间一次 **Tarjan/Kosaraju**（`O(V+E)`）；defer 边逐条查 SCC + 一次「SCC 内是否有 defer 边」集合查询（`O(E)`）。
-- **环的语义口径**：本规则的「环」按**闭迹（closed walk，允许重复顶点）**理解；若实现按「简单环」理解，则 `|S|≥2 且 SCC 内含 defer 边` 是**充分但非必要**的保守判定（见 §11 边界 E-1）。W2a 以本 DR 的等价判定为准，**不得**自行收紧或放宽。
+- **环的语义口径**：本规则以**闭迹（closed walk，允许重复顶点）**为权威口径；按「简单环」口径**更严**——E-1 的构造满足本判定、但不存在「过 u 且含该 defer 边」的简单环，本规则按冻结判定**通过**（属放宽例，不是反例；见 §11 E-1）。实现以 §2.5.2 的等价判定为准，**不得**自行收紧或放宽。
 - 定位与 message（英文稳定模板，02 §2.4.2）：
   - message：`defer edge source '{u}' is not re-entrant: must lie on a cycle containing a defer edge`
   - location：`{ "edge_index": <e.index>, "node_id": "<u>" }`
   - expected：`"re-entrant defer source (cycle through source containing a defer edge, or defer self-loop)"`
   - actual：`{ "node_id": "<u>", "scc_size": <n>, "defer_edges": [<indices>] }`（`defer_edges` = 该 SCC 内 defer 边索引，升序）
 - **与 R13 独立**：R13 保持原样（`G'` 只含无 gate 边，自环计入）；R15 用 `G_all`。二者可同时报错时按执行顺序（R13 先）只报 R13（fail-fast）。
-- **子图**：R6 的递归规则集由「R4/R5/R8–R13」扩为「R4/R5/R8–R13、R15」（子图命名空间内独立判定；`R7` 仍不适用）。
+- **子图**：R6 的递归规则集由「R4/R5/R8–R13」扩为「R4/R5/R8–R13、R15」（子图命名空间内独立判定；`R7` 仍不适用）。**错误码收敛（N-4）**：子图内 R15 违规由 R6 包装为 `DSL_SUBGRAPH_INVALID`（message `subgraph '<id>': ...`，`location` 保留内部 `node_id`/`edge_index`），不把 `DSL_DEFER_NOT_REENTRANT` 直接抛出；与现有子图 R13 收敛一致。
 
 #### 2.5.3 正例（通过）
 
@@ -180,7 +180,6 @@ fail(e) → DSL_DEFER_NOT_REENTRANT，location = {edge_index: e.index, node_id: 
 |---|---|---|
 | N-1 | `a --defer(gate)--> b`，b 无出边 | `SCC(a)={a}`、无 defer 自环 → `DSL_DEFER_NOT_REENTRANT`（`edge_index`=该边，`node_id=a`） |
 | N-2 | `a --defer(gate)--> b`；`b --gate--> c`；`c --gate--> b` | `SCC(a)={a}`（b/c 自环但与 a 不连通）→ 报错 |
-| N-3 | `a --defer(gate)--> b`；`b --gate--> a`，但 `a→b` 是**唯一** defer 边且……（合法，见 P-4） | — |
 | N-4 | 无 gate 的 `defer` 自环 `a → a` | **先**被 R13 `DSL_CYCLE_DETECTED` 拦截（R13 先于 R15）；R15 不报 |
 | N-5 | 无 gate 的 `a→b→a` 环 + 某条 `defer` 前进边指向环外 | R13 先报 `DSL_CYCLE_DETECTED`（defer 不豁免 R13） |
 
@@ -228,11 +227,11 @@ pub struct DeferredReceipt {
     pub source_instance: InstanceId,  // 做出 deferred 决策的发布者实例
     pub source_attempt: Attempt,      // 该实例 attempt（审计/排障）
     pub target_node: NodeId,          // = CompiledEdge.to_node
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: String,          // 实现口径：RFC3339 毫秒 Z（与既有 ts/at 同口径）
 }
 ```
 
-- `RunState.deferred_receipts: BTreeMap<EdgeIdx, DeferredReceipt>`（**BTreeMap**：quiescence 判定与错误 message 需要确定性的边序；同一 `EdgeIdx` 重复 deferred → 覆盖旧值、刷新 `updated_at`）。
+- `RunState.deferred_receipts: BTreeMap<EdgeIdx, DeferredReceipt>`（**BTreeMap**：quiescence 判定与错误 message 需要确定性的边序；同一 `EdgeIdx` 重复 deferred → 覆盖旧值、刷新 `updated_at`）。**`updated_at` 实现口径 = `String`（RFC3339 毫秒 `Z`）**，与 kernel 既有 `ts`/`at` 记录同口径；spec 01 同步。
 - 仅 **defer 边** 且 **gate=false** 时写入；settle 边的 gate=false 不写 receipt（保持 v0.1.0）。
 - receipt 不参与 `graph_hash`、不进入 `Delivery`；只进运行期状态（trace 经 `GateResultRecord.deferred=true` 可观测）。
 
@@ -249,10 +248,13 @@ pub struct DeferredReceipt {
 | 5 | `Defer` | true | `v` 当前实例 `Completed`，`v.type == end` | **B2 特例**：不 attempt+1；`fail_run(RUN_DELIVERY_TO_TERMINAL)`（end 是 run 级聚合，重入未定义） |
 | 6 | `Defer` | true | `v` 当前实例 `Completed`，`u == v`（自环） | **B3**：按自环语义 `attempt = src.attempt + 1`；`>= max` → 新实例 Crashed(Internal) + `NODE_INTERNAL`；否则新建 Pending 实例 + **按端口继承 + `settled_by_node[v]` 重置**（§3.2 行 6/7 补全） |
 | 7 | `Defer` | true | `v` 当前实例 `Completed`，`u != v` | **B1**：`attempt = target_current.attempt + 1`；`>= max` → 新实例 Crashed(Internal) + `NODE_INTERNAL`；否则新建 Pending 实例 + **按端口继承 + `settled_by_node[v]` 重置**，再应用本次投递 |
-| 8 | `Defer` | true | `v` 当前实例终态非 `Completed` | **现行**失败路径：`RUN_DELIVERY_TO_TERMINAL`（冷峻失败已发生，防御性） |
-| 9 | 无 gate（`gate: None`） | true | 同 3–8 | 同 3–8（`deferred` 只在 false 时可能为 true；无 gate 恒 true，故走 attempt-per-activation 判断） |
+| 8 | **`Settle`** | true | 目标当前实例 `Completed` | **现行失败路径**：`RUN_DELIVERY_TO_TERMINAL`（**不** attempt+1；attempt-per-activation **只对 `Defer` 边**）；resolve 失败 → 不产生 GateResult |
+| 9 | `Defer` | true | `v` 当前实例终态非 `Completed` | **现行**失败路径：`RUN_DELIVERY_TO_TERMINAL`（冷峻失败已发生，防御性） |
+| 10 | 无 gate（`gate: None`） | true | 同 3–9 | 同 3–9（`deferred` 只在 false 时可能为 true；无 gate 恒 true，故走 attempt-per-activation 判断） |
 
-> 行 9 是 SOP v1.1 的关键：`W→R`、`W→P.artifact`、`R→P` 无 gate，但标 `defer` 的作用就是**允许目标已 Completed 时按 attempt 重入**。
+> **attempt 计算（C2 明确）**：`Defer` **自环** → `attempt = src.attempt + 1`（保持 v0.1.0 自环语义，不双重递增）；`Defer` **非自环** → `attempt = target_current.attempt + 1`；**`Settle` 边永不进入 attempt-per-activation**（行 8 = 现行 `RUN_DELIVERY_TO_TERMINAL`）。
+>
+> 行 10 是 SOP v1.1 的关键：`W→R`、`W→P.artifact`、`R→P` 无 gate，但标 `defer` 的作用就是**允许目标已 Completed 时按 attempt 重入**。
 >
 > **行 6/7 的「按端口继承 + settled 重置」是 B1 的必要补全（Lead 2026-10-31 裁决；见 §11 C-1）**。原因有二：
 > - **stale-input 提前就绪（缺陷 A）**：SOP 的 `P` 有两个 defer 输入（`artifact` 来自 W、`review` 来自 R）。若新 attempt 继承**全部** arrived，P 的新实例在 `W→P.artifact` 投递后就会满足 `trigger=all`（旧 `review` 仍 arrived）→ 用**上一代评审结论**提前执行，rework 语义随机化。
@@ -260,9 +262,9 @@ pub struct DeferredReceipt {
 >
 > **冻结规则（两条，必须同时实现）**：
 > 1. **按端口继承（per-port inheritance）**：创建 defer 重入实例时，对目标节点 `v` 的每个声明输入端口 `p`，查 `EdgeIndex.incoming[(v,p)]`：
->    - 该端口**有入边且 `edge.on_gate_false != Defer`** → 继承 `values[p]` 与 `arrived` 中的 `p`（深拷贝），并把该 `EdgeIdx` 继承进新实例 `settled_sources`（值/arrived/结算三者一致）；
+>    - 该端口**有入边且 `edge.on_gate_false != Defer`** → 继承 `values[p]` 与 `arrived` 中的 `p`（深拷贝）；结算状态**统一按节点级 `settled_by_node`** 处理（不由实例级集合参与）;
 >    - 该端口**入边为 defer**（或没有入边，如可选端口未接）→ **不继承**（值和 arrived 都不继承），必须由当前这一代重新投递才能满足 required。
->    - `required` 集合由编译期节点重建；`gate_results` 不继承。
+>    - `required` 集合由编译期节点重建；`gate_results` 不继承。若实现保留实例级 `settled_sources`，仅作审计/排障、不参与 skip/就绪判定（N-9 口径）。
 > 2. **重入实例创建时清空 `settled_by_node[target_node]`**：让新一代重新结算自己的入边，避免上一代节点级 settled 集把新 Pending 实例误判 `Skipped`。某些 settle 入边（来自已完成的外部节点）不会重投 → 该节点可能永远「非全结算」，这不影响就绪（就绪只看 buffer arrived），而 `maybe_skip` 需要「全结算」才触发，反而正确避免误级联。**v0.1.0 无重入实例 → 行为不变**（B6）。
 >
 > **SOP 落地校验**：`W` 的 `task`（`D→W`，settle）继承、`feedback`（`P→W`，defer）重投；`R` 的 `spec`（`D→R`，settle）继承、`result`（`W→R`，defer）重投；`P` 的 `review`/`artifact` 都 defer → **都等新一代投递**（`W→P.artifact` 与 `R→P.review` 两条都到位才 ready，杜绝旧评审提前执行）。
@@ -271,18 +273,18 @@ pub struct DeferredReceipt {
 ### 3.3 投递应用算法（03 §3.4.3 的权威伪代码）
 
 ```text
-apply_completed(src, output, evaluations):                 # 执行任务回传后、事件循环内
+apply_completed(src, output, evaluations):                 # 执行任务回传后、事件循环内；顺序与 03 §3.4.2 逐行同构
   transition(src, Completed); set output
   for eval in evaluations.sorted_by_edge_index():
+      if run.status.is_terminal(): return                  # 前置短路：fail_run 后不再处理后续边
       edge = graph.edges[eval.edge_index]
       deferred = (!eval.passed && edge.on_gate_false == Defer)
-      record  = GateResultRecord {
-          ..., passed: eval.passed, error: eval.error,
-          deferred, attempt: src.attempt, verdict: eval.verdict }
+      record  = GateResultRecord { ..., passed: eval.passed, error: eval.error,
+                                   deferred, attempt: src.attempt, verdict: eval.verdict }
 
-      # ---- 分支 1：gate 不通过 ----
+      # ---- 分支 1：gate 不通过（先 emit，再结算/挂账）----
       if !eval.passed:
-          emit(record)                                     # 不可丢
+          emit(record)                                     # 不可丢（先于结算）
           if edge.on_gate_false == Defer:
               deferred_receipts[edge.index] = DeferredReceipt { edge.index, src.id, src.attempt,
                                                                edge.to_node, now() }
@@ -291,26 +293,53 @@ apply_completed(src, output, evaluations):                 # 执行任务回传�
           maybe_skip_after_settle(edge.to_node)
           continue
 
-      # ---- 分支 2：gate 通过 ----
-      target = None
-      reused = defer_reentry_target(edge, src)             # 行 5/6/7 的判定；None = 走现行路径
-      #   └─ 创建重入实例时：clear_settled_by_node(edge.to_node) + per-port inheritance（§3.2 补全规则）
-      if reused == REENTRY_END_TERMINAL:      fail_run(RUN_DELIVERY_TO_TERMINAL); return
-      if reused == REENTRY_OVER_LIMIT:        create_crashed_instance(...); emit(record);
-                                              fail_run(NODE_INTERNAL); return
-      if reused is Some(instance):            target = instance
-      if target is None:                      target = resolve_target(src, edge)  # 现行 3/4/8
-                                              if target is None: return
-      emit(record)
+      # ---- 分支 2：gate 通过（先 resolve，成功后才 emit）----
+      target = resolve_target(src, edge)                   # 内部先 resolve_defer_reentry(edge)：
+                                                           #   NotApplicable → 现行 resolve（3/4/8/9）
+                                                           #   Created(inst) → 该实例（成功 reentry 或超限 Crashed）
+                                                           #   Failed        → None（RUN_DELIVERY_TO_TERMINAL，含 end 特例）
+      if target is None: return                            # resolve 失败：**不产生 GateResult**
+      emit(record)                                         # 仅 resolve 成功（含超限返回的 Crashed 实例）后 emit；超限时 sink 已关闭 → no-op（不入库）
       buffer_write(target, edge.to_port, output)
       settle_edge(edge.to_node, edge.index)
       maybe_make_ready(target)
       maybe_skip_after_settle(edge.to_node)                # 现行「结算后统一复核」
+
+resolve_defer_reentry(edge, src) -> NotApplicable | Created(instance) | Failed:
+  if edge.on_gate_false != Defer: return NotApplicable     # C2：只对 defer 边
+  if edge.from != edge.to_node:                            # 非自环
+      current = node_current.get(edge.to_node)
+      if current is None: return NotApplicable             # 首次投递（现行）
+      if !instances[current].status.is_terminal(): return NotApplicable   # 现实例（现行）
+      if instances[current].status != Completed: return Failed           # 防御性：不 emit
+      if node_type(edge.to_node) == End: return Failed     # end 特例：不 emit
+      attempt = instances[current].attempt + 1
+      if attempt >= node(edge.to_node).max_attempts:
+          created = create_instance(edge.to_node, attempt, crash = Internal{...})
+          fail_run(NODE_INTERNAL)                          # 先 fail_run（与现行自环一致；emitter.finish → sink 关闭）
+          return Created(created)                          # 外层照常 emit（no-op、不入库）→ buffer/结算 → 下一轮终态早退
+      return Created(create_reentry_instance(edge.to_node, attempt, current))
+  # 自环 defer：attempt 语义保持现行为（source.attempt + 1）
+  attempt = instances[src].attempt + 1
+  if attempt >= node(edge.to_node).max_attempts:
+      created = create_instance(edge.to_node, attempt, crash = Internal{...})
+      fail_run(NODE_INTERNAL)                              # emitter.finish → sink 关闭
+      return Created(created)                              # 外层 emit 为 no-op（不入库）
+  return Created(create_reentry_instance(edge.to_node, attempt, src))
+
+create_reentry_instance(target, attempt, prev):
+  clear_settled_by_node(target)                            # 缺陷 B：节点级结算集重置
+  for p in declared_inputs(target):                        # 缺陷 A：per-port 继承
+      e = incoming[(target, p)]
+      if e.exists and e.on_gate_false != Defer: inherit values[p] + arrived[p]   # 结算按 settled_by_node
+      else: skip                                            # defer 端口等待新一代投递
 ```
 
 - **确定性**：evaluations 按 `edge_index` 升序；receipt 用 `BTreeMap`；新实例 attempt 只依赖目标当前实例 attempt（自环依赖源实例 attempt）。
-- **失败顺序**：`RUN_DELIVERY_TO_TERMINAL` / 超限都是**冷峻失败**（`fail_run`），后续边不再应用（循环开头 `if status.is_terminal() return`）。
-- **trace 顺序**：一条边至多一条 `GateResult`；失败路径不产生投递；超限路径与自环超限同序（创建 Crashed 实例 → `GateResult` → `fail_run`），W2a 以测试锁定。
+- **失败顺序（C1 冻结，与现行 kernel/03 §3.4.2 逐行同构）**：
+  - `RUN_DELIVERY_TO_TERMINAL`（含 `end` 特例与防御性终态）：`resolve` 失败返回 `None` → **不产生 GateResult**（与现行 settle 路径一致，REV-026/ISSUE-061）。
+  - **超限（自环与 defer 重入）**：`resolve` 内先 **create Crashed 实例 + `fail_run(NODE_INTERNAL)`**（`fail_run` 先 `emitter.finish` 关闭 sink），返回该实例 → 外层照常 **emit（no-op，不入库）** → 写 buffer/结算 → 循环下一轮因 `is_terminal` 早退。**该条边的 GateResult 不可观测、不要求入库**；trace 证据 = Crashed 实例（attempt=max）+ 之前已产生的 GateResult 行 + `RunFinished{Failed}`/`NODE_INTERNAL`。**不得**改成 create→emit→fail（会改变 v0.1.0 自环超限的事件顺序，违反 B6/AC-14 d）。
+- **trace 顺序**：一条边至多一条 `GateResult`；resolve 失败不产生投递/记录；**超限路径在 `fail_run`（sink 关闭）之后才 emit，因此该次 GateResult 不入库**（同现行自环）；e2e 只断言 Crashed 实例 + 之前 GateResult + `RunFinished{Failed}`。
 - **I7 不变**：gate 异常/panic 仍是 `passed=false`（B5），defer 边因此走 deferred 分支；**不** fail run、不改 `error` 语义。
 
 ### 3.4 receipt 生命周期与 dormant/死锁（B4）
@@ -350,6 +379,7 @@ if is_quiescent(run):
 - 自环（现行为，保持同风格）：
   `"self-loop of node '{v}' exceeded max_attempts ({n})"` / `"… on edge {i}"`
 - 都是 `NodeError::Internal` → `NODE_INTERNAL`，**不新增运行期错误码**；Crashed 实例的 `attempt = max`（如 `max=3` → attempt 3）。
+- **不产生该条边的 `GateResult` 入库（Lead 2026-10-31 裁决）**：`fail_run` 先 `emitter.finish` 关闭 sink，外层 emit 是 no-op；W2a e2e **不得**断言「超限那次的 GateResult」。trace 证据 = Crashed 实例（attempt=max）+ 之前已产生的 GateResult 行 + `RunFinished{Failed}`/`NODE_INTERNAL`。
 
 ### 3.6 兼容性（B6）
 
@@ -419,19 +449,20 @@ CREATE TABLE IF NOT EXISTS gate_results (
 - `TRACE_SCHEMA_VERSION = 4`；新库**单事务**建 v4 DDL + 写 `schema_migrations` 1/2/3/4 四行 + `PRAGMA user_version = 4`（无备份）。
 - 旧库迁移：v1→v2→v3→v4 逐版本循环；v3→v4 单版本单事务：`VACUUM INTO '<db>.bak.v3-{ts}'`（回写 `user_version=3`、校验）→ 三条 `ALTER TABLE gate_results ADD COLUMN …`（默认值 `0`/`0`/`NULL`）→ 插 `schema_migrations(4)` → `PRAGMA user_version = 4`；失败 → 删 `-wal`/`-shm` → 备份覆盖恢复 → exit 4。
 - 只读 `trace`/`replay`：`user_version < 4` → 拒绝且**不迁移**（`unsupported schema version=N, expected 4`，exit 4）；`> 4` → `STORE_SCHEMA_TOO_NEW`。
-- `events.kind='GateResult'` 的 `payload.record` 增 `deferred`/`attempt`/`verdict`；`deferred` 为 bool、`attempt` 为整数、`verdict` 为 JSON 值或 null。payload 总大小上限（64 KiB）不变。
+- `events.kind='GateResult'` 的 `payload.record` 增 `deferred`/`attempt`/`verdict`（**仅 v4 后新写入事件**）；`deferred` 为 bool、`attempt` 为整数、`verdict` 为 JSON 值或 null。payload 总大小上限（64 KiB）不变。
+- **迁移历史行（S2）**：v3→v4 只补 `gate_results` SQL 列默认值（`deferred=0`/`attempt=0`/`verdict_json=NULL`），**不改写历史 `events.payload`**——旧 `GateResult` 事件 payload 仍为 v3 形态（无三键），`trace --json` **不合成**默认键；历史行以表列默认值为准。
 - `GateResultRow` 增 `deferred: bool`、`attempt: u32`、`verdict: Option<Value>`（从 `verdict_json` 解析；旧行为 NULL → `None`）；`reader.gate_results` 列清单同步。
-- `zgraph trace --json` 自然带出（NDJSON 直接输出 payload）；**人类可读文本列格式不变**（不加列、不改对齐）。`trace --stats` 不变。
-- `verdict_json` 的写入口径：`serde_json::to_string(&verdict)`（`None` → NULL）；读取失败（手工损坏）→ 视为 `NULL` 并告警，不让 `trace` 崩。
+- `zgraph trace --json` 自然带出（NDJSON 直接输出 payload；历史行按旧 payload）；**人类可读文本列格式不变**（不加列、不改对齐）。`trace --stats` 不变。
+- `verdict_json` 的写入口径：`serde_json::to_string(&verdict)`（`None` → NULL）。**读取失败口径待定**：本 DR 暂冻结「视为 `NULL` + 告警、不让 `trace` 崩」，REV-070 S1 倾向严格报错；见 **ISSUE-105**（W2a-docs/trace 后续定案：reader 兜底 NULL+告警，或改 06 §6.2.8 措辞）。
 
 ### 4.3 回放与 golden（C3）
 
 | 层 | 要求 |
 |---|---|
-| L1 events | `--mode=events` 回放 v4 库：`GateResult` payload 含三个新键；旧 v3 迁移后旧行取默认值；`trace --json` 与 replay events 逐字节一致的口径不变 |
+| L1 events | `--mode=events` 回放 v4 库：**v4 后新写入事件**的 `GateResult` payload 含三个新键；**v3→v4 迁移的历史事件 payload 保持 v3 形态**（不合成默认键，历史行的三字段以 `gate_results` 表列为准）；`trace --json` 与 replay events 逐字节一致的口径不变 |
 | L2 outputs | `--mode=outputs` 语义**不变**（GateResult 不参与 L2 判据；rework 图的 L2 重放记录的是各实例输出，attempt-per-activation 会产生新的 `(node_id, attempt)` 记录） |
 | golden | 新增 defer/rework 路径 golden（AC-14 a/b/c）；v0.1.0 v3 seed → 迁移 v4 → `trace`/`replay` 期望输出（AC-14 h） |
-| 校验 | **v3 seed 迁移样例由 W2a e2e 交付**（`tests/fixtures/trace/schema_v3_seed.sql` 在 W1 未交付，属 W1 遗留缺口，Lead 已登记 ISSUE）：W2a e2e 生成 v3 seed → 迁移 v4 → 回放断言；DR-004 §6.3 的 seed 路径是**目标路径**，不是既有资产。本批**不得**写成「沿用 W1 交付」 |
+| 校验 | **v3 seed 迁移样例由 W2a e2e 交付**（`tests/fixtures/trace/schema_v3_seed.sql` + `v0.1.0_expected_trace.json` 在 W1 未交付，属 W1 遗留缺口，Lead 已登记 **ISSUE-104**）：W2a e2e 生成 v3 seed → 迁移 v4 → 回放断言；DR-004 §6.3 的 seed 路径是**目标路径**，不是既有资产。本批**不得**写成「沿用 W1 交付」 |
 
 ---
 
@@ -552,13 +583,13 @@ codegen：`--mode approved|rework`（缺省 `approved`，保持 W1 字节级可�
 
 | # | 场景 | 图/资产 | 关键断言 |
 |---|---|---|---|
-| a | **自环 defer 返工** | `tests/fixtures/graphs/defer_self_loop.json`：`start → loop`，`loop --gate(defer)--> loop.again`；`loop` 输入 `seed`(required，start→loop 注入) + `again`(**required:false**，只能由自环供源；若 required 则首轮 `trigger=all` 永不就绪——ISSUE-062 同型坑)；Python stub 第 1 次输出 `{continue:true}`、第 2 次 `{continue:false}` | run `Completed`；`loop` 实例 attempt `0/1`；attempt1 因**按端口继承**拿到 `seed`（`again` 由自环重投）；`gate_results` 两行（`deferred=0`、`attempt` 0/1）；无 `RUN_DEADLOCK` |
+| a | **自环 defer 返工** | `tests/fixtures/graphs/defer_self_loop.json`：`start → loop`，`loop --gate(defer)--> loop.again`；`loop` 输入 `seed`(required，start→loop 注入) + `again`(**required:false**，只能由自环供源；若 required 则首轮 `trigger=all` 永不就绪——ISSUE-062 同型坑)；Python stub 第 1 次输出 `{continue:true}`、第 2 次 `{continue:false}` | run `Completed`；`loop` 实例 attempt `0/1`；attempt1 因**按端口继承**拿到 `seed`（`again` 由自环重投）；`gate_results` 两行（同一边）：**attempt0 `passed=true/deferred=false`**、**attempt1 `passed=false/deferred=true`**；随后目标节点当前实例已 `Completed` → `deferred_receipt` dormant → run 正常 `Completed`；无 `RUN_DEADLOCK` |
 | b | **A→B→A 回边返工** | `defer_ab_cycle.json`：`start→A`，`A --gate(defer)--> B`，`B --gate(defer)--> A`；**两条环边至少一条带 gate**（打断 R13 的无门控环；建议两条都带 gate，例如 `check_output` 判 A/B 的输出标志），`A`/`B` 的循环端口 `required:false`（入口/终止方式由 e2e 实现定，契约：R13/R15 均须通过）；`start→A` 用 settle 边供首次输入 | A attempt `0/1`、B attempt `0/1`；run `Completed`；R15 通过（`SCC={A,B}` 含 defer 边）；R13 通过（无无 gate 环） |
 | c | **SOP v1 rework e2e** | `software_team_v1` codegen `--mode rework` + `parse_verdict_rework` + fake LLM（rework→approved 脚本；**调用序可判定**） | run `Completed`；`W/R/P` attempts `0/1`；trace `gate_results` 含 `deferred=true`（approved 前进边 false）、`attempt`、`verdict="rework"/"approved"`；下游拿到最终 artifact（`P.artifact` 透传，非评审摘要）；`parse_verdict_rework` 输出 `verdict=rework` 不抛错；**P 的新一轮执行必须消费新一轮 R 的 `review`**（fake LLM 调用序锁定：若 P 用旧 review 提前执行，会消耗错误脚本条目而失败——直接验证 per-port 不继承） |
 | d | **回归不变** | v0.1.0 全部 fixture（`crates/zgraph-dsl/tests/fixtures.rs` golden）+ W1 approved-only 图 | `graph_hash` 逐字节不变；validate/run 结果、trace golden 不变；无 defer 字段的图 `deferred=0`（迁移后旧库亦然） |
-| e | **超 max_attempts** | rework profile + fake LLM 恒定 `rework` | run `Failed` + `NODE_INTERNAL`；`Crashed` 实例 attempt = `max_attempts`（=3）；`instances.error.kind=Internal`；非终态实例 `Cancelled` |
+| e | **超 max_attempts** | rework profile + fake LLM 恒定 `rework` | run `Failed` + `NODE_INTERNAL`；`Crashed` 实例 attempt = `max_attempts`（=3）；`instances.error.kind=Internal`；非终态实例 `Cancelled`；**不断言超限那次的 GateResult**（sink 已关闭、不入库，见 §3.5）；证据 = Crashed 实例 + 之前 GateResult + `RunFinished{Failed}` |
 | f | **dormant 正常完成** | `defer_self_loop.json` 变体：gate 恒 false（defer）→ 只挂账 | run `Completed`（不误报 `RUN_DEADLOCK`）：receipt 目标实例存在且 `Completed` → dormant |
-| g | **blocked deferred → 死锁** | `defer_blocked.json`：`a --gate(false,defer)--> b`，b 永无实例（b 非 entry，required 端口由该边供源） | 静默后**立即** `Failed` + `RUN_DEADLOCK`（不等 `deadlock_grace`）；`error.message` 含 edge 索引与 target node |
+| g | **blocked deferred → 死锁（R15-valid 变体）** | `defer_blocked.json`（**必须通过 R15**）：`start→a`；`a --gate(manual default false, on_gate_false:"defer")--> a.again`（`again` required:false，**defer 自环**给 `a` 一个可重入来源）；`a --gate(恒 false, on_gate_false:"defer")--> b.x`（`b` 非 entry、`x` required 仅由该边供源）。运行后 a 有两条 receipt：`a→a` 目标 a 已 `Completed` → dormant；`a→b` 目标 b 从未实例化 → blocked | 静默后**立即** `Failed` + `RUN_DEADLOCK`（不等 `deadlock_grace`）；`error.message` 含 edge 索引与 target node；`b` 无实例。**注**：若删掉 defer 自环，`a` 不在含 defer 边的环上 → `zgraph validate` 先报 `DSL_DEFER_NOT_REENTRANT`（R15 设计意图，不可用该骨架做 blocked 用例） |
 | h | **schema v4 迁移与回放** | v3 seed（`tests/fixtures/trace/schema_v3_seed.sql`，**W2a e2e 交付**；W1 遗留缺口）→ 迁移 v4；defer 图新库 | 迁移后 `user_version=4` + `schema_migrations` 1..4 + 备份 `.bak.v3-*`；旧行取默认 `deferred=0/attempt=0/verdict=NULL`；只读 `trace` 对 v3 拒绝（exit 4）；L1 events 回放含新字段；L2 outputs 语义不变 |
 
 ### 7.1 测试落点（W2a）
@@ -588,11 +619,14 @@ codegen：`--mode approved|rework`（缺省 `approved`，保持 W1 字节级可�
 | 3 | trace | `feat/trace-gate-defer` | 本批（可与 dsl 并行，接口按 §4） | `GateResultRecord`/`GateResultRow` 三字段、schema v4、迁移、payload |
 | 4 | kernel | `feat/kernel-deferrable-gate` | dsl 合并（CompiledEdge 字段） | 决策矩阵、DeferredReceipt、attempt-per-activation + buffer 继承、end/自环、超限、dormant/deadlock |
 | 5 | py-worker | `feat/py-worker-parse-rework` | W1 py-worker 已合并（DR-004 S11） | `parse_verdict_rework` + ISSUE-101 边界 |
-| 6 | e2e | `test/e2e-gate-defer` | kernel/dsl/trace/py-worker 合并 | AC-14 a/b/c/e/h 的图与脚本（c/e 走 SOP rework codegen） |
+| 6 | e2e | `test/e2e-gate-defer` | kernel/dsl/trace/py-worker/cli 合并 | AC-14 a/b/c/e/h 的图与脚本（c/e 走 SOP rework codegen）；断言 `trace --json` 三字段非默认值 |
+| 7 | **cli**（S3） | `feat/cli-gate-defer-bridge`（名称由 Lead 定） | trace 分支已合并（字段已存在）；kernel 分支合并后接真实值 | **`bridge.rs::map_gate_result`**：trace 分支先落过渡值 `deferred=false/attempt=0/verdict=None`（REV-070 特批）；kernel 分支接线**真实** `deferred`/`attempt`/`verdict`；`run_cmd.rs` 测试字面量与 `tests/trace.rs` 断言同步 |
 
-- **写作用域互斥**：docs 只写 `doc/**`；kernel 只写 `crates/zgraph-kernel/**`；dsl/trace/py-worker/e2e 按 AGENTS §2；`e2e` 单写者，W1 e2e 已合并后才开始。
-- **依赖钉死**：kernel 等 dsl 的 `CompiledEdge` 字段；e2e 等全部；py-worker 与 dsl 可并行。
+- **写作用域互斥**：docs 只写 `doc/**`；kernel 只写 `crates/zgraph-kernel/**`；dsl/trace/py-worker/e2e 按 AGENTS §2；**cli 只写 `crates/zgraph-cli/**`**；`e2e` 单写者，W1 e2e 已合并后才开始。
+- **依赖钉死**：kernel 等 dsl 的 `CompiledEdge` 字段；e2e 等全部；py-worker 与 dsl 可并行；**cli 的真实值接线等 kernel 合并**（过渡值 → 真实值，不留 dummy）。
+- **跨模块评审（S3）**：cli 改动由 **Lead 声明为跨模块**并指定第二评审人——REV-070（trace 分支）由 Lead 追加第二评审段；REV-071（kernel/cli 接线）第二评审人由 Lead 另定。
 - **docs 串行**：本批合并后才允许 W2a-docs（`docs/docs-gate-defer-spec`）回写实现偏差。
+- **注意**：DR-004 §4 的 W2a 波次表**未列 cli**，本 DR §8 的 cli 项是 Lead 2026-10-31 对 S3 的裁决增补，以本 DR 为准。
 
 ---
 
@@ -646,10 +680,10 @@ codegen：`--mode approved|rework`（缺省 `approved`，保持 W1 字节级可�
 
 | # | 边界 | 冻结 |
 |---|---|---|
-| E-1 | R15 的「环」是否要求简单环 | 按**闭迹**语义冻结；`|SCC|≥2 且 SCC 内含 defer 边` 为权威判定（简单环语义下是保守充分条件）。构造性反例（简单环语义）：SCC=`{u,x,a,b}`，边 `u→x, x→u, x→a, a→b, b→x`，defer 边 `a→b` —— 闭迹 `u→x→a→b→x→u` 过 u 且含 `a→b`，但无**简单环**同时过 u 与 `a→b`；按冻结判定**通过**。W2a 不为此例加反例（避免与冻结判定冲突） |
-| E-2 | receipt 目标实例为终态非 `Completed`（`Skipped`） | 视为 **dormant**（终态不可能再投递）；`Crashed`/`TimedOut` 时 run 已冷峻 Failed，不可达。若后续对该终态实例放行，按行 8 `RUN_DELIVERY_TO_TERMINAL` |
+| E-1 | R15 的「环」是否要求简单环 | 按**闭迹**语义冻结，`|SCC|≥2 且 SCC 内含 defer 边` 为**权威判定**；按「简单环」口径**更严**。构造例（SCC=`{u,x,a,b}`，边 `u→x, x→u, x→a, a→b, b→x`，defer 边 `a→b`）：闭迹 `u→x→a→b→x→u` 过 u 且含 `a→b`；但不存在同时过 u 与 `a→b` 的**简单环**——本规则按冻结判定**通过**，这是**放宽例**（不是反例，也不加反例夹具，避免自相矛盾） |
+| E-2 | receipt 目标实例为终态非 `Completed`（`Skipped`） | 视为 **dormant**（终态不可能再投递）；`Crashed`/`TimedOut` 时 run 已冷峻 Failed，不可达。若后续对该终态实例放行，按 §3.2 决策矩阵行 9 `RUN_DELIVERY_TO_TERMINAL` |
 | E-3 | gate=false 的 defer 边是否清空/消费 receipt | **不消费**：receipt 表示「最近一次 deferred 决策」，放行不删除；dormant 只看目标当前实例状态（确定性、少分支） |
-| E-4 | defer 边目标为非 entry 但从未实例化的「合法 dormant」场景 | 不存在：receipt 目标从未实例化 ⇒ 该 defer 边没有再交付路径 ⇒ 冻结为 **blocked → RUN_DEADLOCK**（AC-14 g）；若设计者需要「可选延迟边」，应在图上保证目标可从其它路径实例化 |
+| E-4 | defer 边目标为非 entry 但从未实例化的「合法 dormant」场景 | 不存在：receipt 目标从未实例化 ⇒ 该 defer 边没有再交付路径 ⇒ 冻结为 **blocked → RUN_DEADLOCK**（AC-14 g 的 R15-valid 变体：必须另有 defer 自环/可重入来源，否则 R15 先拒绝）；若设计者需要「可选延迟边」，应在图上保证目标可从其它路径实例化 |
 | E-5 | `verdict` 的路径取值对 `compare` 的 `path` 缺失 | `None`（不报错；gate 求值本身按 compare 契约处理） |
 
 > 上述 C-1/C-2/C-4/C-7 与 E-1–E-5 请在 REV-067 评审中逐条确认；若有不同意见，以 Lead 裁决为准并回写本 DR（追加修订段，不改历史决策）。
@@ -674,9 +708,13 @@ codegen：`--mode approved|rework`（缺省 `approved`，保持 W1 字节级可�
 | `doc/design/software-team-sop-v1.md` | 升级 v1.1（E1–E5） |
 | `doc/spec-v1.2/README.md` / `PROVENANCE.md` / `doc/index.md` | 行数/状态/§2 第 15 条/hash/索引 |
 
+> **W2a 实现波及（非本批 docs 改动，S3）**：`crates/zgraph-cli/src/bridge.rs`（`map_gate_result`：过渡值 → 真实 `deferred/attempt/verdict`）、`crates/zgraph-cli/src/run_cmd.rs`（测试字面量）、`tests/trace.rs`（断言）——由 W2a 的 cli 适配分支交付，见 §8 第 7 行；**不得**把 cli 写成「不改」。本批（W2a0）仍只改 `doc/**`。
+
 ### 12.2 不修改（红线）
 
 `CLAUDE.md`、`doc/progress.md`、`doc/issues.md`、`doc/reviews/**`（评审记录由评审人写）、任何代码/测试/配置/`schemas/**`、`doc/architecture-v2.md`（非本批允许范围，见 C-7）。
+
+> 注：本表约束的是 **W2a0 docs 批**；W2a 实现批**包含 cli**（§8 第 7 行），不在此列。
 
 ### 12.3 提交与评审
 
