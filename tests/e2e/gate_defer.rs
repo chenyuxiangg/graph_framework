@@ -816,9 +816,16 @@ fn blocked_deferred_receipt_fails_with_run_deadlock() {
     assert!(deferred
         .iter()
         .all(|row| row.gate_fn.as_deref() == Some("check_output")));
+    // message 模板与 kernel `defer_gate::blocked_deferred_receipt_fails_immediately_with_deadlock`
+    // （REV-071）锁定的一致口径：edge 升序 + target 去重，确定性可逐字断言。
+    // 实测：`deferred receipt(s) blocked on edge(s) [2]: target node(s) [b] never instantiated`。
     let error_message = run.error_message.as_deref().unwrap_or_default();
     assert!(
-        error_message.contains("blocked") && error_message.contains("b"),
-        "RUN_DEADLOCK message 应含 blocked 与 target node: {error_message}"
+        error_message.contains("deferred receipt(s) blocked on edge(s) [2]"),
+        "RUN_DEADLOCK message 必须含确定的 edge 索引（a→b edge 2）: {error_message}"
+    );
+    assert!(
+        error_message.contains("target node(s) [b] never instantiated"),
+        "RUN_DEADLOCK message 必须含确定的 target node b: {error_message}"
     );
 }
