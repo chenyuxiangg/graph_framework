@@ -27,7 +27,7 @@
 | 04 | [04-节点接口与扩展点](04-节点接口与扩展点.md) | 906 | NodeHandler、NodeContext、Python 契约、内置节点、GateContext、SymbolResolver | v1 无 resume；签名只硬校验 arity；严格 bool；整包广播；worker 子进程 + 全局并发上限（v2，见 §8）；**W2a0**：`GateResultRecord` 三字段例外（§4.6.4） |
 | 05 | [05-AgentHarness](05-AgentHarness.md) | 1429 | AgentConfig、LlmProvider(genai)、六状态机、上下文预算、ToolDef、错误映射、流式、AgentProvider | 流式唯一接口；预算冷峻；重试仅建立阶段；iteration=LLM 轮次；output 固定四字段 |
 | 06 | [06-存储与可观测](06-存储与可观测.md) | 1117 | SQLite DDL v1（8 表 + v2 L2 记录表/列）、seq 语义、双通道写线程、Streaming 聚合、CLI 契约、崩溃标定 | 落聚合分段而非逐 token；`events.seq` 权威；崩溃标 `Failed+interrupted`；`NodeError` JSON canonical（§6.2.5.1）；不做断点续跑；**W2a0**：trace schema v4（`gate_results.deferred/attempt/verdict_json`，§6.7 迁移） |
-| 07 | [07-验收用例](07-验收用例.md) | 330 | AC-01..AC-14 + DoD 检查单 | 示例图/gate/Skipped/trace/坏图/冷峻/超时/不阻塞/真 LLM/并行/暂停取消/死锁/多 run/software_team SOP v1/**deferrable gate + 有限返工（W2a0）** |
+| 07 | [07-验收用例](07-验收用例.md) | 334 | AC-01..AC-14 + DoD 检查单 | 示例图/gate/Skipped/trace/坏图/冷峻/超时/不阻塞/真 LLM/并行/暂停取消/死锁/多 run/software_team SOP v1/**deferrable gate + 有限返工（W2a0）** |
 | 08 | [08-审计关闭矩阵](08-审计关闭矩阵.md) | 524 | 76 条逐条关闭状态 + 37 条一致性复核 + 可开工判定 + **§8.6 回填记录** + §8.9 W2a0 注记 + §8.9.1 W2a 实现证据 | 60 已关闭 / 6 部分 / 7 延后 / 3 不适用；回填后 **10/10 可开工**；§8.9/§8.9.1 只追加增量（不改历史快照） |
 
 ## 建议阅读顺序
@@ -62,7 +62,7 @@
 - 技术前提：`../analysis/spike/REPORT.md` 的 8 项实测（PyO3/GIL/超时/事件循环/SQLite）已全部跑通。
 - 验收：07 的 AC-01..AC-14，P6 阶段以 `cargo test` + CLI + SQLite 断言执行。
 - **W2a0 回写批次（2026-10-31，REV-067）**：见 PROVENANCE §2 第 15 条（新增 AC-14、R15/`DSL_DEFER_NOT_REENTRANT`、trace schema v4、SOP v1.1）。
-- **W2a 实现回写批次（2026-10-31，REV-073）**：见 PROVENANCE §2 第 17 条（按已合并 dsl/trace/py-worker/kernel+cli 实现校准 AC-14/as-built 注记/08 §8.9.1；e2e Phase 2B 最终证据另补）。
+- **W2a 实现回写批次（2026-10-31，REV-073）**：见 PROVENANCE §2 第 17 条（按已合并 dsl/trace/py-worker/kernel+cli 实现校准 AC-14/as-built 注记/08 §8.9.1；REV-072 已通过，e2e 分支待合并；e2e final 单 item profile 后重校准 c/e）。
 
 ## 仍未覆盖 / 延后项（诚实清单）
 
