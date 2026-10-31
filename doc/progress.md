@@ -2,18 +2,19 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.1.0 已发布（annotated tag `v0.1.0` @ `5d43c58`，已推 origin；GitHub Release 已创建并上传产物）；`software_team` SOP 设计稿 v1（REV-062）合入本地 `main`（`fe3bb7a`）。
+**当前阶段**：v0.2（M7）**已立项**——DR-004（REV-063 通过）已合入 `main`；v0.1.0 发布与 SOP 设计稿 v1 已完成；W1（SOP v1 落地）待启动。
 
 | 里程碑 | 状态 | 关键交付 | REV |
 |---|---|---|---|
 | M0–M6 | done | Rust 内核 + Python worker、DSL/内核/trace/replay、Harness、CLI、e2e AC-01…12；详见 DR-003 / README | 000–061 |
-| v0.1.0 发布 | done | release 构建 + 冒烟、`dist/` 产物与 SHA-256、notes；tag 已推；GitHub Release `v0.1.0`（tar.gz + sha256） | — |
-| SOP 设计稿 v1 | done | `doc/design/software-team-sop-v1.md`：设计角色依赖 DAG + 工作 agent + per-item 评审（参考规模 60 节点/100 边）；人工评审/图级返工/扇出上限/动态 N/共享队列延期 v0.2 | 062 |
+| v0.1.0 发布 | done | release 构建 + 冒烟、`dist/` 产物与 SHA-256、notes；tag 已推；GitHub Release `v0.1.0` | — |
+| SOP 设计稿 v1 | done | `doc/design/software-team-sop-v1.md`：设计角色依赖 DAG + 工作 agent + per-item 评审（参考规模 60 节点/100 边） | 062 |
+| v0.2 立项 | done | DR-004：W1 SOP v1 落地 / W2 返工+扇出上限 / W3 人工评审 / W4 动态 N；共享队列 v0.3 | 063 |
 
 **下一步**
-1. 本地 `main`（`fe3bb7a`）领先 `origin/main`（`5d43c58`）：设计稿 + 收口 + 发布记录是否 push，待用户决定。
-2. v0.2 立项（另立 DR）：人工评审、图级有限返工、每节点最大扇出限制、动态 N、共享评审队列；SOP 设计稿 codegen + fake LLM e2e 落地。
-3. 收口项：ISSUE-091（时序 flaky，2026-10-31 合并门禁复现 1 次）、ISSUE-098（REV-062 R7/R8 措辞）、ISSUE-099（tag 注解 61/59 口径）。
+1. 用户确认 DR-004 §9 A1–A7（范围/W3b durable/CLI decide/动态 N/扇出/返工 P 契约/版本），确认后启动 **W1**（e2e + py-worker，无内核改动）。
+2. W1 后按 DR-004 §4 顺序：W2a0(docs) → W2a → W2b → W3a0 → W3a → W3b(可选) → W4a → W4b。
+3. 收口项：ISSUE-091（时序 flaky）、ISSUE-098（REV-062 措辞）、ISSUE-099（tag 61/59 口径）、ISSUE-100（W2a spec 02 环检测规则）。
 
 **阻塞**
-- 无硬阻塞。环境仍须 `CARGO_HOME=<repo>/.cargo-home` + 离线，merge 门禁偶发 ISSUE-091 假失败（重跑通过）。
+- 无硬阻塞。环境仍须 `CARGO_HOME=<repo>/.cargo-home` + 离线；merge 门禁偶发 ISSUE-091 假失败（重跑通过）。
