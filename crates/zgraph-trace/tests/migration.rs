@@ -121,6 +121,13 @@ fn fresh_database_migrates_to_current_version_with_all_tables_and_indexes() {
             "runs missing column {column}; have {runs_columns:?}"
         );
     }
+    let gate_columns = table_columns(&conn, "gate_results");
+    for column in ["deferred", "attempt", "verdict_json"] {
+        assert!(
+            gate_columns.iter().any(|name| name == column),
+            "gate_results missing column {column}; have {gate_columns:?}"
+        );
+    }
     drop(conn);
     drop(reader);
     writer.close().expect("close writer");
@@ -211,7 +218,9 @@ fn readonly_reader_rejects_v1_schema_without_migrating() {
     match TraceReader::open_readonly(&path) {
         Ok(_) => panic!("readonly reader must reject older schema"),
         Err(TraceError::Storage(message)) => assert!(
-            message.contains("unsupported schema version=1, expected 3"),
+            message.contains(&format!(
+                "unsupported schema version=1, expected {TRACE_SCHEMA_VERSION}"
+            )),
             "unexpected message: {message}"
         ),
         Err(other) => panic!("expected Storage, got {other:?}"),
@@ -288,12 +297,12 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
     drop(reader);
     writer.close().expect("close");
 
-    // 06 §6.7：每个版本迁移前各留一份备份（v1→v2、v2→v3）。
+    // 06 §6.7：每个版本迁移前各留一份备份（v1→v2、v2→v3、v3→v4）。
     let backups = backup_files(dir.path());
     assert_eq!(
         backups.len(),
-        2,
-        "expected two migration backups: {backups:?}"
+        3,
+        "expected three migration backups: {backups:?}"
     );
     assert!(backups
         .iter()
@@ -301,6 +310,9 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
     assert!(backups
         .iter()
         .any(|path| backup_name(path).contains(".bak.v2-")));
+    assert!(backups
+        .iter()
+        .any(|path| backup_name(path).contains(".bak.v3-")));
 }
 
 #[test]
@@ -345,6 +357,108 @@ fn v2_database_is_upgraded_to_v3_with_backup_and_preserves_rows() {
         .query_row("SELECT run_id FROM runs", [], |row| row.get(0))
         .expect("backup keeps run rows");
     assert_eq!(run_id, "run-v2");
+}
+
+#[test]
+fn v3_database_is_upgraded_to_v4_with_gate_result_defaults() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v3.db");
+    create_v3_database(&path);
+
+    // 迁移前：v3 库无 v4 列，但保留一条 v0.1.0 时代的 gate 结果行。
+    let conn = Connection::open(&path).expect("inspect v3");
+    assert_eq!(user_version(&conn), 3);
+    let v3_columns = table_columns(&conn, "gate_results");
+    for column in ["deferred", "attempt", "verdict_json"] {
+        assert!(
+            !v3_columns.iter().any(|name| name == column),
+            "v3 db must not have {column}"
+        );
+    }
+    let legacy_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM gate_results", [], |row| row.get(0))
+        .expect("legacy gate rows");
+    assert_eq!(legacy_rows, 1);
+    drop(conn);
+
+    // 打开写端触发 v3→v4：补列后旧行取默认值，新行写入三字段。
+    let writer = TraceWriter::open(&path).expect("upgrade v3 db");
+    let handle = writer.handle();
+    handle.send(common::gate_with_v4(
+        "run-v3",
+        "inst-p",
+        "review",
+        1,
+        false,
+        None,
+        true,
+        2,
+        Some(serde_json::json!({"x": 1})),
+    ));
+    writer.flush().expect("flush");
+    writer.close().expect("close writer");
+
+    let reader = TraceReader::open_readonly(&path).expect("reader");
+    assert_eq!(
+        reader.schema_version().expect("version"),
+        TRACE_SCHEMA_VERSION
+    );
+    let run = reader
+        .run("run-v3")
+        .expect("query")
+        .expect("legacy run preserved");
+    assert_eq!(run.status, zgraph_trace::RunStatus::Completed);
+    let gates = reader.gate_results("run-v3").expect("gates");
+    assert_eq!(gates.len(), 2, "legacy row + new row");
+    assert!(!gates[0].deferred, "legacy row defaults to deferred=false");
+    assert_eq!(gates[0].attempt, 0, "legacy row defaults to attempt=0");
+    assert_eq!(gates[0].verdict, None, "legacy row verdict_json is NULL");
+    assert!(!gates[0].passed);
+    assert!(gates[1].deferred);
+    assert_eq!(gates[1].attempt, 2);
+    assert_eq!(gates[1].verdict, Some(serde_json::json!({"x": 1})));
+    drop(reader);
+
+    // 迁移后：v4 列存在、审计行写入、备份为迁移前的 v3 快照。
+    let conn = Connection::open(&path).expect("inspect v4");
+    assert_eq!(user_version(&conn), 4);
+    let v4_columns = table_columns(&conn, "gate_results");
+    for column in ["deferred", "attempt", "verdict_json"] {
+        assert!(
+            v4_columns.iter().any(|name| name == column),
+            "missing migrated column {column}"
+        );
+    }
+    let description: String = conn
+        .query_row(
+            "SELECT description FROM schema_migrations WHERE version = 4",
+            [],
+            |row| row.get(0),
+        )
+        .expect("v4 audit row");
+    assert!(
+        description.contains("W2a"),
+        "v4 audit description should name W2a: {description}"
+    );
+    drop(conn);
+
+    let backups = backup_files(dir.path());
+    let backup = backups
+        .iter()
+        .find(|path| backup_name(path).contains(".bak.v3-"))
+        .unwrap_or_else(|| panic!("missing v3 backup: {backups:?}"));
+    let backup_conn = Connection::open(backup).expect("open backup");
+    assert_eq!(user_version(&backup_conn), 3, "backup keeps old version");
+    assert!(
+        !table_columns(&backup_conn, "gate_results")
+            .iter()
+            .any(|name| name == "deferred"),
+        "backup was taken before the v4 columns were added"
+    );
+    let backup_rows: i64 = backup_conn
+        .query_row("SELECT COUNT(*) FROM gate_results", [], |row| row.get(0))
+        .expect("backup keeps gate rows");
+    assert_eq!(backup_rows, 1);
 }
 
 #[test]
@@ -423,7 +537,8 @@ fn backup_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 造一个 v2 库：先用当前版本建库并写一条 run，再降级（删 v3 列/审计行、user_version=2）。
+/// 造一个 v2 库：先用当前版本建库并写一条 run，再降级（删 v3/v4 列与审计行、
+/// user_version=2）。
 fn create_v2_database(path: &Path) {
     let writer = TraceWriter::open(path).expect("create current db");
     let handle = writer.handle();
@@ -437,11 +552,39 @@ fn create_v2_database(path: &Path) {
     let conn = Connection::open(path).expect("open for downgrade");
     conn.execute_batch(
         "ALTER TABLE runs DROP COLUMN global_vars_json;\
-         DELETE FROM schema_migrations WHERE version = 3;\
+         ALTER TABLE gate_results DROP COLUMN verdict_json;\
+         ALTER TABLE gate_results DROP COLUMN attempt;\
+         ALTER TABLE gate_results DROP COLUMN deferred;\
+         DELETE FROM schema_migrations WHERE version IN (3, 4);\
          PRAGMA user_version = 2;",
     )
     .expect("downgrade to v2");
     assert_eq!(user_version(&conn), 2);
+}
+
+/// 造一个 v3 库：先用当前版本建库并写 run + 一条默认 gate 结果，再降级
+/// （删 v4 列/审计行、user_version=3；保留 gate_results 旧行）。
+fn create_v3_database(path: &Path) {
+    let writer = TraceWriter::open(path).expect("create current db");
+    let handle = writer.handle();
+    handle.send(common::started("run-v3"));
+    handle.send(common::gate("run-v3", "inst-p", "review", 0, false, None));
+    handle.send(common::finished(
+        "run-v3",
+        zgraph_trace::RunStatus::Completed,
+    ));
+    writer.flush().expect("flush");
+    writer.close().expect("close writer");
+    let conn = Connection::open(path).expect("open for downgrade");
+    conn.execute_batch(
+        "ALTER TABLE gate_results DROP COLUMN verdict_json;\
+         ALTER TABLE gate_results DROP COLUMN attempt;\
+         ALTER TABLE gate_results DROP COLUMN deferred;\
+         DELETE FROM schema_migrations WHERE version = 4;\
+         PRAGMA user_version = 3;",
+    )
+    .expect("downgrade to v3");
+    assert_eq!(user_version(&conn), 3);
 }
 
 fn create_v1_database(path: &Path) {

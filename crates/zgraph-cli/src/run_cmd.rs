@@ -2001,6 +2001,9 @@ mod tests {
             gate_fn: Some("gates.ok".to_string()),
             passed: false,
             error: None,
+            deferred: false,
+            attempt: 0,
+            verdict: None,
             ts: "2026-10-28T09:12:03.104Z".to_string(),
         })
     }

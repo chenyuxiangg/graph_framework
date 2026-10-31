@@ -226,6 +226,9 @@ fn gate_result_event() -> TraceInput {
         gate_fn: Some("gates.hr.need_human".to_string()),
         passed: false,
         error: None,
+        deferred: false,
+        attempt: 0,
+        verdict: None,
         ts: at(80),
     })
 }
@@ -450,6 +453,10 @@ fn assert_tail_event_fields(events: &[Value]) {
     assert_eq!(gate["payload"]["record"]["passed"], json!(false));
     assert_eq!(gate["payload"]["record"]["edge_index"], json!(2));
     assert_eq!(gate["payload"]["record"]["gate_fn"], "gates.hr.need_human");
+    // schema v4（W2a）：payload.record 新增 deferred/attempt/verdict 三键。
+    assert_eq!(gate["payload"]["record"]["deferred"], json!(false));
+    assert_eq!(gate["payload"]["record"]["attempt"], json!(0));
+    assert_eq!(gate["payload"]["record"]["verdict"], json!(null));
     let timed_out = ok("NodeTimedOut", "error");
     assert_eq!(timed_out["payload"]["elapsed_ms"], json!(1000));
     let abandoned = ok("NodeAbandoned", "warn");

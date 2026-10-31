@@ -485,3 +485,89 @@ fn run_finished_defaults_and_metrics_are_optional_on_success() {
     assert_eq!(events[1].severity, "info");
     fx.close().expect("close");
 }
+
+/// W2a / schema v4：`GateResult` 的 deferred/attempt/verdict 读写与 payload 形状。
+#[test]
+fn gate_result_v4_fields_roundtrip_and_defaults_are_backward_compatible() {
+    let fx = common::Fixture::new();
+    let run_id = "run-gate-v4";
+    let handle = &fx.handle;
+    handle.send(common::started(run_id));
+    // defer 边被 gate 拦截：passed=false 且 deferred=true（severity 仍 warn）。
+    handle.send(common::gate_with_v4(
+        run_id,
+        "inst-review",
+        "reviewer",
+        3,
+        false,
+        None,
+        true,
+        2,
+        Some(json!({"x": 1})),
+    ));
+    // v0.1.0 默认语义：settle 边 false → deferred=false / attempt=0 / verdict=None。
+    handle.send(common::gate(
+        run_id,
+        "inst-review",
+        "reviewer",
+        0,
+        false,
+        None,
+    ));
+    // 放行边（无 verdict 提取）。
+    handle.send(common::gate(
+        run_id,
+        "inst-review",
+        "reviewer",
+        1,
+        true,
+        None,
+    ));
+    fx.flush();
+
+    let reader = fx.reader();
+    let gates = reader.gate_results(run_id).expect("gates");
+    assert_eq!(gates.len(), 3);
+    assert!(gates[0].deferred, "deferred roundtrip");
+    assert_eq!(gates[0].attempt, 2, "attempt roundtrip");
+    assert_eq!(gates[0].verdict, Some(json!({"x": 1})), "verdict roundtrip");
+    assert!(!gates[0].passed);
+    for gate in &gates[1..] {
+        assert!(!gate.deferred, "settle gate defaults to deferred=false");
+        assert_eq!(gate.attempt, 0, "settle gate defaults to attempt=0");
+        assert_eq!(gate.verdict, None, "no verdict extraction → NULL");
+    }
+    assert!(!gates[1].passed);
+    assert!(gates[2].passed);
+
+    // events.payload.record 同步携带三键（06 §6.2.8 canonical 形状）。
+    let events = reader
+        .events(run_id, &EventQuery::default())
+        .expect("events");
+    let gate_events: Vec<&zgraph_trace::EventRow> = events
+        .iter()
+        .filter(|event| event.kind == "GateResult")
+        .collect();
+    assert_eq!(gate_events.len(), 3);
+    let payloads: Vec<&serde_json::Value> = gate_events
+        .iter()
+        .map(|event| &event.payload["record"])
+        .collect();
+    assert_eq!(payloads[0]["deferred"], json!(true));
+    assert_eq!(payloads[0]["attempt"], json!(2));
+    assert_eq!(payloads[0]["verdict"], json!({"x": 1}));
+    assert_eq!(payloads[1]["deferred"], json!(false));
+    assert_eq!(payloads[1]["attempt"], json!(0));
+    assert_eq!(payloads[1]["verdict"], json!(null));
+    assert_eq!(payloads[2]["deferred"], json!(false));
+    assert_eq!(payloads[2]["attempt"], json!(0));
+    assert_eq!(payloads[2]["verdict"], json!(null));
+
+    // deferred 不改变 severity 推导：passed=false + error=None 仍 warn。
+    let severities: Vec<&str> = gate_events
+        .iter()
+        .map(|event| event.severity.as_str())
+        .collect();
+    assert_eq!(severities, vec!["warn", "warn", "info"]);
+    fx.close().expect("close");
+}

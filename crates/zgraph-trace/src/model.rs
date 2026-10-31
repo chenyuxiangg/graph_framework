@@ -281,7 +281,7 @@ pub struct TransitionRecord {
     pub ts: String,
 }
 
-/// 门控结果记录（01 §1.5 `GateResultRecord`）。
+/// 门控结果记录（01 §1.5 `GateResultRecord`；v4 = W2a / DR-005）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GateResultRecord {
     /// 所属 run。
@@ -302,6 +302,17 @@ pub struct GateResultRecord {
     pub passed: bool,
     /// gate 异常/非 bool 的人类可读信息。
     pub error: Option<String>,
+    /// 是否**延迟结算**（W2a / DR-005；01 §1.5、06 §6.2.8）：`passed == false`
+    /// 且边策略为 `defer` 时为 `true`；其它（`settle` 边、放行边）为 `false`。
+    /// deferred 不改变 severity 推导：`passed=0 + error=None` 仍是 `warn`。
+    pub deferred: bool,
+    /// **发布者实例**的 attempt（同节点重建实例序号；W2a / DR-005）。
+    /// 非自环/未重入为 0。
+    pub attempt: u32,
+    /// 门控判定值（W2a0 冻结 / DR-005；01 §1.5、06 §6.2.8）：仅内置
+    /// `check_output`/`compare` 且 `params.path` 为字符串时，取发布者 output
+    /// 在该路径的值；否则 `None`（本 crate 只存储/读取，不负责提取）。
+    pub verdict: Option<Value>,
     /// 记录时刻（RFC3339 毫秒 Z）。
     pub ts: String,
 }

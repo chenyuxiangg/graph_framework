@@ -8,8 +8,13 @@
 //! （canonical JSON：object 键递归排序，落库字节稳定），供 `replay --mode=outputs`
 //! 重建 run 级 `global_vars` 快照。
 //!
+//! v4 = W2a（DR-004 D1/D5 + DR-005 + 06 §6.2.8）：`gate_results` 新增
+//! `deferred INTEGER NOT NULL DEFAULT 0`（0/1）、`attempt INTEGER NOT NULL DEFAULT 0`、
+//! `verdict_json TEXT`（可空 JSON），供 deferrable gate / 有限返工回放与审计。
+//!
 //! 版本策略：`PRAGMA user_version` 为权威；`0` = 新库（单事务建当前版本），
-//! `1` = spec 06 v1 库、`2` = v2 库（逐版本迁移到 v3），`3` = 就绪，`>3` = 拒绝。
+//! `1` = spec 06 v1 库、`2` = v2 库、`3` = v3 库（逐版本迁移到 v4），`4` = 就绪，
+//! `>4` = 拒绝。
 //! 迁移前 `VACUUM INTO '<db>.bak.v{old}-{ts}'` 备份；每版本一个事务；失败则恢复
 //! 备份并返回 [`TraceError::Storage`]（06 §6.7）。
 
@@ -20,8 +25,8 @@ use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::TraceError;
 
-/// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2；v3 = ISSUE-087）。
-pub const TRACE_SCHEMA_VERSION: i64 = 3;
+/// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2；v4 = W2a / DR-005）。
+pub const TRACE_SCHEMA_VERSION: i64 = 4;
 
 /// SQLite `busy_timeout`（毫秒，06 §6.2.1）。
 pub const DB_BUSY_TIMEOUT_MS: u32 = 5_000;
@@ -77,7 +82,17 @@ const RUNS_V2_COLUMNS: &[(&str, &str)] = &[
 /// v2 → v3 需要补到 `runs` 的列（ISSUE-087：run 级 `global_vars` 快照，canonical JSON）。
 const RUNS_V3_COLUMNS: &[(&str, &str)] = &[("global_vars_json", "global_vars_json TEXT")];
 
-/// 当前完整 DDL（全部 `IF NOT EXISTS`，单事务执行；06 §6.2 + v2/v3 增量）。
+/// v3 → v4 需要补到 `gate_results` 的列（W2a / DR-005：deferred/attempt/verdict）。
+const GATE_RESULTS_V4_COLUMNS: &[(&str, &str)] = &[
+    (
+        "deferred",
+        "deferred INTEGER NOT NULL DEFAULT 0 CHECK (deferred IN (0,1))",
+    ),
+    ("attempt", "attempt INTEGER NOT NULL DEFAULT 0"),
+    ("verdict_json", "verdict_json TEXT"),
+];
+
+/// 当前完整 DDL（全部 `IF NOT EXISTS`，单事务执行；06 §6.2 + v2/v3/v4 增量）。
 const DDL_CURRENT: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version     INTEGER PRIMARY KEY,
@@ -200,7 +215,10 @@ CREATE TABLE IF NOT EXISTS gate_results (
   gate_fn        TEXT,
   passed         INTEGER NOT NULL CHECK (passed IN (0,1)),
   error          TEXT,
-  at             TEXT NOT NULL
+  at             TEXT NOT NULL,
+  deferred       INTEGER NOT NULL DEFAULT 0 CHECK (deferred IN (0,1)),
+  attempt        INTEGER NOT NULL DEFAULT 0,
+  verdict_json   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_gate_run_seq  ON gate_results(run_id, seq);
@@ -372,6 +390,10 @@ fn migrate_step(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
             add_missing_columns(&tx, "runs", RUNS_V3_COLUMNS)?;
             record_migration(&tx, 3)?;
         }
+        3 => {
+            add_missing_columns(&tx, "gate_results", GATE_RESULTS_V4_COLUMNS)?;
+            record_migration(&tx, 4)?;
+        }
         other => {
             return Err(TraceError::Storage(format!(
                 "no migration step from schema version {other}"
@@ -425,6 +447,7 @@ fn migration_description(version: i64) -> &'static str {
         1 => "v1: base trace schema",
         2 => "v2: reproducibility columns/tables",
         3 => "v3: runs.global_vars_json (ISSUE-087)",
+        4 => "v4: gate_results deferred/attempt/verdict (W2a)",
         _ => "unknown migration",
     }
 }

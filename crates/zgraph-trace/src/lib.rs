@@ -21,6 +21,9 @@
 //!   （object 键递归排序）写入 `runs.global_vars_json`，供 `replay --mode=outputs`
 //!   重建 run 级全局变量；v1/v2 旧库按 06 §6.7 逐版本迁移（迁移前 `VACUUM INTO`
 //!   `.bak.v{old}-{ts}` 备份、单版本单事务、失败恢复备份）。
+//! - schema 升 **v4**（W2a / DR-005）：`GateResultRecord`/`gate_results` 增
+//!   `deferred`（0/1）、`attempt`、`verdict_json`，`events.payload.record` 同步携带
+//!   `deferred`/`attempt`/`verdict` 三键；v3 旧库按同一 forward-only 框架迁移。
 //! - 崩溃标定（06 §6.8）是两段式原语：`TraceWriter::interrupted_candidates` 查
 //!   `Running`/`Paused` 候选，`TraceWriter::mark_interrupted` 单事务标定为
 //!   `Failed + interrupted=1`；判活（`kill(pid, 0)`/heartbeat 陈旧）由调用方负责。

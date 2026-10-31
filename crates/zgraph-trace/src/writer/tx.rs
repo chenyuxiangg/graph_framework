@@ -457,6 +457,9 @@ fn write_gate_result(
         "gate_fn": record.gate_fn.as_deref(),
         "passed": record.passed,
         "error": record.error.as_deref(),
+        "deferred": record.deferred,
+        "attempt": record.attempt,
+        "verdict": record.verdict.as_ref(),
         "ts": &record.ts,
     }});
     let seq = insert_event(
@@ -472,11 +475,13 @@ fn write_gate_result(
         },
     )?;
     let passed: i64 = if record.passed { 1 } else { 0 };
+    let deferred: i64 = if record.deferred { 1 } else { 0 };
+    let verdict_json = json_opt(record.verdict.as_ref())?;
     tx.execute(
         "INSERT INTO gate_results \
          (seq, run_id, instance_id, node_id, edge_index, to_node, to_port, gate_fn, passed, \
-          error, at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+          error, at, deferred, attempt, verdict_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             seq,
             record.run_id,
@@ -488,7 +493,10 @@ fn write_gate_result(
             record.gate_fn,
             passed,
             record.error,
-            record.ts
+            record.ts,
+            deferred,
+            i64::from(record.attempt),
+            verdict_json
         ],
     )
     .map_err(sql_err)?;

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params_from_iter, Connection};
+use serde_json::Value;
 
 use crate::error::TraceError;
 use crate::model::{parse_json, parse_json_opt, InstanceStatus, RunStatus};
@@ -209,7 +210,7 @@ pub struct TransitionRow {
     pub at: String,
 }
 
-/// 门控结果行（06 §6.2.8）。
+/// 门控结果行（06 §6.2.8；v4 = W2a / DR-005 增 `deferred`/`attempt`/`verdict`）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GateResultRow {
     /// 明细主键。
@@ -236,6 +237,13 @@ pub struct GateResultRow {
     pub error: Option<String>,
     /// 记录时刻。
     pub at: String,
+    /// 是否延迟结算（W2a / DR-005）。
+    pub deferred: bool,
+    /// 发布者实例 attempt（W2a / DR-005）。
+    pub attempt: u32,
+    /// 门控判定值（W2a0 冻结；仅内置 `check_output`/`compare` 且 `params.path`
+    /// 为字符串时有值）。
+    pub verdict: Option<Value>,
 }
 
 /// 流式聚合段行（06 §6.2.9；`node_id` 来自 events 回填）。
@@ -453,7 +461,7 @@ impl TraceReader {
     /// 查询门控结果（按 `seq` 升序）。
     pub fn gate_results(&self, run_id: &str) -> Result<Vec<GateResultRow>, TraceError> {
         let sql = "SELECT gate_result_id, seq, run_id, instance_id, node_id, edge_index, \
-                   to_node, to_port, gate_fn, passed, error, at \
+                   to_node, to_port, gate_fn, passed, error, at, deferred, attempt, verdict_json \
                    FROM gate_results WHERE run_id = ?1 ORDER BY seq ASC";
         let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
         let mut rows = stmt.query([run_id]).map_err(db_err)?;
@@ -750,6 +758,7 @@ fn map_transition_row(row: &rusqlite::Row<'_>) -> Result<TransitionRow, TraceErr
 
 fn map_gate_row(row: &rusqlite::Row<'_>) -> Result<GateResultRow, TraceError> {
     let passed: i64 = row.get(9).map_err(db_err)?;
+    let deferred: i64 = row.get(12).map_err(db_err)?;
     Ok(GateResultRow {
         gate_result_id: row.get(0).map_err(db_err)?,
         seq: row.get(1).map_err(db_err)?,
@@ -763,6 +772,9 @@ fn map_gate_row(row: &rusqlite::Row<'_>) -> Result<GateResultRow, TraceError> {
         passed: passed != 0,
         error: row.get(10).map_err(db_err)?,
         at: row.get(11).map_err(db_err)?,
+        deferred: deferred != 0,
+        attempt: to_u32(row.get(13).map_err(db_err)?),
+        verdict: parse_json_opt(row.get(14).map_err(db_err)?)?,
     })
 }
 

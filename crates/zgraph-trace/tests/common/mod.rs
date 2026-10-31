@@ -149,7 +149,7 @@ pub fn transition(
     }
 }
 
-/// 构造门控结果输入。
+/// 构造门控结果输入（v0.1.0 默认值：`deferred=false`、`attempt=0`、`verdict=None`）。
 pub fn gate(
     run_id: &str,
     instance_id: &str,
@@ -157,6 +157,32 @@ pub fn gate(
     edge_index: i64,
     passed: bool,
     error: Option<&str>,
+) -> TraceInput {
+    gate_with_v4(
+        run_id,
+        instance_id,
+        node_id,
+        edge_index,
+        passed,
+        error,
+        false,
+        0,
+        None,
+    )
+}
+
+/// 构造带 schema v4 字段（deferred/attempt/verdict）的门控结果输入（W2a）。
+#[allow(clippy::too_many_arguments)]
+pub fn gate_with_v4(
+    run_id: &str,
+    instance_id: &str,
+    node_id: &str,
+    edge_index: i64,
+    passed: bool,
+    error: Option<&str>,
+    deferred: bool,
+    attempt: u32,
+    verdict: Option<serde_json::Value>,
 ) -> TraceInput {
     TraceInput::GateResult(GateResultRecord {
         run_id: run_id.to_string(),
@@ -168,6 +194,9 @@ pub fn gate(
         gate_fn: Some("builtin.check_output".to_string()),
         passed,
         error: error.map(str::to_string),
+        deferred,
+        attempt,
+        verdict,
         ts: ts(200),
     })
 }
