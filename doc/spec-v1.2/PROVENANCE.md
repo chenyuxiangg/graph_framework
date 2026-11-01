@@ -235,13 +235,13 @@
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
 | `00-总纲.md` | b966952f82f6cabc19fa010147adcce40fd7b4cafbaa47fdc4824c41bc8980b4 | 344 |
-| `01-领域模型与状态机.md` | 2472260f614646b1899ea65a2b3f841f1eebe425345f6ef1b37c625c5e7303f1 | 446 |
+| `01-领域模型与状态机.md` | fbd752b31faeff88be7f96ac55659a6ea4157df71ad76508a8d5082d457f92ae | 446 |
 | `02-DSL与校验.md` | 548d82c542740e9c13ee83db287db5f133e4e7e620c6f7af1dd6c5b8a9c70695 | 984 |
-| `03-调度器与生命周期.md` | cb2d964672e42db8a8fb9aceb941c83f239976df3c268b04714b83c42c0d5b0c | 684 |
+| `03-调度器与生命周期.md` | ab99c278b6b4ec8f0717cc208a05fbcf9e01703ffc2e25efb4abbdb9fcd7b9d6 | 684 |
 | `04-节点接口与扩展点.md` | b051c3c1bb14dd18373a6eec99d0ea6b1384d69fd773fd50f4242c867da2ce00 | 939 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
 | `06-存储与可观测.md` | c82e4f7a5d31715c05fd0261313ed4e36a58d152f2a1e88d3bcf47aa30c51d6f | 1273 |
-| `07-验收用例.md` | bc90d67881ead59d15948e29caad1dbad5176949c6e0eb925faba20f6f7a22c1 | 491 |
+| `07-验收用例.md` | 9014644cbd65156cce9d9ef7074626e96b6a13a970a844ea7f5ace24d39a3abd | 491 |
 | `08-审计关闭矩阵.md` | 9450d7a9a16ca3fe627c243fa6ae0a311d8210318735752ea51ebd7e4f9e2143 | 564 |
 
 > 00–08 合计 **7154 行**（`wc -l` 口径；2026-11-01 **W4a 设计冻结 + REV-086 条件修复批次后**实测（REV-086；**00–08 numstat 285/17（净 268）**；**全 spec 目录 numstat 330/37（净 293）**；见 §2 第 23–24 条）；此前 W3a as-built + R 收口批次 6886 行/§2 第 22 条；W3a0 冻结 + R1–R4 批次 6815 行/§2 第 20–21 条；W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7532 行）。

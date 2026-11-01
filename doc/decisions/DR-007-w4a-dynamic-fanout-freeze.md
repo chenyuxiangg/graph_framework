@@ -267,7 +267,7 @@ for F in nodes (nodes order):
 - **全部 N 个 item 的 E 都 Completed** 后，按 item_index 升序构造数组 `[E.output_0 .. E.output_{N-1}]`，作为**一次投递**发给 J：
   - 目标端口 = `E→J` 边的 `to_input_port`；
   - **N>0 的 source（冻结）**：`Delivery.from_instance` = **最后完成使 join_buffer 达到 N 的那个 E item 实例**；`GateResultRecord.instance_id`/`attempt` = 该 E item 实例的 id/attempt；`to_node=J`、`edge=E→J`；该实例由计数触发，顺序确定（事件循环串行处理完成事件，最后一条唯一）。
-  - **N=0 的 source（冻结）**：无 E item 实例 → **不产生 `GateResult`、不产生 `Delivery`**；controller 直接把 `[]` 写入 J 的输入 buffer（`instances.input` 快照可见 `[]`），J 按普通就绪/结算继续。trace 证据 = `foreach_expansions(count=0)` + J 的 input/transition（**无** GateResult 行）。
+  - **N=0 的 source（冻结）**：无 E item 实例 → **不产生 `GateResult`、不产生 `Delivery`**；controller 直接把 `[]` 写入 J 的输入 buffer（`instances.input` 快照可见 `[]`），J 按普通就绪/结算继续。**J 实例创建/边结算（N24）**：注入等价于 entry 外部注入——若 J 尚不存在则创建 J 实例（`item_index=0`）并写 input；`E→J` 边不产生 Delivery/GateResult（无 E 实例）；J 的 `instances.input`/`transition` 为证据。trace 证据 = `foreach_expansions(count=0)` + J 的 input/transition（**无** GateResult 行）。
   - J 为普通节点 item_index=0；J 为 `end` 时走 end 聚合（`run_output` 对应端口为数组）。
 - join 投递（N>0）是**普通 Delivery**（不是新事件类型）；`events.kind` 不变。
 - J 的 `trigger=all` 时需等其它入边到齐（正常语义）；J 可使用 `check_output` 等 gate 处理数组（整包广播）。
@@ -286,7 +286,7 @@ for F in nodes (nodes order):
 | item_key 重复 | `RUN_FOREACH_ITEM_KEY_DUPLICATE` |
 | W2b max_fanout | 只限制每个 item 实例一次激活的放行出边数；**不限制 N** |
 | W3a human | region 内 human 节点每 item 独立实例/等待/decide；`human_decisions` 按 instance_id 唯一（不需改表） |
-| **controller：入边全部 settle=false（无数据）** | controller → `Skipped`（不展开、不创建 item 实例）；region 节点不创建；F 的出边按普通 skip 级联（E→J 无数据 → J 按普通规则 skip/等其它入边） |
+| **controller：入边全部 settle=false（无数据）** | controller → `Skipped`（不展开、不创建 item 实例）；region 节点不创建；F 的出边按普通 skip 级联（E→J 无数据 → J 按普通规则 skip/等其它入边）。**controller-origin skip 的边结算（N25）**：与 N=0 同路径——不产生 GateResult/Delivery；J 若其它入边未到则不实例化/按普通 skip 或等待（静默后既有死锁判定），J 的 input/transition 为证据 |
 | **controller：部分入边到达、required 未满足且无在飞** | 静默后 `RUN_DEADLOCK`（message 含 F；03 §3.10） |
 | **controller：items_port 无数据（settle=false）** | controller → `Skipped`（不展开）；若 items_port 仍有在飞投递，静默时按 `RUN_DEADLOCK` |
 | **defer 边以 F 为目标** | gate=true → 正常进入 controller buffer（展开前）；gate=false → 挂 `DeferredReceipt`，静默时 F 无实例 → 既有确定性 `RUN_DEADLOCK`；F 已 `Expanded`/`Skipped` 后任何投递（含 defer gate=true）→ `RUN_DELIVERY_TO_TERMINAL` |
