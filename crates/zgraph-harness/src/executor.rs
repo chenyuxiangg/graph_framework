@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -70,6 +71,11 @@ pub struct HarnessExecutor {
     ///
     /// 独立字段而非 [`HarnessSettings`] 字段：保持冻结面（e2e/CLI 结构体字面量）不变。
     skills_dir: Option<PathBuf>,
+    /// v0.3（DR-009 §5）：`run_id` → `skill_view` 预算计数器。
+    ///
+    /// 冻结口径为「**单 run** ≤ `MAX_SKILL_VIEWS` 次」：同一 run 的全部
+    /// `agent_call` 实例共享同一计数器；不同 run（含复用 executor）各自重置。
+    skill_view_budgets: Mutex<HashMap<String, Arc<AtomicU32>>>,
 }
 
 impl HarnessExecutor {
@@ -82,6 +88,7 @@ impl HarnessExecutor {
             tool_limits: None,
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
+            skill_view_budgets: Mutex::new(HashMap::new()),
         }
     }
 
@@ -100,6 +107,7 @@ impl HarnessExecutor {
             tool_limits: None,
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
+            skill_view_budgets: Mutex::new(HashMap::new()),
         }
     }
 
@@ -116,6 +124,7 @@ impl HarnessExecutor {
             tool_limits: Some(limits),
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
+            skill_view_budgets: Mutex::new(HashMap::new()),
         }
     }
 
@@ -132,6 +141,7 @@ impl HarnessExecutor {
             tool_limits: Some(limits),
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
+            skill_view_budgets: Mutex::new(HashMap::new()),
         }
     }
 
@@ -146,6 +156,21 @@ impl HarnessExecutor {
     pub fn with_skills_dir(mut self, skills_dir: Option<PathBuf>) -> Self {
         self.skills_dir = skills_dir;
         self
+    }
+
+    /// v0.3（DR-009 §5）：取该 run 的 `skill_view` 预算计数器（不存在则新建）。
+    ///
+    /// 冻结口径「单 run ≤ `MAX_SKILL_VIEWS` 次」：同 run 的所有 agent_call 实例
+    /// 共享同一 `Arc<AtomicU32>`；不同 run 独立计数（复用同一 executor 也不串账）。
+    fn skill_view_budget(&self, run_id: &str) -> Arc<AtomicU32> {
+        let mut budgets = match self.skill_view_budgets.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        budgets
+            .entry(run_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicU32::new(0)))
+            .clone()
     }
 
     /// 本 run 用到的模型参数摘要（ISSUE-082；JSON 对象数组，**不含密钥**）。
@@ -384,6 +409,7 @@ impl HarnessExecutor {
             .unwrap_or(agent.config.max_iterations)
             .clamp(1, 50);
         let tools_dir = absolute(&self.settings.tools_dir);
+        let skill_view_budget = self.skill_view_budget(job.ctx.run_id());
         let cancel = CancelToken::new(job.ctx.clone());
         let run = AgentRun {
             agent: &agent,
@@ -398,6 +424,7 @@ impl HarnessExecutor {
             ctx: job.ctx.clone(),
             cancel,
             recorder: self.recorder.as_ref(),
+            skill_view_budget: &skill_view_budget,
         };
         run_agent(run)
             .await
@@ -485,6 +512,7 @@ fn absolute(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -519,6 +547,30 @@ mod tests {
       "edges": [
         {"from": "start", "to_node": "worker", "to_input_port": "message"},
         {"from": "worker", "to_node": "end", "to_input_port": "result"}
+      ]
+    }"#;
+
+    /// 两个串行 agent_call 实例（同一 run）——验证 run 级 `skill_view` 预算共享。
+    const TWO_AGENT_GRAPH: &str = r#"{
+      "version": "1.0",
+      "metadata": {"name": "harness-two-agents"},
+      "entry_points": ["start"],
+      "nodes": [
+        {"id": "start", "type": "start",
+         "inputs": [{"name": "message", "type": "any", "required": true}], "config": {}},
+        {"id": "worker1", "type": "agent_call",
+         "inputs": [{"name": "message", "type": "any", "required": true}],
+         "config": {"agent_id": "parser"}},
+        {"id": "worker2", "type": "agent_call",
+         "inputs": [{"name": "message", "type": "any", "required": true}],
+         "config": {"agent_id": "parser"}},
+        {"id": "end", "type": "end",
+         "inputs": [{"name": "result", "type": "any", "required": true}], "config": {}}
+      ],
+      "edges": [
+        {"from": "start", "to_node": "worker1", "to_input_port": "message"},
+        {"from": "worker1", "to_node": "worker2", "to_input_port": "message"},
+        {"from": "worker2", "to_node": "end", "to_input_port": "result"}
       ]
     }"#;
 
@@ -1165,5 +1217,108 @@ mod tests {
             .expect("tool message");
         assert!(tool_content.contains("<skill_content name=\"code-review\">"));
         assert!(tool_content.contains("look closely"));
+    }
+
+    /// DR-009 §5（REV-097 C1）：预算按 **run_id** 隔离——同 run 返回同一计数器，
+    /// 新 run / 新 executor 从 0 开始。
+    #[test]
+    fn skill_view_budget_is_per_run_and_resets() {
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "x"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = HarnessExecutor::new(settings(dir.path(), &fake, &runner));
+        let first = executor.skill_view_budget("run-1");
+        let same = executor.skill_view_budget("run-1");
+        assert!(Arc::ptr_eq(&first, &same), "same run shares one counter");
+        first.fetch_add(crate::constants::MAX_SKILL_VIEWS, Ordering::SeqCst);
+        let other = executor.skill_view_budget("run-2");
+        assert_eq!(other.load(Ordering::SeqCst), 0, "new run starts at 0");
+
+        let fresh = HarnessExecutor::new(settings(dir.path(), &fake, &runner));
+        assert_eq!(
+            fresh.skill_view_budget("run-1").load(Ordering::SeqCst),
+            0,
+            "new executor starts at 0"
+        );
+    }
+
+    /// DR-009 §5（REV-097 C1）：同一 run 的两个串行 agent_call 实例共享预算；
+    /// 第 6 次新激活在第二个实例上 → `TOOL_ERROR{reason:"view_budget"}`（喂回 LLM）。
+    #[tokio::test]
+    async fn run_level_skill_view_budget_shared_across_agent_calls() {
+        let mut agent = agent_config("parser", &[]);
+        let object = agent.as_object_mut().expect("agent object");
+        object.insert("skills".to_string(), json!(["*"]));
+        object.insert("max_iterations".to_string(), json!(8));
+        let dir = assets(agent, "你是解析器。");
+        for index in 0..6 {
+            let name = format!("skill-{index}");
+            let skill_dir = dir.path().join("skills").join(&name);
+            std::fs::create_dir_all(&skill_dir).expect("skill dir");
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: skill {index}\n---\n\nBODY {index}\n"),
+            )
+            .expect("SKILL.md");
+        }
+        let view = |index: usize| {
+            json!({"kind": "tool_calls", "content": null,
+                   "tool_calls": [{"call_id": format!("c{index}"), "name": "skill_view",
+                                   "args": {"name": format!("skill-{index}")}}]})
+        };
+        let mut calls: Vec<Value> = (0..5)
+            .map(view)
+            .chain([json!({"kind": "text", "content": "first"})])
+            .collect();
+        calls.push(view(5));
+        calls.push(json!({"kind": "text", "content": "second"}));
+        let fake =
+            Arc::new(FakeLlmProvider::from_script(fake_script(json!(calls))).expect("script"));
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
+        let (outcome, sink) = run_graph(TWO_AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            RunStatus::Completed,
+            "view_budget is a tool error (fed back), not a run failure: {:?}",
+            outcome.error
+        );
+
+        // 第二个实例的第 6 次新激活 → 工具结果含 view_budget。
+        let last_tool = fake
+            .requests()
+            .last()
+            .expect("request")
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                LlmMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("tool message");
+        assert!(last_tool.contains("view_budget"), "content: {last_tool}");
+
+        // trace 证据：恰一次 ToolCallEnd ok=false。
+        let failures = sink
+            .streaming_calls()
+            .into_iter()
+            .filter(|call| {
+                matches!(
+                    call.event,
+                    StreamingEvent::ToolCallEnd {
+                        tool_name: ref name,
+                        ok: false,
+                        ..
+                    } if name == "skill_view"
+                )
+            })
+            .count();
+        assert_eq!(failures, 1);
     }
 }

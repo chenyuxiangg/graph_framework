@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -141,6 +142,9 @@ pub(crate) struct AgentRun<'a> {
     pub(crate) cancel: CancelToken,
     /// LLM 调用记录器（ISSUE-082；可选观察者，不改变执行语义）。
     pub(crate) recorder: Option<&'a Arc<dyn LlmCallRecorder>>,
+    /// v0.3（DR-009 §5）：**run 级** `skill_view` 预算计数器（跨该 run 的全部
+    /// agent_call 实例共享；由 [`crate::executor::HarnessExecutor`] 按 `run_id` 持有）。
+    pub(crate) skill_view_budget: &'a Arc<AtomicU32>,
 }
 
 /// 执行一次 Agent（05 §5.5.4 语义；Loading 由 executor 预先完成）。
@@ -189,9 +193,10 @@ struct LoopState {
     /// 连续空响应计数（05 §5.5.3）。
     empty_streak: u32,
     /// v0.3：`skill_view` 已激活正文缓存（同 session 重复激活去重；不重复计预算）。
+    ///
+    /// 预算计数**不在这里**：DR-009 §5 冻结「单 run ≤5 次」，计数归 run 级
+    /// [`AgentRun::skill_view_budget`]（跨该 run 的所有 agent_call 实例共享）。
     skill_view_cache: HashMap<String, String>,
-    /// v0.3：`skill_view` 已消耗预算次数（`MAX_SKILL_VIEWS` 超限 → `view_budget`）。
-    skill_view_count: u32,
 }
 
 impl LoopState {
@@ -224,7 +229,6 @@ impl LoopState {
             last_pending: Vec::new(),
             empty_streak: 0,
             skill_view_cache: HashMap::new(),
-            skill_view_count: 0,
         })
     }
 
@@ -421,18 +425,35 @@ impl LoopState {
         if let Some(cached) = self.skill_view_cache.get(name) {
             return (true, cached.clone());
         }
-        if self.skill_view_count >= MAX_SKILL_VIEWS {
+        if !reserve_skill_view_budget(run.skill_view_budget) {
             let failure = ToolFailure::new(
                 "view_budget",
-                format!("skill_view budget exhausted ({MAX_SKILL_VIEWS} per instance)"),
+                format!(
+                    "skill_view budget exhausted ({MAX_SKILL_VIEWS} per run, shared by all agent_call instances)"
+                ),
             );
             return (false, tool_error_content(&failure));
         }
         let content = skills::skill_view_text(skill);
-        self.skill_view_count = self.skill_view_count.saturating_add(1);
         self.skill_view_cache
             .insert(name.to_string(), content.clone());
         (true, content)
+    }
+}
+
+/// v0.3（DR-009 §5）：原子预留一次 `skill_view` 预算（run 级共享，≤ `MAX_SKILL_VIEWS`）。
+///
+/// 失败不消耗预算（CAS 失败重试；已达上限返回 `false`）。
+fn reserve_skill_view_budget(budget: &AtomicU32) -> bool {
+    let mut current = budget.load(Ordering::SeqCst);
+    loop {
+        if current >= MAX_SKILL_VIEWS {
+            return false;
+        }
+        match budget.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
     }
 }
 
@@ -950,7 +971,8 @@ mod tests {
         runner: &Arc<FakeToolRunner>,
         ctx: &Arc<TestCtx>,
     ) -> Result<AgentOutput, RunFailure> {
-        execute_with_recorder(agent, fake, runner, ctx, None).await
+        let budget = Arc::new(AtomicU32::new(0));
+        execute_with_budget(agent, fake, runner, ctx, &budget, None).await
     }
 
     async fn execute_with_recorder(
@@ -958,6 +980,19 @@ mod tests {
         fake: &Arc<FakeLlmProvider>,
         runner: &Arc<FakeToolRunner>,
         ctx: &Arc<TestCtx>,
+        recorder: Option<&Arc<dyn LlmCallRecorder>>,
+    ) -> Result<AgentOutput, RunFailure> {
+        let budget = Arc::new(AtomicU32::new(0));
+        execute_with_budget(agent, fake, runner, ctx, &budget, recorder).await
+    }
+
+    /// 以指定 run 级 `skill_view` 预算执行一次 agent_call（模拟同 run 多实例共享）。
+    async fn execute_with_budget(
+        agent: &LoadedAgent,
+        fake: &Arc<FakeLlmProvider>,
+        runner: &Arc<FakeToolRunner>,
+        ctx: &Arc<TestCtx>,
+        skill_view_budget: &Arc<AtomicU32>,
         recorder: Option<&Arc<dyn LlmCallRecorder>>,
     ) -> Result<AgentOutput, RunFailure> {
         let provider: Arc<dyn LlmProvider> = fake.clone();
@@ -979,6 +1014,7 @@ mod tests {
             ctx: ctx.clone(),
             cancel,
             recorder,
+            skill_view_budget,
         })
         .await
     }
@@ -1945,7 +1981,8 @@ STEP TWO",
         let runner = Arc::new(FakeToolRunner::new());
         let agent = loaded_agent_with_skills(skills, 8, "role");
         let ctx = TestCtx::new();
-        let output = execute(&agent, &ToolRegistry::default(), &fake, &runner, &ctx)
+        let budget = Arc::new(AtomicU32::new(0));
+        let output = execute_with_budget(&agent, &fake, &runner, &ctx, &budget, None)
             .await
             .expect("repeated activation is deduped (no view_budget)");
         assert_eq!(output.content, "done");
@@ -1960,6 +1997,72 @@ STEP TWO",
             .collect();
         assert_eq!(ends.len(), 6);
         assert!(ends.iter().all(|ok| *ok), "cached activation stays ok");
+        assert_eq!(
+            budget.load(Ordering::SeqCst),
+            1,
+            "cache hit does not consume run-level budget"
+        );
+    }
+
+    /// DR-009 §5（REV-097 C1）：`skill_view` 预算为 **run 级**——同一 run 的第二个
+    /// agent_call 实例共享前一个实例的计数；第 6 次新激活 → `view_budget`。
+    #[tokio::test]
+    async fn skill_view_budget_is_shared_across_instances_in_same_run() {
+        let skills: Vec<crate::skills::SkillEntry> = (0..6)
+            .map(|index| skill_entry(&format!("skill-{index}"), "desc", "BODY"))
+            .collect();
+        let view = |index: usize| {
+            json!({"kind": "tool_calls", "content": null,
+                   "tool_calls": [{"call_id": format!("c{index}"), "name": "skill_view",
+                                   "args": {"name": format!("skill-{index}")}}]})
+        };
+        let calls: Vec<Value> = (0..5)
+            .map(view)
+            .chain([text("first")])
+            .chain([view(5)])
+            .chain([text("second")])
+            .collect();
+        let fake = script(json!({"calls": calls}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent_with_skills(skills, 8, "role");
+        let shared_budget = Arc::new(AtomicU32::new(0));
+
+        // 实例 1（同 run）：消耗 5 次预算，正常返回。
+        let ctx1 = TestCtx::new();
+        let first = execute_with_budget(&agent, &fake, &runner, &ctx1, &shared_budget, None)
+            .await
+            .expect("first instance");
+        assert_eq!(first.content, "first");
+        assert_eq!(shared_budget.load(Ordering::SeqCst), MAX_SKILL_VIEWS);
+
+        // 实例 2（同 run）：缓存为空 → 新激活 → 预算耗尽 → TOOL_ERROR（喂回 LLM）。
+        let ctx2 = TestCtx::new();
+        let second = execute_with_budget(&agent, &fake, &runner, &ctx2, &shared_budget, None)
+            .await
+            .expect("tool error is fed back, run continues");
+        assert_eq!(second.content, "second");
+        assert_eq!(shared_budget.load(Ordering::SeqCst), MAX_SKILL_VIEWS);
+        let last_tool = fake
+            .requests()
+            .last()
+            .expect("request")
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                LlmMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("tool message");
+        assert!(
+            last_tool.contains("view_budget"),
+            "second instance must hit shared run budget: {last_tool}"
+        );
+        let failed = tool_events(&ctx2)
+            .into_iter()
+            .filter(|event| matches!(event, StreamingEvent::ToolCallEnd { ok: false, .. }))
+            .count();
+        assert_eq!(failed, 1);
     }
 
     #[tokio::test]
