@@ -3,8 +3,9 @@
 > **⚠ v2 落地偏差（已回写）**：本分册的进程内执行/超时/门控/并发/符号解析等假设，已按 [`doc/architecture-v2.md`](../architecture-v2.md) §8 偏差表（D1–D12）**回写为正文**（M0–M2 批次，2026-10-30，见 PROVENANCE §2 第 4 条）；正文与偏差表冲突时以正文为准。
 > **W2a0 批次（2026-10-31，REV-067；见 PROVENANCE §2 第 15 条）**：边级 `on_gate_false`（白名单/serde/hash 投影/编译映射）、新校验规则 **R15** 与新错误码 `DSL_DEFER_NOT_REENTRANT`（DSL 域 17→18 码）、`max_attempts` 复用说明；执行顺序冻结为 `R1→R13→R15→R14`（R15 属 L2 纯函数阶段）。
 > **W2a 实现回写（2026-10-31，REV-073；分支 `docs/docs-gate-defer-spec`）**：本册补 as-built 注记（实现已合并 `e7578f1`）；不改 W2a0 冻结语义/historical 段。
-> **W2b 批次（2026-10-31，REV-077；见 PROVENANCE §2 第 18 条）**：节点级 `max_fanout`（schema/白名单/serde/hash 投影/编译映射）+ 新校验规则 **R16 静态扇出上限**（L2 纯函数；执行顺序 `R1→R13→R15→R16→R14`；超限复用 `DSL_PARSE_ERROR`，DSL 域仍 18 码；子图内收敛 `DSL_SUBGRAPH_INVALID`）。默认无 `max_fanout` → v0.1.0 行为/错误序列/hash 逐字节不变。
+> **W2b 批次（2026-10-31，REV-077；见 PROVENANCE §2 第 18 条）**：节点级 `max_fanout`（schema/白名单/serde/hash 投影/编译映射）+ 新校验规则 **R16 静态扇出上限**（L2 纯函数；执行顺序 `R1→R13→R15→R18→R16→R14`；超限复用 `DSL_PARSE_ERROR`，DSL 域仍 19 码（W4a 新增第 19 码）；子图内收敛 `DSL_SUBGRAPH_INVALID`）。默认无 `max_fanout` → v0.1.0 行为/错误序列/hash 逐字节不变。
 > **W3a0 批次（2026-10-31，REV-078；见 PROVENANCE §2 第 20 条）**：新增**保留 python_node 符号 `builtin.human`**（人工审批节点，02 §2.5.1/§2.5.4；kernel 编译为内置 Human handler，**不 import、不启动 worker、无 `NODE_WORKER_IMPORT`**）。**DSL schema/R1–R16/canonical hash 均不变**；默认（无 human 节点）行为不变。本批只冻结设计，不写 as-built。
+> **W4a 批次（2026-11-01，REV-086；见 PROVENANCE §2 第 23 条）**：新增节点级 **`foreach`**（仅 `python_node`/`agent_call`，含 `builtin.human`；子图内禁止）——形状/白名单/**R17**（复用 `DSL_PARSE_ERROR`，R4 阶段）+ **R18** 区域校验（新 DSL 码 **`DSL_FOREACH_INVALID`**，DSL 域 **18→19**，reason 闭集 11 值）；执行顺序 `R1→R13→R15→R18→R16→R14`；`graph_hash` 仅在显式 `foreach` 时变化。**默认（无 foreach）行为/hash/校验序列不变**；本批只冻结设计、不写 as-built。
 > **状态**：规格冻结（编码前置）。本分册冻结**图 DSL schema、加载期校验规则 R1–R16、错误响应契约、符号解析、graph_hash**；这些内容可直接转成 Loader / `types.rs` / CLI 的实现与测试。
 > **取代关系**：本分册细化并修正《详细设计 v1.1》第 1 章（`/tmp/designdoc/doc.txt` L84–L270）与第 6 章符号解析相关部分；冲突时**以本规格为准**，00 分册为本册的上级锚点。v1.1 原文保留作为意图参考与审计依据。
 > **范围**：仅内核（见 [`doc/analysis/decision-record-01-scope.md`](../analysis/decision-record-01-scope.md) §2）。子图**执行**、人工介入、Agent 资产平台、API/前端不在本规格内。
@@ -24,7 +25,7 @@
 
 ## 2.1 本册范围与总则
 
-**一句话结论**：本册是 DSL 的**唯一权威 schema + 唯一校验清单**；校验按 `R1→R13→R15→R16→R14` 顺序执行（R15/R16 为 L2 纯函数规则、必须先于 L3 的 R14；见 §2.1.2）、跨规则 fail-fast、同规则内聚合；任何错误都不产生 `CompiledGraph`、不产生 run。
+**一句话结论**：本册是 DSL 的**唯一权威 schema + 唯一校验清单**；校验按 `R1→R13→R15→R18→R16→R14` 顺序执行（R15/R16 为 L2 纯函数规则、必须先于 L3 的 R14；见 §2.1.2）、跨规则 fail-fast、同规则内聚合；任何错误都不产生 `CompiledGraph`、不产生 run。
 
 ### 2.1.1 职责边界
 
@@ -59,7 +60,7 @@
 
 | 约定 | 规则 |
 |---|---|
-| 跨规则 | **fail-fast**：首个失败的规则终止后续规则；执行顺序 = `R1→R13→R15→R16→R14`（W2a0 起、W2b 追加 R16；R15/R16 必须在 L3 的 R14 前，见 §2.1.2），可测试 |
+| 跨规则 | **fail-fast**：首个失败的规则终止后续规则；执行顺序 = `R1→R13→R15→R18→R16→R14`（W2a0 起、W2b 追加 R16；R15/R16 必须在 L3 的 R14 前，见 §2.1.2），可测试 |
 | 同规则内 | **聚合**：按 `nodes`/`edges` 数组顺序收集全部违反项。**例外（W2a0/W2b）**：R15 按 `edges` 数组序取**首错**（与 R13 风格一致，不聚合；见 §2.4.1 R15）；R16 按 `nodes` 数组序取**首错**（同 R13/R15，不聚合；见 §2.4.1 R16） |
 | 上限 | `MAX_DSL_ERRORS = 20`；超出截断并置 `truncated=true` |
 | 自动修复 | **MUST NOT**（图定义错误是设计错误，用户修） |
@@ -99,6 +100,7 @@
 | `config.timeout_ms` | **新增（生效）** | `python_node` / `agent_call` 可选，整数 ≥1 | 编译为实例级超时；缺省 `DEFAULT_NODE_TIMEOUT_MS = 180_000`（00 §0.5） | C-01 |
 | `config.retry.max_attempts` | **新增（生效）** | 同上，整数 ≥1 | 缺省 `DEFAULT_MAX_ATTEMPTS = 3`（00 §0.5）；**自环与 defer 重入的统一实例上限**（合法 attempt `0..max-1`，W2a0） | C-26 / S-08 |
 | `GraphNode.max_fanout` | **新增（生效，W2b）** | 节点级可选顶层字段（**所有节点类型**）：整数 ≥1；缺省 = 无上限；加载期 **R16** 校验 `out_degree(node) <= max_fanout` | 缺省无上限（v0.1.0 行为）；显式值参与 `graph_hash`（§2.8.3）；运行期每激活防御层见 03 §3.4.4 | DR-004 §3 W2b / D2 |
+| `GraphNode.foreach` | **新增（生效，W4a）** | 节点级可选顶层字段（仅 `python_node`/`agent_call`，含 `builtin.human`；子图内禁止）：`items_port`/`key_field`/`join`/`max_items`/`on_item_error` 闭集；R17 形状、R18 区域；显式值参与 `graph_hash`（§2.8.3） | 缺省 = 普通节点（v0.1.0 行为）；运行期展开见 03 §3.4.6 | DR-007；REV-086 |
 | `config.exec_class` | **新增（生效；v2 忽略，D4）** | 仅 `python_node`，枚举 `"cpu" \| "io"` | 保留字段/接口；**v2 每节点一进程，不再区分 CPU/IO 信号量**（并发见 `MAX_WORKERS`/`MAX_WORKERS_PER_RUN`，00 §0.5）；缺省 `io`（`PYTHON_EXEC_CLASS_DEFAULT`） | M-10 / D4 |
 | `on_error` | **保留字（不在 schema）** | v2 失败路由 | 任何位置出现 → R4 `DSL_UNSUPPORTED_FIELD`（v2 启用） | C-09 |
 | `GateDefinition.function` | **修订（语义收紧，v2 D6）** | 只接受内置 op 短名 `check_output`/`compare`/`manual`；v1.1 的 Python 全限定 `module.function` 写法作废（Python gate 延后，ISSUE-014） | 非内置 op 名 → R14b `DSL_SYMBOL_NOT_FOUND`；`params` 契约不符 → `DSL_SIGNATURE_MISMATCH` | C-22 / D6 |
@@ -144,6 +146,7 @@ interface GraphNode {
   config: NodeConfig;         // 按 type 区分；start/end 必须恰好 {}（R4）
   outputs?: OutputPort[];     // v1.2 保留：仅参与 R4 结构校验；v1 不实现字段级路由
   max_fanout?: number;        // W2b：整数 ≥1；缺省无上限；所有节点类型；R16 静态校验 out_degree <= max_fanout
+  foreach?: ForeachConfig;            // W4a：动态 N 展开（仅 python_node/agent_call，含 builtin.human）
   // ⚠ on_error 不是字段：保留字，出现即 R4 → DSL_UNSUPPORTED_FIELD（v2 启用）
 }
 
@@ -191,6 +194,14 @@ interface SubgraphConfig { subgraph_id: string }  // v1：加载期校验通过�
 
 interface StartEndConfig {}         // 必须恰好 {}；on_error → DSL_UNSUPPORTED_FIELD，其它未知键 → DSL_PARSE_ERROR
 
+
+interface ForeachConfig {
+  items_port: string;                  // 必填；本节点已声明 input 端口
+  key_field?: string;                  // 可选；元素 object 字段名
+  join: string;                        // 必填；region 唯一出口指向的 join 节点
+  max_items?: number;                  // 可选；整数 >=1；缺省无上限
+  on_item_error?: "fail";              // 可选；v0.2 闭集仅 fail
+}
 interface GraphEdge {
   from: string;                     // R8
   to_node: string;                  // R8
@@ -241,13 +252,14 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 |---|---|---|
 | 顶层 `GraphDefinition` | `version, metadata, entry_points, nodes, edges, subgraphs` | `version, metadata, entry_points, nodes, edges` |
 | `metadata` | `name, description, author, created_at` | `name` |
-| `GraphNode`（全类型） | `id, type, inputs, trigger, config, outputs, max_fanout`；`on_error` 为**保留字**（出现即 `DSL_UNSUPPORTED_FIELD`） | `id, type, inputs, config` |
+| `GraphNode`（全类型） | `id, type, inputs, trigger, config, outputs, max_fanout, foreach`；`on_error` 为**保留字**（出现即 `DSL_UNSUPPORTED_FIELD`） | `id, type, inputs, config` |
 | `InputPort` | `name, type, required, description` | `name, type, required` |
 | `OutputPort` | `name, type, description` | `name, type` |
 | `AgentCallConfig` | `agent_id, input_mapping, max_iterations, timeout_ms, retry` | `agent_id` |
 | `PythonNodeConfig` | `module, function, exec_class, timeout_ms, retry` | `module, function` |
 | `SubgraphConfig` | `subgraph_id` | `subgraph_id` |
 | `StartEndConfig` | *（无）* | —（必须恰好 `{}`） |
+| `ForeachConfig` | `items_port, key_field, join, max_items, on_item_error` | `items_port, join` |
 | `RetryConfig` | `max_attempts` | — |
 | `GraphEdge` | `from, to_node, to_input_port, gate, on_gate_false`；`from_output_port` 为**保留字段**（出现即 `DSL_UNSUPPORTED_FIELD`） | `from, to_node, to_input_port` |
 | `GateDefinition` | `function, params`（`params` 内部开放） | `function` |
@@ -399,7 +411,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 ## 2.4 校验规则 R1–R16（最终版）
 
-**一句话结论**：16 条规则执行，**执行顺序 = `R1→R13→R15→R16→R14`**（R15/R16 是 L2 纯规则，必须在 L3 的 R14 之前；编号在 R14 之后仅为契约兼容，§2.1.2）；`(from,to_node)` 与 `(to_node,to_input_port)` 是**两级独立唯一性**（分别由 R10/R11 关闭 C-04/C-05），`created_at` 可选（R3 关闭 C-25），R15（W2a0）冻结 defer 边可重入校验、R16（W2b）冻结静态扇出上限，示例合法性由 §2.3 关闭 C-15。
+**一句话结论**：18 条规则（R1–R18）执行，**执行顺序 = `R1→R13→R15→R18→R16→R14`**（R15/R16 是 L2 纯规则，必须在 L3 的 R14 之前；编号在 R14 之后仅为契约兼容，§2.1.2）；`(from,to_node)` 与 `(to_node,to_input_port)` 是**两级独立唯一性**（分别由 R10/R11 关闭 C-04/C-05），`created_at` 可选（R3 关闭 C-25），R15（W2a0）冻结 defer 边可重入校验、R16（W2b）冻结静态扇出上限，示例合法性由 §2.3 关闭 C-15。
 
 ### 2.4.1 规则总表（执行顺序见上）
 
@@ -421,6 +433,8 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | **R14** | 外部引用解析 | `DSL_SYMBOL_NOT_FOUND` / `DSL_SIGNATURE_MISMATCH` / `DSL_SYMBOL_CONFLICT` / `DSL_AGENT_NOT_FOUND` | (a) **gate**：格式 → 内置 op 查表 → `params` 契约 → 跨类冲突（§2.5；D6/D7）；**python_node 只做 `module/function` 格式校验，不 import**（导入/签名在 worker 启动期 → `NODE_WORKER_IMPORT`）；(b) `agent_call.agent_id` 在资产索引中存在（未提供资产根时跳过，§2.6.3）。**`subgraph` 节点不在此拒绝**（加载期通过，运行期 run 启动后、实例创建前报 `NODE_TYPE_UNSUPPORTED`，§2.6.1） | `edge_index`（gate）/ `node_id`（资产） |
 | **R15** | defer 边源可重入（**L2；在 R14 之前执行**） | `DSL_DEFER_NOT_REENTRANT` | 对每条 `on_gate_false="defer"` 的边 `(u→v)`：在 `G_all`（顶点=全部节点，边=**全部边**，含 gate 边与自环）上求 `S = SCC(u)`；通过条件 = 「存在 defer 自环 `u→u`」或「`|S| ≥ 2` 且 `S` 内存在 defer 边（两端点 ∈ `S`）」；否则报错。与 R13 独立（R13 用 `G'`，R15 用 `G_all`；R13 先判）。**同规则内取 `edges` 数组序首错**（不聚合，与 R13 一致） | `edge_index`（该 defer 边）+ `node_id`（= 源 `u`） |
 | **R16** | 静态扇出上限（**L2；在 R15 之后、R14 之前执行**，W2b） | `DSL_PARSE_ERROR`（**复用**；不新增 DSL 码） | 对每个节点（按 `nodes` 数组序）：若显式声明了 `max_fanout` 且 `out_degree(node) > max_fanout` → 报错；`out_degree` = 以该节点为 `from` 的**全部边数（含 gate/defer 边）**；无 `max_fanout` 的节点跳过（无上限）。**同规则内取首错**（按 `nodes` 数组序，不聚合，与 R13/R15 一致）。子图内由 `validate_subgraph_rules` 以同一函数执行，按 R6 口径收敛 `DSL_SUBGRAPH_INVALID`（message 前缀 `subgraph '<id>': …`，`location` 保留内部 `node_id`，expected/actual 保留） | `node_id`（= 超限节点） |
+| **R17** | `foreach` 形状（**R4 阶段**，W4a） | `DSL_PARSE_ERROR`（**复用**；不新增 DSL 码） | 仅 `python_node`/`agent_call`（含 `builtin.human`）允许；`foreach` 对象键白名单 `items_port/key_field/join/max_items/on_item_error`；必填 `items_port`（string 且 ∈ 本节点 inputs）/`join`（非空 string）；`key_field?` 非空 string；`max_items?` 整数 ≥1；`on_item_error?` ∈ `{"fail"}`；节点类型不支持/子图内 → `DSL_PARSE_ERROR`（子图内按 R6 收敛 `DSL_SUBGRAPH_INVALID`）。错误模板/expected/actual 见 §2.4.2（W4a 扩展行） | `node_id`（= F） |
+| **R18** | `foreach` 区域（**新码；在 R15 之后、R16 之前执行**，W4a） | `DSL_FOREACH_INVALID`（**新 DSL 码，第 19 码**） | 对每个 F（`nodes` 数组序取首错）：`J=F.foreach.join`；R=F ∪ 从 F 出发不经过 J 可达的节点集；检查 `join_not_found`/`join_in_region`/`join_type_unsupported`/`forbidden_node_type`/`nested_foreach`/`no_exit`/`multiple_exits`/`external_edge`/`join_edge_gated`/`items_port_missing`/`region_overlap`（reason 闭集 11 值，按此顺序取首因）；R 内节点类型限制、单一出口 E→J（无 gate）、边界闭合、与其它 region 不相交。载荷：`message="foreach region of node '{F}' is invalid: {reason}"`、`expected="valid foreach region"`、`actual={"node_id":F,"reason":reason}`、`location.node_id=F` | `node_id`（= F） |
 
 ### 2.4.2 错误信息模板与定位（message 为英文稳定模板，M-11）
 
@@ -446,6 +460,8 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | `DSL_AGENT_NOT_FOUND` | `agent asset '{agent_id}' not found in index '{assets_dir}/agents'`；`duplicate agent asset id '{agent_id}'` | `node_id` | `graph.json: node 'X'.config.agent_id` |
 | `DSL_UNSUPPORTED_NODE_TYPE` | `node type '{type}' is not a known node type; allowed: [start, end, agent_call, python_node, subgraph]`（`subgraph` 的运行期拒绝用 `NODE_TYPE_UNSUPPORTED`，§2.6.1） | `node_id` | `graph.json: node 'X'` |
 | `DSL_DEFER_NOT_REENTRANT` | `defer edge source '{u}' is not re-entrant: must lie on a cycle containing a defer edge`（W2a0） | `edge_index`（该 defer 边）+ `node_id`（= 源 `u`） | `graph.json: edges[i].on_gate_false` |
+| `DSL_FOREACH_INVALID` | `foreach region of node '{F}' is invalid: {reason}`（W4a；reason 闭集见 §2.4.1 R18） | `node_id`（= F） | `graph.json: node 'F'`（R18） |
+> **W4a R17 扩展模板（`DSL_PARSE_ERROR`，W4a）**：`field 'foreach' expects object, got {actual_type}`；`unknown field '{key}' in foreach of node '{F}'`；`foreach of node '{F}' missing required field '{field}'`；`'foreach.items_port' of node '{F}' must be a declared input port, got {actual}`；`'foreach.key_field' must be a non-empty string, got {actual}`；`'foreach.join' must be a node id, got {actual}`；`'foreach.max_items' must be an integer >= 1, got {actual}`；`'foreach.on_item_error' must be one of ['fail'], got {actual}`；`node '{F}' of type '{type}' does not support foreach`。`expected`/`actual` 为机器可读 JSON 值（同 §2.4.2 约定）。
 
 `expected` / `actual` 约定：
 
@@ -484,6 +500,9 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 
 > **W2b R16 实测（as-built，实现已合并；REV-074）**：`cargo test -p zgraph-dsl` **101 passed**（unit 1 + fixtures 6 + hash 15 + rules 78 + doctest 1）。`zgraph validate` 实测：`valid_max_fanout.json` exit 0 / `graph_hash=e05d882cc55aa275`；`bad_max_fanout_exceeded.json` exit 2 / `code=DSL_PARSE_ERROR` / `error_count=1` / `location.node_id=start`；`bad_max_fanout_value.json` exit 2 / message `'max_fanout' must be >= 1, got 0` / `expected=">= 1"` / `actual=0`。单测 `r16_*`（`crates/zgraph-dsl/tests/rules.rs`）覆盖取值/序列化/主图反例/首错序/子图收敛/R15→R16→R14 顺序/全节点类型；`crates/zgraph-dsl/tests/hash.rs` 覆盖 `max_fanout` 显式参与投影与缺省不补齐。**已知测试缺口（P3，见 `doc/issues.md`）**：R16 对 defer 边的 out-degree 计数、子图内 R15→R16 顺序与取值非法收敛、`u32::MAX` 接受值等尚无固化用例（REV-074 §3 N1–N3）。
 
+| R17 | `foreach` 形状合法/非法（非 object/未知键/缺 items_port/非声明端口/on_item_error 非 fail/start 带 foreach） | 正例：`python_node` 带 `foreach:{items_port:"items",join:"J"}`；反例：`on_item_error:"skip"` → `DSL_PARSE_ERROR` |
+| R18 | 区域合法/非法（join 不存在/join=入口 region/无出口/双出口/外部边/gated join 边/嵌套/重名 region） | 正例：`start→F(foreach)→W→E→J→end`；反例：`E` 有第二条出边到外部 → `DSL_FOREACH_INVALID(reason=external_edge)` |
+
 ### 2.4.4 本册对审计条目的裁定（D-02-xx，可编码）
 
 | 编号 | 裁定 | 关闭 |
@@ -501,6 +520,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | D-02-11（W2a0） | `on_gate_false` 是**生效字段**（非保留字）：缺省 `settle`；只接受 `settle`/`defer` 两个字符串，其它值/类型 → R4 `DSL_PARSE_ERROR`；缺省**不写回、不参与 hash**，作者显式写才进 canonical 投影（§2.8.3） | DR-005 §2 / REV-063 C11 |
 | D-02-12（W2a0） | **R15 与 R13 独立**：R13 保持「只查无 gate 环」的 `G'`；R15 在 `G_all`（全部边，含 gate 边/自环）上判定「defer 边源可重入」。执行顺序 `R13 → R15`，R13 先报；子图递归同规则（R6）。不得把两条规则合并/互相豁免 | ISSUE-100 / REV-063 S12 |
 | D-02-13（W2b） | **R16 复用 `DSL_PARSE_ERROR`，不新增 DSL 码**（DSL 域保持 18 码）：静态扇出上限属「图定义错误」类型桶；按 `nodes` 数组序取首错；`out_degree` 统计**全部**出边（含 gate/defer 边，与 R15 的 `G_all` 口径一致；R10 禁止同 `(from,to_node)` 平行边，故"全部边数 ≡ 不同目标节点数"无歧义）；无 `max_fanout` 节点零副作用（v0.1.0 错误序列/hash 不变）；子图递归同规则并按 R6 收敛 `DSL_SUBGRAPH_INVALID`；运行期每激活防御层见 03 §3.4.4 | DR-004 §3 W2b / D2 / REV-074 |
+| D-02-14（W4a） | **R17 复用 `DSL_PARSE_ERROR`（R4 阶段）、R18 新增 `DSL_FOREACH_INVALID`（第 19 码）**：区域边界/join/嵌套属「区域定义错误」新类型桶，用独立码以便定位与测试；reason 闭集 11 值、按 `nodes` 数组序取首错；R18 在 R15 之后、R16 之前（保证 defer 可重入判定先于区域判定，且区域校验先于静态扇出上限）；R17 与 R18 分离（形状 vs 区域）便于 W4b dsl 模块分文件实现；子图内 foreach 由 R17/R6 拦截 | DR-007 §3；REV-086 |
 
 ---
 
@@ -716,7 +736,7 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | 约定 | 规则 |
 |---|---|
 | `ok=true` | `errors` 为空数组；`zgraph validate` 成功时 `--json` 输出 `{"ok":true,"errors":[],"error_count":0,"truncated":false,"graph_hash":"<16hex>"}` |
-| 顺序 | 按 `R1→R13→R15→R16→R14`、数组序；`errors[0]` 为**首错**（可用作快速失败） |
+| 顺序 | 按 `R1→R13→R15→R18→R16→R14`、数组序；`errors[0]` 为**首错**（可用作快速失败） |
 | 截断 | `error_count > MAX_DSL_ERRORS(20)` 时 `truncated=true`，`errors` 只含前 20 条 |
 | 扩展 | 未来可加 `message_key`（i18n）而不改 `code` |
 
@@ -788,7 +808,7 @@ $ echo $?    # 2
 
 | 步 | 动作 | 规则 |
 |---|---|---|
-| 1 | 前置 | 仅当 **R1–R13、R15、R16 全部通过**时计算（R14 失败不产出 hash：加载未成功） |
+| 1 | 前置 | 仅当 **R1–R13、R15、R18、R16 全部通过**时计算（R14 失败不产出 hash：加载未成功） |
 | 2 | 投影 | 构造 `canonical` 对象（字段白名单，§2.8.3），**基于 DSL 原文**（不补齐默认值：`trigger` 缺省则不出现、`timeout_ms`/`retry` 不补齐） |
 | 3 | 排序 | 递归按**对象键的 UTF-8 字节序升序**重排；数组**保持原顺序**（`nodes`/`edges`/`subgraphs` 顺序均有语义） |
 | 4 | 序列化 | 无缩进、无空白；字符串最小转义（仅 `"`、`\`、控制字符，按 RFC 8259）；整数最短十进制（无 `+`、无前导零、`-0`→`0`）；若 `gate.params` 含浮点，按其最短往返表示（RFC 8785 口径） |
@@ -801,7 +821,7 @@ $ echo $?    # 2
 |---|---|---|
 | 顶层 | `version`、`metadata.name`、`entry_points`、`nodes`、`edges`、`subgraphs?` | — |
 | `metadata` | 仅 `name` | `description`、`author`、`created_at` |
-| 节点 | `id`、`type`、`inputs`（`name/type/required/description?`）、`trigger?`（**仅在作者写了时**）、**`max_fanout?`（仅在作者显式写了时，W2b）**、`config`（按类型全量）、`outputs?` | —（`config` 默认值不补齐） |
+| 节点 | `id`、`type`、`inputs`（`name/type/required/description?`）、`trigger?`（**仅在作者写了时**）、**`max_fanout?`（仅在作者显式写了时，W2b）**、**`foreach?`（仅在作者显式写了时，W4a）**、`config`（按类型全量）、`outputs?` | —（`config` 默认值不补齐） |
 | 输入/输出端口 | `name`、`type`、`required`（仅输入）、`description?` | — |
 | 边 | `from`、`to_node`、`to_input_port`、`gate?`（`function` + `params` 全量）、`from_output_port?`、**`on_gate_false?`（仅作者显式写时）** | — |
 | 子图 | `id`、`nodes`、`edges`、`input_mapping`、`output_mapping`（递归同规则） | — |
@@ -810,6 +830,7 @@ $ echo $?    # 2
 - **已知限制（明示）**：语义等价但写法不同的两张图（缺省 `trigger` vs 显式 `"all"`；缺省 `on_gate_false` vs 显式 `"settle"`；缺省 `max_fanout` vs 显式 `4294967295`）会产生**不同** hash。若需语义去重，先在编辑器归一化；v1 不做。
 - **W2a0 兼容**：缺省 `on_gate_false` **不出现在投影中**（边对象无该键）→ v0.1.0/批准的 W1 图 hash 逐字节不变；显式 `"defer"`/`"settle"` 参与 hash。
 - **W2b 兼容**：缺省 `max_fanout` **不出现在投影中**（节点对象无该键、不补齐为 `u32::MAX`）→ v0.1.0/W1/W2a 既有图 hash 逐字节不变；显式值（含 `u32::MAX`）参与 hash，子图节点经同一 `project_node` 同样参与。
+- **W4a 兼容**：缺省 `foreach` **不出现在投影中**（节点对象无该键）→ 无 foreach 图 hash 逐字节不变；显式 `foreach` 对象**原样**参与（键序由规范化排序处理；`max_items`/`on_item_error` 缺省不补齐）。
 - **不覆盖**：Python 代码版本、Agent 资产内容、skills/tools 实现 → 均不参与 hash（风险见 §2.8.5）。
 
 ### 2.8.4 存储位置与用途
@@ -852,12 +873,12 @@ $ echo $?    # 2
 
 | 步 | 动作 | 失败处理 |
 |---|---|---|
-| 1 | R1–R13、R15、R16 通过（纯函数，不触碰外部） | 返回 DSL 错误，无产物 |
+| 1 | R1–R13、R15、R18、R16 通过（纯函数，不触碰外部） | 返回 DSL 错误，无产物 |
 | 2 | 按 DSL `nodes` 顺序建 `CompiledNode` 并 push `node_order`：`inputs` 原样、`outputs` 缺省空集、`trigger` 缺省 `All`、`timeout_ms` 缺省 180_000、`max_attempts` 缺省 3、**`max_fanout` 原样带出（`None` = 无上限，W2b）**、`handler` 按 §2.9.3 映射 | 不应失败（已校验）；失败记 `Internal` |
 | 3 | 按 DSL `edges` 顺序建 `CompiledEdge`：`index = i`、`to_port = DSL.to_input_port`、`gate = Some(GateRef{ symbol, params })`（symbol 先存字符串，R14b 后绑定句柄）、**`on_gate_false = DSL.on_gate_false.unwrap_or(Settle)`**（缺省补齐只发生在产物） | 同上 |
 | 4 | 建 `EdgeIndex`：`outgoing[from].push(i)`、`incoming[(to_node,to_port)] = i`（写入前断言键不存在）、`incoming_by_node[to_node].push(i)` | 覆盖 = 框架 bug（`Internal`） |
 | 5 | R14：图级符号解析 → `ResolvedSymbols`（04 §4.7）；agent 资产索引校验 | `DSL_SYMBOL_*` / `DSL_AGENT_NOT_FOUND`；无产物 |
-| 6 | 计算 `graph_hash`（§2.8；仅 R1–R13、R15、R16 通过的 DSL 内容） | 不应失败；失败记 `Internal` |
+| 6 | 计算 `graph_hash`（§2.8；仅 R1–R13、R15、R18、R16 通过的 DSL 内容） | 不应失败；失败记 `Internal` |
 
 ### 2.9.3 字段映射表（目标字段名以 01 §1.1.1 为准）
 
@@ -873,6 +894,7 @@ $ echo $?    # 2
 | `nodes[].trigger?` | `.nodes[id].trigger` | 缺省 `All`（补齐只发生在产物，不回写 DSL） |
 | `nodes[].config.timeout_ms?` | `.nodes[id].timeout_ms` | 缺省 `DEFAULT_NODE_TIMEOUT_MS`（00 §0.5） |
 | `nodes[].max_fanout?` | `.nodes[id].max_fanout: Option<u32>` | **W2b**：R16 已校验 `out_degree <= max_fanout`；`None`（未写）= 无上限（v0.1.0 行为）；原样带出、不补齐默认值（不参与 hash，§2.8.3）；子图节点经同一 `compile_node` 带出 |
+| `nodes[].foreach?` | `.nodes[id].foreach: Option<CompiledForeach>` | **W4a**：R17/R18 已校验；原样带出 `items_port/key_field/join/max_items/on_item_error`（`None` 不补齐）；`on_item_error` 编译为 `Fail`（v0.2 唯一）；显式 `foreach` 参与 hash（§2.8.3） |
 | `nodes[].config.retry.max_attempts?` | `.nodes[id].max_attempts` | 缺省 `DEFAULT_MAX_ATTEMPTS`；**自环与 defer 重入的统一上限**（W2a0） |
 | `agent_call.config.agent_id` | `.nodes[id].handler = Agent{agent_id}` | R14c 已校验资产存在 |
 | `agent_call.config.input_mapping?` | `.nodes[id].handler = Agent{agent_id, input_mapping}` | 缺省 `{}`（identity 映射）；01 §1.1.1 已扩展该字段（P-02-09 已解决）；05 §5.9.3 消费 |
@@ -918,9 +940,9 @@ $ echo $?    # 2
 | C-22（gate 符号三写法） | v1.2 曾统一为全限定 `module.function`；**v2 D6 改为内置 op 短名**（Python gate 延后，ISSUE-014） | §2.5.1 |
 | C-25（created_at 必填） | 改可选；R3 校验格式；不参与 hash | D-02-02 / §2.2.1 / §2.8.3 |
 | C-26（自环与环检测） | 自环不豁免；无 gate 自环报 `DSL_CYCLE_DETECTED`；次数上限走 `retry.max_attempts` | D-02-05 / R13 |
-| M-11（错误码分层/聚合） | **18 码**（W2a0 +1；W2b 不新增）映射到 R1–R16；跨规则 fail-fast（`R1→R13→R15→R16→R14`）+ 同规则聚合 + 20 条上限；错误响应结构 | §2.1.3 / §2.4 / §2.7 |
+| M-11（错误码分层/聚合） | **19 码**（W2a0 +1；W2b 不新增；W4a +1 `DSL_FOREACH_INVALID`）映射到 R1–R18；跨规则 fail-fast（`R1→R13→R15→R18→R16→R14`）+ 同规则聚合 + 20 条上限；错误响应结构 | §2.1.3 / §2.4 / §2.7 |
 | W2a0（DSL defer） | `on_gate_false` 字段/白名单/serde/hash 投影/编译映射；**R15** + `DSL_DEFER_NOT_REENTRANT`（DSL 域 17→18）；R13 不变；子图递归含 R15 | DR-005 §2；REV-063 C11/S12；ISSUE-100 |
-| W2b（DSL max_fanout） | 节点级 `max_fanout`（schema/白名单/serde/编译映射）；**R16** 静态扇出上限（`DSL_PARSE_ERROR`，DSL 域仍 18 码）；`max_fanout` 显式参与 hash、缺省不补齐；子图递归含 R16（收敛 `DSL_SUBGRAPH_INVALID`）；运行期每激活防御层见 03 §3.4.4 | DR-004 §3 W2b / D2；REV-074；W2b docs REV-077 |
+| W2b（DSL max_fanout） | 节点级 `max_fanout`（schema/白名单/serde/编译映射）；**R16** 静态扇出上限（`DSL_PARSE_ERROR`，DSL 域仍 19 码（W4a 新增第 19 码））；`max_fanout` 显式参与 hash、缺省不补齐；子图递归含 R16（收敛 `DSL_SUBGRAPH_INVALID`）；运行期每激活防御层见 03 §3.4.4 | DR-004 §3 W2b / D2；REV-074；W2b docs REV-077 |
 | M-16（输出端口/字段级路由） | `outputs` 保留声明（R4 校验）；`from_output_port` 出现即 `DSL_UNSUPPORTED_FIELD`（R9）；v1 整包广播裁定 | §2.2.1 / §2.6.2 |
 | M-20（版本与 graph_hash） | version 只接受 `"1.0"`；六步 canonical hash；存储与用途 | §2.8 |
 | S-01（entry 注入） | `entry_points` 权威、entry 无入边、`RunSpec.entry_inputs` 契约；`start` 语义 | D-02-04/D-02-08 / §2.3.4 |
@@ -929,6 +951,8 @@ $ echo $?    # 2
 **本册部分关闭 / 不覆盖**：C-19（Agent 输出形状 → 05）、S-17（end 输出 → 03/04）、S-03/S-08（attempt 运行期语义 → 03）、C-01（超时预算层级 → 03，DSL 只提供 `timeout_ms`）。
 
 ---
+
+| W4a（动态 N / foreach） | 节点级 `foreach`（schema/白名单/serde/hash）；**R17** 形状（`DSL_PARSE_ERROR`，R4 阶段）+ **R18** 区域（**`DSL_FOREACH_INVALID`**，第 19 码，reason 闭集 11 值）；执行顺序 `R1→R13→R15→R18→R16→R14`；无 foreach 图零副作用 | DR-007；REV-086 |
 
 ## 2.11 待裁决项与跨册风险（交 Lead）
 
@@ -940,12 +964,13 @@ $ echo $?    # 2
 | P-02-02 | 00 未覆盖"start/end 边方向非法"与"资产索引非法"的错误码归属 | 分别复用 `DSL_INVALID_EDGE_REF`（reason: `end_as_source`/`start_as_target`）与 `DSL_AGENT_NOT_FOUND`（message: `duplicate agent asset id`） | ✅ 已解决：不新增错误码（本册 §2.7.5 规定不新增） |
 | P-02-03 | 00 §0.4 DSL 行把 `DSL_UNSUPPORTED_NODE_TYPE` 描述为"使用了 v1 不支持的节点类型（如 `subgraph` 运行）"，与运行期码 `NODE_TYPE_UNSUPPORTED` 的职责重叠 | 裁定：`subgraph` = **运行期（run 启动后、实例创建前）** `NODE_TYPE_UNSUPPORTED`（决策记录 §2.2 / 04 §4.4.4）；`DSL_UNSUPPORTED_NODE_TYPE` = **加载期未知/保留 `type` 字符串** | 与 04 A5 一致：建议 00 修订该行说明为"使用了未知/保留的节点类型字符串" |
 | P-02-04 | `GateDefinition.function` 取值语义收紧与 00 §0.1"新增字段均为可选/保留字，向后兼容"的字面表述冲突 | 属**语义收紧**而非字段变更；v2 D6 进一步改为内置 op 短名（Python gate 延后） | 00 §0.1 已注明"符号名格式收紧属 v1.2 修订" |
-| P-02-05 | ✅ **已关闭**：决策记录 §2.1 已更正为“17 个 `DSL_*` 错误码”；00 §0.4 现列 17 个（**W2a0 起 18 个**，见 §2.4.1/00 §0.4） | 以 00 为准 | ✅ 已回填（2026-10-28；W2a0 追加第 18 码） |
+| P-02-05 | ✅ **已关闭**：决策记录 §2.1 已更正为“17 个 `DSL_*` 错误码”；00 §0.4 现列 17 个（**W2a0 起 18 个、W4a 起 19 个**，见 §2.4.1/00 §0.4） | 以 00 为准 | ✅ 已回填（2026-10-28；W2a0 追加第 18 码） |
 | P-02-06 | ✅ **已关闭**：00 §0.4 运行期域已增补 `RUN_ENTRY_INVALID` / `RUN_ENTRY_INPUT_MISSING` | 本册 §2.3.4 的 `RunSpec` 契约与 03 §3.1 的启动校验已对齐此两码 | 无 |
 | P-02-07 | **04 §4.7.2 R1③** 把 `agent_call` 的 skill 符号纳入**图加载期**收集（错误码走 `DSL_SYMBOL_*`）；与 00 §0.4（工具错误归 Harness 域）、05 §5.6/§5.11（tools 由 Agent 加载期校验 `HARNESS_CONFIG_LOAD`）冲突 | 本册按 00/05 裁定：图级 R14 只解析 gate/python_node；skills/tools 归 Harness Loading | lead/08 裁决；若采纳 04，则 02 需增"③ skill 符号"收集与错误码映射（改动点 §2.5.2/§2.5.4/§2.5.7） |
 | P-02-08 | **07 §AC-04** 把 `unsupported_subgraph.json` 列为 `zgraph validate` 的 `DSL_UNSUPPORTED_NODE_TYPE` 反例；按本册裁定该图 validate **通过**、`run` 才失败 | 07 已改为：① `unknown_node_type.json` 做 validate 反例；② 子图 e2e 断言 `run` Failed + `NODE_TYPE_UNSUPPORTED` | ✅ 已关闭（2026-10-28） |
 | P-02-09 | 01 §1.1.1 `CompiledNode.handler = HandlerRef::Agent{agent_id}` **未携带 DSL 节点级 `input_mapping`**；05 §5.9.3 需要它做路径映射 | 01 已增 `input_mapping` 字段，本册 §2.9.3 已改为“进入产物” | ✅ 已关闭（2026-10-28） |
 | P-02-10（W2b） | 00 §0.4 DSL 域无「静态扇出超限」专用码；是否新增 `DSL_FANOUT_EXCEEDED` | **不新增**：按「00 未覆盖边界以复用既有码 + message 细分兜底」（本册 §0 关系）用 `DSL_PARSE_ERROR`（图定义/类型桶），DSL 域保持 18 码；R16 的 message/expected/actual/location 在 §2.4.1/§2.4.2 冻结 | ✅ 已裁定（REV-074；W2b docs REV-077 回写） |
+| P-02-11（W4a） | foreach 区域校验是否新增 DSL 码，或复用 `DSL_PARSE_ERROR` | **新增 `DSL_FOREACH_INVALID`（第 19 码）**：区域/边界是独立语义桶（reason 闭集 11 值，便于定位与 W4b 测试）；R17 形状仍复用 `DSL_PARSE_ERROR`（R4 阶段）；执行顺序 R18 在 R15 后、R16 前（DR-007 §3） | ✅ 已裁定（REV-086） |
 
 **跨册接口约定（需一致）**：
 

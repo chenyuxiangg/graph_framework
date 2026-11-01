@@ -1,9 +1,10 @@
-# software_team SOP 设计稿 v1.1（per-item 评审 + 有限返工形态）
+# software_team SOP 设计稿 v1.2（per-item 评审 + 有限返工 + 动态 N 形态）
 
-> **状态**：设计稿 **v1.1**（W2a0 冻结；REV-067）· 2026-10-31
-> **作者**：lead（v1）/ docs-writer（v1.1 升级，W2a0）· **分支**：`docs/docs-rework-design`
-> **关联**：DR-001（技术路线）、[`DR-005-w2a-defer-gate-freeze.md`](../decisions/DR-005-w2a-defer-gate-freeze.md)（返工语义冻结）、spec v1.2 分册 00/01/02/03/04/05/06/07、`legacy/config/software_team_graph.json`（SOP 语义来源，冻结只读）、ISSUE-011/ISSUE-062/ISSUE-100
-> **版本约定（v1.1）**：本稿同时定义两个 profile——**approved-only v1**（框架 v0.1.x 能力内、语义不变）与 **rework v1.1**（框架 v0.2 / W2a 的 opt-in deferrable gate + attempt-per-activation）。人工评审、每节点最大扇出限制、动态 N、共享评审队列仍在延期项（§9，对应框架 W3a/W2b/W4b/W5）。
+> **状态**：设计稿 **v1.2**（W4a 动态 N 设计冻结；REV-086）· 2026-11-01
+> **作者**：lead（v1）/ docs-writer（v1.1 升级，W2a0）/ docs-dev（v1.2 升级，W4a）· **分支**：`docs/docs-dynamic-fanout-design`
+> **关联**：DR-001（技术路线）、[`DR-005-w2a-defer-gate-freeze.md`](../decisions/DR-005-w2a-defer-gate-freeze.md)（返工语义冻结）、[`DR-007-w4a-dynamic-fanout-freeze.md`](../decisions/DR-007-w4a-dynamic-fanout-freeze.md)（动态 N 语义冻结）、spec v1.2 分册 00/01/02/03/04/05/06/07、`legacy/config/software_team_graph.json`（SOP 语义来源，冻结只读）、ISSUE-011/ISSUE-062/ISSUE-100
+> **版本约定（v1.2）**：本稿定义**三个 profile**——**approved-only v1**（框架 v0.1.x 能力内、语义不变）、**rework v1.1**（框架 v0.2 / W2a 的 opt-in deferrable gate + attempt-per-activation）、**dynamic-N v1.2**（框架 v0.2 / W4a 设计冻结的节点级 `foreach` 展开，§3.3/§7.3）。人工评审已由 W3a 实现（REV-079–084）；每节点最大扇出限制已由 W2b 实现（REV-074–077）；共享评审队列仍在延期项（§9，对应框架 W5）。
+> **v1.2 增量（相对 v1.1）**：新增 dynamic-N profile（§3.3 topological 展开 + §7.3 codegen 规则 + §11.3 验收）；§9 移除「动态 N」延期项；§10 的「N 静态」限制在 dynamic-N profile 下被 `foreach` 取代（静态 profile 不受影响）。approved-only v1 / rework v1.1 的图结构/语义/`graph_hash` 完全不变。
 > **v1.1 增量（相对 v1）**：两个 profile 与环上 defer 边统一规则（§3.2）、`parse_verdict_rework` 契约（§5.2）、`max_attempts` 预算（§6/§7.3）、codegen `--mode`（§7）、有限返工验收（§11）。approved-only v1 的**图结构/语义/`graph_hash` 不变**（DR-005 §6.1）。
 > **范围**：只定义新 DSL（schema 1.0 / v1.2 语义）下的软件团队 SOP 图设计；**不含代码改动**。
 
@@ -122,6 +123,31 @@ D_i ──fan-out──▶ W_{i,1} ──┬─▶ R_{i,1} ──▶ P_{i,1} ─
 ---
 
 
+### 3.3 dynamic-N（v1.2，W4a 设计冻结；DR-007）
+
+> 只用 `foreach` 表达「运行期 N」；静态 profile（v1/v1.1）不加 `foreach`、行为不变。**本稿只写设计，不写 as-built**（W4b 实现后由 W4b-docs 回写）。
+
+**图形态**（N 由上游列表决定，同一张图跑任意 N）：
+
+```text
+start(requirement) ──▶ D_up(设计角色) ──▶ items_python_node(输出 {items:[...]}) ──▶ F(foreach{items_port:"items", join:"D_next"})
+                                                                                          │
+                     F ──▶ W(工作 agent, per-item) ──▶ R(评审 agent, per-item) ──▶ E(per-item 出口)
+                                                                                          │
+                                                                                     E ──(无 gate, 唯一出口)──▶ D_next(下一设计角色, join)
+```
+
+- `F`：带 `foreach` 的节点（`python_node`/`agent_call`），消费 `items_port` 的数组；框架**不创建 F 的 controller 实例**，按 item 创建 N 个 F/item 实例。
+- region = `F ∪ W ∪ R ∪ E`；`E→D_next` 是 region 唯一出口边且**不得有 gate**；`D_next` 是 join（普通 agent_call 或 end）。
+- 每个 item 的 `W/R` 链独立实例/attempt；`join` 在 `D_next` 的输入端口收**有序数组**（`item_index` 升序）。
+- **per-item 评审**：`R` 的结论/`W` 的产物都进入 per-item `E`（等价 v1 的 `P` 角色，可由 python_node 解析）；`E` 输出即 join 元素。
+- **空列表**：N=0 时直接给 `D_next` 投 `[]`（跳过 region，不产生 item 实例）。
+- **失败**：`on_item_error=fail`（v0.2 唯一）= 任一 item 的 `W/R/E` 失败 → run Failed（冷峻）；取消传播所有 item。
+- **依赖/触发**：`D_next` 的 join 端口按普通 `trigger=all` 等其它依赖；join 数组是该端口的值。
+- **与静态 profile 的关系**：dynamic-N 是叠加在 R1–R18 上的 opt-in 图形态；`approved-only`/`rework` profile 的节点不加 `foreach`，图 hash/语义不变。
+
+**映射到 SOP 角色**：D_up 产出 items（如需求拆分）→ F 展开 N 个工作 agent W → per-item 评审 R → per-item 解析 E（approved/rework 判定）→ join 到下一设计角色 D_next；失败/返工策略沿用 rework profile 的 `max_attempts` 与 defer 回边（region 内允许）。
+
 ## 4. v1 参考实例（依赖矩阵 + 工作 agent 清单）
 
 ### 4.1 设计角色依赖矩阵（与 legacy 的 iport 依赖对齐）
@@ -231,9 +257,9 @@ sto ─approved─▶ qa ─approved─▶ release ─approved─▶ end
 
 ---
 
-## 7. N 与 codegen 规则（关闭 C3；v1.1 双 profile）
+## 7. N 与 codegen 规则（关闭 C3；v1.2 三 profile）
 
-图是静态 JSON；按 §4.1 的**依赖矩阵**在生成图时展开。codegen 增 `--mode approved|rework`（缺省 `approved`，W1 产物字节级不变）。
+图是静态 JSON；按 §4.1 的**依赖矩阵**在生成图时展开。codegen 增 `--mode approved|rework`（缺省 `approved`，W1 产物字节级不变）；**dynamic-N profile 不再按 N codegen**（同一张图用 `foreach` 跑任意 N，见 §7.3）。
 
 ### 7.1 通用规则（两 profile 共用）
 
@@ -302,6 +328,33 @@ W/R/P[role][item].config.retry.max_attempts = 3   # 可参数化；e2e 固定 3
 
 ---
 
+### 7.3 dynamic-N profile（v1.2，W4a；不按 N codegen）
+
+> `--mode dynamic`（W4b 实现时启用；本稿只冻结形态）不生成 N 份 W/R/P，而是生成**一份 per-item region + foreach**：
+
+```text
+# 节点
+D_up = agent_call(...)                                  # 产出 items（entry input 或上游产物）
+items = python_node(outputs {items: array})             # 可选：把上游结果整理成列表端口
+F = agent_call|python_node(
+      inputs=[items: array, ...], trigger="all",
+      foreach={items_port:"items", key_field:"id"?, join:"D_next"})
+W = agent_call|python_node(per-item 工作)
+R = agent_call(agent_id="design_reviewer", per-item 评审)
+E = python_node(per-item 解析/判定)                     # 等价 v1 的 P
+D_next = agent_call(inputs=[items: array, ...], trigger="all")   # join 节点
+
+# 边（region 内 per-item）
+D_up -> items -> F                                     # F 的 items_port 由入边供源
+F -> W.task; F -> R.spec; W -> R.result; W -> E.artifact; R -> E.review
+E -> D_next.<port>                                     # region 唯一出口、无 gate（join）
+```
+
+- **合法性**：R17/R18（spec 02 §2.4.1）由 `zgraph validate` 检查；`E→D_next` 无 gate（R18 强制）；`D_next` 可以是 `end`。
+- **N 与 max_items**：`max_items` 可选（缺省无上限）；N 由列表长度决定，codegen 不再需要 N。
+- **返工**：如需 rework，region 内可加 defer 回边（与 §3.2 同规则；attempt 按 item 作用域）。
+- **静态兼容**：`--mode approved|rework` 产物与 v1/v1.1 逐字节不变；dynamic profile 是新增 `--mode`，不替换静态。
+
 ## 8. 与 legacy 图对照
 
 | legacy 元素 | v1 / v1.1 对应 | 差异 |
@@ -322,10 +375,9 @@ W/R/P[role][item].config.retry.max_attempts = 3   # 可参数化；e2e 固定 3
 
 1. **人工评审**：`WaitingHuman` + 外部 decide/resume + durable run（W3a/W3b；无人工等待；`manual` gate 仅静态值）。
 2. **每节点最大扇出限制**：无每节点 fan-out 上限；框架 W2b 增加加载期静态 + 运行期每激活上限。
-3. **动态 N**：运行期 map/reduce fan-out（当前 N 编译期固定，需 codegen；框架 W4b）。
-4. **共享评审队列**：一个评审节点按到达顺序排队处理多份投递，评完一个放行一个（需要节点邮箱/多次激活/按 item 路由，内核级改动；框架 W5/v0.3 候选）。
+3. **共享评审队列**：一个评审节点按到达顺序排队处理多份投递，评完一个放行一个（需要节点邮箱/多次激活/按 item 路由，内核级改动；框架 W5/v0.3 候选）。
 
-> **已移出延期项**：图级有限返工 —— v1.1 rework profile 落地（框架 W2a；语义冻结见 DR-005，验收见 §11.2 / spec 07 AC-14）。
+> **已移出延期项**：图级有限返工 —— v1.1 rework profile 落地（框架 W2a；语义冻结见 DR-005，验收见 §11.2 / spec 07 AC-14）；**动态 N** —— v1.2 dynamic-N profile（框架 W4a 设计冻结，DR-007；验收见 §11.3 / spec 07 AC-17），W4b 实现。
 >
 > 以上四项仍属执行模型扩展，不在本设计稿的 approved-only v1 落地范围内；落地前需另立 DR。
 
@@ -343,7 +395,7 @@ W/R/P[role][item].config.retry.max_attempts = 3   # 可参数化；e2e 固定 3
 - **agent 输出固定四字段**：业务字段必须经 `python_node` 解析，且 `content` 必须可解析 JSON。
 - **工具串行**：单响应多 tool_call 串行执行；大量并行工具应拆成图级节点。
 - **每 run worker 上限 8**（Python worker）：工作 agent 使用 tools 时与节点执行共享该上限。
-- **N 静态**：N 变化必须重新生成图；同一图不能在运行期改变 fan-out 宽度。
+- **N 静态（仅静态 profile）**：approved-only v1 / rework v1.1 的 N 变化仍需重新 codegen；**dynamic-N profile（v1.2）由 `foreach` 在运行期展开**，不受此限（DR-007）。
 - **返工重入的输入继承**：defer 边 attempt 重入的新实例继承上一实例输入 buffer 快照（DR-005 §3.2 行 6/7）；`W/R` 的 `task`/`spec` 由继承保证，`feedback`/`result` 由本次投递覆盖。
 
 ---
@@ -368,6 +420,14 @@ W/R/P[role][item].config.retry.max_attempts = 3   # 可参数化；e2e 固定 3
 3. **超限失败**：评审恒 `rework` → 第 3 次 rework 时 `W` 新实例 attempt=3 超限 → run `Failed(NODE_INTERNAL)`；Crashed 实例 attempt=max；非终态实例 `Cancelled`。
 4. **兼容**：approved-only 参考图与 W1 完全一致（`graph_hash` 三基线不变）；v0.1.0 fixture 回归不变。
 
+
+### 11.3 dynamic-N v1.2（W4a 设计冻结；W4b 实测）
+
+1. `zgraph validate` 通过 dynamic-N 参考图（region 边界/R17/R18/join 无 gate）；`zgraph validate --structure-only` 同样通过。
+2. fake LLM 真链路：items 3 个 → 3 个 item 实例（W/R/E 各 item_index 0..2）→ 有序 join 数组 → 下一设计角色/end Completed。
+3. 空列表：不产生 item 实例、join 收 `[]`、run Completed。
+4. 错误路径：items 非数组/超 `max_items`/key 重复 → run Failed 对应 `RUN_FOREACH_*`；item 失败 → 冷峻 Failed；取消传播全部 item Cancelled。
+5. trace v6：`foreach_expansions` 行（item_count/keys）、`trace --json` ForeachExpansion 行、L1/L2 回放（per-item outputs）；无 foreach 旧图 golden 不变（spec 07 AC-17 i）。
 
 ---
 

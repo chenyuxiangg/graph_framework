@@ -209,20 +209,33 @@
     - **测试证据（as-built）**：trace **79/0**；kernel **122/0**、`--features test-hooks` **132/0**；cli **206/0**；e2e **85/0/2**（human_decide **21/0**，3 轮稳定）；空载 workspace **819/0/3**；pytest **170**；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`、`bash scripts/dev/check.sh` 全绿。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6886 行**；**00–08 numstat +103/−32（净 +71）**；**全 spec 目录 numstat +138/−50（净 +88，`git diff --numstat main -- doc/spec-v1.2`）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7239 行）。
 
+23. **W4a 动态 N / foreach 设计冻结批次**（2026-11-01，REV-086；分支 `docs/docs-dynamic-fanout-design`，base = 本地 `main` `559ede6`；docs-only）：
+    - **来源/性质**：用户 **2026-11-01 决定 W3b 不做**（durable resume 不纳入 v0.2；记录于 DR-004 §10）；本批为 **W4b 实现前的设计冻结**，不写 as-built、不改代码；语义冻结见新增 [`DR-007-w4a-dynamic-fanout-freeze.md`](../decisions/DR-007-w4a-dynamic-fanout-freeze.md)。
+    - **02-DSL与校验**：`GraphNode.foreach`（仅 `python_node`/`agent_call`，含 `builtin.human`；子图内禁止）：`items_port/key_field/join/max_items/on_item_error` 闭集/白名单/serde/hash 投影；**R17** 形状（复用 `DSL_PARSE_ERROR`，R4 阶段）+ **R18** 区域（新 DSL 码 **`DSL_FOREACH_INVALID`**，DSL 域 **18→19**，reason 闭集 11 值，载荷/定位冻结）；执行顺序 `R1→R13→R15→R18→R16→R14`；正反例/模板/hash 兼容（无 foreach 图 hash 逐字节不变）。
+    - **01-领域模型与状态机**：`CompiledNode.foreach`、`InstanceRecord.item_index/item_key`、item 实例定位键 `(node_id,item_index)`、attempt/defer 按 item 作用域、`RunState.controller_buffers`（无 controller 实例）、join 有序数组/空列表（§1.2.5/§1.9）；非 region `item_index=0`。
+    - **03-调度器与生命周期**：新增 **§3.4.6 foreach 展开与 join**（controller buffer 就绪→展开；F 自身 per-item 执行；region 内同 item 投递；join 按 item_index 升序；空列表立即 `[]`；4 个 `RUN_FOREACH_*`；取消/Pause/超时/上限）；§3.5/§3.8/§3.9.1/§3.10/§3.15 同步。
+    - **06-存储与可观测**：trace schema **v6**——`instances` 增 `item_index`/`item_key` 并重建唯一键 `(run_id,node_id,attempt,item_index)`；新表 **`foreach_expansions`**（+run_id 索引）；v5→v6 备份/单事务/12 步重建/只读拒绝；v1..v5→v6 链；`trace` 追加 ForeachExpansion 行（不写 `events.kind`）；L2 查找键扩展 `(node_id,attempt,item_index)`（`recorded_outputs` 结构不改）；`--stats` 不新增字段。
+    - **07-验收用例**：新增 **AC-17 a–i（设计冻结；W4b 实测）** 并加入 §7.1/§7.2/DoD；通过标准改 **AC-01..AC-17**；§7.3 校验数改 **18 条（R1–R18）**。
+    - **00-总纲**：`DSL_FOREACH_INVALID`（第 19 码）+ 4 个 `RUN_FOREACH_*` 运行期码、`ItemIndex`/`ExpansionId` 别名、W4a 设计注记（item 实例/I1）；**04-节点接口**：foreach region 内 human per-item 最小注记。
+    - **SOP 设计稿 v1.2**：新增 **dynamic-N profile**（foreach 替代按 N codegen；per-item W/R/E 链 + join；静态 v1/v1.1 兼容；§7.3 codegen 规则；§9 移除「动态 N」；§11.3 验收）；只写设计。
+    - **DR-004 §10**：追加「用户 2026-11-01 决定 W3b 不做」+ W4a 执行记录；`doc/index.md` 新增 DR-007 行、reviews 范围至 REV-086；`doc/progress.md`（进行中 W4a、下一步 W4b、W3b 不做）。
+    - **hash/迁移红线**：无 foreach 图 hash/validate/run/trace/回放逐字节不变；`events.kind` 不变；既有 DSL 18 码 + R1–R16 不变（仅新增第 19 码与 R17/R18）；不修改 `doc/reviews/**` 既有记录、不改代码。
+    - **重测与落盘**：`bash scripts/dev/check.sh` PASSED；PROVENANCE §3 按 §3 重算（00–08 合计 **7110 行**；00–08 numstat **+245/−21（净 +224）**；全 spec 目录 numstat **281/41（净 240）**）；spec README 行数表同步（00 343/01 421/02 984/03 675/04 939/06 1271/07 484）。提交正文 `Review: REV-086` + `Agent: docs-dev`；本批不 push/不 merge。
+
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | f76b1726de2bce0477f2797d3d379401b7ade42e52c084b29541e20e941389e0 | 333 |
-| `01-领域模型与状态机.md` | 5f13262255a97c8b6792cbd1c848295c3d4378ac1be9c0d3f1ad9e1fab159152 | 398 |
-| `02-DSL与校验.md` | f57d257aabebe0127190b5cd457bc507babc005342c29cfb92cce0b1694b516e | 959 |
-| `03-调度器与生命周期.md` | b29d89dfc624c8cff9fdfe3f3e38e4be082c4d8ad92ac8556cd432da074ecc27 | 601 |
-| `04-节点接口与扩展点.md` | ec676faaf9a3c06a1397a6b6616f7247a8e04967e754fc41e616002bc5566339 | 936 |
+| `00-总纲.md` | 68373df49b7d9828adf73dede65a2566813ee635e5ac6421dcc225ac46e29994 | 343 |
+| `01-领域模型与状态机.md` | 47a31cfc0e4c4e22511e0b19b1f52a59cb06a5895e4271fba94a64969716097f | 421 |
+| `02-DSL与校验.md` | 7941f5fc4b5206f08d84b6b61f9f4c9cd3fce47718507329bc02c6f2063f4d2d | 984 |
+| `03-调度器与生命周期.md` | 6704e74f70ff40793106b2219fcdb5269bca23cbf23cd58f210c7e51900681f3 | 675 |
+| `04-节点接口与扩展点.md` | b051c3c1bb14dd18373a6eec99d0ea6b1384d69fd773fd50f4242c867da2ce00 | 939 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | 9f02d9fea8a6a79b86657fe1f6e4a6e8709c7d4e07e69ea17c3be176078bab61 | 1237 |
-| `07-验收用例.md` | 9cc44593399b72c6a308e503daf71998db735e279b17d013822216f9c8913a97 | 429 |
+| `06-存储与可观测.md` | 1dfb7df5f93f7b1f7607cde4e5d4f005d8bb8d9c9f4e0a42c29018836d2f7201 | 1271 |
+| `07-验收用例.md` | 902324b8894b47ba9b953c8d9ead079bc2cc76098c53d5253b5ec896e73e5a60 | 484 |
 | `08-审计关闭矩阵.md` | 9450d7a9a16ca3fe627c243fa6ae0a311d8210318735752ea51ebd7e4f9e2143 | 564 |
 
-> 00–08 合计 **6886 行**（`wc -l` 口径；2026-11-01 **W3a as-built 回写 + REV-084 复审残留收口批次后**实测（REV-084；**00–08 numstat +103/−32（净 +71）**；**全 spec 目录 numstat +138/−50（净 +88）**；见 §2 第 22 条）；此前 W3a0 冻结 + R1–R4 批次 6815 行/§2 第 20–21 条；W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7239 行）。
+> 00–08 合计 **7110 行**（`wc -l` 口径；2026-11-01 **W4a 动态 N / foreach 设计冻结批次后**实测（REV-086；**00–08 numstat +245/−21（净 +224）**；**全 spec 目录 numstat 281/41（净 240）**；见 §2 第 23 条）；此前 W3a as-built + R 收口批次 6886 行/§2 第 22 条；W3a0 冻结 + R1–R4 批次 6815 行/§2 第 20–21 条；W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7479 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
@@ -248,3 +261,4 @@ wc -l 0*.md
 - **W2b spec 回写已完成（2026-10-31，REV-077）**：00/01/02/03/06/07 已按已合并实现（REV-074 dsl / REV-075 kernel+cli / REV-076 e2e）回写 R16 静态扇出上限、`NODE_FANOUT_EXCEEDED` 运行期防御层、`CompiledNode.max_fanout`、`NodeError` canonical JSON 与 07 AC-15；`doc/architecture-v2.md` 顶部注记同步为 R1–R16（历史表述保持冻结）；默认无 `max_fanout` 的图行为/hash/错误序列与 v0.1.0 逐字节一致。台账新增 ISSUE-113–125（113–124 为 REV-074/075/076 P3，125 为 03 §3.2 预存偏差）；`doc/progress.md` 已更新为 W2b 完成、下一步 W3a0；REV-077 复审条件 C1–C4 已由条件修复批次关闭（见 §2 第 19 条）。
 - **W3a0 人工评审设计冻结已完成（2026-10-31，REV-078）**：00/01/02/03/04/06/07 已按 [`DR-006`](../decisions/DR-006-w3a-human-decide-freeze.md) 冻结 human lifecycle（`builtin.human` 保留符号、`WaitingHuman` 非静默等待、decide 自动接续/无 `resume`、`human_decisions`+C13 写者、trace schema v5、CLI decide 退出码 5、AC-16 a–g 设计）。**本批是设计冻结，不代表 W3a 实现完成**；本批不写 as-built，实现偏差由 W3a-docs 回写；07 AC-16 的测试名/计数待实现后补。REV-078 首轮「有条件通过」的 C1–C5 已由条件修复批次关闭（见 §2 第 21 条），**复审通过（REV-078，复审记录 `05a5803`）**；R1–R4 复审残留已由合并前小 commit 收口；残留 P3 建议登记 ISSUE-126–128。
 - **W3a 实现回写已完成（2026-11-01，REV-084）**：00/01/03/04/06/07/08 已按已合并实现（REV-079 trace / REV-080 kernel / REV-081 cli / REV-082 cli L2 / REV-083 e2e）回写 as-built（WaitingHuman 实际生命周期、`builtin.human` 精确映射、decide/consumer 实测、schema v5 迁移证据、AC-16 a–g 实测 21 用例、08 §8.10 source-breaking）；DR-006 §15 执行记录；台账新增 ISSUE-129–140。默认无 human 图行为/hash/trace 不变。
+- **W4a 动态 N / foreach 设计冻结已完成（2026-11-01，REV-086）**：新增 [`DR-007`](../decisions/DR-007-w4a-dynamic-fanout-freeze.md)；spec 00/01/02/03/04/06/07 冻结写入（foreach 语法/R17/R18/`DSL_FOREACH_INVALID` 第 19 码/item 实例/join/trace v6/AC-17 a–i 设计）；SOP 设计稿升 v1.2（dynamic-N profile）；**本批是 W4b 实现前的设计冻结，不写 as-built**；W4b 实现后由 W4b-docs 回写。**用户 2026-11-01 决定 W3b 不做**（DR-004 §10）。
