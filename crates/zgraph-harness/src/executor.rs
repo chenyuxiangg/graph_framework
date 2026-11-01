@@ -23,7 +23,7 @@ use zgraph_kernel::{
 use zgraph_worker::WorkerLimits;
 
 use crate::agent_loop::{run_agent, AgentRun, RunFailure};
-use crate::config::{load_agent_with_skills, peek_agent_node_timeout, ModelConfig};
+use crate::config::{load_agent_with_options, peek_agent_node_timeout, ModelConfig};
 use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
 use crate::ctx::{CancelToken, HarnessCtx};
 use crate::error::HarnessError;
@@ -76,6 +76,12 @@ pub struct HarnessExecutor {
     /// 冻结口径为「**单 run** ≤ `MAX_SKILL_VIEWS` 次」：同一 run 的全部
     /// `agent_call` 实例共享同一计数器；不同 run（含复用 executor）各自重置。
     skill_view_budgets: Mutex<HashMap<String, Arc<AtomicU32>>>,
+    /// v0.3/V3：`--allow-mcp` 开关（默认关；CLI/库调用方需显式开启）。
+    mcp_allowed: bool,
+    /// v0.3/V3：MCP 客户端工厂（默认 rmcp；测试注入 Fake）。
+    mcp_factory: Arc<dyn crate::mcp::McpClientFactory>,
+    /// v0.3/V3：run_id → MCP run 状态（懒连接；换 run 时关闭旧连接）。
+    mcp_run: tokio::sync::Mutex<Option<(String, Arc<crate::mcp::McpRun>)>>,
 }
 
 impl HarnessExecutor {
@@ -89,6 +95,9 @@ impl HarnessExecutor {
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
             skill_view_budgets: Mutex::new(HashMap::new()),
+            mcp_allowed: false,
+            mcp_factory: crate::mcp::default_factory(),
+            mcp_run: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -108,6 +117,9 @@ impl HarnessExecutor {
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
             skill_view_budgets: Mutex::new(HashMap::new()),
+            mcp_allowed: false,
+            mcp_factory: crate::mcp::default_factory(),
+            mcp_run: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -125,6 +137,9 @@ impl HarnessExecutor {
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
             skill_view_budgets: Mutex::new(HashMap::new()),
+            mcp_allowed: false,
+            mcp_factory: crate::mcp::default_factory(),
+            mcp_run: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -142,6 +157,9 @@ impl HarnessExecutor {
             model_params: Mutex::new(HashMap::new()),
             skills_dir: None,
             skill_view_budgets: Mutex::new(HashMap::new()),
+            mcp_allowed: false,
+            mcp_factory: crate::mcp::default_factory(),
+            mcp_run: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -155,6 +173,18 @@ impl HarnessExecutor {
     /// **只增不破**：不修改 [`HarnessSettings`] 字段集合；未配置 skills 的路径行为不变。
     pub fn with_skills_dir(mut self, skills_dir: Option<PathBuf>) -> Self {
         self.skills_dir = skills_dir;
+        self
+    }
+
+    /// v0.3/V3（DR-010 §2.2）：允许配置的 MCP servers 启动（`--allow-mcp`）。
+    pub fn with_mcp_allow(mut self, allowed: bool) -> Self {
+        self.mcp_allowed = allowed;
+        self
+    }
+
+    /// v0.3/V3：注入 MCP 客户端工厂（测试 seam；生产用默认 rmcp 工厂）。
+    pub fn with_mcp_factory(mut self, factory: Arc<dyn crate::mcp::McpClientFactory>) -> Self {
+        self.mcp_factory = factory;
         self
     }
 
@@ -388,14 +418,20 @@ impl HarnessExecutor {
             .registry(&job.ctx)
             .await
             .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
-        let agent = load_agent_with_skills(
+        let mut agent = load_agent_with_options(
             &self.settings.assets_dir,
             &job.agent_id,
             &registry,
             self.settings.fake_mode,
             self.skills_dir.as_deref(),
+            self.mcp_allowed,
         )
         .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
+        // v0.3/V3：MCP 工具发现（async；每 run 每 server 懒连接 + run 级缓存）。
+        let mcp_run = self
+            .prepare_mcp_run(&job, &mut agent)
+            .await
+            .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
         // ISSUE-082：记录本 run 的模型参数摘要（去重；失败 run 也保留已加载的摘要）。
         self.record_model_params(job.ctx.run_id(), &agent.config.model);
         // ISSUE-076：有效实例超时 = DSL 声明 > AgentConfig > DEFAULT（05 §5.2.6），
@@ -425,11 +461,74 @@ impl HarnessExecutor {
             cancel,
             recorder: self.recorder.as_ref(),
             skill_view_budget: &skill_view_budget,
+            mcp: mcp_run.as_deref(),
         };
         run_agent(run)
             .await
             .map(|output| output.to_json())
             .map_err(RunFailure::into_node_error)
+    }
+}
+
+impl HarnessExecutor {
+    /// v0.3/V3：准备 MCP run 状态并解析本 Agent 显式请求的 MCP 工具。
+    ///
+    /// - 无 `AgentConfig.mcp` → 不读 registry/不启进程（默认路径零开销）；
+    /// - 换 run → 关闭旧连接（进程组 kill）；同 run 多次 agent_call 复用连接与工具缓存；
+    /// - `allow` 交集/`tools` 显式白名单在 [`crate::mcp::map_tools`] 校验（fail-closed）；
+    /// - stderr 打印无密钥启动命令（DR-010 §2.2/§6）。
+    async fn prepare_mcp_run(
+        &self,
+        job: &AgentCallJob,
+        agent: &mut crate::config::LoadedAgent,
+    ) -> Result<Option<Arc<crate::mcp::McpRun>>, HarnessError> {
+        let Some(plan) = agent.mcp.clone() else {
+            return Ok(None);
+        };
+        let run_id = job.ctx.run_id().to_string();
+        let mut guard = self.mcp_run.lock().await;
+        if let Some((current, old)) = guard.as_ref() {
+            if current != &run_id {
+                old.shutdown().await;
+                *guard = None;
+            }
+        }
+        let run = match guard.as_ref() {
+            Some((_, run)) => run.clone(),
+            None => {
+                let run = crate::mcp::McpRun::new(Arc::new(plan), self.mcp_factory.clone());
+                for notice in run.startup_notice() {
+                    eprintln!("{notice}");
+                }
+                *guard = Some((run_id, run.clone()));
+                run
+            }
+        };
+        drop(guard);
+        let discovered = run.list_tools().await?;
+        let requested: Vec<String> = agent
+            .config
+            .tools
+            .iter()
+            .filter(|reference| reference.starts_with("mcp__"))
+            .cloned()
+            .collect();
+        let tools = crate::mcp::map_tools(run.plan(), &requested, &discovered)?;
+        for tool in &tools {
+            if agent
+                .tools
+                .iter()
+                .any(|existing| existing.name == tool.name)
+            {
+                return Err(crate::mcp::mcp_config_error(
+                    "name_conflict",
+                    None,
+                    format!("MCP tool '{}' conflicts with an existing tool", tool.name),
+                ));
+            }
+        }
+        agent.tools.extend(tools);
+        Ok(Some(run))
     }
 }
 
@@ -1320,5 +1419,109 @@ mod tests {
             })
             .count();
         assert_eq!(failures, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.3 MCP（DR-010 / REV-098）：执行器级 fail-closed + FakeMcpClient 真链路
+    // ------------------------------------------------------------------
+
+    fn assets_with_mcp() -> TempDir {
+        let mut agent = agent_config("parser", &[]);
+        let object = agent.as_object_mut().expect("agent object");
+        object.insert("mcp".to_string(), json!({"servers": ["fake"], "allow": []}));
+        object.insert("tools".to_string(), json!(["mcp__fake__echo"]));
+        let dir = assets(agent, "你是解析器。");
+        std::fs::write(
+            dir.path().join("mcp_servers.json"),
+            json!({
+                "mcpServers": {
+                    "fake": {"command": "fake-mcp", "args": ["--stdio"], "timeout_ms": 1000}
+                }
+            })
+            .to_string(),
+        )
+        .expect("mcp registry");
+        dir
+    }
+
+    fn fake_mcp_factory() -> Arc<crate::mcp::testing::FakeMcpFactory> {
+        let client = crate::mcp::testing::FakeMcpClient::new()
+            .with_tools(vec![crate::mcp::McpTool {
+                server: String::new(),
+                name: "echo".to_string(),
+                description: "echo args".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+            }])
+            .with_default_outcome("mcp-ok", false);
+        crate::mcp::testing::FakeMcpFactory::new().with_client("fake", client) as _
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_are_bridged_in_process_when_allowed() {
+        let dir = assets_with_mcp();
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null,
+                 "tool_calls": [{"call_id": "c1", "name": "mcp__fake__echo",
+                                 "args": {"q": 1}}]},
+                {"kind": "text", "content": "done", "stop_reason": "EndTurn"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_mcp_allow(true)
+                .with_mcp_factory(fake_mcp_factory()),
+        );
+        let (outcome, _sink) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            RunStatus::Completed,
+            "error: {:?}",
+            outcome.error
+        );
+        // 工具结果作为 tool 消息进入第二次请求（进程内桥接、不经 worker）。
+        let tool_text = fake
+            .requests()
+            .iter()
+            .flat_map(|request| request.messages.iter())
+            .find_map(|message| match message {
+                LlmMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("tool message");
+        assert_eq!(tool_text, "mcp-ok");
+        assert_eq!(
+            requests_tool_names(&fake),
+            vec!["mcp__fake__echo".to_string()]
+        );
+    }
+
+    fn requests_tool_names(fake: &Arc<FakeLlmProvider>) -> Vec<String> {
+        fake.requests()
+            .first()
+            .map(|request| request.tools.iter().map(|tool| tool.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn mcp_not_allowed_fails_at_loading() {
+        let dir = assets_with_mcp();
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "unused"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        // 默认（未 --allow-mcp）→ HARNESS_MCP_ERROR（不启动 server）。
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_mcp_factory(fake_mcp_factory()),
+        );
+        let (outcome, _sink) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        let error = outcome.error.expect("run must fail");
+        assert_eq!(error.code, "HARNESS_MCP_ERROR");
     }
 }

@@ -142,6 +142,9 @@ pub(crate) struct AgentRun<'a> {
     pub(crate) cancel: CancelToken,
     /// LLM 调用记录器（ISSUE-082；可选观察者，不改变执行语义）。
     pub(crate) recorder: Option<&'a Arc<dyn LlmCallRecorder>>,
+    /// v0.3/V3 MCP：本 run 的 MCP 状态（`None` = 未配置/未开启；工具名字前缀
+    /// `mcp__` 时进程内桥接，不启动 worker）。
+    pub(crate) mcp: Option<&'a crate::mcp::McpRun>,
     /// v0.3（DR-009 §5）：**run 级** `skill_view` 预算计数器（跨该 run 的全部
     /// agent_call 实例共享；由 [`crate::executor::HarnessExecutor`] 按 `run_id` 持有）。
     pub(crate) skill_view_budget: &'a Arc<AtomicU32>,
@@ -368,6 +371,26 @@ impl LoopState {
             // 且 trace 只记字符数、不落正文。
             let (ok, tool_content) = if tool.name == SKILL_VIEW_TOOL_NAME {
                 self.execute_skill_view(run, tool, call)
+            } else if tool.name.starts_with("mcp__") {
+                // v0.3/V3：MCP 工具进程内桥接（不启动 worker；失败作为 TOOL_ERROR 喂回）。
+                match run.mcp {
+                    Some(mcp) => {
+                        let future = mcp.execute_tool(&tool.name, &call.args);
+                        tokio::select! {
+                            result = future => result,
+                            _ = wait_cancelled(&run.ctx) => {
+                                return Err(RunFailure::Cancelled);
+                            }
+                        }
+                    }
+                    None => {
+                        let failure = ToolFailure::new(
+                            "mcp_unavailable",
+                            "MCP tool called but no MCP run is active",
+                        );
+                        (false, tool_error_content(&failure))
+                    }
+                }
             } else {
                 execute_tool(run, tool, call).await?
             };
@@ -941,6 +964,7 @@ mod tests {
                 constraints_file: None,
                 tools: tool_names,
                 skills: Vec::new(),
+                mcp: None,
                 input_mapping: BTreeMap::new(),
                 max_iterations,
                 llm_timeout_ms: 5_000,
@@ -952,6 +976,7 @@ mod tests {
             api_key: SecretString::new("test-key"),
             tools,
             skills: Vec::new(),
+            mcp: None,
         }
     }
 
@@ -1015,6 +1040,7 @@ mod tests {
             cancel,
             recorder,
             skill_view_budget,
+            mcp: None,
         })
         .await
     }

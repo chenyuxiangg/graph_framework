@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+# v0.3（DR-010）：MCP client（stdio + Streamable HTTP 双 era）。默认关：不引入依赖、
+# 不读 registry、不启进程；CLI 默认 feature 打开（`--no-default-features` 可关）。
+mcp = ["dep:rmcp", "dep:process-wrap", "dep:http"]
+
 [dependencies]
 zgraph-kernel = { path = "../zgraph-kernel" }
 zgraph-dsl = { path = "../zgraph-dsl" }
@@ -19,6 +24,15 @@ genai.workspace = true
 # genai 0.7.2 的 `ChatStream` 只实现 `futures::Stream`；取流需要 `StreamExt`。
 # 选更小的 `futures-util`（genai 已把它作为传递依赖编译）。
 futures-util.workspace = true
+# v0.3（DR-010）：MCP Rust client（精确锁版本；feature-gated，默认不编译）。
+rmcp = { version = "=3.8.0", optional = true, default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+# 进程组 kill（stdio 子进程清理；DR-010 §4）与 HTTP 自定义 headers。
+process-wrap = { version = "10.0", optional = true }
+http = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

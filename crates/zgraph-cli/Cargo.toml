@@ -10,6 +10,11 @@ authors.workspace = true
 name = "zgraph"
 path = "src/main.rs"
 
+[features]
+# v0.3（DR-010 §2.2/§11-7）：MCP 默认启用；`--no-default-features` 可关（CI 双构建）。
+default = ["mcp"]
+mcp = ["zgraph-harness/mcp"]
+
 [dependencies]
 blake3.workspace = true
 chrono.workspace = true

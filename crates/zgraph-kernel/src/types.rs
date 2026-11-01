@@ -141,6 +141,13 @@ pub const CODE_HARNESS_TOOL_ERROR: &str = "TOOL_ERROR";
 /// 上下文预算裁剪后仍溢出（M4 追加；00 §0.4 已有该码，而 §0.3 七值缺该 kind，见 05 §5.13）。
 pub const CODE_HARNESS_CONTEXT_OVERFLOW: &str = "HARNESS_CONTEXT_OVERFLOW";
 
+/// MCP server/工具/开关错误（v0.3/V3 追加，DR-010 §8；00 §0.4 append-only）。
+///
+/// `detail.reason` 为闭集（`not_allowed`/`server_not_found`/`allow_invalid`/
+/// `name_conflict`/`env_undefined`/`config_invalid`/`init_failed`/`protocol_version`/
+/// `tool_not_found`/`tool_not_allowed`/`input_required_unsupported`/`timeout` 等）。
+pub const CODE_HARNESS_MCP_ERROR: &str = "HARNESS_MCP_ERROR";
+
 /// 被引用的 skill 存在但格式/路径非法（v0.3/V2 追加，DR-009 §6；00 §0.4 append-only）。
 ///
 /// 缺失引用走 [`CODE_HARNESS_CONFIG_LOAD`]`{reason:"skill_not_found"}`，不新增
@@ -423,6 +430,8 @@ pub enum HarnessErrorKind {
     /// `detail.reason` 为闭集（`unknown_field`/`unparseable_yaml`/…）；
     /// 缺失引用仍走 [`Self::ConfigLoad`]（`skill_not_found`）。
     SkillInvalid,
+    /// MCP 配置/开关/生命周期错误（v0.3/V3 追加，DR-010 §8；单一 `HARNESS_MCP_ERROR`）。
+    Mcp,
 }
 
 impl HarnessErrorKind {
@@ -438,6 +447,7 @@ impl HarnessErrorKind {
             Self::MemoryDegraded => CODE_HARNESS_MEMORY_DEGRADED,
             Self::ContextOverflow => CODE_HARNESS_CONTEXT_OVERFLOW,
             Self::SkillInvalid => CODE_HARNESS_SKILL_INVALID,
+            Self::Mcp => CODE_HARNESS_MCP_ERROR,
         }
     }
 }

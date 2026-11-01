@@ -149,6 +149,29 @@ impl HarnessError {
         )
     }
 
+    /// MCP 配置/开关/生命周期错误（v0.3/V3；DR-010 §8 单一 `HARNESS_MCP_ERROR`）。
+    ///
+    /// `detail` 统一含 `reason`（闭集）与可选 `server`/`tool`；`stage` 取调用方阶段
+    /// （Loading/Tool）。错误信息不得含 env 值/headers/密钥。
+    pub fn mcp_error(
+        reason: &str,
+        server: Option<&str>,
+        tool: Option<&str>,
+        stage: Stage,
+        message: impl Into<String>,
+    ) -> Self {
+        let code = HarnessErrorKind::Mcp.code();
+        let mut detail = Self::detail(code, stage);
+        detail.insert("reason".to_string(), Value::from(reason));
+        if let Some(server) = server {
+            detail.insert("server".to_string(), Value::from(server));
+        }
+        if let Some(tool) = tool {
+            detail.insert("tool".to_string(), Value::from(tool));
+        }
+        Self::new(HarnessErrorKind::Mcp, code, message, Value::Object(detail))
+    }
+
     /// LLM 调用了未注册工具（05 §5.7.2：Crashed）。
     pub fn unknown_tool(tool: &str, iteration: u32, available: &[String]) -> Self {
         let code = HarnessErrorKind::UnknownTool.code();

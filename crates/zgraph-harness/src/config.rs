@@ -71,6 +71,8 @@ pub struct AgentConfig {
     pub tools: Vec<String>,
     /// v0.3 skills 引用（缺省 `[]`；`"*"` = 全部可用；≤16；DR-009 §3）。
     pub skills: Vec<String>,
+    /// v0.3 MCP 配置（additive；缺省 `None` = 不启用；DR-010 §2.2）。
+    pub mcp: Option<crate::mcp::McpConfig>,
     /// 节点端口 → Agent 输入字段（05 §5.2.2/§5.9.3）。
     pub input_mapping: BTreeMap<String, String>,
     /// LLM 请求轮次上限。
@@ -98,6 +100,8 @@ pub struct LoadedAgent {
     pub tools: Vec<ToolDef>,
     /// 已按 `config.skills` 解析的 skill 条目（`skills` 非空时含内置 `skill_view`）。
     pub skills: Vec<crate::skills::SkillEntry>,
+    /// 已解析的 MCP 计划（`None` = 未启用；工具由 executor 异步发现后追加）。
+    pub mcp: Option<crate::mcp::McpPlan>,
 }
 
 impl std::fmt::Debug for LoadedAgent {
@@ -108,6 +112,7 @@ impl std::fmt::Debug for LoadedAgent {
             .field("constraints", &self.constraints)
             .field("tools", &self.config.tools)
             .field("skills", &self.config.skills)
+            .field("mcp", &self.config.mcp)
             .field("api_key", &"<redacted>")
             .finish()
     }
@@ -126,7 +131,7 @@ impl LoadedAgent {
 }
 
 /// 顶层允许键（05 §5.2.2 + `$schema` 白名单）。
-const TOP_LEVEL_KEYS: [&str; 14] = [
+const TOP_LEVEL_KEYS: [&str; 15] = [
     "id",
     "name",
     "schema_version",
@@ -135,6 +140,7 @@ const TOP_LEVEL_KEYS: [&str; 14] = [
     "constraints_file",
     "tools",
     "skills",
+    "mcp",
     "input_mapping",
     "max_iterations",
     "llm_timeout_ms",
@@ -281,6 +287,21 @@ pub fn load_agent_with_skills(
     fake_mode: bool,
     skills_dir: Option<&Path>,
 ) -> Result<LoadedAgent, HarnessError> {
+    load_agent_with_options(assets_dir, agent_id, registry, fake_mode, skills_dir, false)
+}
+
+/// 完整 Loading 选项（v0.3/V3）：skills 目录 + `--allow-mcp` 开关。
+///
+/// `mcp_allowed=false` 且 AgentConfig 配置了 MCP → `HARNESS_MCP_ERROR{not_allowed}`；
+/// 未配置 MCP 时不读 registry/不启进程（默认路径逐字节不变）。
+pub fn load_agent_with_options(
+    assets_dir: &Path,
+    agent_id: &str,
+    registry: &ToolRegistry,
+    fake_mode: bool,
+    skills_dir: Option<&Path>,
+    mcp_allowed: bool,
+) -> Result<LoadedAgent, HarnessError> {
     let assets_dir = absolute(assets_dir);
     let index = agent_index(&assets_dir)?;
     let path = index.get(agent_id).cloned().ok_or_else(|| {
@@ -314,7 +335,53 @@ pub fn load_agent_with_skills(
             "$.constraints_file",
         )?),
     };
-    let mut tools = resolve_tools(&config, registry)?;
+    // v0.3 MCP：MCP 工具引用必须在 config.tools 中显式出现；registry 只在
+    // AgentConfig.mcp 非空时读取（默认路径零 IO）。
+    let mcp_refs: Vec<String> = config
+        .tools
+        .iter()
+        .filter(|reference| reference.starts_with("mcp__"))
+        .cloned()
+        .collect();
+    let mcp = match &config.mcp {
+        None => {
+            if !mcp_refs.is_empty() {
+                return Err(crate::mcp::mcp_config_error(
+                    "config_invalid",
+                    None,
+                    "AgentConfig.tools references MCP tools but AgentConfig.mcp is absent",
+                ));
+            }
+            None
+        }
+        Some(mcp_config) => {
+            let registry = crate::mcp::McpRegistry::load(&assets_dir)?;
+            let plan =
+                registry.resolve(mcp_config, mcp_allowed, crate::constants::MAX_MCP_SERVERS)?;
+            if plan.is_some() && !mcp_refs.is_empty() {
+                // 工具可用性在 executor 的 async 发现阶段校验（需启 server）。
+            } else if plan.is_none() && !mcp_refs.is_empty() {
+                return Err(crate::mcp::mcp_config_error(
+                    "config_invalid",
+                    None,
+                    "AgentConfig.tools references MCP tools but AgentConfig.mcp is empty",
+                ));
+            }
+            plan
+        }
+    };
+    // mcp__ 引用由 async 发现阶段解析；其余走既有工具注册表（保持原错误码）。
+    let non_mcp_tools: Vec<String> = config
+        .tools
+        .iter()
+        .filter(|reference| !reference.starts_with("mcp__"))
+        .cloned()
+        .collect();
+    let tools_config = AgentConfig {
+        tools: non_mcp_tools,
+        ..config.clone()
+    };
+    let mut tools = resolve_tools(&tools_config, registry)?;
     let skills = resolve_skills(&assets_dir, &config, skills_dir)?;
     if !skills.is_empty() {
         // v0.3：内置 `skill_view` 仅当 skills 非空时注册（DR-009 §3/§4）。
@@ -328,6 +395,7 @@ pub fn load_agent_with_skills(
         api_key,
         tools,
         skills,
+        mcp,
     })
 }
 
@@ -363,6 +431,124 @@ fn resolve_skills(
 
 /// skills 目录环境变量（DR-009 §1；CLI 侧同名常量独立定义）。
 const SKILLS_ENV: &str = "ZGRAPH_SKILLS";
+
+/// 解析 `AgentConfig.mcp`（additive；`servers`/`allow` 两个数组；≤16）。
+fn parse_mcp(
+    object: &Map<String, Value>,
+    path: &Path,
+) -> Result<Option<crate::mcp::McpConfig>, HarnessError> {
+    let Some(value) = object.get("mcp") else {
+        return Ok(None);
+    };
+    let Some(mcp_object) = value.as_object() else {
+        return Err(type_error(
+            path,
+            "$.mcp",
+            "object {servers, allow}",
+            json_type_name(value),
+            "mcp must be an object",
+        ));
+    };
+    for key in mcp_object.keys() {
+        if key != "servers" && key != "allow" {
+            return Err(config_error(
+                "unsupported_value",
+                Some(&path.display().to_string()),
+                Some("$.mcp"),
+                Some(Value::from("servers/allow")),
+                Some(Value::from(key.clone())),
+                format!("unknown mcp field '{key}'"),
+            ));
+        }
+    }
+    let servers = parse_mcp_name_list(mcp_object, path, "servers", true)?;
+    let allow = parse_mcp_name_list(mcp_object, path, "allow", false)?;
+    if servers.is_empty() && allow.is_empty() {
+        return Ok(None);
+    }
+    for name in &servers {
+        if !crate::mcp::is_valid_server_name(name) {
+            return Err(config_error(
+                "unsupported_value",
+                Some(&path.display().to_string()),
+                Some("$.mcp.servers"),
+                Some(Value::from("^[a-z0-9][a-z0-9_-]{0,63}$")),
+                Some(Value::from(name.clone())),
+                format!("invalid MCP server name '{name}'"),
+            ));
+        }
+    }
+    for entry in &allow {
+        if crate::mcp::parse_full_tool_name(entry).is_none() {
+            return Err(config_error(
+                "unsupported_value",
+                Some(&path.display().to_string()),
+                Some("$.mcp.allow"),
+                Some(Value::from("mcp__<server>__<tool>")),
+                Some(Value::from(entry.clone())),
+                format!("invalid MCP allow entry '{entry}'"),
+            ));
+        }
+    }
+    Ok(Some(crate::mcp::McpConfig { servers, allow }))
+}
+
+fn parse_mcp_name_list(
+    object: &Map<String, Value>,
+    path: &Path,
+    field: &str,
+    enforce_limit: bool,
+) -> Result<Vec<String>, HarnessError> {
+    let Some(value) = object.get(field) else {
+        return Ok(Vec::new());
+    };
+    let Some(array) = value.as_array() else {
+        return Err(type_error(
+            path,
+            &format!("$.mcp.{field}"),
+            "array of strings",
+            json_type_name(value),
+            format!("mcp.{field} must be an array"),
+        ));
+    };
+    if enforce_limit && array.len() > crate::constants::MAX_MCP_SERVERS {
+        return Err(config_error(
+            "out_of_range",
+            Some(&path.display().to_string()),
+            Some(&format!("$.mcp.{field}")),
+            Some(Value::from(format!(
+                "<= {} items",
+                crate::constants::MAX_MCP_SERVERS
+            ))),
+            Some(Value::from(array.len())),
+            "too many MCP servers".to_string(),
+        ));
+    }
+    let mut names = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let Some(name) = item.as_str() else {
+            return Err(type_error(
+                path,
+                &format!("$.mcp.{field}[{index}]"),
+                "string",
+                json_type_name(item),
+                format!("mcp.{field}[{index}] must be a string"),
+            ));
+        };
+        if name.trim().is_empty() {
+            return Err(config_error(
+                "unsupported_value",
+                Some(&path.display().to_string()),
+                Some(&format!("$.mcp.{field}[{index}]")),
+                Some(Value::from("non-empty string")),
+                Some(item.clone()),
+                format!("empty mcp.{field} entry"),
+            ));
+        }
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
 
 /// 解析 `AgentConfig.skills`（可选字符串数组；≤16；`"*"` 显式全量）。
 fn parse_skills(object: &Map<String, Value>, path: &Path) -> Result<Vec<String>, HarnessError> {
@@ -438,6 +624,7 @@ fn parse_agent_config(
     let constraints_file = optional_string(object, "constraints_file", path, "$.constraints_file")?;
     let tools = parse_tools(object, path)?;
     let skills = parse_skills(object, path)?;
+    let mcp = parse_mcp(object, path)?;
     let input_mapping = parse_input_mapping(object, path)?;
     let max_iterations = parse_max_iterations(object, path)?;
     let (llm_timeout_ms, llm_max_retries, node_timeout_ms) = parse_timeouts(object, path)?;
@@ -451,6 +638,7 @@ fn parse_agent_config(
         constraints_file,
         tools,
         skills,
+        mcp,
         input_mapping,
         max_iterations,
         llm_timeout_ms,
@@ -1424,6 +1612,35 @@ fn is_model_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-'))
 }
 
+/// CLI 预检用（DR-010 §2.2/AC-19 c）：AgentConfig 是否配置了 MCP（最佳努力）。
+///
+/// 只判断 JSON 中 `mcp.servers`/`mcp.allow` 是否非空；解析失败/文件缺失返回 false
+/// （真正的配置错误在 Loading 阶段 fail-closed）。不读 registry、不启进程。
+pub fn agent_uses_mcp(assets_dir: &Path, agent_id: &str) -> bool {
+    let assets_dir = absolute(assets_dir);
+    let Ok(index) = agent_index(&assets_dir) else {
+        return false;
+    };
+    let Some(path) = index.get(agent_id) else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    let Some(mcp) = value.get("mcp").and_then(Value::as_object) else {
+        return false;
+    };
+    let non_empty = |field: &str| {
+        mcp.get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    };
+    non_empty("servers") || non_empty("allow")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2112,6 +2329,127 @@ mod tests {
             .map(|skill| skill.name.as_str())
             .collect();
         assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.3 MCP（DR-010 / REV-098）：AgentConfig.mcp 解析与 Loading fail-closed
+    // ------------------------------------------------------------------
+
+    fn agent_with_mcp(servers: Value, allow: Value) -> Value {
+        let mut agent = valid_agent();
+        agent.as_object_mut().expect("object").insert(
+            "mcp".to_string(),
+            json!({"servers": servers, "allow": allow}),
+        );
+        agent
+    }
+
+    fn write_mcp_registry(assets: &std::path::Path) {
+        std::fs::write(
+            assets.join("mcp_servers.json"),
+            json!({
+                "mcpServers": {
+                    "fake": {"command": "fake-mcp", "args": ["--stdio"], "timeout_ms": 1000}
+                }
+            })
+            .to_string(),
+        )
+        .expect("registry");
+    }
+
+    #[test]
+    fn mcp_config_is_optional_and_parsed() {
+        // 缺省 → None（默认路径不读 registry/不启进程）。
+        let dir = asset_dir(&valid_agent(), "role", None);
+        let agent =
+            load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true).expect("load");
+        assert!(agent.mcp.is_none());
+        assert!(!agent_uses_mcp(dir.path(), "parser"));
+    }
+
+    #[test]
+    fn mcp_without_allow_is_not_allowed() {
+        let agent_value = agent_with_mcp(json!(["fake"]), json!([]));
+        let dir = asset_dir(&agent_value, "role", None);
+        write_mcp_registry(dir.path());
+        let error = load_agent_with_options(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+            false,
+        )
+        .expect_err("not allowed");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::Mcp);
+        assert_eq!(error.code, "HARNESS_MCP_ERROR");
+        assert_eq!(error.detail["reason"], "not_allowed");
+    }
+
+    #[test]
+    fn mcp_allowed_resolves_registry_plan_and_explicit_tools() {
+        let mut agent_value = agent_with_mcp(json!(["fake"]), json!(["mcp__fake__echo"]));
+        agent_value
+            .as_object_mut()
+            .expect("object")
+            .insert("tools".to_string(), json!(["echo", "mcp__fake__echo"]));
+        let dir = asset_dir(&agent_value, "role", None);
+        write_mcp_registry(dir.path());
+        assert!(agent_uses_mcp(dir.path(), "parser"));
+        let agent = load_agent_with_options(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+            true,
+        )
+        .expect("load with mcp");
+        let plan = agent.mcp.expect("mcp plan");
+        assert_eq!(plan.servers.len(), 1);
+        assert_eq!(plan.servers[0].name, "fake");
+        assert!(plan.tool_allowed("mcp__fake__echo"));
+        // MCP 工具由 executor 的 async 发现阶段追加（此处不启动 server）。
+        assert_eq!(agent.tools.len(), 1);
+        assert_eq!(agent.tools[0].name, "echo");
+    }
+
+    #[test]
+    fn mcp_server_not_found_is_fail_closed() {
+        let agent_value = agent_with_mcp(json!(["ghost"]), json!([]));
+        let dir = asset_dir(&agent_value, "role", None);
+        write_mcp_registry(dir.path());
+        let error = load_agent_with_options(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+            true,
+        )
+        .expect_err("missing server");
+        assert_eq!(error.detail["reason"], "server_not_found");
+    }
+
+    #[test]
+    fn mcp_tool_reference_without_mcp_section_is_config_load() {
+        let mut agent_value = valid_agent();
+        agent_value
+            .as_object_mut()
+            .expect("object")
+            .insert("tools".to_string(), json!(["echo", "mcp__fake__echo"]));
+        let dir = asset_dir(&agent_value, "role", None);
+        let error = load_agent_with_options(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+            true,
+        )
+        .expect_err("mcp tool without mcp config");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::Mcp);
+        assert_eq!(error.detail["reason"], "config_invalid");
     }
 
     #[test]

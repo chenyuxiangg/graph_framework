@@ -85,7 +85,7 @@ use zgraph_harness::{
 use zgraph_kernel::{
     CompiledGraph, CompiledHandler, CompiledNode, HumanDecision, HumanDecisionRecord, NodeError,
     NodeExecution, NodeExecutor, RunControl, RunError, RunOptions, RunOutcome, RunSpec, RunStatus,
-    StreamingEvent, CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID,
+    StreamingEvent, CODE_HARNESS_MCP_ERROR, CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID,
 };
 use zgraph_trace::{
     DecisionConsumer, HumanDecisionRow, LlmCallRecord, RecordMode, RecordedOutput, TraceError,
@@ -116,6 +116,8 @@ options:
   --assets-dir <dir>     agent asset root (default: $ZGRAPH_ASSETS or .)
   --tools-dir <dir>      tool directory (default: $ZGRAPH_TOOLS or <assets-dir>/tools)
   --skills-dir <dir>     skills directory (default: $ZGRAPH_SKILLS or <assets-dir>/skills)
+  --allow-mcp            allow configured MCP servers (default: off; enabling MCP starts child
+                         processes / opens network connections; registry: <assets-dir>/mcp_servers.json)
   --python <exe>         Python interpreter (default: $PYO3_PYTHON > $ZGRAPH_PYTHON > python3)
   --python-path <dir>    prepend a module search path; repeatable (PYTHONPATH)
   --fake-llm[=<script>]  scripted LLM provider (bare flag = built-in default script)
@@ -202,6 +204,8 @@ pub struct RunArgs {
     /// `--skills-dir` 显式路径（`None` 时按 `$ZGRAPH_SKILLS`；再缺省由 harness 用
     /// `<assets-dir>/skills`，且仅当 AgentConfig.skills 非空时才扫描；DR-009 §1）。
     pub skills_dir: Option<PathBuf>,
+    /// `--allow-mcp`：显式允许启动配置的 MCP servers（默认关；DR-010 §2.2）。
+    pub allow_mcp: bool,
     /// `--python` 显式解释器（`None` 时按 `$ZGRAPH_PYTHON` → `python3`）。
     pub python: Option<String>,
     /// `--python-path`（可重复；按序叠加到 `PYTHONPATH` 之前）。
@@ -255,6 +259,7 @@ struct ParseState {
     assets_dir: Option<PathBuf>,
     tools_dir: Option<PathBuf>,
     skills_dir: Option<PathBuf>,
+    allow_mcp: bool,
     python: Option<String>,
     python_paths: Vec<PathBuf>,
     fake_llm: FakeLlmMode,
@@ -275,6 +280,7 @@ impl Default for ParseState {
             assets_dir: None,
             tools_dir: None,
             skills_dir: None,
+            allow_mcp: false,
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,
@@ -314,6 +320,9 @@ impl ParseState {
             }
             "--skills-dir" => {
                 self.skills_dir = Some(PathBuf::from(option_value(iter, "--skills-dir")?));
+            }
+            "--allow-mcp" => {
+                self.allow_mcp = true;
             }
             "--python" => self.python = Some(option_value(iter, "--python")?),
             "--python-path" => {
@@ -360,6 +369,7 @@ impl ParseState {
             assets_dir: self.assets_dir,
             tools_dir: self.tools_dir,
             skills_dir: self.skills_dir,
+            allow_mcp: self.allow_mcp,
             python: self.python,
             python_paths: self.python_paths,
             fake_llm: self.fake_llm,
@@ -875,6 +885,16 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         );
         return ExitCode::from(EXIT_ENTRY_INPUT);
     }
+    // V3（DR-010 §2.2 / AC-19 c）：MCP 未开启 → run 启动前失败（不产生 run、不启 server、exit 3）。
+    if !args.allow_mcp {
+        if let Some(agent_id) = graph_agent_using_mcp(&graph, &assets_dir) {
+            close_quietly(writer);
+            eprintln!(
+                "error[{CODE_HARNESS_MCP_ERROR}]: MCP is disabled but agent '{agent_id}'                  configures MCP servers (reason: not_allowed); pass --allow-mcp to enable"
+            );
+            return ExitCode::from(EXIT_ENTRY_INPUT);
+        }
+    }
     // W3a：human 图启动 decision consumer（非 memory；无 human 图的图不启动，行为不变）。
     let human_consumer = !memory_db && graph_has_human(&graph);
     let (decision_tx, decision_rx) = mpsc::channel::<HumanDecisionRecord>();
@@ -938,6 +958,21 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
 ///
 /// W3a（DR-006 §2.1）：只有这类图才需要跨进程 trace DB 与 decision consumer；
 /// 无 human 节点的图行为完全不变。
+/// 图中第一个配置了 MCP 的 agent_call 的 agent_id（CLI 预检；不启进程）。
+fn graph_agent_using_mcp(graph: &CompiledGraph, assets_dir: &Path) -> Option<String> {
+    for node_id in &graph.node_order {
+        let Some(node) = graph.nodes.get(node_id) else {
+            continue;
+        };
+        if let zgraph_kernel::CompiledHandler::Agent { agent_id, .. } = &node.handler {
+            if zgraph_harness::agent_uses_mcp(assets_dir, agent_id) {
+                return Some(agent_id.clone());
+            }
+        }
+    }
+    None
+}
+
 fn graph_has_human(graph: &CompiledGraph) -> bool {
     graph
         .nodes
@@ -1249,7 +1284,12 @@ fn build_executor(
         None => HarnessExecutor::with_tool_limits(settings, limits),
     };
     // v0.3（DR-009 §1）：`--skills-dir`/env 显式覆盖；None 时 harness 回退资产默认。
-    let harness = Arc::new(harness.with_skills_dir(skills_dir));
+    // v0.3（DR-010 §2.2）：`--allow-mcp` 显式开关（默认关；未开启且配置 MCP → 预检 exit 3）。
+    let harness = Arc::new(
+        harness
+            .with_skills_dir(skills_dir)
+            .with_mcp_allow(args.allow_mcp),
+    );
     let routing: Arc<dyn NodeExecutor> = Arc::new(RoutingExecutor {
         harness: Arc::clone(&harness),
         worker: Arc::clone(&worker),
@@ -1932,9 +1972,9 @@ fn close_quietly(writer: TraceWriter) {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_code_for, graph_has_human, human_recording, is_memory_db, lifecycle_detail,
-        llm_call_recorder, output_hash, parse, resolve_entry_inputs, Consumed, FakeLlmMode,
-        ParseState, RecordingExecutor, RunArgs, DEFAULT_USER_ID,
+        exit_code_for, graph_agent_using_mcp, graph_has_human, human_recording, is_memory_db,
+        lifecycle_detail, llm_call_recorder, output_hash, parse, resolve_entry_inputs, Consumed,
+        FakeLlmMode, ParseState, RecordingExecutor, RunArgs, DEFAULT_USER_ID,
     };
     use serde_json::json;
     use std::future::Future;
@@ -2061,6 +2101,7 @@ mod tests {
         assert_eq!(parsed.assets_dir, None);
         assert_eq!(parsed.tools_dir, None);
         assert_eq!(parsed.skills_dir, None);
+        assert!(!parsed.allow_mcp);
         assert_eq!(parsed.python, None);
         assert!(parsed.python_paths.is_empty());
         assert_eq!(parsed.fake_llm, FakeLlmMode::Off);
@@ -2087,6 +2128,7 @@ mod tests {
             "tools",
             "--skills-dir",
             "skills",
+            "--allow-mcp",
             "--python",
             "/venv/bin/python",
             "--python-path",
@@ -2107,6 +2149,7 @@ mod tests {
         assert_eq!(parsed.assets_dir, Some(PathBuf::from("assets")));
         assert_eq!(parsed.tools_dir, Some(PathBuf::from("tools")));
         assert_eq!(parsed.skills_dir, Some(PathBuf::from("skills")));
+        assert!(parsed.allow_mcp);
         assert_eq!(parsed.python.as_deref(), Some("/venv/bin/python"));
         assert_eq!(
             parsed.python_paths,
@@ -2202,6 +2245,46 @@ mod tests {
         );
     }
 
+    /// V3（DR-010 / AC-19 c）：`--allow-mcp` 预检识别图中配置 MCP 的 agent（不启进程）。
+    #[test]
+    fn preflight_detects_agent_with_mcp() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("agents")).expect("agents");
+        let agent_path = dir.path().join("agents/parser.json");
+        std::fs::write(
+            &agent_path,
+            json!({"id": "parser", "mcp": {"servers": ["fake"]}}).to_string(),
+        )
+        .expect("agent");
+        let graph_text = json!({
+            "version": "1.0",
+            "metadata": {"name": "mcp-agent"},
+            "entry_points": ["start"],
+            "nodes": [
+                {"id": "start", "type": "start",
+                 "inputs": [{"name": "x", "type": "any", "required": true}], "config": {}},
+                {"id": "worker", "type": "agent_call",
+                 "inputs": [{"name": "x", "type": "any", "required": true}],
+                 "config": {"agent_id": "parser"}},
+                {"id": "end", "type": "end",
+                 "inputs": [{"name": "r", "type": "any", "required": true}], "config": {}}
+            ],
+            "edges": [
+                {"from": "start", "to_node": "worker", "to_input_port": "x"},
+                {"from": "worker", "to_node": "end", "to_input_port": "r"}
+            ]
+        })
+        .to_string();
+        let graph = compiled_graph(&graph_text);
+        assert_eq!(
+            graph_agent_using_mcp(&graph, dir.path()),
+            Some("parser".to_string())
+        );
+        // 无 mcp 配置 → None（默认路径不触发预检失败）。
+        std::fs::write(&agent_path, json!({"id": "parser"}).to_string()).expect("agent");
+        assert!(graph_agent_using_mcp(&graph, dir.path()).is_none());
+    }
+
     #[test]
     fn run_args_is_equatable() {
         let args = RunArgs {
@@ -2212,6 +2295,7 @@ mod tests {
             assets_dir: None,
             tools_dir: None,
             skills_dir: None,
+            allow_mcp: false,
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,

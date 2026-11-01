@@ -147,3 +147,43 @@ pub const SKILL_VIEW_TOOL_NAME: &str = "skill_view";
 
 /// 内置 `skill_view` 工具来源（`ToolDef.source`；仅诊断/分发用）。
 pub const SKILL_VIEW_TOOL_SOURCE: &str = "builtin.skills";
+
+// ---------------------------------------------------------------------------
+// v0.3 MCP（DR-010 §5/§7；00 §0.5 append-only）
+// ---------------------------------------------------------------------------
+
+/// AgentConfig.mcp.servers 引用上限（与 skills 同口径 ≤16；DR-010 §2.2）。
+pub const MAX_MCP_SERVERS: usize = 16;
+
+/// MCP server 名规则上限（`^[a-z0-9][a-z0-9_-]{0,63}$`；registry/AgentConfig 同源）。
+pub const MAX_MCP_SERVER_NAME_CHARS: usize = 64;
+
+/// MCP registry 文件字节上限（256 KiB；与 AgentConfig 同口径）。
+pub const MCP_REGISTRY_MAX_BYTES: u64 = 256 * 1024;
+
+/// MCP 工具 description 截断上限（1..=1024，05 §5.6.1）。
+pub const MAX_MCP_TOOL_DESCRIPTION_CHARS: usize = 1_024;
+
+/// MCP 工具结果字符截断上限（32768；超出追加截断标记）。
+pub const MCP_TOOL_RESULT_MAX_CHARS: usize = 32_768;
+
+/// MCP `tools/call` 默认超时（毫秒；server `timeout_ms` 缺省值，DR-010 §5）。
+pub const MCP_DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
+
+/// MCP initialize / tools-list 超时（毫秒；DR-010 §5）。
+pub const MCP_INIT_TIMEOUT_MS: u64 = 10_000;
+
+/// MCP MRTR（input_required）默认轮次上限（DR-010 §5）。
+pub const MCP_MRTR_MAX_ROUNDS: usize = 10;
+
+/// MCP stdio server stderr 持续读取上限（字节；截断后仅诊断，不写 trace）。
+pub const MCP_STDERR_MAX_BYTES: usize = 8_192;
+
+/// MCP HTTP client 默认并发上限（DR-010 §5）。
+pub const MCP_HTTP_MAX_CONCURRENT_REQUESTS: usize = 16;
+
+/// MCP HTTP control request 超时（毫秒；DR-010 §5）。
+pub const MCP_HTTP_CONTROL_TIMEOUT_MS: u64 = 5_000;
+
+/// MCP 崩溃后同 run 最多重启次数（DR-010 §4）。
+pub const MCP_MAX_RESTARTS_PER_RUN: u32 = 1;
