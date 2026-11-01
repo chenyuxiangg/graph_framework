@@ -486,6 +486,28 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 
 ---
 
+### 14.1 W4b 实现执行记录（as-built，2026-11-01，REV-094；只追加）
+
+| 模块 | 分支 / 实现提交 | 评审 | 合并点（main） | 测试证据 |
+|---|---|---|---|---|
+| dsl | `feat/dsl-foreach` / `9efc41c` | REV-088（reviewer-a；fixture 跨模块 Lead 第二评审） | `45cd7c6` | dsl **118/0**；fixtures 56 bad/8 valid；既有 42 fixture A/B 84/84 |
+| trace | `feat/trace-dynamic` / `49806c2` + 修复 `dc25340` | REV-089（reviewer-b；首轮不通过 → 修复后通过；跨模块第二评审 lead） | `948d677` | trace **94/0**（migration 18/expansions 5/item 5）；workspace 834/0/3 |
+| kernel | `feat/kernel-dynamic-fanout` / `53b42ca` + `211c2be` + 修复 `f6e8ed9` | REV-090（reviewer-b；有条件通过 → 复审通过；cli 第二评审 lead） | `519066d` | kernel **149/0**、test-hooks **159/0**、cli **222/0**；`foreach.rs` 25 |
+| fix | `fix/kernel-foreach-items-unwrap` / `8846240` | REV-092（reviewer-b） | `683260b` | kernel 149/159、cli 222、workspace 894/0/3 |
+| cli | `feat/cli-dynamic` / `59c7443` | REV-091（reviewer-a） | `4a1ff0f` | cli **222/0**（`foreach_dynamic.rs` 9）；workspace 889/0/3 |
+| e2e | `test/e2e-dynamic-fanout` / `a82943d` + `e1fdcd1` | REV-093（reviewer-b） | `201341b`（e2e 评审后 main 头） | e2e **106/0/2**（dynamic_fanout **21/0**，6 连跑）；workspace **915/0/3**；全量 e2e 3 连跑稳定 |
+| docs | `docs/docs-dynamic-spec`（本批） | REV-094（reviewer-a） | 本分支待合并 | check.sh / PROVENANCE §3 实测 |
+
+**as-built 偏差（已评审裁决/接受）**：
+
+- **items_port 取值规则 A（REV-092，v1 整包广播）**：`v=controller.values[items_port]`；array 直用；**object 且含与 items_port 同名键 → 取该键值（必须 array）**；否则 `RUN_FOREACH_ITEMS_NOT_ARRAY`；只取一层、不点分。NOT_ARRAY→EXCEEDED→DUPLICATE 顺序作用于 unwrap 后列表。
+- **region_overlap 防御性不可达**（row4/row8 先拦截；dsl 单测锁定优先级）；**子图内 foreach 归 R6**（精确 message/location 已由 rules 锁定）。
+- **controller Pause/Resume**：Resume 后 `expand_ready_controllers` 按 node_order 循环重扫 Ready controller（串行 F 链）；`source_instance_id` 只在 Collecting 记录；F 已 Expanded/Skipped 后任何投递（含 defer gate=false）→ `RUN_DELIVERY_TO_TERMINAL`；`incomplete_join` 防御。
+- **join/item 终态**：join source=最后完成使 join 满 N 的 E item；N=0 无 GateResult/Delivery；冷峻失败只取消失效中 item，已 Completed 保留（e2e d/j 差异即此时序）。
+- **trace v6 迁移**：FK CASCADE 窗口（事务外 OFF/恢复 ON）；真实 v1→v6（v6-only 索引移出 `DDL_CURRENT`；**ISSUE-142 P1 fixed**，REV-089）。
+- **cli 输出**：人类摘要+`source_instance/at` 明细；`--json` 增 `source_instance_id`（null 不省略）；行序 events→HumanDecision→ForeachExpansion；L2 预检 CORRUPT/MISSING/Skipped 合法。
+- **遗留**：ISSUE-142（fixed）、ISSUE-143（e2e NOT_ARRAY 缺 object-无同名键变体）等；REV-088/090/091/093 的 P3 见台账。
+
 ## 15. 冲突、边界与待确认项
 
 ### 15.1 与既有 spec/DR 的冲突及处置

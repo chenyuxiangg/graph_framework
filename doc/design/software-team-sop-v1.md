@@ -429,6 +429,13 @@ E -> D_next.<port>                                     # region 唯一出口、�
 4. 错误路径：items 非数组/超 `max_items`/key 重复 → run Failed 对应 `RUN_FOREACH_*`；item 失败 → 冷峻 Failed；取消传播全部 item Cancelled。
 5. trace v6：`foreach_expansions` 行（item_count/keys）、`trace --json` ForeachExpansion 行、L1/L2 回放（per-item outputs）；无 foreach 旧图 golden 不变（spec 07 AC-17 i）。
 
+## 12. W4b 实现 as-built 注记（2026-11-01，REV-094；只追加）
+
+- dynamic-N profile 已由 W4b 实现（框架 `foreach`）：同一张图在运行期按列表展开 N 个 per-item W/R/E 实例，join 有序数组交给下一设计角色；不再按 N codegen（§7.3）。
+- 实测：`tests/e2e/dynamic_fanout.rs` **21 用例**（AC-17 a–j + 迁移/golden/默认）；e2e **106/0/2**、workspace **915/0/3**；`items_port` 取值遵循 v1 整包广播规则 A（object 同名键 unwrap；REV-092）。
+- 静态 v1/v1.1 profile 未改（图/hash/语义不变）；dynamic-N 为 opt-in（节点带 `foreach` 才生效）。
+- 本稿仍为设计稿；as-built 细节以 spec 00/01/02/03/06/07 的 W4b 段与 DR-007 §14.1 为准。
+
 ---
 
 ## 附录 A：单 item 管线骨架（已用 `zgraph validate` 验证）

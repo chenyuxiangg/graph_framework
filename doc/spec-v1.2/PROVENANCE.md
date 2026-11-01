@@ -231,20 +231,32 @@
     - **P2/P3**：修复 00/01 代码块/表格拼接（N6）；恢复 02 W2b 历史 banner 原文（只追加，N7）；明确子图内 foreach 归 **R6**、R17 不负责子图（N8）；`ControllerBuffer`/`join_buffer` 类型入 01（N9）；`keys_json` NULL 键改结构化 `{"$index": i}`（避免与真实 string key 撞表示，N10）；README 00/02 行改 19 码/R1–R18、index SOP 行改 v1.2 三 profile（N11）；**ISSUE-141** 登记 `max_items` 缺省无上限风险（N12）；DR-004 旧行标注（N13）；SOP §9「三项」/§7.1「静态两 profile 共用」（N14）；R18 row4 先 `forbidden_node_type` 后 `nested_foreach`、README 19 码起句、07 DoD 限定（N15）；06 迁移链改 v1→…→v6（含 v5→v6，N16）；DR §6.2 自问自答清理（N17）；`source_instance_id` 冻结为「最后使 controller Ready 的投递来源，entry=NULL」（N18）；AC-17 补 controller/来源/边界断言（N19）；index DR-004 行补 W4a/W3b 状态（N20）。
     - **重测与落盘**：`bash scripts/dev/check.sh` PASSED；PROVENANCE §3 重算（00–08 合计 **7154 行**；00–08 numstat **285/17（净 268）**；全 spec 目录 numstat **330/37（净 293）**；spec 目录合计 **7532 行**）；spec README 行数表同步（00/01/02/03/04/06/07/08）。提交正文 `Review: REV-086` + `Agent: docs-dev`；不 push/不 merge。
 
+25. **W4b 实现回写批次**（2026-11-01，REV-094；分支 `docs/docs-dynamic-spec`，base = 本地 `main` `201341b`；docs-only）：
+    - **来源（已合并实现）**：dsl `9efc41c`（REV-088；合并 `45cd7c6`）、trace `49806c2`+`dc25340`（REV-089；合并 `948d677`）、kernel `53b42ca`+`211c2be`+`f6e8ed9`（REV-090；合并 `519066d`）、fix `8846240`（REV-092；合并 `683260b`）、cli `59c7443`（REV-091；合并 `4a1ff0f`）、e2e `a82943d`+`e1fdcd1`（REV-093；合并 `201341b`）。本批按实际实现校准 as-built，不改 W4a 冻结语义；无 foreach 图行为/hash/validate/run/trace/回放逐字节不变。
+    - **重点 as-built（items_port 取值规则 A，REV-092）**：`v=controller.values[items_port]`；array 直用；**object 且含与 items_port 同名键 → 取该键值（必须 array）**；否则 `RUN_FOREACH_ITEMS_NOT_ARRAY`；只取一层、不点分（v1 整包广播：entry/worker/agent_call 均为 object）；NOT_ARRAY→EXCEEDED→DUPLICATE 顺序作用于 unwrap 后列表（03 §3.4.6、DR-007 §14.1）。
+    - **00/01/02/03/04**：W4b banner + as-built——DSL 19 码/R17/R18 已实现（reason 闭集 11 值，`region_overlap` 防御性不可达；子图内 foreach 归 R6）；`CompiledNode.foreach`/`InstanceRecord.item_index/item_key`/`ControllerBuffer`/`ControllerState`/`JoinBuffer` 落地；controller Pause/Resume Ready 展开修复（REV-090 C1）、`source_instance_id` 仅 Collecting 记录、Expanded/Skipped 后投递 → `RUN_DELIVERY_TO_TERMINAL`、`incomplete_join` 防御；冷峻失败只取消失效中 item、已 Completed 保留；region 内 human 每 item 独立 decide。
+    - **06**：schema v6 实测（trace **94/0**）：instances item 列+四列唯一键、`foreach_expansions` 表/索引、writer/reader；**v5→v6 FK CASCADE 窗口**（事务外 OFF→重建→恢复 ON，否则 human_decisions 被 CASCADE 删）；**真实 v1→v6 迁移**（v6-only item 索引移出 `DDL_CURRENT`；**ISSUE-142 P1 fixed**、REV-089）；`trace` 人类摘要+`source_instance/at` 明细、`--json` 含 `source_instance_id`（null 不省略）、行序 events→HumanDecision→ForeachExpansion、决策/展开行不受过滤；L2 `RecordKey=(node_id,attempt,item_index)`、expansion 预检 CORRUPT/MISSING（region 有实例缺行）/Skipped 合法。
+    - **07**：**AC-17 a–j 设计冻结 → 实测**——`tests/e2e/dynamic_fanout.rs` **21 用例**（静态 3 + 迁移/i 3 + 默认 2 + a–j 13，逐一列名）；e2e **106/0/2**（dynamic_fanout **21/0**，6 连跑）、workspace **915/0/3**、全量 e2e 3 连跑稳定；d/j 终态语义、region_overlap 分工、v5 seed 口径已注明。
+    - **08**：新增 **§8.11 W4b 注记**（实现证据表 + source-breaking 清单：`InstanceRow`/`InstanceSnapshot` item 字段、`ForeachExpansionRecord`/`TraceInput::ForeachExpansion`、`DSL_FOREACH_INVALID` 19 码、4 个 `RUN_FOREACH_*`、`CompiledNode.foreach`、`ControllerBuffer`/`JoinBuffer`；`InstanceStatus` 无新增）+ as-built 偏差/遗留。
+    - **DR-007 §14.1 执行记录**（分支/提交/REV/合并点/测试、偏差 A–E、遗留）；**DR-004 §10** 追加 W4b 执行记录；SOP 设计稿追加 W4b as-built 注记（只追加）。
+    - **台账/索引**：`doc/issues.md` 新增 **ISSUE-142（fixed）–ISSUE-148**（真实 v1→v6 缺陷/CLI·e2e·dsl 残余 P3）；`doc/reviews/README.md` 补 REV-088–093 索引行 + REV-094（本分支待评审）；`doc/index.md`/`doc/progress.md` 状态同步（W4b 完成、下一步发布收口）。
+    - **测试证据**：dsl **118/0**；trace **94/0**；kernel **149/0**、test-hooks **159/0**；cli **222/0**；e2e **106/0/2**（dynamic_fanout **21/0**，6 连跑）；workspace **915/0/3**；clippy/fmt/check 全绿。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **7198 行**；00–08 numstat **76/32（净 44）**；全 spec 目录 numstat **106/50（净 56）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7588 行））。
+
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | b966952f82f6cabc19fa010147adcce40fd7b4cafbaa47fdc4824c41bc8980b4 | 344 |
-| `01-领域模型与状态机.md` | fbd752b31faeff88be7f96ac55659a6ea4157df71ad76508a8d5082d457f92ae | 446 |
-| `02-DSL与校验.md` | 548d82c542740e9c13ee83db287db5f133e4e7e620c6f7af1dd6c5b8a9c70695 | 984 |
-| `03-调度器与生命周期.md` | ab99c278b6b4ec8f0717cc208a05fbcf9e01703ffc2e25efb4abbdb9fcd7b9d6 | 684 |
-| `04-节点接口与扩展点.md` | b051c3c1bb14dd18373a6eec99d0ea6b1384d69fd773fd50f4242c867da2ce00 | 939 |
+| `00-总纲.md` | 31fadd751f1fe114144c7a498bcb3ef582aa27eb50c5e451e8f864c411cb8184 | 345 |
+| `01-领域模型与状态机.md` | 8037a3c0b3dac86e73348c498e3b4a2f117347661f9dc42da8ca9776d17c74b3 | 447 |
+| `02-DSL与校验.md` | f14a950a11b0db11e4dabe767291293afc38a48108d256f0f63195a9a63d8f43 | 985 |
+| `03-调度器与生命周期.md` | fd132ad0dfbdba09d9852ac29b15d4ca5a1d510c84d752cd55d8f536b1b8d864 | 685 |
+| `04-节点接口与扩展点.md` | 63a788bbfe94c15716bed9160716ad3b0c50e4c4aea8d5ea5dbc9a637574e9bb | 940 |
 | `05-AgentHarness.md` | 52f35e7bfa6123a3f61612b95019ab0eca440fa251aa5e38763f370bc19dbf42 | 1429 |
-| `06-存储与可观测.md` | c82e4f7a5d31715c05fd0261313ed4e36a58d152f2a1e88d3bcf47aa30c51d6f | 1273 |
-| `07-验收用例.md` | 9014644cbd65156cce9d9ef7074626e96b6a13a970a844ea7f5ace24d39a3abd | 491 |
-| `08-审计关闭矩阵.md` | 9450d7a9a16ca3fe627c243fa6ae0a311d8210318735752ea51ebd7e4f9e2143 | 564 |
+| `06-存储与可观测.md` | bb3fe36861113e6e71dce9ea37fefc4127b8aa2d89bb755df89ea086b1a310bb | 1278 |
+| `07-验收用例.md` | ad641fbf124aafed236b29704c3702aa464f9e5a0ee1883f606b2bbce4a08795 | 489 |
+| `08-审计关闭矩阵.md` | e7983cbf74f2f53536146a469a7b357391faa621788895965c628f47f027923b | 600 |
 
-> 00–08 合计 **7154 行**（`wc -l` 口径；2026-11-01 **W4a 设计冻结 + REV-086 条件修复批次后**实测（REV-086；**00–08 numstat 285/17（净 268）**；**全 spec 目录 numstat 330/37（净 293）**；见 §2 第 23–24 条）；此前 W3a as-built + R 收口批次 6886 行/§2 第 22 条；W3a0 冻结 + R1–R4 批次 6815 行/§2 第 20–21 条；W2b 批次 6491 行/§2 第 18–19 条；W2a 实现回写批次 6385 行/§2 第 17 条；W2a0 首轮冻结为 6308 行/§2 第 15 条；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7532 行）。
+> 00–08 合计 **7198 行**（`wc -l` 口径；2026-11-01 **W4b 动态 N 实现回写批次后**实测（REV-094；**00–08 numstat 76/32（净 44）**；**全 spec 目录 numstat 106/50（净 56）**；见 §2 第 25 条）；此前 W4a 设计冻结 + REV-086 收口批次 7154 行/§2 第 24 条；W3a as-built + R 收口批次 6886 行/§2 第 22 条；W3a0 冻结 + R1–R4 批次 6815 行；W2b 批次 6491 行；W2a 实现回写批次 6385 行；W2a0 首轮冻结为 6308 行；W1 SOP v1 批次为 6051 行、M6 批次为 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7588 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 
