@@ -1,6 +1,8 @@
 # REV-098 · harness（含 cli/kernel 机械）· V3 MCP 实现（rmcp 双 era + 工具桥接 + `--allow-mcp`）
 
 > **跨模块声明**（Lead 已批准 + 第二评审追加）：本分支改动 `crates/zgraph-harness`（主体）、`crates/zgraph-cli/src/run_cmd.rs`（`--allow-mcp` + 预检 + `close_mcp` 调用）、`crates/zgraph-kernel/src/types.rs`（`HarnessErrorKind::Mcp`/`CODE_HARNESS_MCP_ERROR` append-only）、`Cargo.toml`/`Cargo.lock`（`rmcp =3.8.0` feature-gated）。评审人只新增本评审记录，未改实现/测试。
+>
+> **最终状态（2026-11-02）**：首轮（`815abea`）「有条件通过」→ 作者收口 **`15f3d18`**（C1/C2 + P2 加固）→ 评审人重跑全部门禁 + 只读复核：C1/C2 closed，结论改为「通过」（逐条见 §6；P2⑥ 残余与 P3 见 §6.3，非阻塞）。
 
 - **分支**：`feat/harness-mcp`
 - 分支: feat/harness-mcp
@@ -12,9 +14,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-默认（无 MCP 配置）路径与既有测试全部保持；feature/依赖、registry 拒绝矩阵、AgentConfig/`--allow-mcp`、McpRun 桥接、双 era、trace 不 v7、测试与门禁主体成立。P0=0；**P1 条件 C1–C2**（均可由 harness 小 commit + 测试关闭）；P2/P3 建议见 §3。**未发现功能返工级问题**。
+> **结论历史**：首轮（2026-11-01，基准 `815abea`）为「**有条件通过**」——P1 条件 C1（同一 run 多 agent 的 MCP plan/allow 交叉复用）与 C2（AgentConfig.mcp 结构/allow 错误码未收敛到 `HARNESS_MCP_ERROR`）。作者收口 `15f3d18`（C1/C2 + P2 加固）后，评审人重跑全部门禁 + 只读复核，C1/C2 均关闭（§6.1），P2①–⑤、⑦–⑨ 关闭（§6.2），结论改为**通过**；**P2⑥（server 名归一化）为唯一 P2 残余**、P3 见 §6.3（均在 P2 一般/P3 建议级别，不阻塞）。
+>
+> 首轮核对（历史保留）：默认（无 MCP 配置）路径与既有测试全部保持；feature/依赖、registry 拒绝矩阵、AgentConfig/`--allow-mcp`、McpRun 桥接、双 era、trace 不 v7、测试与门禁主体成立。P0=0；P1 条件 C1–C2；P2/P3 见 §3。以下 §1.1/§2 为**首轮核对快照**（⚠️ 项已关闭）。
 
 ### 1.1 合同核对（对照 DR-010 / 05 §5.14.2 / 07 AC-19）
 
@@ -114,17 +118,61 @@ cargo tree -p zgraph-cli -e normal --no-default-features --locked | grep -c rmcp
 - 关闭后由评审人只读复核 + 追加「条件关闭」结论；P2/P3 可同 commit 或 V5-docs 处理（不单独阻塞）。
 - 合并门禁：当前 HEAD `815abea` 时**不可 merge**（结论为有条件通过）；C1/C2 关闭并复审通过后 merge → 开 V4（harness 插件）。
 
-## 6. 条件关闭记录（"有条件通过"）
+## 6. 条件关闭复核（"有条件通过" → "通过"）
 
-| 条件 | 状态 | 关闭要求 |
+### 6.1 条件关闭状态
+
+| 条件 | 状态 | 关闭证据（作者 `15f3d18`，父 `2adfb75`） |
 |---|---|---|
-| C1 同一 run 多 agent MCP plan/allow 隔离（`executor.rs:493-540`） | **open** | harness 小 commit + 多 agent 测试；重跑门禁 |
-| C2 AgentConfig.mcp 结构/allow 错误码统一到 `HARNESS_MCP_ERROR`（`config.rs:435-560`） | **open** | harness 小 commit + config 测试；或 Lead 接受拆分并登记 ISSUE |
+| C1 同一 run 多 agent MCP plan/allow 隔离 | **closed** | 新增 `McpPool`（run 级共享 `server→client`/`server→tools` 缓存）+ `McpSessionRuns{run_id,pool,by_agent}` + per-agent `McpRun`（`executor.rs:87-94,503-560`；`mcp/mod.rs:959-1128`）；`list_tools` 每 server 共享缓存，`map_tools`/`execute_tool` 按本 agent plan/allow，bound 反向映射到原始工具；测试 `mcp_plans_are_isolated_per_agent_in_same_run`、`second_agent_allow_is_not_bypassed_by_first_agent`（`executor.rs:1644/1717`）通过 |
+| C2 AgentConfig.mcp 错误码统一 | **closed** | `parse_mcp`/`parse_mcp_name_list` 全部改 `mcp_config_error` → `HarnessErrorKind::Mcp`/`HARNESS_MCP_ERROR{config_invalid\|allow_invalid}`（`config.rs:435-560`）；测试 `mcp_parse_errors_use_harness_mcp_error` 断言 kind/code/reason（含 allow_invalid、servers>16）通过 |
+
+### 6.2 P2 加固关闭确认（①–⑨）
+
+| # | 关闭证据 |
+|---|---|
+| ① 常量对齐 00 §0.5 | `MCP_DEFAULT_TIMEOUT_MS`/`MCP_TOOLS_LIST_TIMEOUT_MS`/`MCP_HTTP_MAX_CONCURRENCY`/`MCP_CONTROL_REQUEST_TIMEOUT_MS` 已改名；`real.rs` list 用 `MCP_TOOLS_LIST_TIMEOUT_MS`、call 默认 `MCP_DEFAULT_TIMEOUT_MS`（`constants.rs:168-197`） |
+| ② allow≤16 | `parse_mcp_name_list(..., "allow", true)`；超限 `config_invalid`（`config.rs:494-520`） |
+| ③ stdio cwd=assets-dir | `CommandWrap` 加 `current_dir(assets_dir)`；`McpClientFactory::connect(spec, assets_dir)` 传参（`real.rs:150-160`） |
+| ④ `__` server 名 | 新增 `parse_tool_name_for_servers` 按**已配置 server 名最长前缀**解析；测试 `parses_server_names_containing_double_underscore`（`mcp/mod.rs:489/1508`） |
+| ⑤ stderr 脱敏 | `display_command` URL 去 userinfo/query、args 敏感键打码、env 只列名（`mcp/mod.rs:86-150`）；`startup_notice` 走此格式 |
+| ⑥ 函数名归一化+反向映射 | `normalized_function_name`（tool 部分小写/非 `[a-z0-9_]`→`_`、超长/冲突截短+FNV hash）+ `bind_tools`/bound `original` 反向映射；测试 `function_names_are_normalized_and_reversible`；**server 段未归一化（P2 残余，见 §6.3）** |
+| ⑦ truncated JSON | 超限返回 `{"truncated":true,"is_error":…,"text":…}`（`mcp/mod.rs:1106-1119`）；测试 `truncated_result_is_machine_readable_json`/`result_truncation_is_bounded` |
+| ⑧ 流式截断/1MiB schema | `call_result_text(result, limit_chars)` 按上限累积（不先拼全量）；`McpRun::list_tools` 累计 schema 字节 > `MCP_TOOLS_LIST_MAX_BYTES`(1MiB) → `init_failed`（`real.rs:253-268`；`mcp/mod.rs` list_tools） |
+| ⑨ 测试 | 新增多 agent/allow 隔离、`__`、normalize、no-feature（`mcp_configured_without_feature_fails_init`，默认 207 vs feature 206）、`mcp_parse_errors...`；`--allow-mcp` 真 CLI exit3 端到端按 Lead 裁决留 V5 AC-19 c（e2e 分支） |
+
+### 6.3 残余 P2/P3（非阻塞，列明；建议 V4 首 commit 或 V5-docs 处理）
+
+- **P2⑥ 未完全关闭（唯一 P2 残余）**：`normalized_function_name` 的 **server 段仍原样**（`prefix = "mcp__{server}__"`）——server 名正则允许 `-` → 函数名含 `-`；server 名过长（前缀 >55 字符）时函数名仍 >64；两者均违反函数名注释/`ToolDef` 合同 `^[a-z][a-z0-9_]{0,63}$`。现有测试只用 server `alpha`，未覆盖。建议：server 段同样归一化（`-`→`_`、截短+hash）或拒绝过长 server 名；补 `server="a-b"`/64 字符 server 用例。**P2 一般，不阻塞 V3 merge**（可随 V4 首 commit 或登 ISSUE）。
+- **P3（测试/实现小项）**：`display_command` 脱敏无专门测试；allow>16 复用同一函数（代码已限）但仅有 servers 用例；`call_result_text` 仍接收 rmcp 已解析的完整 `CallToolResult`（网络层全量解析后才按 chars 累积，传输层硬上限未强制——V5 安全 spike）；`startup_notice` 多 agent 同 server 会重复打印；`graph_has_human` doc 注释仍错位（`run_cmd.rs:966-970`）；额外常量 `MCP_TOOLS_LIST_MAX_BYTES` 未入 00 §0.5（V5-docs 可补）。
+
+### 6.4 最终门禁复核（评审人执行）
+
+```bash
+git status --porcelain                          # 空（worktree 干净）
+git diff --stat 2adfb75..15f3d18                # 6 files, +890/−294（仅 crates/zgraph-harness/src；无 cli/kernel/Cargo 改动）
+cargo test -p zgraph-harness                    # 207 passed / 0 failed / 1 ignored（默认 feature）
+cargo test -p zgraph-harness --features mcp     # 206 passed / 0 failed / 1 ignored
+cargo test -p zgraph-cli                        # 223 / 0
+cargo test -p zgraph-e2e                        # 106 / 0 / 2
+cargo test --workspace                          # 976 passed / 0 failed / 3 ignored
+cargo check -p zgraph-cli --no-default-features --locked   # 通过
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                      # exit 0
+bash scripts/dev/check.sh                       # CHECK PASSED
+```
+
+- C1/C2 closed；P2①–⑤、⑦–⑨ closed；**P2⑥ 残余**已列明（P2 一般，非阻塞）；P3 见 §6.3。
+- 跨模块：本轮仅 harness 6 文件（无新增 cli/kernel/Cargo 改动），首轮跨模块声明不变；第二评审由 Lead 追加。
+
+### 6.5 合并门禁
+
+结论已为 `通过`；worktree 干净、基于 `origin/main`（`69aeb87`）；记录含 `分支: feat/harness-mcp` 与 `结论：通过` → 满足 merge.sh 前置；Lead 可追加跨模块第二评审 → merge → 开 V4（harness 插件 + Codex adapter）。
 
 ## 7. 遗留问题
 
-- **V5 e2e（AC-19 a/b/d/e 真链路）**：真实 stdio/HTTP 双 era 桩、进程组 kill/无孤儿、SIGTERM/取消、真实 rmcp 超时/MRTR/input_required 映射、结果内存上限；Windows JobObject 为 P3（Lead 已接受）。
-- **V5-docs as-built**：常量名/缺失（P2-1）、allow 限长、cwd、`truncated` 标记、TOOL_ERROR reason taxonomy、ToolDef 名称合同（P2 项）需在 05/06/00/DR-010 as-built 回写或代码修正。
-- **测试缺口**（P2-9/P3）建议 V3 补 timeout/multi-agent/CLI 集成，V5 补真实传输。
-- 跨模块（cli/kernel/Cargo）已按 Lead 批准声明；kernel 仅 append-only 码/枚举，无既有语义变更；未改 docs（V5 回写）。
-- 未发现 P0；未发现既有行为回归。
+- **V5 e2e（AC-19 a/b/d/e 真链路）**：真实 stdio/HTTP 双 era 桩、进程组 kill/无孤儿、SIGTERM/取消、真实 rmcp 超时/MRTR/input_required 映射、结果内存上限；**AC-19 c 的 `--allow-mcp` 真 CLI exit3 端到端**按 Lead 裁决随 V5 e2e 覆盖；Windows JobObject 为 P3（Lead 已接受）。
+- **P2⑥ 残余（非阻塞）**：函数名 **server 段未归一化**（含 `-`/过长 server → 违反 `^[a-z][a-z0-9_]{0,63}$` 或 >64），建议 V4 首 commit 或 ISSUE 关闭（见 §6.3）。
+- **P3/测试小项**：见 §6.3（脱敏/schema 上限/重复 notice/`run_cmd` doc 注释等）；V5-docs as-built 需补：常量（含 `MCP_TOOLS_LIST_MAX_BYTES`）、函数名/allow 口径、TOOL_ERROR reason taxonomy、`truncated` 口径到 00/05/06/DR-010。
+- 跨模块（cli/kernel/Cargo）已按 Lead 批准声明；本轮收口仅 harness 6 文件；kernel 仅首轮 append-only 码/枚举，无既有语义变更；V3 未改 docs（V5 回写）。
+- 未发现 P0；未发现既有行为回归；C1/C2 关闭后本记录结论为 `通过`。
