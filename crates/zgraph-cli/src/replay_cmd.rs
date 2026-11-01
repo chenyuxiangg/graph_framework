@@ -30,8 +30,16 @@
 //! graph 中的 human 节点替换为可执行 handler（[`replay_recorded_human_graph`]），
 //! 由 [`RecordedExecutor`] 直接返回记录输出；不启动 worker、不 solicit 人工，
 //! publish/gate/end 聚合与原 run 一致。无 human 节点的图原样重跑（零变化）。
+//!
+//! # foreach item（W4b / DR-007 §8.5）
+//!
+//! L2 记录查找键扩展为 `(node_id, attempt, item_index)`（`item_index` 由 `instances`
+//! 表提供；`recorded_outputs` 结构不变）。重跑前按 `foreach_expansions` 的
+//! `item_count`/`keys` 校验 per-item 记录完整性（不匹配 → `REPLAY_RECORD_CORRUPT`；
+//! 已展开但缺 expansion → `REPLAY_RECORD_MISSING`）。item 输出按记录重放，内核重新
+//! 展开（同一 entry/上游数据 → 同一 N/keys），不启动 worker、不重新要求人工决策。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -46,8 +54,8 @@ use zgraph_kernel::{
     NodeExecutor, NodeId, PortName, RunOptions, RunOutcome, RunSpec, RunStatus,
 };
 use zgraph_trace::{
-    InstanceRow, InstanceStatus as TraceInstanceStatus, RecordedOutputRow, RunRow,
-    RunStatus as TraceRunStatus, TraceError, TraceReader,
+    ForeachExpansionRow, InstanceRow, InstanceStatus as TraceInstanceStatus, RecordedOutputRow,
+    RunRow, RunStatus as TraceRunStatus, TraceError, TraceReader,
 };
 
 use crate::run_cmd::output_hash;
@@ -264,17 +272,25 @@ fn report(error: ReplayError) -> ExitCode {
     ExitCode::from(error.exit_code)
 }
 
+/// L2 记录查找键：`(node_id, attempt, item_index)`（W4b / DR-007 §8.5）。
+///
+/// `item_index` 由 `instances` 表提供（`recorded_outputs` 表结构不变）；非 foreach
+/// 实例恒 0，因此无 foreach 的既有记录键与 `(node_id, attempt)` 一一对应（golden 不变）。
+type RecordKey = (String, u32, u32);
+
 /// L2 预检产物。
 struct ReplayPlan {
-    /// `(node_id, attempt) -> recorded output.json`。
-    outputs: HashMap<(String, u32), Value>,
+    /// `(node_id, attempt, item_index) -> recorded output.json`。
+    outputs: HashMap<RecordKey, Value>,
     /// 记录行数（摘要用）。
     recorded: usize,
+    /// 原 run 的实例行（`foreach_expansions` 完整性预检用）。
+    instances: Vec<InstanceRow>,
 }
 
 /// 以记录输出为唯一数据源的执行器（不启动 worker/LLM）。
 struct RecordedExecutor {
-    outputs: HashMap<(String, u32), Value>,
+    outputs: HashMap<RecordKey, Value>,
 }
 
 impl NodeExecutor for RecordedExecutor {
@@ -282,13 +298,17 @@ impl NodeExecutor for RecordedExecutor {
         &'a self,
         execution: NodeExecution<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Value, NodeError>> + Send + 'a>> {
-        let key = (execution.node.id.clone(), execution.ctx.attempt());
+        let key = (
+            execution.node.id.clone(),
+            execution.ctx.attempt(),
+            execution.ctx.item_index(),
+        );
         let result = match self.outputs.get(&key) {
             Some(output) => Ok(output.clone()),
             None => Err(NodeError::Internal {
                 message: format!(
-                    "replay: no recorded output for node '{}' attempt {}",
-                    key.0, key.1
+                    "replay: no recorded output for node '{}' attempt {} item {}",
+                    key.0, key.1, key.2
                 ),
             }),
         };
@@ -321,6 +341,11 @@ async fn run_outputs(args: &ReplayArgs) -> ExitCode {
         Ok(graph) => graph,
         Err(error) => return report(error),
     };
+    // W4b（DR-007 §8.5）：按 `foreach_expansions` 的 item_count/keys 校验 per-item
+    // 记录完整性（缺失 → REPLAY_RECORD_MISSING；不匹配 → REPLAY_RECORD_CORRUPT）。
+    if let Err(error) = validate_foreach_expansions(&reader, &run, &graph, &plan.instances) {
+        return report(error);
+    }
     let graph = replay_recorded_human_graph(graph);
     let spec = match build_spec(&run, graph) {
         Ok(spec) => spec,
@@ -342,17 +367,27 @@ async fn run_outputs(args: &ReplayArgs) -> ExitCode {
     finish_outputs(args, &run, &outcome, plan.recorded)
 }
 
-/// 预检：record_mode/status/记录完整性与 hash 复核（DR-002 §3.3 步 2）。
+/// 预检：record_mode/status/记录完整性与 hash 复核（DR-002 §3.3 步 2；W4b per-item）。
 fn build_plan(reader: &TraceReader, run: &RunRow) -> Result<ReplayPlan, ReplayError> {
     ensure_replayable(run.record_mode.as_deref(), run.status)?;
     let instances = reader.instances(&run.run_id)?;
+    let instance_item_index = instance_item_indexes(&instances);
     let records = reader.recorded_outputs(&run.run_id)?;
-    let outputs = index_recorded_outputs(&records)?;
+    let outputs = index_recorded_outputs(&records, &instance_item_index)?;
     ensure_executed_nodes_recorded(&instances, &outputs)?;
     Ok(ReplayPlan {
         outputs,
         recorded: records.len(),
+        instances,
     })
+}
+
+/// `instance_id -> item_index`（`recorded_outputs` 不含 item_index，由 instances 提供）。
+fn instance_item_indexes(instances: &[InstanceRow]) -> HashMap<String, u32> {
+    instances
+        .iter()
+        .map(|instance| (instance.instance_id.clone(), instance.item_index))
+        .collect()
 }
 
 /// 前置校验：原 run 必须 `--record=full` 且状态 `Completed`（DR-002 §3.3 步 2）。
@@ -378,12 +413,16 @@ fn ensure_replayable(record_mode: Option<&str>, status: TraceRunStatus) -> Resul
     Ok(())
 }
 
-/// 把 `recorded_outputs` 行建成 `(node_id, attempt) -> output` 索引，并复核
-/// `output_json` 存在性、hash 一致性与重复记录（DR-002 §3.3 步 2）。
+/// 把 `recorded_outputs` 行建成 `(node_id, attempt, item_index) -> output` 索引，
+/// 并复核 `output_json` 存在性、hash 一致性与重复记录（DR-002 §3.3 步 2；W4b per-item）。
+///
+/// `recorded_outputs` 表结构不变（唯一键含 `instance_id`），`item_index` 由
+/// `instances` 表按 `instance_id` 提供；记录引用未知实例 → `REPLAY_RECORD_CORRUPT`。
 fn index_recorded_outputs(
     records: &[RecordedOutputRow],
-) -> Result<HashMap<(String, u32), Value>, ReplayError> {
-    let mut outputs: HashMap<(String, u32), Value> = HashMap::new();
+    instance_item_index: &HashMap<String, u32>,
+) -> Result<HashMap<RecordKey, Value>, ReplayError> {
+    let mut outputs: HashMap<RecordKey, Value> = HashMap::new();
     for record in records {
         let output = record.output_json.as_ref().ok_or_else(|| {
             ReplayError::record(
@@ -394,23 +433,36 @@ fn index_recorded_outputs(
                 ),
             )
         })?;
+        let item_index = instance_item_index
+            .get(&record.instance_id)
+            .copied()
+            .ok_or_else(|| {
+                ReplayError::record(
+                    CODE_REPLAY_RECORD_CORRUPT,
+                    format!(
+                        "recorded output references unknown instance '{}' (node '{}' attempt {})",
+                        record.instance_id, record.node_id, record.attempt
+                    ),
+                )
+            })?;
         let recomputed = output_hash(output);
         if recomputed != record.output_hash {
             return Err(ReplayError::record(
                 CODE_REPLAY_RECORD_CORRUPT,
                 format!(
-                    "recorded output hash mismatch for node '{}' attempt {}: recorded={} recomputed={recomputed}",
+                    "recorded output hash mismatch for node '{}' attempt {} item {item_index}: \
+                     recorded={} recomputed={recomputed}",
                     record.node_id, record.attempt, record.output_hash
                 ),
             ));
         }
-        let key = (record.node_id.clone(), record.attempt);
+        let key = (record.node_id.clone(), record.attempt, item_index);
         if outputs.insert(key.clone(), output.clone()).is_some() {
             return Err(ReplayError::record(
                 CODE_REPLAY_RECORD_CORRUPT,
                 format!(
-                    "duplicate recorded output for node '{}' attempt {}",
-                    key.0, key.1
+                    "duplicate recorded output for node '{}' attempt {} item {}",
+                    key.0, key.1, key.2
                 ),
             ));
         }
@@ -419,10 +471,10 @@ fn index_recorded_outputs(
 }
 
 /// 完整性预检：已执行且 `Completed` 的 `python_node`/`agent_call` 必须有记录
-/// （DR-002 §3.3 步 2）。
+/// （DR-002 §3.3 步 2；W4b 查找键含 per-item `item_index`）。
 fn ensure_executed_nodes_recorded(
     instances: &[InstanceRow],
-    outputs: &HashMap<(String, u32), Value>,
+    outputs: &HashMap<RecordKey, Value>,
 ) -> Result<(), ReplayError> {
     for instance in instances {
         if !EXECUTED_NODE_TYPES.contains(&instance.node_type.as_str())
@@ -430,13 +482,195 @@ fn ensure_executed_nodes_recorded(
         {
             continue;
         }
-        let key = (instance.node_id.clone(), instance.attempt);
+        let key = (
+            instance.node_id.clone(),
+            instance.attempt,
+            instance.item_index,
+        );
         if !outputs.contains_key(&key) {
             return Err(ReplayError::record(
                 CODE_REPLAY_RECORD_MISSING,
                 format!(
-                    "missing recorded output for executed node '{}' attempt {} (status=Completed)",
-                    key.0, key.1
+                    "missing recorded output for executed node '{}' attempt {} item {} \
+                     (status=Completed)",
+                    key.0, key.1, key.2
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// L2 foreach 完整性预检（W4b / DR-007 §8.5）：`foreach_expansions` 的
+/// `item_count`/`keys` 必须与 item 实例一致。
+///
+/// - expansion 引用未知节点/非 foreach 节点、同一 F 多行、`item_count` 与
+///   item_index 集合不一致、`keys` 与实例 `item_key` 不一致 → `REPLAY_RECORD_CORRUPT`；
+/// - 图内 foreach 节点已有 region 实例但缺 expansion 行 → `REPLAY_RECORD_MISSING`
+///   （controller 被 Skipped、region 从未展开时无实例也无 expansion，属正常）。
+fn validate_foreach_expansions(
+    reader: &TraceReader,
+    run: &RunRow,
+    graph: &CompiledGraph,
+    instances: &[InstanceRow],
+) -> Result<(), ReplayError> {
+    let expansions = reader.foreach_expansions(&run.run_id)?;
+    validate_foreach_records(&expansions, graph, instances)
+}
+
+/// [`validate_foreach_expansions`] 的纯函数核心（单测可直接构造行/图）。
+fn validate_foreach_records(
+    expansions: &[ForeachExpansionRow],
+    graph: &CompiledGraph,
+    instances: &[InstanceRow],
+) -> Result<(), ReplayError> {
+    let mut by_node: BTreeMap<&str, &ForeachExpansionRow> = BTreeMap::new();
+    for expansion in expansions {
+        if by_node
+            .insert(expansion.node_id.as_str(), expansion)
+            .is_some()
+        {
+            return Err(ReplayError::record(
+                CODE_REPLAY_RECORD_CORRUPT,
+                format!(
+                    "duplicate foreach_expansions row for node '{}' (single expansion expected)",
+                    expansion.node_id
+                ),
+            ));
+        }
+    }
+    for (node_id, expansion) in &by_node {
+        let node = graph.nodes.get(*node_id).ok_or_else(|| {
+            ReplayError::record(
+                CODE_REPLAY_RECORD_CORRUPT,
+                format!("foreach expansion references unknown node '{node_id}'"),
+            )
+        })?;
+        if node.foreach.is_none() {
+            return Err(ReplayError::record(
+                CODE_REPLAY_RECORD_CORRUPT,
+                format!("foreach expansion references non-foreach node '{node_id}'"),
+            ));
+        }
+        let f_instances: Vec<&InstanceRow> = instances
+            .iter()
+            .filter(|instance| instance.node_id == *node_id)
+            .collect();
+        validate_one_expansion(expansion, &f_instances)?;
+    }
+    // 图内 foreach 节点：region 已有实例却无 expansion 行 → 记录缺失。
+    for node in graph.nodes.values().filter(|node| node.foreach.is_some()) {
+        if by_node.contains_key(node.id.as_str()) {
+            continue;
+        }
+        let Some(config) = &node.foreach else {
+            continue;
+        };
+        let region_has_instance = instances.iter().any(|instance| {
+            config
+                .region
+                .iter()
+                .any(|region_node| region_node == &instance.node_id)
+        });
+        if region_has_instance {
+            return Err(ReplayError::record(
+                CODE_REPLAY_RECORD_MISSING,
+                format!(
+                    "foreach node '{}' has item instances but no foreach_expansions row",
+                    node.id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 校验单次展开：`item_count` ↔ F 的 item_index 集合、`keys` ↔ item_key。
+fn validate_one_expansion(
+    expansion: &ForeachExpansionRow,
+    f_instances: &[&InstanceRow],
+) -> Result<(), ReplayError> {
+    let expected_count = usize::try_from(expansion.item_count).map_err(|_| {
+        ReplayError::record(
+            CODE_REPLAY_RECORD_CORRUPT,
+            format!(
+                "foreach expansion of node '{}' item_count {} overflows usize",
+                expansion.node_id, expansion.item_count
+            ),
+        )
+    })?;
+    let keys = expansion
+        .keys
+        .as_ref()
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ReplayError::record(
+                CODE_REPLAY_RECORD_CORRUPT,
+                format!(
+                    "foreach expansion of node '{}' has no keys array",
+                    expansion.node_id
+                ),
+            )
+        })?;
+    if keys.len() != expected_count {
+        return Err(ReplayError::record(
+            CODE_REPLAY_RECORD_CORRUPT,
+            format!(
+                "foreach expansion of node '{}' keys length {} != item_count {}",
+                expansion.node_id,
+                keys.len(),
+                expected_count
+            ),
+        ));
+    }
+    // F 的 item 实例（可能多 attempt）：按 item_index 建索引，取每个 index 的首个实例。
+    let mut by_index: BTreeMap<u32, &InstanceRow> = BTreeMap::new();
+    for instance in f_instances {
+        by_index.entry(instance.item_index).or_insert(instance);
+    }
+    let actual_indexes: Vec<u32> = by_index.keys().copied().collect();
+    let expected_indexes: Vec<u32> =
+        (0..u32::try_from(expected_count).unwrap_or(u32::MAX)).collect();
+    if actual_indexes != expected_indexes {
+        return Err(ReplayError::record(
+            CODE_REPLAY_RECORD_CORRUPT,
+            format!(
+                "foreach expansion of node '{}' item_count {} does not match item instances \
+                 {actual_indexes:?}",
+                expansion.node_id, expansion.item_count
+            ),
+        ));
+    }
+    for (index, key) in keys.iter().enumerate() {
+        let instance = by_index
+            .get(&u32::try_from(index).unwrap_or(u32::MAX))
+            .expect("index set validated above");
+        let expected_key = match key {
+            Value::String(key) => Some(key.as_str()),
+            // NULL 键的冻结表示：单键对象 `{"$index": i}`（真实 string key 不与它撞）。
+            Value::Object(map)
+                if map.len() == 1
+                    && map.get("$index").and_then(Value::as_u64) == Some(index as u64) =>
+            {
+                None
+            }
+            other => {
+                return Err(ReplayError::record(
+                    CODE_REPLAY_RECORD_CORRUPT,
+                    format!(
+                        "foreach expansion of node '{}' has invalid keys[{index}]={other}",
+                        expansion.node_id
+                    ),
+                ))
+            }
+        };
+        if instance.item_key.as_deref() != expected_key {
+            return Err(ReplayError::record(
+                CODE_REPLAY_RECORD_CORRUPT,
+                format!(
+                    "foreach expansion of node '{}' keys[{index}]={key} does not match \
+                     instance item_key {:?}",
+                    expansion.node_id, instance.item_key
                 ),
             ));
         }
@@ -654,10 +888,11 @@ fn json_text(value: Option<&Value>) -> String {
 mod tests {
     use super::{
         build_spec, ensure_replayable, index_recorded_outputs, parse, replay_recorded_human_graph,
-        ReplayArgs, ReplayMode, CODE_REPLAY_RECORD_CORRUPT, CODE_REPLAY_RECORD_MISSING,
-        CODE_REPLAY_RUN_NOT_COMPLETED,
+        validate_foreach_records, ReplayArgs, ReplayMode, CODE_REPLAY_RECORD_CORRUPT,
+        CODE_REPLAY_RECORD_MISSING, CODE_REPLAY_RUN_NOT_COMPLETED,
     };
     use crate::run_cmd::output_hash;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -928,28 +1163,269 @@ mod tests {
             output_json,
             recorded_at: "2026-10-30T00:00:00.000Z".to_string(),
         };
+        let item_indexes = HashMap::from([("inst-1".to_string(), 0_u32)]);
 
-        // 合法记录 → 建立索引。
-        let outputs = index_recorded_outputs(&[record(hash.clone(), Some(output.clone()))])
-            .expect("valid record");
-        assert_eq!(outputs.get(&("work".to_string(), 0)), Some(&output));
+        // 合法记录 → 建立索引（键含 item_index）。
+        let outputs =
+            index_recorded_outputs(&[record(hash.clone(), Some(output.clone()))], &item_indexes)
+                .expect("valid record");
+        assert_eq!(
+            outputs.get(&("work".to_string(), 0, 0)),
+            Some(&output),
+            "无 foreach 记录 item_index=0，键与旧 (node_id, attempt) 一一对应"
+        );
 
         // hash 不符 → CORRUPT。
-        let error = index_recorded_outputs(&[record("bad-hash".to_string(), Some(output.clone()))])
-            .expect_err("hash mismatch");
+        let error = index_recorded_outputs(
+            &[record("bad-hash".to_string(), Some(output.clone()))],
+            &item_indexes,
+        )
+        .expect_err("hash mismatch");
         assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
 
         // 缺 output_json（hash 模式记录）→ CORRUPT。
-        let error =
-            index_recorded_outputs(&[record(hash.clone(), None)]).expect_err("missing json");
+        let error = index_recorded_outputs(&[record(hash.clone(), None)], &item_indexes)
+            .expect_err("missing json");
         assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
 
-        // 重复 (node_id, attempt) → CORRUPT。
-        let error = index_recorded_outputs(&[
-            record(hash.clone(), Some(output.clone())),
-            record(hash, Some(output)),
-        ])
+        // 未知实例（无法从 instances 取得 item_index）→ CORRUPT。
+        let error = index_recorded_outputs(
+            &[record(hash.clone(), Some(output.clone()))],
+            &HashMap::new(),
+        )
+        .expect_err("unknown instance");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+
+        // 重复 (node_id, attempt, item_index) → CORRUPT。
+        let error = index_recorded_outputs(
+            &[
+                record(hash.clone(), Some(output.clone())),
+                record(hash, Some(output)),
+            ],
+            &item_indexes,
+        )
         .expect_err("duplicate record");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+    }
+
+    // -----------------------------------------------------------------------
+    // W4b：foreach per-item 记录键与 expansion 完整性预检
+    // -----------------------------------------------------------------------
+
+    /// P-1 形状的 foreach 图：`start → F(foreach, join=J) → W(出口 E) → J`。
+    const FOREACH_GRAPH: &str = r#"{
+        "version": "1.0",
+        "metadata": {"name": "foreach"},
+        "entry_points": ["start"],
+        "nodes": [
+          {"id": "start", "type": "start", "inputs": [], "config": {}},
+          {"id": "F", "type": "python_node",
+           "inputs": [{"name": "items", "type": "any", "required": true}],
+           "config": {"module": "workers.foreach", "function": "fanout"},
+           "foreach": {"items_port": "items", "join": "J"}},
+          {"id": "W", "type": "python_node",
+           "inputs": [{"name": "task", "type": "any", "required": true}],
+           "config": {"module": "workers.foreach", "function": "work"}},
+          {"id": "J", "type": "end",
+           "inputs": [{"name": "results", "type": "any", "required": true}], "config": {}}
+        ],
+        "edges": [
+          {"from": "start", "to_node": "F", "to_input_port": "items"},
+          {"from": "F", "to_node": "W", "to_input_port": "task"},
+          {"from": "W", "to_node": "J", "to_input_port": "results"}
+        ]
+    }"#;
+
+    fn foreach_graph() -> Arc<CompiledGraph> {
+        let loaded = zgraph_dsl::load_graph(FOREACH_GRAPH.as_bytes()).expect("foreach graph loads");
+        CompiledGraph::compile(&loaded).expect("foreach graph compiles")
+    }
+
+    fn instance_row(
+        instance_id: &str,
+        node_id: &str,
+        item_index: u32,
+        item_key: Option<&str>,
+        status: zgraph_trace::InstanceStatus,
+    ) -> zgraph_trace::InstanceRow {
+        zgraph_trace::InstanceRow {
+            instance_id: instance_id.to_string(),
+            run_id: "run-f".to_string(),
+            node_id: node_id.to_string(),
+            node_type: "python_node".to_string(),
+            attempt: 0,
+            item_index,
+            item_key: item_key.map(str::to_string),
+            status,
+            input: None,
+            output_json: None,
+            error: None,
+            error_code: None,
+            created_seq: None,
+            started_at: None,
+            finished_at: None,
+            finished_seq: None,
+        }
+    }
+
+    fn expansion_row(
+        node_id: &str,
+        item_count: u64,
+        keys: Value,
+        source: Option<&str>,
+    ) -> zgraph_trace::ForeachExpansionRow {
+        zgraph_trace::ForeachExpansionRow {
+            expansion_id: format!("exp-{node_id}"),
+            run_id: "run-f".to_string(),
+            node_id: node_id.to_string(),
+            source_instance_id: source.map(str::to_string),
+            item_count,
+            keys: Some(keys),
+            at: "2026-11-01T10:00:00.000Z".to_string(),
+        }
+    }
+
+    fn done(node_id: &str, item_index: u32) -> zgraph_trace::InstanceRow {
+        instance_row(
+            &format!("inst-{node_id}-{item_index}"),
+            node_id,
+            item_index,
+            None,
+            zgraph_trace::InstanceStatus::Completed,
+        )
+    }
+
+    /// 一致的 expansion（count=2 / keys 索引对象 / F item 实例 0,1）→ 通过。
+    #[test]
+    fn validate_foreach_records_accepts_consistent_expansion() {
+        let instances = vec![done("F", 0), done("F", 1), done("W", 0), done("W", 1)];
+        let expansions = vec![expansion_row(
+            "F",
+            2,
+            json!([{"$index": 0}, {"$index": 1}]),
+            Some("inst-start"),
+        )];
+        validate_foreach_records(&expansions, &foreach_graph(), &instances)
+            .expect("consistent expansion must pass");
+    }
+
+    /// 空列表展开（count=0 / keys=[] / 无 item 实例）→ 通过。
+    #[test]
+    fn validate_foreach_records_accepts_empty_expansion() {
+        let expansions = vec![expansion_row("F", 0, json!([]), None)];
+        validate_foreach_records(&expansions, &foreach_graph(), &[])
+            .expect("empty expansion must pass");
+    }
+
+    /// `item_count` 与 F 的 item_index 集合不一致 → REPLAY_RECORD_CORRUPT。
+    #[test]
+    fn validate_foreach_records_rejects_item_count_mismatch() {
+        let instances = vec![done("F", 0), done("F", 1)];
+        let expansions = vec![expansion_row(
+            "F",
+            3,
+            json!([{"$index": 0}, {"$index": 1}, {"$index": 2}]),
+            None,
+        )];
+        let error = validate_foreach_records(&expansions, &foreach_graph(), &instances)
+            .expect_err("item_count mismatch");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+        assert!(error.message.contains("item_count 3"), "{}", error.message);
+    }
+
+    /// `keys` 与实例 `item_key` 不一致 → REPLAY_RECORD_CORRUPT（含显式 key 原值）。
+    #[test]
+    fn validate_foreach_records_rejects_keys_mismatch() {
+        let instances = vec![
+            instance_row(
+                "inst-F-0",
+                "F",
+                0,
+                Some("a"),
+                zgraph_trace::InstanceStatus::Completed,
+            ),
+            instance_row(
+                "inst-F-1",
+                "F",
+                1,
+                Some("b"),
+                zgraph_trace::InstanceStatus::Completed,
+            ),
+        ];
+        // 实例 item_key=Some("a"/"b")，keys 却是索引对象 → 不一致。
+        let wrong = vec![expansion_row(
+            "F",
+            2,
+            json!([{"$index": 0}, {"$index": 1}]),
+            None,
+        )];
+        let error = validate_foreach_records(&wrong, &foreach_graph(), &instances)
+            .expect_err("keys mismatch");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+
+        // 显式 key 正确 → 通过。
+        let right = vec![expansion_row("F", 2, json!(["a", "b"]), None)];
+        validate_foreach_records(&right, &foreach_graph(), &instances).expect("explicit keys");
+
+        // 非法 keys 元素（number）→ CORRUPT。
+        let invalid = vec![expansion_row("F", 2, json!([1, 2]), None)];
+        let error = validate_foreach_records(&invalid, &foreach_graph(), &instances)
+            .expect_err("invalid keys entry");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+    }
+
+    /// region 已有 item 实例但缺 expansion 行 → REPLAY_RECORD_MISSING；
+    /// controller 未展开（region 无实例）→ 合法。
+    #[test]
+    fn validate_foreach_records_requires_expansion_for_expanded_region() {
+        let expanded = vec![done("F", 0), done("W", 0)];
+        let error = validate_foreach_records(&[], &foreach_graph(), &expanded)
+            .expect_err("missing expansion");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_MISSING);
+
+        // 未展开（region 无实例；例如 controller Skipped）→ 不要求 expansion。
+        let unexpanded = vec![instance_row(
+            "inst-start",
+            "start",
+            0,
+            None,
+            zgraph_trace::InstanceStatus::Completed,
+        )];
+        validate_foreach_records(&[], &foreach_graph(), &unexpanded)
+            .expect("region never expanded is valid without expansion row");
+    }
+
+    /// expansion 引用未知节点/非 foreach 节点、同一 F 多行 → REPLAY_RECORD_CORRUPT。
+    #[test]
+    fn validate_foreach_records_rejects_invalid_expansion_rows() {
+        // 非 foreach 节点（W）。
+        let error = validate_foreach_records(
+            &[expansion_row("W", 1, json!([{"$index": 0}]), None)],
+            &foreach_graph(),
+            &[],
+        )
+        .expect_err("non-foreach node expansion");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+
+        // 未知节点。
+        let error = validate_foreach_records(
+            &[expansion_row("nope", 0, json!([]), None)],
+            &foreach_graph(),
+            &[],
+        )
+        .expect_err("unknown node expansion");
+        assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
+
+        // 同一 F 两行。
+        let duplicated = vec![
+            expansion_row("F", 0, json!([]), None),
+            zgraph_trace::ForeachExpansionRow {
+                expansion_id: "exp-F-2".to_string(),
+                ..expansion_row("F", 0, json!([]), None)
+            },
+        ];
+        let error = validate_foreach_records(&duplicated, &foreach_graph(), &[])
+            .expect_err("duplicate expansion");
         assert_eq!(error.code, CODE_REPLAY_RECORD_CORRUPT);
     }
 }

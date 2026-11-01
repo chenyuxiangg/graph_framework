@@ -1060,6 +1060,10 @@ fn default_run_output_is_unchanged_without_decisions() {
         !stdout(&human).contains("human_decisions"),
         "no decision section for runs without decisions"
     );
+    assert!(
+        !stdout(&human).contains("foreach"),
+        "no foreach section for runs without foreach (W4b 默认输出不变)"
+    );
 
     let json = zgraph(&["trace", RUN_ID, "--db", db, "--json"]);
     assert_eq!(code(&json), 0, "{}", stderr(&json));
@@ -1068,9 +1072,13 @@ fn default_run_output_is_unchanged_without_decisions() {
     assert!(lines
         .iter()
         .all(|line| line["kind"] != json!("HumanDecision")));
+    assert!(lines
+        .iter()
+        .all(|line| line["kind"] != json!("ForeachExpansion")));
 
-    // --stats 不新增 human 决策计数字段（W3a0 冻结）。
+    // --stats 不新增 human 决策 / foreach 计数字段（W3a0/W4a 冻结）。
     let stats = zgraph(&["trace", RUN_ID, "--db", db, "--stats"]);
     assert_eq!(code(&stats), 0, "{}", stderr(&stats));
     assert!(!stdout(&stats).contains("human"), "{}", stdout(&stats));
+    assert!(!stdout(&stats).contains("foreach"), "{}", stdout(&stats));
 }

@@ -8,6 +8,11 @@
 //! 追加 `human_decisions` 摘要（人类可读）或 `{"kind":"HumanDecision",...}` NDJSON
 //! 行；决策**不是** `TraceEvent`（`events.kind` 不变），无决策行时输出与 v5 前逐字节
 //! 一致。`replay --mode=events` 直接复用本模块，因此两者输出逐字节一致。
+//!
+//! **W4b foreach 展开行（DR-007 §8.4）**：事件（与 human 决策行）之后按
+//! `(at, expansion_id)` 追加 `foreach node='<F>' items=<N> keys=[...]` 摘要或
+//! `{"kind":"ForeachExpansion",...}` NDJSON 行；展开事实**不是** `TraceEvent`
+//! （`events.kind` 不变），无 foreach 的 run 输出逐字节不变；`--stats` 不新增字段。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +20,8 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 use zgraph_trace::{
-    EventQuery, EventRow, HumanDecisionRow, RunRow, RunStats, RunStatus, TraceError, TraceReader,
+    EventQuery, EventRow, ForeachExpansionRow, HumanDecisionRow, RunRow, RunStats, RunStatus,
+    TraceError, TraceReader,
 };
 
 use crate::{EXIT_OTHER, EXIT_STORAGE, EXIT_SUCCESS};
@@ -266,6 +272,8 @@ fn is_truncated(reader: &TraceReader, run: &RunRow) -> Result<bool, TraceError> 
 ///
 /// W3a（DR-006 §6.4）：事件输出之后追加该 run 的 `human_decisions` 行（无决策行时
 /// 不追加，输出与 v5 前逐字节一致）；决策行不参与 `seq`/`--limit`/`--kinds` 过滤。
+/// W4b（DR-007 §8.4）：随后追加 `foreach_expansions` 行（无 foreach 时不输出，
+/// 输出逐字节不变）。
 fn run_timeline(
     reader: &TraceReader,
     options: &TraceOptions,
@@ -280,9 +288,14 @@ fn run_timeline(
         Ok(decisions) => decisions,
         Err(error) => return report_storage_error(&error),
     };
+    let expansions = match reader.foreach_expansions(&options.run_id) {
+        Ok(expansions) => expansions,
+        Err(error) => return report_storage_error(&error),
+    };
     if options.json {
         print_ndjson(&events);
         print_human_decisions_ndjson(&decisions);
+        print_foreach_expansions_ndjson(&expansions);
         if truncated {
             eprintln!("{}", truncation_note(run));
         }
@@ -290,6 +303,7 @@ fn run_timeline(
         let duration = duration_text(reader, run);
         print_human(run, &events, &duration, truncated);
         print_human_decisions(&decisions);
+        print_foreach_expansions(&expansions);
     }
     exit_code(run.status, truncated)
 }
@@ -382,6 +396,44 @@ fn print_human_decisions_ndjson(decisions: &[HumanDecisionRow]) {
     }
 }
 
+/// 追加 foreach 展开 NDJSON 行（W4b / DR-007 §8.4；一行一次展开，`kind=ForeachExpansion`）。
+///
+/// 字段形状（顺序与文档一致）：`kind, run_id, expansion_id, node_id,
+/// source_instance_id, item_count, keys, at`；`source_instance_id` 为 `null` 时
+/// **不省略**（entry 注入/无实例，N18）。顺序由 reader 保证 `(at, expansion_id)` 升序。
+fn print_foreach_expansions_ndjson(expansions: &[ForeachExpansionRow]) {
+    for expansion in expansions {
+        let mut object = serde_json::Map::new();
+        object.insert("kind".to_string(), serde_json::json!("ForeachExpansion"));
+        object.insert(
+            "run_id".to_string(),
+            serde_json::json!(expansion.run_id.as_str()),
+        );
+        object.insert(
+            "expansion_id".to_string(),
+            serde_json::json!(expansion.expansion_id.as_str()),
+        );
+        object.insert(
+            "node_id".to_string(),
+            serde_json::json!(expansion.node_id.as_str()),
+        );
+        object.insert(
+            "source_instance_id".to_string(),
+            serde_json::json!(expansion.source_instance_id.as_deref()),
+        );
+        object.insert(
+            "item_count".to_string(),
+            serde_json::json!(expansion.item_count),
+        );
+        object.insert(
+            "keys".to_string(),
+            expansion.keys.clone().unwrap_or(Value::Null),
+        );
+        object.insert("at".to_string(), serde_json::json!(expansion.at.as_str()));
+        println!("{}", Value::Object(object));
+    }
+}
+
 /// 追加 human 决策摘要（人类可读；无决策行时**不输出**，默认 run 输出不变）。
 ///
 /// 形状：`human_decisions: N (approved A / rejected R; pending P)` + 每行
@@ -417,6 +469,34 @@ fn print_human_decisions(decisions: &[HumanDecisionRow]) {
             decision.decided_at,
             decision.consumed_at.as_deref().unwrap_or("-"),
             decision.reason.as_deref().unwrap_or("-"),
+        );
+    }
+}
+
+/// 追加 foreach 展开摘要（W4b / DR-007 §8.4；无展开时不输出，默认输出逐字节不变）。
+///
+/// 形状（每次展开）：`foreach node='<F>' items=<N> keys=[...]` + 明细行
+/// `  source_instance=<id|-> at=<ts>`；`keys` 为结构化 JSON 数组（NULL 键以
+/// `{"$index": i}` 表示，DR-007 §6.1）。
+fn print_foreach_expansions(expansions: &[ForeachExpansionRow]) {
+    if expansions.is_empty() {
+        return;
+    }
+    println!();
+    for expansion in expansions {
+        let keys = expansion
+            .keys
+            .as_ref()
+            .map(|keys| keys.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        println!(
+            "foreach node='{}' items={} keys={keys}",
+            expansion.node_id, expansion.item_count
+        );
+        println!(
+            "  source_instance={} at={}",
+            expansion.source_instance_id.as_deref().unwrap_or("-"),
+            expansion.at
         );
     }
 }
