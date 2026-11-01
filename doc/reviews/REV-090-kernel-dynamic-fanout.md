@@ -142,3 +142,15 @@ git merge-base HEAD main                    # 948d677
 ### 7.4 复审结论
 
 **C1 + N1–N3（及 N4/N5 对应项）关闭；复审无 P0/P1；最终结论：通过。** 建议 Lead 追加 cli 第二评审后 merge（HEAD `f6e8ed9` + 本记录提交）。
+
+## 8. 第二评审 · cli bridge 跨模块机械改动（Lead 追加，2026-11-01）
+
+- **评审人**：`lead`（**≠ 作者** `kernel-dev`；Lead 已批准跨模块机械改动，按 AGENTS §2 追加第二评审）
+- **范围**：`crates/zgraph-cli/src/bridge.rs`（`948d677..f6e8ed9`，+83/−4）：
+  1. `TraceBridge::foreach_expansion` 实现：kernel `ForeachExpansionRecord` → trace v6 `TraceInput::ForeachExpansion`（不产生 events 行，`events.kind` 不变）；
+  2. `map_snapshot` 把 trace 分支的占位 `0/None` 替换为 kernel `InstanceSnapshot` 真实 `item_index/item_key`（类型一致 u32/Option<String>）；
+  3. `map_foreach_expansion`：`item_count` `u64::from`、`keys: Vec<Option<String>>` → JSON：`None` → `{"$index": i}`、string 原样（DR-007 §6.1/§8.3 冻结表示）；
+  4. bridge 测试：新 `foreach_expansion_persists_row_with_index_keys`（落 `foreach_expansions` 行、keys `["k0",{"$index":1}]`、u32→u64）；既有 sink 测试字面量补 item 默认字段。
+- **核对结论（通过）**：仅映射/占位替换/测试；无 cli 其它逻辑、命令行参数、退出码改动；无 foreach 图行为不变；未放宽容差或断言；kernel 源码无其它改动。
+- **Lead 亲自验证**：`cargo test -p zgraph-cli --offline` = 207 passed / 0 failed；`git diff 948d677..f6e8ed9 --stat` 仅 kernel 3 文件 + cli bridge 1 文件。
+- **结论**：**通过（第二评审）**。cli 机械改动与主审结论合并生效；分支满足合并前置。
