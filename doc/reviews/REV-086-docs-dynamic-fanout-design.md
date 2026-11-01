@@ -8,35 +8,38 @@
 - **评审人**：`reviewer-b`（独立评审，**≠ 作者**）
 - **变更范围**：`559ede6..ab53d4e`（14 files，+917/−56）：新增 `doc/decisions/DR-007-w4a-dynamic-fanout-freeze.md`（557 行）；spec 00/01/02/03/04/06/07 W4a 冻结写入；`doc/design/software-team-sop-v1.md` 升 v1.2；DR-004 §10、`doc/index.md`、`doc/progress.md`、`doc/spec-v1.2/README.md`、`PROVENANCE.md`。
 - **评审时间**：2026-11-01
+- **复审**：2026-11-01，HEAD **`fd06908`**（条件修复提交，parent `703ea07`；14 files 纯 doc +157/−85）；C1–C5 已关闭，结论升级为 **通过**（首轮结论保留为历史，见 §7）
 - **关联**：task-29（Lead 冻结口径合同）、task-30（作者任务）、DR-004 §3 W4a/§5 D4、DR-005/DR-006 格式、spec 01/02/03/06/07、SOP v1.2
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1=5（C1–C5，均为设计冻结闭环前必须关闭的阻断项）**；P2=6；P3=10。核心方向（运行期动态 N、无 controller 实例、item 定位、join、trace v6、默认零变化）与 DR-004 D4/task-29 合同一致，文档骨架完整、PROVENANCE 数字/哈希实测准确；但**区域边界、join 投递来源、controller buffer 生命周期、AC-17 错误覆盖、4 条 Lead 裁决落盘**存在可实现性/一致性问题，若不冻结会在 W4b 产生歧义实现。C1–C4 是 DR/spec 的设计补全，C5 是 AC 覆盖补全；关闭后由 Lead 复审（条件关闭记录见 §7）。
+**复审（2026-11-01，HEAD `fd06908`）：C1–C5 全部关闭，证据见 §7；下方首轮「有条件通过」记录保留为历史。** 复审无 P1；残余 P2=5 / P3=3（§7.3，均不阻断）。
 
-**4 条待确认项与 Lead 2026-11-01 裁决核对**（均与 DR-007 已冻结默认值**语义一致**；但 DR §15.3 仍标「需确认」，见 C4）：
+> **首轮结论（2026-11-01，HEAD `703ea07`）：有条件通过**（已被上方复审取代；保留为历史）。首轮 P0=0；P1=5（C1–C5）；P2=6；P3=10。核心方向（运行期动态 N、无 controller 实例、item 定位、join、trace v6、默认零变化）与 DR-004 D4/task-29 合同一致，文档骨架完整、PROVENANCE 数字/哈希实测准确；首轮问题集中在**区域边界、join 投递来源、controller buffer 生命周期、AC-17 错误覆盖、4 条 Lead 裁决落盘**。首轮 C1–C4 是 DR/spec 的设计补全，C5 是 AC 覆盖补全；均已由 `fd06908` 关闭。
+
+**4 条待确认项与 Lead 2026-11-01 裁决核对**（均与 DR-007 已冻结默认值**语义一致**；C4 已关闭——§15.3 已落盘 Lead 裁决；仅 DR-004 执行行仍为历史表述，见 §7.3 N21）：
 
 | 项 | Lead 裁决 | DR-007 现状 | 核对结果 |
 |---|---|---|---|
-| ① `item_key` canonical 字符串 | number canonical / bool `true\|false` / 复杂值 → NULL 按索引派生 | §2.1/§6.2/E-4 冻结 string 原值、number/bool canonical、null/object/array→NULL | 一致；但 §6.2 有自问自答/「非法」矛盾句，需清理（C4） |
-| ② `max_items` 缺省无上限 | 采纳，风险登记 | §2.1/§6.2/E-10/§13 冻结「缺省无上限」+ 风险表 | 一致；台账未登记（P3 N12） |
+| ① `item_key` canonical 字符串 | number canonical / bool `true\|false` / 复杂值 → NULL 按索引派生 | §2.1/§6.2/E-4 冻结 string 原值、number/bool canonical、null/object/array→NULL | 一致；§6.2 自问自答/「非法」矛盾句已清理（C4 关闭） |
+| ② `max_items` 缺省无上限 | 采纳，风险登记 | §2.1/§6.2/E-10/§13 冻结「缺省无上限」+ 风险表 | 一致；ISSUE-141 已登记（N12 关闭） |
 | ③ join 目标可为 `end`，数组按普通端口值进入 end 聚合 | 采纳 | §2.1/§3.2/§6.5/E-6/01 §1.9 冻结 J 可为 end、`run_output` 对应端口为数组 | 一致 |
-| ④ region 内 `trigger=any` 沿用普通 any（未到端口 null） | 采纳 | §6.1/E-3/§15.2 冻结 controller buffer 按 any 就绪、未到端口 null | 一致；但 `items_port` 是否必须先到未显式（C3/P2） |
+| ④ region 内 `trigger=any` 沿用普通 any（未到端口 null） | 采纳 | §6.1/E-3/§15.2 冻结 controller buffer 按 any 就绪、未到端口 null | 一致；§6.1 已冻结 items_port 必须先到（C3 关闭） |
 
 ## 2. 四维评审
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性/可实现性 | ⚠️ 有条件 | 方向与 D4/task-29 一致；但 C1（F 入边边界）、C2（join 投递来源）、C3（controller 未就绪）会让 W4b 无法唯一实现；C5 使 4 个 `RUN_FOREACH_*` 中 `ITEM_INCOMPLETE` 无验收口径 |
-| 结构合理性 | ✅（P2 备注） | 新增 DR-007 + 分册 banner/正文/AC-17/Dr-004/index/PROVENANCE 结构完整；无代码改动；但 00/01 代码块/表格格式损坏（N6）、`join_buffer`/`ControllerBuffer` 未入 RunState（N9） |
-| 逻辑性 | ⚠️ 有条件 | R17/R18 顺序、reason 闭集、hash 投影、迁移步骤清晰；C1–C3 的边界/来源/生命周期缺口破坏「唯一判定」；历史 W2b banner 被改写（N7） |
-| 可读性 | ⚠️ 有条件 | DR 结构/表格可读，但 §6.2 canonical 段自问自答（C4）、README 02/index SOP 陈旧（N11）、SOP §9「四项」（N14）等降低可读性/可追溯性 |
+| 功能正确性/可实现性 | ✅（复审通过） | 方向与 D4/task-29 一致；首轮 C1–C3/C5 已关闭（§7.1）；残余仅为 P2 实现细节（N24/N25），不改变设计判定 |
+| 结构合理性 | ✅（P2 备注） | DR-007 + 分册 banner/正文/AC-17 a–j/DR-004/index/PROVENANCE 结构完整；`ControllerBuffer`/`JoinBuffer`/`ControllerState` 已入 01；无代码改动；残 README 02 行与 DR-004 执行行文案（N21/N22） |
+| 逻辑性 | ✅（复审通过） | R17/R18 顺序、reason 闭集、hash 投影、迁移步骤清晰；C1–C3 的边界/来源/生命周期已冻结；历史 W2b banner 已恢复（N7 关闭） |
+| 可读性 | ✅（P2 备注） | §6.2 canonical 已重写、index SOP/README 00 已更新、SOP §9「四项」已改「三项」；残 README 02 行、AC-17 j 机制措辞（N22/N23）等 P2/P3 阅读性问题 |
 
-## 3. 发现清单（P0=0 / P1=5 / P2=6 / P3=10）
+## 3. 发现清单（首轮：P0=0 / P1=5 / P2=6 / P3=10；C1–C5 已于复审关闭，证据见 §7）
 
-### P1 · 条件（合并前必须关闭）
+### P1 · 首轮条件（均已于复审关闭）
 
 | # | 位置 | 问题 | 建议 |
 |---|---|---|---|
@@ -104,21 +107,69 @@ git diff --numstat main...HEAD -- doc/spec-v1.2 | awk ...              # +281/�
 
 ## 5. 作者 4 条待确认项与 Lead 裁决（逐条）
 
-见 §1 表：①–④ **DR-007 冻结默认值均与 Lead 裁决一致**（canonical number/bool + 复杂值 NULL；max_items 缺省无上限；J 可为 end、数组入 end 聚合；trigger=any 沿用 ordinary any）。**但 DR §15.3 仍把四者标为「需确认」**，且 §6.2 canonical 段落含自问自答/「非法」矛盾，需在 C4 一次性落盘 Lead 2026-11-01 裁决（历史段只追加）。未发现与裁决相悖的冻结值。
+见 §1 表：①–④ **DR-007 冻结默认值均与 Lead 裁决一致**（canonical number/bool + 复杂值 NULL；max_items 缺省无上限；J 可为 end、数组入 end 聚合；trigger=any 沿用 ordinary any）。**C4 已关闭**：DR-007 §15.3 已落盘 Lead 2026-11-01 裁决表、§6.2 canonical 段已重写、DR-004 旧 W3b 行已加取代注记；历史段只追加。未发现与裁决相悖的冻结值。
 
 ## 6. 遗留问题
 
-- **C1–C5 关闭后**：由 Lead 复审条件关闭记录（可复用本记录 §7 表追加关闭证据）；关闭前不合并。
-- **W4b 后续**：C1–C3 的状态机/来源冻结直接影响 kernel/trace 实现；C5 进入 W4b e2e；W4b-docs 回写 as-built/AC-17 实测/08 注记。
-- **P2/P3**：N6 格式（00/01）、N7 历史改写、N8 子图归属、N9 状态类型、N10 keys 表示、N11 README/index、N12 issues 台账、N13 DR-004 旧行、N14 SOP 文字、N15 R18 row4/README 00/07 DoD、N16 v1..v5 表述、N17 canonical 文案、N18 source_instance_id、N19 AC 补全、N20 index DR-004；建议 docs-dev 在关闭 C1–C5 时一并处理 N6/N7/N11（合并前），其余进台账/后续批次。
-- **无 P0**；无代码/实现改动；不需要 e2e/cargo 验证。
+- **C1–C5 已全部关闭（2026-11-01 复审，HEAD `fd06908`）**；证据与残余 P2/P3 见 §7。首轮记录保留在 §1、§3（历史）。
+- **W4b 后续**：C1–C3 的状态机/来源/生命周期已冻结，直接作为 kernel/trace 实现依据；C5 的 AC-17 j 进入 W4b e2e；W4b-docs 回写 as-built/AC-17 实测/08 注记。
+- **残余 P2/P3（不阻断）**：N21 DR-004 执行行仍为历史「待确认」表述（DR-007 §15.3 已确认）；N22 README 02 行未逐项写 W4a R17/R18；N23 AC-17 j 的「出边 gate=false」应为「E 的入边全被门控拦截」；N24 N=0 controller 注入 `[]` 的 J 实例创建/边结算细节；N25 controller `Skipped` 时 F 无实例的出边 skip/来源细节；N26 `progress`/index 复审后「待复审」状态由 Lead/merge 更新；N27 `01` `explizit` 拼写等 P3。均不改变冻结语义，建议 W4b 前顺手处理。
+- **无 P0/P1**；无代码/实现改动；不需要 e2e/cargo 验证。
 
-## 7. 条件关闭记录（待关闭）
+## 7. 条件关闭复审（2026-11-01，HEAD `fd06908`）
 
-| 条件 | 状态 | 关闭证据（由作者/Lead 追加） |
+**复审对象**：`703ea07..fd06908`（作者修复提交 `fd06908`，parent 评审提交 `703ea07`）；14 files **纯 doc/**，+157/−85；作者提交正文含 `Review: REV-086` / `Agent: docs-dev`；worktree 干净。首轮条件表见 §3（历史），以下为关闭证据。
+
+### 7.1 C1–C5 逐条关闭证据
+
+| 条件 | 状态 | 复审证据 |
 |---|---|---|
-| C1 R18 F 入边边界 | **open** | DR §3.2/§4 + 02 R18 + N-13 fixture |
-| C2 join 来源/空列表 GateResult | **open** | DR §6.5/03 §3.4.6/07 AC-17 c + 06 trace 证据 |
-| C3 controller 未就绪/终止/skip/defer | **open** | DR §6.1/§6.7/§15.1 + 03 §3.10/§3.4.6 + AC |
-| C4 Lead 4 项裁决 + §6.2 清理 + DR-004 旧行 | **open** | DR §15.3/§15.2/§6.2 + DR-004 §10 |
-| C5 AC-17 `ITEM_INCOMPLETE`/canonical 覆盖 | **open** | 07 AC-17 + DR §6.6/03 §3.15 |
+| **C1 R18 F 入边边界** | **closed** | DR-007 §3.2 row8 增加「**F 的全部入边来源 ∉ R**（reason=`external_edge`）」；§4 伪码增加 `if v == F and any(in_edge.from in R): error(external_edge)`；反例 **N-13** 已加（region 内节点/回边→F）；02 R18 表同步「边界闭合含 F 入边 ∉R」并给反例；03 §3.4.6 `on_delivery` 注明 controller 只接收 R 外投递。→ 满足 task-29 A2。 |
+| **C2 join 来源/GateResult** | **closed** | DR-007 §6.5 冻结：**N>0** `Delivery.from_instance`/`GateResultRecord.instance_id`/`attempt` = 最后完成使 join_buffer 达 N 的 E item 实例；**N=0** 无 GateResult/Delivery，controller 注入 `[]`（trace=expansion+J input/transition）；03 §3.4.6/§3.15、06 §6.2.15、07 AC-17 c 同步。→ 满足 Lead C2 口径。 |
+| **C3 controller 生命周期/终止** | **closed** | 01 §1.6.1 新增 `ControllerState{Collecting,Ready,Expanded,Skipped}`/`ControllerBuffer`/`JoinBuffer`，RunState 增 `controller_buffers`/`join_buffer`；DR-007 §6.1/§6.6/§6.7 冻结 items_port 必须先到、全部 settle=false→Skipped、部分到达静默→RUN_DEADLOCK、defer→F、Expanded/Skipped 拒绝投递；03 §3.4.6/§3.10 `is_quiescent` 改为 live controller ∈{Collecting,Ready}，`Expanded/Skipped` 不算活跃。→ 满足 Lead C3 口径。 |
+| **C4 Lead 4 项裁决落盘** | **closed** | DR-007 §15.3 改为「Lead 裁决（2026-11-01，已确认）」表：①canonical、②max_items 无上限、③join 可 end、④trigger=any；§6.2 canonical 段重写为单一冻结陈述（去掉「非法」自问自答）；DR-004 §10 旧「W3b 可选，需用户确认」行加「已被 2026-11-01 决定取代」注记（历史保留）。ISSUE-141 已登记 max_items 风险。 |
+| **C5 AC-17 ITEM_INCOMPLETE/canonical** | **closed** | 07 新增 **AC-17 j**（`exit_skipped.json`：E Skipped→`RUN_FOREACH_ITEM_INCOMPLETE`/无 Crashed/其余 item Cancelled/无 join 投递；`keys_canonical.json`：number/bool/string/null·object→`{"$index":i}`/非 NULL 重复）；AC-17 总 DoD 明确覆盖 4 个 `RUN_FOREACH_*` + 5 类边界；07 banner/§7.1/§7.2/DR §11 同步 a–j。→ 覆盖缺口关闭（测试机制措辞见 N23 残余）。 |
+
+### 7.2 复审验证（新 HEAD + 重算数字）
+
+```bash
+git diff --stat 703ea07..fd06908         # 14 files changed, 157 insertions(+), 85 deletions(-)
+git -c core.quotepath=false diff --name-only 703ea07..HEAD | grep -v '^doc/'   # 无（纯 doc）
+git status --porcelain                   # 空
+git log -1 --format='%B' fd06908         # 含 Review: REV-086 / Agent: docs-dev
+bash scripts/dev/check.sh                # PASSED
+wc -l doc/progress.md                    # 15（≤30）
+
+wc -l doc/spec-v1.2/0[0-8]-*.md | tail -1  # 7154（与 PROVENANCE §3/§2 第24条一致）
+wc -l doc/spec-v1.2/*.md | tail -1         # 7532（含 README/PROVENANCE/REFERENCES）
+git diff --numstat 559ede6..HEAD -- doc/spec-v1.2/0[0-8]-*.md | awk ...  # +285/−17（净 +268）
+git diff --numstat 559ede6..HEAD -- doc/spec-v1.2 | awk ...              # +330/−37（净 +293）
+
+for f in doc/spec-v1.2/0[0-8]-*.md; do shasum -a 256 "$f"; wc -l "$f"; done
+# 9/9 SHA/行数与 PROVENANCE §3 当前表逐字节一致：
+# 00 b966952...344 / 01 2472260...446 / 02 548d82c...984 / 03 cb2d964...684 /
+# 04 b051c3c...939 / 05 52f35e7...1429 / 06 c82e4f7...1273 / 07 bc90d67...491 / 08 9450d7a...564
+```
+
+- **PROVENANCE §3/§2 第 24 条全部实测一致**：00–08 **7154**、spec 目录 **7532**、00–08 numstat **+285/−17**、全目录 **+330/−37**；9 分册 SHA/行数逐字节一致；README 行数表 344/446/984/684/939/1429/1273/491/564 一致。
+- **锚点/无残留**：`AC-17 a–j` 已在 DR-007/07/README/PROVENANCE/DR-004 同步；当前 spec/DR 中无「a–i」残留、无 `#index`/`#<index>` 旧表示；00/01 代码块/表格已拆行；02 W2b 历史 banner 恢复原文（`R1→R13→R15→R16→R14`、18 码），W4a 单独 banner 记录 19 码/新增 R18；子图内 foreach 归 R6（02 R6/R17 已改）；06 迁移链改「v1→…→v6（含 v5→v6）」；R18 row4 顺序冻结；`source_instance_id` 规则冻结（N18）。
+- **SOP/文档**：SOP §9 已「三项」、§7.1「静态两 profile 共用」；index SOP 行改 v1.2 三 profile；README 00 行 19 码；DR-004 行补 W3a/W3b/W4a 状态；ISSUE-141 已登记。
+- **范围**：`git diff 703ea07..HEAD` 14 files +157/−85 纯 doc；无代码/测试/配置；无 cargo 运行（docs-only）。
+
+### 7.3 残余 P2/P3（不阻断，建议 W4b 前顺手处理）
+
+| # | 级别 | 位置 | 问题 | 建议 |
+|---|---|---|---|---|
+| N21 | P2 | DR-004 §10 W4a 行（L272） | 该执行记录仍写「**待确认项 4 条见 DR-007 §15.3**…由 REV-086 逐条确认」；DR-007 §15.3 已改为已确认，DR-004 行属历史交接表述但现读起来像仍待确认 | 在 DR-004 §10 追加一行「REV-086 复审（2026-11-01）确认 4 项裁决」或按只追加原则注明；不改历史行 |
+| N22 | P2 | `doc/spec-v1.2/README.md` 02 行（L25） | 已改为「R1–R18」并加 W4a 顺序括注，但行内**未列 W4a `foreach`/R17/R18/`DSL_FOREACH_INVALID`** 的实质内容（仅顺序提示）；README 00 行已 19 码、07 行已 AC-17 a–j | 02 行补「W4a：`foreach` + R17/R18 + `DSL_FOREACH_INVALID`」一句，与 README 00/07 一致 |
+| N23 | P2 | `07-验收用例.md` AC-17 j 第 1 条（L~470） | 文字写「某 item 的 E 因**出边** gate=false 全部 Skipped」；E→J 边由 R18 禁止 gate，E Skipped 实际由 **E 的入边**全被门控拦截导致（E 是出口节点）；W4b 实现 e2e 时可能照错措辞构造错误 fixture | 改为「E 的全部入边 gate=false → E Skipped（E 为 region 出口，无法完成 join）」；断言不变 |
+| N24 | P2 | DR-007 §6.5 N=0 / 03 §3.4.6 L413 / AC-17 c | N=0 冻结「controller 直接把 `[]` 写入 J 输入 buffer，不产生 Delivery/GateResult」；但未明确 **J 实例如何创建**（created_seq/transition/是否走 entry 注入等价路径）与 E→J 边如何结算；AC c 却要求 J `instances.input`/transition 可断言 | 在 DR/03 补一句「注入等价于 entry 外部注入：必要时创建 J 实例并写 input，不产生 GateResult/Delivery；J 的 transition/instances.input 作为证据」，明确 E→J 边结算/无 GateResult |
+| N25 | P2 | DR-007 §6.6 controller Skipped 行 / 03 §3.4.6 L428 | controller `Skipped`（F 无实例）时写「F 的出边按普通 skip 级联（E→J 无数据 → J 按普通规则 skip/等其它入边）」；但 F/E 均无实例，E→J 边的 settlement 来源/GateResult 语义未像 N=0 那样冻结；J 若未实例化则无法级联 | 明确 controller-origin skip 的边结算（与 N=0 同路径：不产生 GateResult/Delivery，或定义 controller source），并补 AC-17 f 的 J skip/等其它入边断言 |
+| N26 | P3 | `doc/progress.md`、`doc/index.md` | 复审提交后 progress 仍写「待复审」、index reviews 行仍「首轮有条件通过 → C1–C5 已修复，待复审」；属状态行陈旧（Lead/merge 动作后可更新） | merge 后由 Lead 更新为「REV-086 通过」；不影响设计冻结 |
+| N27 | P3 | `01-领域模型与状态机.md` L~80 `item_key` 注释 | 保留拼写 `explizit`（德语拼法，应为 explicit）；仅为注释拼写 | 顺手改 explicit；不影响语义 |
+
+> 残余均不改变 C1–C5 冻结语义；C2/C3 的 N24/N25 是**实现级边界细节**，Lead 已明确 C2 的机制（N=0 不产生 GateResult/Delivery、controller 注入），故不作为合并阻断。若 Lead 认为需在 W4b 前定稿，可在 W4b-docs 或小 commit 处理。
+
+### 7.4 复审结论
+
+**C1–C5 全部关闭；复审无 P0/P1；最终结论：通过。** 建议 Lead 执行 merge（`fd06908` + 本评审记录提交）。
