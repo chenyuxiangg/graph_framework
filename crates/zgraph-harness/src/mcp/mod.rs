@@ -15,8 +15,8 @@ mod real;
 #[cfg(any(test, feature = "mcp"))]
 pub mod testing;
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::constants::{
-    MAX_MCP_SERVER_NAME_CHARS, MAX_MCP_TOOL_DESCRIPTION_CHARS, MCP_DEFAULT_CALL_TIMEOUT_MS,
+    MAX_MCP_SERVER_NAME_CHARS, MAX_MCP_TOOL_DESCRIPTION_CHARS, MCP_DEFAULT_TIMEOUT_MS,
     MCP_MAX_RESTARTS_PER_RUN, MCP_MRTR_MAX_ROUNDS, MCP_REGISTRY_MAX_BYTES,
     MCP_TOOL_RESULT_MAX_CHARS,
 };
@@ -81,16 +81,34 @@ pub enum McpTransport {
 }
 
 impl McpServerSpec {
-    /// 无密钥的启动命令/URL 摘要（stderr 提示用；不展开 env/headers 值）。
+    /// 无密钥的启动命令/URL 摘要（stderr 提示用；**脱敏**）。
+    ///
+    /// - URL 去 userinfo（`user:pass@`）与 query/fragment；
+    /// - args 中 `--token/--key/--secret/--password` 形态的值打码（`=` 形式与下一个参数）；
+    /// - env 只列变量名，不展开值；只输出 server 名/传输/命令骨架。
     pub fn display_command(&self) -> String {
         match &self.transport {
             McpTransport::Stdio {
                 command, args, env, ..
             } => {
-                let mut out = command.clone();
+                let mut out = format!("stdio: {command}");
+                let mut mask_next = false;
                 for arg in args {
+                    let masked = if mask_next {
+                        mask_next = false;
+                        "<redacted>".to_string()
+                    } else if is_secret_arg(arg) {
+                        if arg.contains('=') {
+                            format!("{}<redacted>", arg.split('=').next().unwrap_or(arg))
+                        } else {
+                            mask_next = true;
+                            "<redacted>".to_string()
+                        }
+                    } else {
+                        arg.clone()
+                    };
                     out.push(' ');
-                    out.push_str(arg);
+                    out.push_str(&masked);
                 }
                 if !env.is_empty() {
                     let names: Vec<&str> = env.keys().map(String::as_str).collect();
@@ -98,9 +116,38 @@ impl McpServerSpec {
                 }
                 out
             }
-            McpTransport::Http { url, .. } => url.clone(),
+            McpTransport::Http { url, .. } => format!("http: {}", sanitize_url(url)),
         }
     }
+}
+
+fn is_secret_arg(arg: &str) -> bool {
+    let lower = arg.to_ascii_lowercase();
+    let key = lower.split('=').next().unwrap_or(&lower);
+    matches!(
+        key.trim_start_matches('-'),
+        "token" | "key" | "secret" | "password" | "api-key" | "apikey" | "authorization"
+    )
+}
+
+fn sanitize_url(raw: &str) -> String {
+    let Some((scheme, rest)) = raw.split_once("://") else {
+        return raw.to_string();
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, Some(path)),
+        None => (rest, None),
+    };
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let mut sanitized = format!("{scheme}://{host}");
+    if let Some(path) = path {
+        sanitized.push('/');
+        sanitized.push_str(path);
+    }
+    sanitized
 }
 
 /// 已解析的 MCP 计划：只含本 Agent 引用的 servers + allow 列表。
@@ -224,7 +271,11 @@ pub trait McpClient: Send + Sync {
 #[async_trait]
 pub trait McpClientFactory: Send + Sync {
     /// 建立连接（stdio 启动子进程 / HTTP 建 transport + 握手）。
-    async fn connect(&self, spec: &McpServerSpec) -> Result<Arc<dyn McpClient>, McpClientError>;
+    async fn connect(
+        &self,
+        spec: &McpServerSpec,
+        assets_dir: &Path,
+    ) -> Result<Arc<dyn McpClient>, McpClientError>;
 }
 
 /// 由 `detail.reason` 生成 `HARNESS_MCP_ERROR`（无敏感值）。
@@ -395,22 +446,20 @@ impl McpRegistry {
             };
             servers.push(spec.clone());
         }
+        let server_names: Vec<&str> = servers.iter().map(|spec| spec.name.as_str()).collect();
         let mut allow_seen: BTreeMap<&str, ()> = BTreeMap::new();
         for entry in &config.allow {
-            let Some((server, tool)) = parse_full_tool_name(entry) else {
+            let Some((server, tool)) =
+                parse_tool_name_for_servers(entry, server_names.iter().copied())
+            else {
                 return Err(mcp_config_error(
                     "allow_invalid",
                     None,
-                    format!("invalid MCP allow entry '{entry}' (expected mcp__<server>__<tool>)"),
+                    format!(
+                        "invalid MCP allow entry '{entry}' (expected mcp__<configured-server>__<tool>)"
+                    ),
                 ));
             };
-            if !servers.iter().any(|spec| spec.name == server) {
-                return Err(mcp_config_error(
-                    "allow_invalid",
-                    Some(server),
-                    format!("MCP allow entry '{entry}' references an unconfigured server"),
-                ));
-            }
             if tool.is_empty() {
                 return Err(mcp_config_error(
                     "allow_invalid",
@@ -433,14 +482,28 @@ impl McpRegistry {
     }
 }
 
-/// 解析 `mcp__<server>__<tool>`（返回 `(server, tool)`）。
-pub fn parse_full_tool_name(full_name: &str) -> Option<(&str, &str)> {
+/// 解析 `mcp__<server>__<tool>`（`server` 名可能含 `__`）。
+///
+/// **必须**用已配置 server 名做最长前缀匹配（DR-010 §3 / REV-098 C1-P2④）：
+/// `mcp__my__server__echo` → (`my__server`, `echo`)；未配置 → `None`。
+pub fn parse_tool_name_for_servers<'a>(
+    full_name: &'a str,
+    servers: impl IntoIterator<Item = &'a str>,
+) -> Option<(&'a str, &'a str)> {
     let rest = full_name.strip_prefix("mcp__")?;
-    let (server, tool) = rest.split_once("__")?;
-    if server.is_empty() || tool.is_empty() {
-        return None;
+    let mut matched: Option<&'a str> = None;
+    for server in servers {
+        if rest.starts_with(server)
+            && rest[server.len()..].starts_with("__")
+            && rest.len() > server.len() + 2
+            && matched.is_none_or(|current| server.len() > current.len())
+        {
+            matched = Some(server);
+        }
     }
-    Some((server, tool))
+    let server = matched?;
+    let tool = &rest[server.len() + 2..];
+    (!tool.is_empty()).then_some((server, tool))
 }
 
 pub(crate) fn is_valid_server_name(name: &str) -> bool {
@@ -491,7 +554,7 @@ fn parse_server(
         ));
     }
     let timeout_ms = match object.get("timeout_ms") {
-        None => MCP_DEFAULT_CALL_TIMEOUT_MS,
+        None => MCP_DEFAULT_TIMEOUT_MS,
         Some(value) => value
             .as_u64()
             .filter(|value| (1..=600_000).contains(value))
@@ -678,21 +741,29 @@ fn expand_env(
 }
 
 /// 把已发现的 MCP 工具映射为 `ToolDef`（只保留显式请求 ∩ allow）。
+///
+/// LLM 可见函数名按 `^[a-z][a-z0-9_]{0,63}$` 归一化（非法字符→`_`，超长/冲突→短 hash），
+/// 反向映射由 [`McpBoundTool`] 携带；原始 MCP 工具名不变。
 pub fn map_tools(
     plan: &McpPlan,
     requested: &[String],
     discovered: &[McpTool],
-) -> Result<Vec<ToolDef>, HarnessError> {
+) -> Result<Vec<McpBoundTool>, HarnessError> {
     let mut by_name: BTreeMap<String, &McpTool> = BTreeMap::new();
     for tool in discovered {
         by_name.insert(tool.full_name(), tool);
     }
+    let server_names: Vec<&str> = plan.servers.iter().map(|spec| spec.name.as_str()).collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut tools = Vec::new();
     for reference in requested {
-        if !reference.starts_with("mcp__") {
+        if !reference.starts_with("mcp__") || !seen.insert(reference.clone()) {
             continue;
         }
-        let Some((server_name, _tool_name)) = parse_full_tool_name(reference) else {
+        let Some((server_name, _tool_name)) =
+            parse_tool_name_for_servers(reference, server_names.iter().copied())
+        else {
             return Err(mcp_config_error(
                 "config_invalid",
                 None,
@@ -720,12 +791,17 @@ pub fn map_tools(
                 format!("MCP tool '{reference}' not found on server '{server_name}'"),
             ));
         };
-        tools.push(ToolDef {
-            name: reference.clone(),
-            description: truncate_chars(&tool.description, MAX_MCP_TOOL_DESCRIPTION_CHARS),
-            parameters: tool.input_schema.clone(),
-            timeout_ms: spec.timeout_ms,
-            source: format!("mcp:{}", spec.name),
+        let function_name =
+            normalized_function_name(server_name, &tool.name, reference, &mut taken);
+        tools.push(McpBoundTool {
+            def: ToolDef {
+                name: function_name,
+                description: truncate_chars(&tool.description, MAX_MCP_TOOL_DESCRIPTION_CHARS),
+                parameters: tool.input_schema.clone(),
+                timeout_ms: spec.timeout_ms,
+                source: format!("mcp:{}", spec.name),
+            },
+            original: (*tool).clone(),
         });
     }
     Ok(tools)
@@ -738,26 +814,20 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-/// 截断工具结果到 `MCP_TOOL_RESULT_MAX_CHARS`（chars；追加标记）。
-pub fn truncate_result(value: &str) -> String {
-    if value.chars().count() <= MCP_TOOL_RESULT_MAX_CHARS {
-        return value.to_string();
-    }
-    let head: String = value.chars().take(MCP_TOOL_RESULT_MAX_CHARS).collect();
-    format!("{head}…[mcp result truncated]")
-}
-
-/// 运行期 MCP 状态：每 run 每 server 懒连接、工具列表 run 级缓存、崩溃重连≤1。
-pub struct McpRun {
-    plan: Arc<McpPlan>,
+/// 每 run 共享的 MCP 连接池：`server → client` + `server → tools` 缓存。
+///
+/// **plan/allow 不在这里**（按 agent 隔离，REV-098 C1）：同一 run 的多个 agent 共享
+/// 连接与 `tools/list` 结果，但各自的 servers/allow 由 [`McpRun`] 视图约束。
+pub struct McpPool {
     factory: Arc<dyn McpClientFactory>,
-    state: tokio::sync::Mutex<RunState>,
+    assets_dir: PathBuf,
+    state: tokio::sync::Mutex<PoolState>,
 }
 
 #[derive(Default)]
-struct RunState {
+struct PoolState {
     clients: BTreeMap<String, ClientSlot>,
-    discovered: Option<Vec<McpTool>>,
+    server_tools: BTreeMap<String, Vec<McpTool>>,
 }
 
 struct ClientSlot {
@@ -765,22 +835,150 @@ struct ClientSlot {
     restarts: u32,
 }
 
-impl McpRun {
-    /// 构造（不立即连接；懒启动）。
-    pub fn new(plan: Arc<McpPlan>, factory: Arc<dyn McpClientFactory>) -> Arc<Self> {
+impl McpPool {
+    /// 构造（不连接；懒启动）。
+    pub fn new(factory: Arc<dyn McpClientFactory>, assets_dir: PathBuf) -> Arc<Self> {
         Arc::new(Self {
-            plan,
             factory,
-            state: tokio::sync::Mutex::new(RunState::default()),
+            assets_dir,
+            state: tokio::sync::Mutex::new(PoolState::default()),
         })
     }
 
-    /// 本 run 的 MCP 计划。
+    async fn ensure_client(
+        &self,
+        state: &mut PoolState,
+        spec: &McpServerSpec,
+    ) -> Result<Arc<dyn McpClient>, HarnessError> {
+        if let Some(client) = state
+            .clients
+            .get(&spec.name)
+            .and_then(|slot| slot.client.clone())
+        {
+            return Ok(client);
+        }
+        let client = self
+            .factory
+            .connect(spec, &self.assets_dir)
+            .await
+            .map_err(|error| {
+                HarnessError::mcp_error(
+                    error.reason(),
+                    Some(&spec.name),
+                    None,
+                    Stage::Load,
+                    format!(
+                        "MCP server '{}' connect failed: {}",
+                        spec.name, error.message
+                    ),
+                )
+            })?;
+        state
+            .clients
+            .entry(spec.name.clone())
+            .or_insert(ClientSlot {
+                client: None,
+                restarts: 0,
+            })
+            .client = Some(client.clone());
+        Ok(client)
+    }
+
+    /// `tools/list`（按 server 缓存；同一 run 内跨 agent 共享）。
+    async fn tools_for(&self, spec: &McpServerSpec) -> Result<Vec<McpTool>, HarnessError> {
+        let mut state = self.state.lock().await;
+        if let Some(cached) = state.server_tools.get(&spec.name) {
+            return Ok(cached.clone());
+        }
+        let client = self.ensure_client(&mut state, spec).await?;
+        let tools = client.list_tools().await.map_err(|error| {
+            HarnessError::mcp_error(
+                error.reason(),
+                Some(&spec.name),
+                None,
+                Stage::Load,
+                format!(
+                    "MCP server '{}' tools/list failed: {}",
+                    spec.name, error.message
+                ),
+            )
+        })?;
+        state.server_tools.insert(spec.name.clone(), tools.clone());
+        Ok(tools)
+    }
+
+    async fn call(
+        &self,
+        spec: &McpServerSpec,
+        tool: &str,
+        args: Value,
+        timeout: Duration,
+    ) -> Result<McpCallOutcome, McpClientError> {
+        let mut state = self.state.lock().await;
+        let mut attempt = 0u32;
+        loop {
+            let client = self
+                .ensure_client(&mut state, spec)
+                .await
+                .map_err(|error| McpClientError::new(McpClientErrorKind::Init, error.message))?;
+            match client
+                .call_tool(tool, args.clone(), timeout, MCP_MRTR_MAX_ROUNDS)
+                .await
+            {
+                Ok(outcome) => return Ok(outcome),
+                Err(error)
+                    if matches!(error.kind, McpClientErrorKind::Closed)
+                        && attempt < MCP_MAX_RESTARTS_PER_RUN =>
+                {
+                    attempt += 1;
+                    if let Some(slot) = state.clients.get_mut(&spec.name) {
+                        if let Some(client) = slot.client.take() {
+                            client.shutdown().await;
+                        }
+                        slot.restarts += 1;
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// 关闭全部连接（best-effort；幂等）。
+    pub async fn shutdown(&self) {
+        let mut state = self.state.lock().await;
+        for slot in state.clients.values_mut() {
+            if let Some(client) = slot.client.take() {
+                client.shutdown().await;
+            }
+        }
+        state.server_tools.clear();
+    }
+}
+
+/// 单个 agent 的 MCP 视图（plan/allow 隔离；连接与 tools 缓存共享自 [`McpPool`]）。
+pub struct McpRun {
+    plan: Arc<McpPlan>,
+    pool: Arc<McpPool>,
+    bindings: tokio::sync::Mutex<BTreeMap<String, McpTool>>,
+}
+
+impl McpRun {
+    /// 构造（不立即连接；懒启动）。
+    pub fn new(plan: Arc<McpPlan>, pool: Arc<McpPool>) -> Arc<Self> {
+        Arc::new(Self {
+            plan,
+            pool,
+            bindings: tokio::sync::Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// 本 agent 的 MCP 计划。
     pub fn plan(&self) -> &McpPlan {
         &self.plan
     }
 
-    /// 启动提示（stderr；无密钥；调用方决定是否打印）。
+    /// 启动提示（stderr；脱敏；调用方决定是否打印）。
     pub fn startup_notice(&self) -> Vec<String> {
         self.plan
             .servers
@@ -795,73 +993,31 @@ impl McpRun {
             .collect()
     }
 
-    async fn ensure_client(
-        &self,
-        state: &mut RunState,
-        server: &str,
-    ) -> Result<Arc<dyn McpClient>, HarnessError> {
-        let spec = self.plan.server(server).ok_or_else(|| {
-            mcp_config_error("server_not_found", Some(server), "MCP server not in plan")
-        })?;
-        if let Some(slot) = state.clients.get(server) {
-            if let Some(client) = &slot.client {
-                return Ok(client.clone());
-            }
-        }
-        let client = self.factory.connect(spec).await.map_err(|error| {
-            HarnessError::mcp_error(
-                error.reason(),
-                Some(server),
-                None,
-                Stage::Load,
-                format!("MCP server '{server}' connect failed: {}", error.message),
-            )
-        })?;
-        state
-            .clients
-            .entry(server.to_string())
-            .or_insert(ClientSlot {
-                client: None,
-                restarts: 0,
-            })
-            .client = Some(client.clone());
-        Ok(client)
-    }
-
-    /// `tools/list`（每 run 缓存；列出所有 servers 的工具并过滤非法工具名/描述）。
+    /// `tools/list`（每 server 缓存共享；总 schema 大小受限）。
     pub async fn list_tools(&self) -> Result<Vec<McpTool>, HarnessError> {
-        let mut state = self.state.lock().await;
-        if let Some(cached) = &state.discovered {
-            return Ok(cached.clone());
-        }
         let mut all = Vec::new();
+        let mut schema_bytes = 0usize;
         for server in &self.plan.servers {
-            let client = self.ensure_client(&mut state, &server.name).await?;
-            let tools = client.list_tools().await.map_err(|error| {
-                HarnessError::mcp_error(
-                    error.reason(),
-                    Some(&server.name),
-                    None,
-                    Stage::Load,
-                    format!(
-                        "MCP server '{}' tools/list failed: {}",
-                        server.name, error.message
-                    ),
-                )
-            })?;
-            for mut tool in tools {
+            for mut tool in self.pool.tools_for(server).await? {
                 tool.server = server.name.clone();
-                if !is_valid_function_name(&tool.full_name()) {
-                    eprintln!(
-                        "warning: skipping MCP tool '{}' (name is not LLM-function-safe)",
-                        tool.full_name()
-                    );
-                    continue;
+                schema_bytes = schema_bytes.saturating_add(
+                    serde_json::to_string(&tool.input_schema)
+                        .map(|value| value.len())
+                        .unwrap_or(0),
+                );
+                if schema_bytes > crate::constants::MCP_TOOLS_LIST_MAX_BYTES {
+                    return Err(HarnessError::mcp_error(
+                        "init_failed",
+                        Some(&server.name),
+                        None,
+                        Stage::Load,
+                        "MCP tools/list schema exceeds the configured size limit",
+                    ));
                 }
                 if !tool.input_schema.is_object() {
                     eprintln!(
                         "warning: skipping MCP tool '{}' (inputSchema is not an object)",
-                        tool.full_name()
+                        tool.name
                     );
                     continue;
                 }
@@ -871,22 +1027,47 @@ impl McpRun {
             }
         }
         all.sort_by_key(|tool| tool.full_name());
-        state.discovered = Some(all.clone());
         Ok(all)
     }
 
+    /// 绑定 LLM 可见函数名 → 原始 MCP 工具（归一化/截断后的反向映射）。
+    pub async fn bind_tools(&self, bound: &[McpBoundTool]) {
+        let mut bindings = self.bindings.lock().await;
+        for item in bound {
+            bindings.insert(item.def.name.clone(), item.original.clone());
+        }
+    }
+
     /// 执行 MCP 工具（进程内）；失败返回 `TOOL_ERROR` JSON 内容（喂回 LLM）。
-    pub async fn execute_tool(&self, full_name: &str, args: &Value) -> (bool, String) {
-        let Some((server, tool)) = parse_full_tool_name(full_name) else {
-            return (
-                false,
-                crate::tools::tool_error_content(&ToolFailure::new(
-                    "unknown_mcp_tool",
-                    format!("invalid MCP tool name '{full_name}'"),
-                )),
-            );
+    pub async fn execute_tool(&self, function_name: &str, args: &Value) -> (bool, String) {
+        let bound = {
+            let bindings = self.bindings.lock().await;
+            bindings.get(function_name).cloned()
         };
-        if self.plan.server(server).is_none() {
+        let (server, tool) = match bound {
+            Some(tool) => (tool.server.clone(), tool.name.clone()),
+            None => {
+                let server_names: Vec<&str> = self
+                    .plan
+                    .servers
+                    .iter()
+                    .map(|spec| spec.name.as_str())
+                    .collect();
+                match parse_tool_name_for_servers(function_name, server_names.iter().copied()) {
+                    Some((server, tool)) => (server.to_string(), tool.to_string()),
+                    None => {
+                        return (
+                            false,
+                            crate::tools::tool_error_content(&ToolFailure::new(
+                                "unknown_mcp_tool",
+                                format!("invalid MCP tool name '{function_name}'"),
+                            )),
+                        )
+                    }
+                }
+            }
+        };
+        let Some(spec) = self.plan.server(&server) else {
             return (
                 false,
                 crate::tools::tool_error_content(&ToolFailure::new(
@@ -894,7 +1075,7 @@ impl McpRun {
                     format!("MCP server '{server}' is not configured for this agent"),
                 )),
             );
-        }
+        };
         if !args.is_object() {
             return (
                 false,
@@ -904,79 +1085,110 @@ impl McpRun {
                 )),
             );
         }
-        let timeout = self
-            .plan
-            .server(server)
-            .map(|spec| Duration::from_millis(spec.timeout_ms))
-            .unwrap_or(Duration::from_millis(MCP_DEFAULT_CALL_TIMEOUT_MS));
-        let mut state = self.state.lock().await;
-        let mut attempt = 0u32;
-        loop {
-            let client = match self.ensure_client(&mut state, server).await {
-                Ok(client) => client,
-                Err(error) => {
-                    return (
-                        false,
-                        crate::tools::tool_error_content(&ToolFailure::new(
-                            "mcp_init_failed",
-                            error.message.clone(),
-                        )),
-                    )
+        if !self.plan.tool_allowed(&format!("mcp__{server}__{tool}"))
+            && !self.plan.allow.is_empty()
+            && !self.plan.allow.iter().any(|entry| {
+                entry.ends_with(&format!("__{tool}"))
+                    && entry.starts_with(&format!("mcp__{server}__"))
+            })
+        {
+            return (
+                false,
+                crate::tools::tool_error_content(&ToolFailure::new(
+                    "tool_not_allowed",
+                    format!("MCP tool 'mcp__{server}__{tool}' is not allowed by this agent"),
+                )),
+            );
+        }
+        let timeout = Duration::from_millis(spec.timeout_ms);
+        match self.pool.call(spec, &tool, args.clone(), timeout).await {
+            Ok(outcome) => {
+                let (text, truncated) = truncate_result(&outcome.text);
+                if truncated {
+                    let payload = serde_json::json!({
+                        "truncated": true,
+                        "is_error": outcome.is_error,
+                        "text": text,
+                    });
+                    return (!outcome.is_error, payload.to_string());
                 }
-            };
-            let result = client
-                .call_tool(tool, args.clone(), timeout, MCP_MRTR_MAX_ROUNDS)
-                .await;
-            match result {
-                Ok(outcome) => {
-                    let text = truncate_result(&outcome.text);
-                    return (!outcome.is_error, text);
-                }
-                Err(error)
-                    if matches!(error.kind, McpClientErrorKind::Closed)
-                        && attempt < MCP_MAX_RESTARTS_PER_RUN =>
-                {
-                    // 崩溃/连接关闭：同 run 最多重启一次（仅重建该 server）。
-                    attempt += 1;
-                    if let Some(slot) = state.clients.get_mut(server) {
-                        if let Some(client) = slot.client.take() {
-                            client.shutdown().await;
-                        }
-                        slot.restarts += 1;
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    return (
-                        false,
-                        crate::tools::tool_error_content(&ToolFailure::new(
-                            error.reason(),
-                            error.message,
-                        )),
-                    )
-                }
+                (!outcome.is_error, text)
             }
+            Err(error) => (
+                false,
+                crate::tools::tool_error_content(&ToolFailure::new(error.reason(), error.message)),
+            ),
         }
     }
 
-    /// 关闭全部连接（run 结束/取消；best-effort）。
+    /// 关闭本 run 的连接（转给共享 pool；幂等）。
     pub async fn shutdown(&self) {
-        let mut state = self.state.lock().await;
-        for slot in state.clients.values_mut() {
-            if let Some(client) = slot.client.take() {
-                client.shutdown().await;
-            }
-        }
-        state.discovered = None;
+        self.pool.shutdown().await;
     }
 }
 
-fn is_valid_function_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.chars().count() <= 64
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+/// 映射后的绑定：LLM 可见 `ToolDef` + 原始 MCP 工具（反向映射）。
+#[derive(Debug, Clone)]
+pub struct McpBoundTool {
+    /// 发给 LLM 的工具定义（函数名已归一化到 `^[a-z][a-z0-9_]{0,63}$`）。
+    pub def: ToolDef,
+    /// 原始 MCP 工具。
+    pub original: McpTool,
+}
+
+/// 归一化 LLM 函数名：`^[a-z][a-z0-9_]{0,63}$`；非法字符→`_`，超长/冲突截断+短 hash。
+fn normalized_function_name(
+    server: &str,
+    tool: &str,
+    original_full: &str,
+    taken: &mut BTreeSet<String>,
+) -> String {
+    let mut tool_part: String = tool
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if tool_part.is_empty() {
+        tool_part = "tool".to_string();
+    }
+    let prefix = format!("mcp__{server}__");
+    let mut candidate = format!("{prefix}{tool_part}");
+    if candidate.chars().count() > 64 || taken.contains(&candidate) {
+        let hash = short_hash(original_full);
+        let keep = 64usize.saturating_sub(prefix.chars().count() + 9).max(1);
+        tool_part = tool_part.chars().take(keep).collect();
+        candidate = format!("{prefix}{tool_part}_{hash}");
+        while candidate.chars().count() > 64 && !tool_part.is_empty() {
+            tool_part.pop();
+            candidate = format!("{prefix}{tool_part}_{hash}");
+        }
+    }
+    taken.insert(candidate.clone());
+    candidate
+}
+
+/// FNV-1a 短 hash（函数名冲突/截断后缀；无需密码学强度）。
+fn short_hash(value: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{:08x}", (hash >> 32) as u32)
+}
+
+/// 截断工具结果到 `MCP_TOOL_RESULT_MAX_CHARS`（chars；返回是否截断）。
+pub fn truncate_result(value: &str) -> (String, bool) {
+    if value.chars().count() <= MCP_TOOL_RESULT_MAX_CHARS {
+        return (value.to_string(), false);
+    }
+    let head: String = value.chars().take(MCP_TOOL_RESULT_MAX_CHARS).collect();
+    (format!("{head}…[mcp result truncated]"), true)
 }
 
 /// 默认客户端工厂：`feature = "mcp"` 用 rmcp 实现，否则返回明确错误。
@@ -998,7 +1210,11 @@ struct UnavailableFactory;
 #[cfg(not(feature = "mcp"))]
 #[async_trait]
 impl McpClientFactory for UnavailableFactory {
-    async fn connect(&self, _spec: &McpServerSpec) -> Result<Arc<dyn McpClient>, McpClientError> {
+    async fn connect(
+        &self,
+        _spec: &McpServerSpec,
+        _assets_dir: &Path,
+    ) -> Result<Arc<dyn McpClient>, McpClientError> {
         Err(McpClientError::new(
             McpClientErrorKind::Init,
             "zgraph-harness was built without the `mcp` feature",
@@ -1022,6 +1238,10 @@ mod tests {
             },
             timeout_ms,
         }
+    }
+
+    fn pool(factory: Arc<FakeMcpFactory>) -> Arc<McpPool> {
+        McpPool::new(factory, std::path::PathBuf::from("."))
     }
 
     fn tool(server: &str, name: &str, description: &str) -> McpTool {
@@ -1190,13 +1410,13 @@ mod tests {
         let tools =
             map_tools(&plan, &["mcp__alpha__echo".to_string()], &discovered).expect("mapped");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "mcp__alpha__echo");
-        assert_eq!(tools[0].source, "mcp:alpha");
+        assert_eq!(tools[0].def.name, "mcp__alpha__echo");
+        assert_eq!(tools[0].def.source, "mcp:alpha");
         assert_eq!(
-            tools[0].description.chars().count(),
+            tools[0].def.description.chars().count(),
             crate::constants::MAX_MCP_TOOL_DESCRIPTION_CHARS
         );
-        assert_eq!(tools[0].parameters["type"], "object");
+        assert_eq!(tools[0].def.parameters["type"], "object");
 
         let error = map_tools(&plan, &["mcp__alpha__echo".to_string()], &discovered[1..])
             .expect_err("tool not found");
@@ -1215,7 +1435,7 @@ mod tests {
             servers: vec![spec("alpha", 1000)],
             allow: vec![],
         };
-        let run = McpRun::new(Arc::new(plan), factory);
+        let run = McpRun::new(Arc::new(plan), pool(factory));
         let tools = run.list_tools().await.expect("tools");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].server, "alpha");
@@ -1225,7 +1445,10 @@ mod tests {
 
         let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({"q": 1})).await;
         assert!(ok);
-        assert!(text.chars().count() <= crate::constants::MCP_TOOL_RESULT_MAX_CHARS + 64);
+        // 超限结果 → 机器可读 JSON（truncated:true）；不把 4 万字符全文塞回上下文。
+        let payload: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(payload["truncated"], true);
+        assert!(text.len() < 40_000);
         assert_eq!(client.call_count(), 1);
     }
 
@@ -1241,7 +1464,7 @@ mod tests {
             servers: vec![spec("alpha", 1000)],
             allow: vec![],
         };
-        let run = McpRun::new(Arc::new(plan), factory);
+        let run = McpRun::new(Arc::new(plan), pool(factory));
         let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({})).await;
         assert!(!ok);
         assert!(
@@ -1258,7 +1481,7 @@ mod tests {
             servers: vec![spec("alpha", 1000)],
             allow: vec![],
         };
-        let run = McpRun::new(Arc::new(plan), factory);
+        let run = McpRun::new(Arc::new(plan), pool(factory));
         let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({})).await;
         assert!(ok);
         assert_eq!(text, "recovered");
@@ -1274,7 +1497,7 @@ mod tests {
             servers: vec![spec("alpha", 5)],
             allow: vec![],
         };
-        let run = McpRun::new(Arc::new(plan), factory);
+        let run = McpRun::new(Arc::new(plan), pool(factory));
         let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({})).await;
         assert!(!ok, "isError result is a tool error");
         assert_eq!(text, "boom");
@@ -1282,10 +1505,76 @@ mod tests {
     }
 
     #[test]
+    fn parses_server_names_containing_double_underscore() {
+        let servers = ["my__server", "alpha"];
+        assert_eq!(
+            parse_tool_name_for_servers("mcp__my__server__echo", servers.iter().copied()),
+            Some(("my__server", "echo"))
+        );
+        assert_eq!(
+            parse_tool_name_for_servers("mcp__my__server__a__b", servers.iter().copied()),
+            Some(("my__server", "a__b"))
+        );
+        assert_eq!(
+            parse_tool_name_for_servers("mcp__ghost__echo", servers.iter().copied()),
+            None
+        );
+    }
+
+    #[test]
+    fn function_names_are_normalized_and_reversible() {
+        let plan = McpPlan {
+            servers: vec![spec("alpha", 1000)],
+            allow: vec![],
+        };
+        let discovered = vec![
+            tool("alpha", "My.Tool-Name", "d"),
+            tool("alpha", &"x".repeat(100), "d"),
+        ];
+        let requested: Vec<String> = discovered.iter().map(McpTool::full_name).collect();
+        let bound = map_tools(&plan, &requested, &discovered).expect("mapped");
+        assert_eq!(bound.len(), 2);
+        for item in &bound {
+            assert!(
+                item.def.name.len() <= 64
+                    && item
+                        .def
+                        .name
+                        .chars()
+                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'),
+                "function name contract: {}",
+                item.def.name
+            );
+            assert!(item.def.name.starts_with("mcp__alpha__"));
+        }
+        assert_eq!(bound[0].def.name, "mcp__alpha__my_tool_name");
+        assert!(bound[1].def.name.len() <= 64 && bound[1].def.name.contains('_'));
+    }
+
+    #[tokio::test]
+    async fn truncated_result_is_machine_readable_json() {
+        let client = FakeMcpClient::new().with_default_outcome("z".repeat(40_000), false);
+        let factory = FakeMcpFactory::new().with_client("alpha", client);
+        let plan = McpPlan {
+            servers: vec![spec("alpha", 1000)],
+            allow: vec![],
+        };
+        let run = McpRun::new(
+            Arc::new(plan),
+            McpPool::new(factory, std::path::PathBuf::from(".")),
+        );
+        let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({})).await;
+        assert!(ok);
+        let payload: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(payload["truncated"], true);
+    }
+
+    #[test]
     fn result_truncation_is_bounded() {
-        let text = truncate_result(&"y".repeat(40_000));
+        let (text, truncated) = truncate_result(&"y".repeat(40_000));
+        assert!(truncated);
         assert!(text.chars().count() <= crate::constants::MCP_TOOL_RESULT_MAX_CHARS + 64);
         assert!(text.contains("mcp result truncated"));
-        assert_eq!(truncate_result("small"), "small");
+        assert_eq!(truncate_result("small"), ("small".to_string(), false));
     }
 }

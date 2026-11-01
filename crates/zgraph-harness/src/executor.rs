@@ -80,8 +80,18 @@ pub struct HarnessExecutor {
     mcp_allowed: bool,
     /// v0.3/V3：MCP 客户端工厂（默认 rmcp；测试注入 Fake）。
     mcp_factory: Arc<dyn crate::mcp::McpClientFactory>,
-    /// v0.3/V3：run_id → MCP run 状态（懒连接；换 run 时关闭旧连接）。
-    mcp_run: tokio::sync::Mutex<Option<(String, Arc<crate::mcp::McpRun>)>>,
+    /// v0.3/V3：per-run MCP 会话（共享 pool + 每 agent 独立 plan/allow 视图）。
+    ///
+    /// REV-098 C1：同一 run 的多个 agent 共享 client/tools 缓存，但 servers/allow
+    /// 按 agent 隔离；换 run 时关闭旧 pool。
+    mcp_run: tokio::sync::Mutex<Option<McpSessionRuns>>,
+}
+
+/// 单 run 的 MCP 会话状态（executor 内部）。
+struct McpSessionRuns {
+    run_id: String,
+    pool: Arc<crate::mcp::McpPool>,
+    by_agent: HashMap<String, Arc<crate::mcp::McpRun>>,
 }
 
 impl HarnessExecutor {
@@ -190,8 +200,8 @@ impl HarnessExecutor {
     /// `feature = "mcp"` 关闭时同样安全（不编译 rmcp，只清理空槽）。
     pub async fn close_mcp(&self) {
         let mut guard = self.mcp_run.lock().await;
-        if let Some((_, run)) = guard.take() {
-            run.shutdown().await;
+        if let Some(session) = guard.take() {
+            session.pool.shutdown().await;
         }
     }
 
@@ -500,20 +510,31 @@ impl HarnessExecutor {
         };
         let run_id = job.ctx.run_id().to_string();
         let mut guard = self.mcp_run.lock().await;
-        if let Some((current, old)) = guard.as_ref() {
-            if current != &run_id {
-                old.shutdown().await;
-                *guard = None;
+        if let Some(session) = guard.as_ref() {
+            if session.run_id != run_id {
+                let old = guard.take().expect("checked");
+                old.pool.shutdown().await;
             }
         }
-        let run = match guard.as_ref() {
-            Some((_, run)) => run.clone(),
+        if guard.is_none() {
+            *guard = Some(McpSessionRuns {
+                run_id,
+                pool: crate::mcp::McpPool::new(
+                    self.mcp_factory.clone(),
+                    self.settings.assets_dir.clone(),
+                ),
+                by_agent: HashMap::new(),
+            });
+        }
+        let session = guard.as_mut().expect("session exists");
+        let run = match session.by_agent.get(&job.agent_id) {
+            Some(run) => run.clone(),
             None => {
-                let run = crate::mcp::McpRun::new(Arc::new(plan), self.mcp_factory.clone());
+                let run = crate::mcp::McpRun::new(Arc::new(plan), session.pool.clone());
                 for notice in run.startup_notice() {
                     eprintln!("{notice}");
                 }
-                *guard = Some((run_id, run.clone()));
+                session.by_agent.insert(job.agent_id.clone(), run.clone());
                 run
             }
         };
@@ -526,21 +547,25 @@ impl HarnessExecutor {
             .filter(|reference| reference.starts_with("mcp__"))
             .cloned()
             .collect();
-        let tools = crate::mcp::map_tools(run.plan(), &requested, &discovered)?;
-        for tool in &tools {
+        let bound = crate::mcp::map_tools(run.plan(), &requested, &discovered)?;
+        run.bind_tools(&bound).await;
+        for item in &bound {
             if agent
                 .tools
                 .iter()
-                .any(|existing| existing.name == tool.name)
+                .any(|existing| existing.name == item.def.name)
             {
                 return Err(crate::mcp::mcp_config_error(
                     "name_conflict",
                     None,
-                    format!("MCP tool '{}' conflicts with an existing tool", tool.name),
+                    format!(
+                        "MCP tool '{}' conflicts with an existing tool",
+                        item.def.name
+                    ),
                 ));
             }
         }
-        agent.tools.extend(tools);
+        agent.tools.extend(bound.into_iter().map(|item| item.def));
         Ok(Some(run))
     }
 }
@@ -1568,6 +1593,202 @@ mod tests {
             1,
             "second close is a no-op"
         );
+    }
+
+    fn two_agent_graph(first: &str, second: &str) -> String {
+        format!(
+            r#"{{"version":"1.0","metadata":{{"name":"two-agents"}},"entry_points":["start"],
+            "nodes":[
+              {{"id":"start","type":"start","inputs":[{{"name":"message","type":"any","required":true}}],"config":{{}}}},
+              {{"id":"w1","type":"agent_call","inputs":[{{"name":"message","type":"any","required":true}}],"config":{{"agent_id":"{first}"}}}},
+              {{"id":"w2","type":"agent_call","inputs":[{{"name":"message","type":"any","required":true}}],"config":{{"agent_id":"{second}"}}}},
+              {{"id":"end","type":"end","inputs":[{{"name":"result","type":"any","required":true}}],"config":{{}}}}
+            ],
+            "edges":[
+              {{"from":"start","to_node":"w1","to_input_port":"message"}},
+              {{"from":"w1","to_node":"w2","to_input_port":"message"}},
+              {{"from":"w2","to_node":"end","to_input_port":"result"}}
+            ]}}"#
+        )
+    }
+
+    fn write_agent_file(dir: &TempDir, agent: Value) {
+        let id = agent["id"].as_str().expect("id");
+        std::fs::write(
+            dir.path().join("agents").join(format!("{id}.json")),
+            serde_json::to_string_pretty(&agent).expect("json"),
+        )
+        .expect("agent file");
+    }
+
+    fn write_registry(dir: &TempDir, servers: Value) {
+        std::fs::write(
+            dir.path().join("mcp_servers.json"),
+            json!({"mcpServers": servers}).to_string(),
+        )
+        .expect("registry");
+    }
+
+    fn fake_server_tools() -> Vec<crate::mcp::McpTool> {
+        vec![crate::mcp::McpTool {
+            server: String::new(),
+            name: "echo".to_string(),
+            description: "echo".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }]
+    }
+
+    /// REV-098 C1：同 run 两个 agent 的 servers/allow 互相隔离；
+    /// 第二个 agent 访问自己的 server 不误报 server_not_found。
+    #[tokio::test]
+    async fn mcp_plans_are_isolated_per_agent_in_same_run() {
+        let mut agent1 = agent_config("parser", &[]);
+        agent1.as_object_mut().expect("obj").insert(
+            "mcp".to_string(),
+            json!({"servers": ["alpha"], "allow": []}),
+        );
+        agent1
+            .as_object_mut()
+            .expect("obj")
+            .insert("tools".to_string(), json!(["mcp__alpha__echo"]));
+        let dir = assets(agent1, "你是解析器。");
+        let mut agent2 = agent_config("parser2", &[]);
+        agent2.as_object_mut().expect("obj").insert(
+            "mcp".to_string(),
+            json!({"servers": ["beta"], "allow": ["mcp__beta__echo"]}),
+        );
+        agent2
+            .as_object_mut()
+            .expect("obj")
+            .insert("tools".to_string(), json!(["mcp__beta__echo"]));
+        write_agent_file(&dir, agent2);
+        write_registry(
+            &dir,
+            json!({
+                "alpha": {"command": "fake-alpha", "args": []},
+                "beta": {"command": "fake-beta", "args": []}
+            }),
+        );
+        let alpha = crate::mcp::testing::FakeMcpClient::new()
+            .with_tools(fake_server_tools())
+            .with_default_outcome("alpha-ok", false);
+        let beta = crate::mcp::testing::FakeMcpClient::new()
+            .with_tools(fake_server_tools())
+            .with_default_outcome("beta-ok", false);
+        let factory = crate::mcp::testing::FakeMcpFactory::new()
+            .with_client("alpha", alpha)
+            .with_client("beta", beta);
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null,
+                 "tool_calls": [{"call_id": "a1", "name": "mcp__alpha__echo", "args": {}}]},
+                {"kind": "text", "content": "one"},
+                {"kind": "tool_calls", "content": null,
+                 "tool_calls": [{"call_id": "b1", "name": "mcp__beta__echo", "args": {}}]},
+                {"kind": "text", "content": "two"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_mcp_allow(true)
+                .with_mcp_factory(factory as _),
+        );
+        let (outcome, _sink) =
+            run_graph(&two_agent_graph("parser", "parser2"), executor, json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            RunStatus::Completed,
+            "error: {:?}",
+            outcome.error
+        );
+        let texts: Vec<String> = fake
+            .requests()
+            .iter()
+            .flat_map(|request| request.messages.iter())
+            .filter_map(|message| match message {
+                LlmMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|text| text == "alpha-ok"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "beta-ok"), "{texts:?}");
+    }
+
+    /// REV-098 C1：第二个 agent 的 allow 不被第一个 agent 的空 allow 绕过。
+    #[tokio::test]
+    async fn second_agent_allow_is_not_bypassed_by_first_agent() {
+        let mut agent1 = agent_config("parser", &[]);
+        agent1.as_object_mut().expect("obj").insert(
+            "mcp".to_string(),
+            json!({"servers": ["alpha"], "allow": []}),
+        );
+        agent1
+            .as_object_mut()
+            .expect("obj")
+            .insert("tools".to_string(), json!(["mcp__alpha__echo"]));
+        let dir = assets(agent1, "你是解析器。");
+        let mut agent2 = agent_config("parser2", &[]);
+        agent2.as_object_mut().expect("obj").insert(
+            "mcp".to_string(),
+            json!({"servers": ["alpha"], "allow": ["mcp__alpha__other"]}),
+        );
+        agent2
+            .as_object_mut()
+            .expect("obj")
+            .insert("tools".to_string(), json!(["mcp__alpha__echo"]));
+        write_agent_file(&dir, agent2);
+        write_registry(
+            &dir,
+            json!({"alpha": {"command": "fake-alpha", "args": []}}),
+        );
+        let alpha = crate::mcp::testing::FakeMcpClient::new()
+            .with_tools(fake_server_tools())
+            .with_default_outcome("ok", false);
+        let factory = crate::mcp::testing::FakeMcpFactory::new().with_client("alpha", alpha);
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "one"},
+                {"kind": "text", "content": "two"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_mcp_allow(true)
+                .with_mcp_factory(factory as _),
+        );
+        let (outcome, _sink) =
+            run_graph(&two_agent_graph("parser", "parser2"), executor, json!("hi")).await;
+        let error = outcome.error.expect("must fail on second agent allow");
+        assert_eq!(error.code, "HARNESS_MCP_ERROR", "{error:?}");
+        assert!(
+            error.message.contains("tool_not_allowed") || error.message.contains("not allowed"),
+            "message: {}",
+            error.message
+        );
+    }
+
+    /// REV-098 #4：无 `mcp` feature 构建 + 配置 MCP（allow 开）→ Loading `init_failed`。
+    #[cfg(not(feature = "mcp"))]
+    #[tokio::test]
+    async fn mcp_configured_without_feature_fails_init() {
+        let dir = assets_with_mcp();
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "unused"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_mcp_allow(true),
+        );
+        let (outcome, _sink) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        let error = outcome.error.expect("must fail");
+        assert_eq!(error.code, "HARNESS_MCP_ERROR");
     }
 
     /// 无 MCP 的默认执行器：`close_mcp` no-op（两次调用不 panic）。

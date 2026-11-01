@@ -177,7 +177,11 @@ impl FakeMcpFactory {
 
 #[async_trait]
 impl McpClientFactory for FakeMcpFactory {
-    async fn connect(&self, spec: &McpServerSpec) -> Result<Arc<dyn McpClient>, McpClientError> {
+    async fn connect(
+        &self,
+        spec: &McpServerSpec,
+        _assets_dir: &std::path::Path,
+    ) -> Result<Arc<dyn McpClient>, McpClientError> {
         let clients = self.clients.lock().expect("clients");
         let Some(client) = clients.get(&spec.name) else {
             return Err(McpClientError::new(

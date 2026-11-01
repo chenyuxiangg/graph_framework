@@ -164,14 +164,24 @@ pub const MCP_REGISTRY_MAX_BYTES: u64 = 256 * 1024;
 /// MCP 工具 description 截断上限（1..=1024，05 §5.6.1）。
 pub const MAX_MCP_TOOL_DESCRIPTION_CHARS: usize = 1_024;
 
-/// MCP 工具结果字符截断上限（32768；超出追加截断标记）。
+/// MCP 工具结果**字符**截断上限（32768 chars，非 bytes；DR-010 §3）。
+///
+/// 超出时工具结果返回机器可读 JSON：`{"truncated":true,"text":"<head…>"}`；
+/// 工具执行期 `TOOL_ERROR.reason` 闭集：`mcp_init_failed`/`transport_closed`/
+/// `input_required_unsupported`/`timeout`/`tool_error`/`invalid_args` 等。
 pub const MCP_TOOL_RESULT_MAX_CHARS: usize = 32_768;
 
 /// MCP `tools/call` 默认超时（毫秒；server `timeout_ms` 缺省值，DR-010 §5）。
-pub const MCP_DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
+pub const MCP_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-/// MCP initialize / tools-list 超时（毫秒；DR-010 §5）。
+/// MCP initialize 握手超时（毫秒；DR-010 §5）。
 pub const MCP_INIT_TIMEOUT_MS: u64 = 10_000;
+
+/// MCP `tools/list` 超时（毫秒；与 initialize 分离，DR-010 §5）。
+pub const MCP_TOOLS_LIST_TIMEOUT_MS: u64 = 10_000;
+
+/// MCP `tools/list` 返回的 schema 总字节上限（防超大 schema 占上下文）。
+pub const MCP_TOOLS_LIST_MAX_BYTES: usize = 1024 * 1024;
 
 /// MCP MRTR（input_required）默认轮次上限（DR-010 §5）。
 pub const MCP_MRTR_MAX_ROUNDS: usize = 10;
@@ -180,10 +190,10 @@ pub const MCP_MRTR_MAX_ROUNDS: usize = 10;
 pub const MCP_STDERR_MAX_BYTES: usize = 8_192;
 
 /// MCP HTTP client 默认并发上限（DR-010 §5）。
-pub const MCP_HTTP_MAX_CONCURRENT_REQUESTS: usize = 16;
+pub const MCP_HTTP_MAX_CONCURRENCY: usize = 16;
 
 /// MCP HTTP control request 超时（毫秒；DR-010 §5）。
-pub const MCP_HTTP_CONTROL_TIMEOUT_MS: u64 = 5_000;
+pub const MCP_CONTROL_REQUEST_TIMEOUT_MS: u64 = 5_000;
 
 /// MCP 崩溃后同 run 最多重启次数（DR-010 §4）。
 pub const MCP_MAX_RESTARTS_PER_RUN: u32 = 1;

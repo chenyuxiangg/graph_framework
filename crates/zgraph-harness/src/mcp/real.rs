@@ -29,7 +29,7 @@ use super::{
     McpTool, McpTransport,
 };
 use crate::constants::{
-    MCP_HTTP_CONTROL_TIMEOUT_MS, MCP_HTTP_MAX_CONCURRENT_REQUESTS, MCP_INIT_TIMEOUT_MS,
+    MCP_CONTROL_REQUEST_TIMEOUT_MS, MCP_HTTP_MAX_CONCURRENCY, MCP_INIT_TIMEOUT_MS,
     MCP_STDERR_MAX_BYTES,
 };
 
@@ -137,7 +137,11 @@ async fn read_stderr(mut stderr: tokio::process::ChildStderr, sink: Arc<Mutex<St
 
 #[async_trait]
 impl McpClientFactory for RealMcpFactory {
-    async fn connect(&self, spec: &McpServerSpec) -> Result<Arc<dyn McpClient>, McpClientError> {
+    async fn connect(
+        &self,
+        spec: &McpServerSpec,
+        assets_dir: &std::path::Path,
+    ) -> Result<Arc<dyn McpClient>, McpClientError> {
         let lifecycle = ClientLifecycleMode::Auto {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
             legacy_version: Some(ProtocolVersion::V_2025_11_25),
@@ -150,6 +154,7 @@ impl McpClientFactory for RealMcpFactory {
                 let mut command = process_wrap::tokio::CommandWrap::with_new(command, |command| {
                     command.args(&args);
                     command.envs(&env);
+                    command.current_dir(assets_dir);
                     command.kill_on_drop(true);
                 });
                 #[cfg(unix)]
@@ -185,8 +190,8 @@ impl McpClientFactory for RealMcpFactory {
             }
             McpTransport::Http { url, headers, .. } => {
                 let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone())
-                    .max_concurrent_requests(MCP_HTTP_MAX_CONCURRENT_REQUESTS)
-                    .control_request_timeout(Duration::from_millis(MCP_HTTP_CONTROL_TIMEOUT_MS));
+                    .max_concurrent_requests(MCP_HTTP_MAX_CONCURRENCY)
+                    .control_request_timeout(Duration::from_millis(MCP_CONTROL_REQUEST_TIMEOUT_MS));
                 for (name, value) in headers {
                     let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
                         McpClientError::new(
@@ -245,21 +250,26 @@ fn map_rmcp_tool(tool: RmcpTool) -> McpTool {
     }
 }
 
-fn call_result_text(result: &CallToolResult) -> String {
+/// 按上限**流式累积**结果文本（不先拼全量再截断；REV-098 P2⑧）。
+fn call_result_text(result: &CallToolResult, limit_chars: usize) -> String {
     let mut text = String::new();
+    let mut count = 0usize;
     for block in &result.content {
-        match block {
-            ContentBlock::Text(content) => text.push_str(&content.text),
-            other => {
-                if let Ok(serialized) = serde_json::to_string(other) {
-                    text.push_str(&serialized);
-                }
-            }
+        let chunk = match block {
+            ContentBlock::Text(content) => content.text.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        let remaining = limit_chars.saturating_sub(count);
+        if remaining == 0 {
+            break;
         }
+        let take = chunk.chars().take(remaining).collect::<String>();
+        count += take.chars().count();
+        text.push_str(&take);
     }
     if text.is_empty() {
         if let Some(structured) = &result.structured_content {
-            text = structured.to_string();
+            text = structured.to_string().chars().take(limit_chars).collect();
         }
     }
     text
@@ -273,7 +283,7 @@ impl McpClient for RealMcpClient {
             McpClientError::new(McpClientErrorKind::Closed, "MCP client is closed")
         })?;
         let tools = tokio::time::timeout(
-            Duration::from_millis(MCP_INIT_TIMEOUT_MS),
+            Duration::from_millis(crate::constants::MCP_TOOLS_LIST_TIMEOUT_MS),
             service.peer().list_all_tools(),
         )
         .await
@@ -303,7 +313,7 @@ impl McpClient for RealMcpClient {
         .map_err(|_| McpClientError::new(McpClientErrorKind::Timeout, "MCP tools/call timed out"))?
         .map_err(|error| Self::map_service_error(&error))?;
         Ok(McpCallOutcome {
-            text: call_result_text(&result),
+            text: call_result_text(&result, crate::constants::MCP_TOOL_RESULT_MAX_CHARS),
             is_error: result.is_error.unwrap_or(false),
         })
     }

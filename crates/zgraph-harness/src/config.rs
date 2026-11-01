@@ -432,7 +432,11 @@ fn resolve_skills(
 /// skills 目录环境变量（DR-009 §1；CLI 侧同名常量独立定义）。
 const SKILLS_ENV: &str = "ZGRAPH_SKILLS";
 
-/// 解析 `AgentConfig.mcp`（additive；`servers`/`allow` 两个数组；≤16）。
+/// 解析 `AgentConfig.mcp`（additive；`servers`/`allow` 两个数组；均 ≤16）。
+///
+/// 阶段内非法（非 object/未知子键/非法 server 名/超限/非法 allow 形态）统一映射为
+/// **`HARNESS_MCP_ERROR{reason:"config_invalid"|"allow_invalid"}`**（与 resolve 阶段同码，
+/// REV-098 C2；不再走 `HARNESS_CONFIG_LOAD`）。
 fn parse_mcp(
     object: &Map<String, Value>,
     path: &Path,
@@ -441,52 +445,47 @@ fn parse_mcp(
         return Ok(None);
     };
     let Some(mcp_object) = value.as_object() else {
-        return Err(type_error(
-            path,
-            "$.mcp",
-            "object {servers, allow}",
-            json_type_name(value),
-            "mcp must be an object",
+        return Err(crate::mcp::mcp_config_error(
+            "config_invalid",
+            None,
+            format!(
+                "$.mcp must be an object {{servers, allow}} ({}); path={}",
+                json_type_name(value),
+                path.display()
+            ),
         ));
     };
     for key in mcp_object.keys() {
         if key != "servers" && key != "allow" {
-            return Err(config_error(
-                "unsupported_value",
-                Some(&path.display().to_string()),
-                Some("$.mcp"),
-                Some(Value::from("servers/allow")),
-                Some(Value::from(key.clone())),
+            return Err(crate::mcp::mcp_config_error(
+                "config_invalid",
+                None,
                 format!("unknown mcp field '{key}'"),
             ));
         }
     }
-    let servers = parse_mcp_name_list(mcp_object, path, "servers", true)?;
-    let allow = parse_mcp_name_list(mcp_object, path, "allow", false)?;
+    let servers = parse_mcp_name_list(mcp_object, "servers", true)?;
+    let allow = parse_mcp_name_list(mcp_object, "allow", true)?;
     if servers.is_empty() && allow.is_empty() {
         return Ok(None);
     }
     for name in &servers {
         if !crate::mcp::is_valid_server_name(name) {
-            return Err(config_error(
-                "unsupported_value",
-                Some(&path.display().to_string()),
-                Some("$.mcp.servers"),
-                Some(Value::from("^[a-z0-9][a-z0-9_-]{0,63}$")),
-                Some(Value::from(name.clone())),
-                format!("invalid MCP server name '{name}'"),
+            return Err(crate::mcp::mcp_config_error(
+                "config_invalid",
+                Some(name),
+                format!("invalid MCP server name '{name}' (expected ^[a-z0-9][a-z0-9_-]{{0,63}}$)"),
             ));
         }
     }
     for entry in &allow {
-        if crate::mcp::parse_full_tool_name(entry).is_none() {
-            return Err(config_error(
-                "unsupported_value",
-                Some(&path.display().to_string()),
-                Some("$.mcp.allow"),
-                Some(Value::from("mcp__<server>__<tool>")),
-                Some(Value::from(entry.clone())),
-                format!("invalid MCP allow entry '{entry}'"),
+        // 形态级校验（server 是否已配置/工具白名单由 resolve 阶段校验）。
+        let rest = entry.strip_prefix("mcp__");
+        if !matches!(rest, Some(rest) if rest.contains("__") && !rest.ends_with("__")) {
+            return Err(crate::mcp::mcp_config_error(
+                "allow_invalid",
+                None,
+                format!("invalid MCP allow entry '{entry}' (expected mcp__<server>__<tool>)"),
             ));
         }
     }
@@ -495,7 +494,6 @@ fn parse_mcp(
 
 fn parse_mcp_name_list(
     object: &Map<String, Value>,
-    path: &Path,
     field: &str,
     enforce_limit: bool,
 ) -> Result<Vec<String>, HarnessError> {
@@ -503,46 +501,43 @@ fn parse_mcp_name_list(
         return Ok(Vec::new());
     };
     let Some(array) = value.as_array() else {
-        return Err(type_error(
-            path,
-            &format!("$.mcp.{field}"),
-            "array of strings",
-            json_type_name(value),
-            format!("mcp.{field} must be an array"),
+        return Err(crate::mcp::mcp_config_error(
+            "config_invalid",
+            None,
+            format!(
+                "mcp.{field} must be an array (got {})",
+                json_type_name(value)
+            ),
         ));
     };
     if enforce_limit && array.len() > crate::constants::MAX_MCP_SERVERS {
-        return Err(config_error(
-            "out_of_range",
-            Some(&path.display().to_string()),
-            Some(&format!("$.mcp.{field}")),
-            Some(Value::from(format!(
-                "<= {} items",
+        return Err(crate::mcp::mcp_config_error(
+            "config_invalid",
+            None,
+            format!(
+                "mcp.{field} has {} items (limit {})",
+                array.len(),
                 crate::constants::MAX_MCP_SERVERS
-            ))),
-            Some(Value::from(array.len())),
-            "too many MCP servers".to_string(),
+            ),
         ));
     }
     let mut names = Vec::with_capacity(array.len());
     for (index, item) in array.iter().enumerate() {
         let Some(name) = item.as_str() else {
-            return Err(type_error(
-                path,
-                &format!("$.mcp.{field}[{index}]"),
-                "string",
-                json_type_name(item),
-                format!("mcp.{field}[{index}] must be a string"),
+            return Err(crate::mcp::mcp_config_error(
+                "config_invalid",
+                None,
+                format!(
+                    "mcp.{field}[{index}] must be a string (got {})",
+                    json_type_name(item)
+                ),
             ));
         };
         if name.trim().is_empty() {
-            return Err(config_error(
-                "unsupported_value",
-                Some(&path.display().to_string()),
-                Some(&format!("$.mcp.{field}[{index}]")),
-                Some(Value::from("non-empty string")),
-                Some(item.clone()),
-                format!("empty mcp.{field} entry"),
+            return Err(crate::mcp::mcp_config_error(
+                "config_invalid",
+                None,
+                format!("empty mcp.{field}[{index}] entry"),
             ));
         }
         names.push(name.to_string());
@@ -2412,6 +2407,73 @@ mod tests {
         // MCP 工具由 executor 的 async 发现阶段追加（此处不启动 server）。
         assert_eq!(agent.tools.len(), 1);
         assert_eq!(agent.tools[0].name, "echo");
+    }
+
+    #[test]
+    fn mcp_parse_errors_use_harness_mcp_error() {
+        let cases = [
+            (json!("not-an-object"), "config_invalid"),
+            (json!({"servers": ["fake"], "bogus": 1}), "config_invalid"),
+            (json!({"servers": ["BAD NAME"]}), "config_invalid"),
+        ];
+        for (mcp, reason) in cases {
+            let mut agent = valid_agent();
+            agent
+                .as_object_mut()
+                .expect("object")
+                .insert("mcp".to_string(), mcp);
+            let dir = asset_dir(&agent, "role", None);
+            let error = load_agent_with_options(
+                dir.path(),
+                "parser",
+                &registry(&["echo", "add"]),
+                true,
+                None,
+                true,
+            )
+            .expect_err("invalid mcp");
+            assert_eq!(
+                error.kind,
+                zgraph_kernel::HarnessErrorKind::Mcp,
+                "{error:?}"
+            );
+            assert_eq!(error.code, "HARNESS_MCP_ERROR");
+            assert_eq!(error.detail["reason"], reason);
+        }
+
+        // allow 形态非法 → allow_invalid（同为 HARNESS_MCP_ERROR）。
+        let agent = agent_with_mcp(json!(["fake"]), json!(["bad"]));
+        let dir = asset_dir(&agent, "role", None);
+        write_mcp_registry(dir.path());
+        let error = load_agent_with_options(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+            true,
+        )
+        .expect_err("invalid allow");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::Mcp);
+        assert_eq!(error.detail["reason"], "allow_invalid");
+
+        // servers/allow >16 → config_invalid（限流在同阶段）。
+        let many: Vec<Value> = (0..(crate::constants::MAX_MCP_SERVERS + 1))
+            .map(|index| Value::from(format!("s{index}")))
+            .collect();
+        let agent = agent_with_mcp(Value::Array(many), json!([]));
+        let dir = asset_dir(&agent, "role", None);
+        let error = load_agent_with_options(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+            true,
+        )
+        .expect_err("too many servers");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::Mcp);
+        assert_eq!(error.detail["reason"], "config_invalid");
     }
 
     #[test]
