@@ -146,3 +146,16 @@ bash scripts/dev/check.sh                     # PASSED
 ```
 - 工作区干净；范围 8 files（+841/−151），无既有评审记录/代码逻辑回退；`git status` 空。
 - 与自报一致：harness 233/1、features 232/1、workspace 1003/0/3、pytest 183；全绿。
+
+## 7. 第二评审 · 跨模块（cli/kernel/py-worker/Cargo）（Lead 追加，2026-11-02）
+
+- **评审人**：`lead`（**≠ 作者** `dsl-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`f204368..3ecb5ab`）：
+  1. `crates/zgraph-cli/src/run_cmd.rs`：`close_provider()` 在 run 成功/失败出口接线（与 `close_mcp` 并列）；无新 CLI 参数/退出码变化。
+  2. `crates/zgraph-kernel/src/types.rs`：append-only —— `CODE_HARNESS_PLUGIN_ERROR`、`HarnessErrorKind::Plugin` variant、`code()` arm + 单测；既有码/枚举/行为未改。
+  3. `python/zgraph_worker/adapters/{__init__,codex,dsh_acp}.py` + `python/tests/test_adapters_{codex,dsh_acp}.py`：py-worker 新模块（Codex adapter 先行、DSH ACP 骨架），无既有 worker 语义改动。
+  4. `crates/zgraph-harness/Cargo.toml` + `Cargo.lock`：新增 `blake3`（inputs_hash）与 unix `nix`（进程组/信号）目标依赖；feature 边界未改。
+- **核对结论（通过）**：cli 为机械接线；kernel append-only；py-worker 为新增 adapter 文件（不改现有 worker runtime）；Cargo 增量为已声明的哈希/进程组依赖、无版本漂移；无 docs/e2e/密钥改动；默认无 harness 配置路径逐字节不变（golden）。
+- **Lead 亲自验证**：`git diff f204368..3ecb5ab --stat` 仅上述 19+2 files；`cargo test --workspace --offline` = 1003 passed / 0 failed / 3 ignored；`cargo test -p zgraph-harness --offline` 233/1 ignored；`pytest python` 183 passed。
+- **裁决**：真实 Codex/DSH 环境未验证 → 按 DR-011 §9 在 release notes 标注「adapter 骨架，待真实环境验证」；V5 e2e 补 L2 不 spawn/CLI 全出口/AC-18/19/20 真链路；P3 留 V5 docs/台账。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
