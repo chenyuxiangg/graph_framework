@@ -12,9 +12,9 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（首轮为「有条件通过」；C1–C3 已于 `3bbe4b5` 关闭，见 §8）
 
-P0=0；**P1=3**；P2=8；P3=6。builtin 默认路径、AgentConfig.harness 解析/校验、能力冲突、fake subprocess 协议、取消/超时/进程池/close_provider、kernel/CLI 接线、MCP P2⑥ 与门禁均通过；但下列 **3 个 P1 必须关闭后**才可合并：
+P0=0；**P1=0**（首轮 3 项已关闭）；P2 残余（见 §8）；P3 残余。builtin 默认路径、AgentConfig.harness 解析/校验、能力冲突、fake subprocess 协议、取消/超时/进程池/close_provider、kernel/CLI 接线、MCP P2⑥ 与门禁均通过；首轮 3 个 P1 的原始记录如下（**均已关闭**）：
 
 - **C1**：外部 harness 路径**未写框架侧 `llm_calls`**（DR-011 §4：每节点 1 条 `request_json={provider,agent_id,session_key,inputs_hash}`、`response_json=四字段+event_count`；实现 `ProviderRequest.recorder` 对 subprocess 完全未使用）。
 - **C2**：协议**单行 1 MiB 上限不是硬上限**：`read_frames` 用 `read_until` 先完整读入整行，再检查 `read > LINE_MAX`；恶意/异常 adapter 发无换行巨行时会在检查前无限增长内存（`big_line` 2 MiB 测试只证明最终报错，不证硬上限）。
@@ -24,14 +24,14 @@ P0=0；**P1=3**；P2=8；P3=6。builtin 默认路径、AgentConfig.harness 解�
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（P1） | 默认 builtin、配置解析、fake 协议、Codex fake 链路通过；外部 `llm_calls` 缺失、行上限非硬、Codex 取消孤儿风险 |
+| 功能正确性 | ✅（P2 残余） | 首轮 P1 已关闭：外部 `llm_calls` 框架侧写入、行硬上限、Codex 取消无孤儿；P2 残余见 §8 |
 | 代码结构合理性 | ✅ | `AgentProvider` seam 清晰；`provider.rs` 只包装 builtin；`plugin.rs` 分层（spawn/frames/exchange/result/error）；executor 只选择 provider；CLI 出口 close；kernel/error append-only |
-| 逻辑性 | ✅（P2 备注） | 协议超时/取消/进程组/close 幂等/Session reset 与 DR 对齐；P2 为 plan/usage_update 映射、stderr、hello limits、env 等 |
+| 逻辑性 | ✅（P2 残余） | 协议超时/取消/进程组/close 幂等/Session reset 与 DR 对齐；同批 P2 plan/usage_update、stderr、hello limits、cancel 写超时、Codex stderr、8 MiB 已修复；N6/N8 与 P3 见 §8 |
 | 可读性 | ✅（P3 备注） | PROTOCOL.md 对外；注释解释 deviations/Lead 裁决；P3 为测试/文档补齐 |
 
 ## 3. 发现清单
 
-### P1 · 合并前必须关闭
+### P1 · 首轮条件（已于 `3bbe4b5` 关闭）
 
 | # | 位置 | 问题 | 条件 |
 |---|---|---|---|
@@ -93,14 +93,56 @@ bash scripts/dev/check.sh                     # PASSED
 | `python/zgraph_worker/adapters/**` | Codex adapter + DSH 骨架 + tests | py-worker 范围；Lead 批准；真实环境待验证 |
 | `Cargo.toml`/`Cargo.lock` | unix `nix` target dependency | 仅进程组信号；无其它依赖漂移 |
 
-## 6. 条件关闭记录（**未关闭**）
+## 6. 条件关闭记录（**已关闭**，`3bbe4b5`）
 
-- [ ] **C1** 外部 harness 每节点 `llm_calls` 写入 + fake `--record=full` 断言（1 条、无原始 JSONL/正文）。
-- [ ] **C2** 有界读取实现单行 1 MiB 硬上限 + 无换行巨行测试（内存有界、`line_too_large`）。
-- [ ] **C3** Codex 子进程取消/超时无孤儿（SIGTERM handler/父 cancel 转发窗口 + fake 长睡 Codex 测试）。
-- 关闭后追加条件关闭段并重新提交评审；P2/P3 不阻断，可登记 V5/后续。
+- [x] **C1** `external_request_record` + `record_external_call` 已实现；`external_call_records_exactly_one_llm_call_row` 断言每节点恰 1 条、request/response 不含事件全文。
+- [x] **C2** `read_frames` 改 `fill_buf`/`consume` 分块、1 MiB 行缓冲硬上限；`no_newline_giant_line_is_bounded_and_rejected`（2 MiB 无换行、<5s、adapter 回收）通过。
+- [x] **C3** Codex SIGTERM/SIGINT handler + 父 `shutdown` cancel 500ms 转发窗口；`codex_in_flight_cancel_leaves_no_orphan_process_group` 通过。
+- 首轮 P1 条件已全部关闭；残余 P2/P3 见 §8，V5 清单见 §7。
 
 ## 7. 遗留问题
 
 - 真实 Codex/DSH 环境验证、V5 e2e AC-20 a–h 真链路、8 MiB/总输出/in-flight cancel 测试按 Lead 预裁决 7 留 V5；release notes 标注 adapter 骨架。
-- P2 N1–N8 建议在 C1–C3 修复时或 V5 前处理；P3 N9–N14 文档/台账。
+- P2 残余：N6 外部仍强制 role_prompt、N8 L2 不 spawn/CLI 全出口 e2e（按预裁决留 V5）；N1–N5/N7 已于 `3bbe4b5` 修复；P3 N9–N14 文档/台账。
+
+## 8. 条件关闭复核（2026-11-02，`3bbe4b5`，parent `56ffdce`）
+
+**复核结论：通过**（保留首轮 `56ffdce` 有条件通过记录；条件关闭后转通过）。
+
+### C1（`llm_calls`）
+- `plugin.rs` 新增 `external_request_record`（provider/agent_id/session_key/BLAKE3 inputs_hash 64 hex）+ `record_external_call`：provider.run 成功/失败/`adapter_for` spawn 失败均恰 1 条；取消/实例超时不写；成功 response=四字段+event_count，失败=error{code,reason}+event_count。
+- `external_call_records_exactly_one_llm_call_row` 通过：成功/失败各 1 条；request 无事件文本；response 无 `"events"` 原始 JSONL。
+- 残余 P3：spawn 失败分支无独立 recorder 测试（代码路径已覆盖）。
+
+### C2（行硬上限）
+- `read_frames` 改 `fill_buf`/`consume` 分块；超过 1 MiB 行**未缓存完整巨行**即 `line_too_large`；保留 8 MiB 总输出上限。
+- `no_newline_giant_line_is_bounded_and_rejected` 通过（2 MiB 无换行、<5s、adapter 回收）；`total_output_limit_is_enforced` 通过。
+
+### C3（取消无孤儿）
+- `codex.py` 安装 SIGTERM/SIGINT handler（`killpg` Codex 进程组）；父 `Adapter::shutdown` 改为 cancel 写 500ms 超时 → 关 stdin → 2s 转发窗口 → SIGTERM → 1s → SIGKILL → reap。
+- `codex_in_flight_cancel_leaves_no_orphan_process_group` 通过（fake 长睡 Codex、600ms cancel、`kill(pid,0)` 轮询无残留）。
+- 残余 P2：复核首次全量 harness 运行时该测试曾等待 >60s（`pid_file` 无超时等待；并行负载下 cancel 可能早于 fake Codex 写 pid）；隔离运行与随后全量重跑均通过。建议该测试给 pid 等待加上限/失败重试，避免 CI 偶发挂起（不改变 C3 实现结论）。
+
+### 同批 P2 复核
+- **N1** `plan`→`Progress`、`usage_update` 折入 result usage：`plan_maps_to_progress_and_usage_update_folds_into_result` 通过；原 `unknown_event` 测试改为 `mystery_event`。
+- **N2/N5** stderr head+tail 4 KiB：Rust `stderr_head_and_tail_are_recorded_within_limit` + Python `test_stderr_capture_keeps_head_and_tail_bounded` 通过；Codex stderr 后台排空。
+- **N3** hello limits 真实 node timeout / total 8 MiB / line 1 MiB；`validate_hello`/`invalid_hello_capabilities_fail_closed` 通过。
+- **N4** cancel 写 500ms 超时；父 shutdown 转发窗口。
+- **N7** builtin golden 加强：run_output / instance snapshots / transitions / streaming events 对照。
+- **N8** 8 MiB 总输出测试补齐；L2/CLI 全出口 e2e 仍按 V5。
+- **N6/N8 残余** role_prompt 外部强制、L2 不 spawn/CLI 全出口真实 e2e 留 V5；N9/N10/N11/N12/N13/N14 为 P3/文档。
+
+### 复跑门禁（`3bbe4b5`）
+```bash
+cargo test -p zgraph-harness                  # 234 tests：233 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp   # 233 tests：232 passed / 0 failed / 1 ignored
+cargo test --workspace                        # 72 targets：1003 passed / 0 failed / 3 ignored
+pytest -q                                     # exit 0；183 passed
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo clippy -p zgraph-harness --all-targets --features mcp --locked -- -D warnings  # clean
+cargo fmt --all -- --check                    # exit 0
+cargo check -p zgraph-harness --no-default-features  # clean
+bash scripts/dev/check.sh                     # PASSED
+```
+- 工作区干净；范围 8 files（+841/−151），无既有评审记录/代码逻辑回退；`git status` 空。
+- 与自报一致：harness 233/1、features 232/1、workspace 1003/0/3、pytest 183；全绿。
