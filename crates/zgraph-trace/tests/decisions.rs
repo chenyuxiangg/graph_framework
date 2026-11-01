@@ -380,7 +380,7 @@ fn decision_store_open_requires_existing_v5_database_and_does_not_migrate() {
     );
     assert!(!missing.exists(), "DecisionStore::open 不得创建空库");
 
-    // v4 库：不迁移，明确报错（提示由 run 迁移）。
+    // v4 库：不迁移，明确报错（提示由 run 迁移；期望版本取当前常量 6）。
     let (_dir, path) = seeded_db(RunStatus::Running);
     {
         let conn = Connection::open(&path).expect("open for downgrade");
@@ -392,7 +392,7 @@ fn decision_store_open_requires_existing_v5_database_and_does_not_migrate() {
         .expect("v4 db must be rejected");
     assert!(
         matches!(&error, TraceError::Storage(message)
-            if message.contains("unsupported schema version=4, expected 5")),
+            if message.contains("unsupported schema version=4, expected 6")),
         "unexpected error: {error:?}"
     );
     let error = DecisionConsumer::open(&path)
@@ -400,7 +400,7 @@ fn decision_store_open_requires_existing_v5_database_and_does_not_migrate() {
         .expect("consumer v4 db must be rejected");
     assert!(
         matches!(&error, TraceError::Storage(message)
-            if message.contains("unsupported schema version=4, expected 5")),
+            if message.contains("unsupported schema version=4, expected 6")),
         "unexpected error: {error:?}"
     );
     let conn = Connection::open(&path).expect("inspect");

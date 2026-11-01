@@ -90,6 +90,8 @@ pub fn snapshot(
         node_id: node_id.to_string(),
         node_type: "python_node".to_string(),
         attempt: 0,
+        item_index: 0,
+        item_key: None,
         status,
         input: Some(json!({"in": 1})),
         output: if status == InstanceStatus::Completed {

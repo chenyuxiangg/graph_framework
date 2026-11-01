@@ -632,6 +632,10 @@ fn map_snapshot(snapshot: &kernel::InstanceSnapshot) -> trace::InstanceSnapshot 
         node_id: snapshot.node_id.clone(),
         node_type: snapshot.node_type.clone(),
         attempt: snapshot.attempt,
+        // W4b（REV-089）跨模块机械占位：kernel 尚未提供 item 字段；
+        // kernel 分支阶段 2 在此替换为 kernel::InstanceSnapshot 的真实 item 值。
+        item_index: 0,
+        item_key: None,
         status: map_instance_status(snapshot.status),
         input: snapshot.input.clone(),
         output: snapshot.output.clone(),
@@ -1359,6 +1363,7 @@ mod tests {
                 zgraph_trace::TraceInput::RunFinished(_) => "RunFinished",
                 zgraph_trace::TraceInput::RecordedOutput(_) => "RecordedOutput",
                 zgraph_trace::TraceInput::LlmCall(_) => "LlmCall",
+                zgraph_trace::TraceInput::ForeachExpansion(_) => "ForeachExpansion",
             };
             observer_seen.lock().expect("lock").push(kind);
         });

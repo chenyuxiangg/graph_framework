@@ -15,8 +15,8 @@ fn frozen_api_types_are_shareable_across_tasks() {
     assert_clone::<TraceHandle>();
     assert_send::<TraceWriter>();
     assert_eq!(
-        TRACE_SCHEMA_VERSION, 5,
-        "v5 = W3a WaitingHuman statuses + human_decisions"
+        TRACE_SCHEMA_VERSION, 6,
+        "v6 = W4a item 实例 + foreach_expansions"
     );
 }
 

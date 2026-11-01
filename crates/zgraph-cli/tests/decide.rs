@@ -122,6 +122,8 @@ fn transition(run_id: &str, instance: &str, to: InstanceStatus) -> TraceInput {
             node_id: instance.to_string(),
             node_type: "python_node".to_string(),
             attempt: 0,
+            item_index: 0,
+            item_key: None,
             status: to,
             input: Some(serde_json::json!({"spec": "review me"})),
             output: None,
@@ -258,7 +260,7 @@ fn decide_records_waiting_human_decision_and_prints_summary() {
     assert_eq!(row_decision_id, decision_id);
     assert!(decided_at.ends_with('Z'), "{decided_at}");
     assert_eq!(*consumed_at, None, "decide 不写 consumed_at");
-    assert_eq!(user_version(fx.path()), 5, "decide 不迁移/不改版本");
+    assert_eq!(user_version(fx.path()), 6, "decide 不迁移/不改版本");
 }
 
 #[test]
@@ -460,7 +462,7 @@ fn newer_schema_version_exits_4() {
     let fx = fixture(false);
     Connection::open(fx.path())
         .expect("open db")
-        .execute_batch("PRAGMA user_version = 6;")
+        .execute_batch("PRAGMA user_version = 7;")
         .expect("upgrade version");
     let output = run_args(&decide_args(fx.path()));
     assert_eq!(code(&output), 4, "stderr={}", stderr(&output));

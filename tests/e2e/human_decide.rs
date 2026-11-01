@@ -17,7 +17,7 @@
 //!
 //! - **静态层**：`human_gate/` 四个 fixture 的真 `zgraph validate`（`builtin.human` 保留符号、
 //!   R14 只做格式校验、hash/gate 形状冻结）；`gate.function="human"` **不是**内置 gate op；
-//!   trace schema v4 seed（只读拒绝不迁移、v4→v5 迁移逐列保留历史、迁移前 v4 golden 不变）；
+//!   trace schema v4 seed（只读拒绝不迁移、v4→v5→v6 迁移逐列保留历史、迁移前 v4 golden 不变）；
 //! - **AC-16 a**：approve 真链路（挂起 → trace 可见 `WaitingHuman` → `decide` → 自动 Completed）
 //!   与 L2 `replay --mode=outputs`（human 实例 `recorded_outputs` 记录 + 重放不重新要求人工
 //!   决策，DR-006 §2.2/§8）；
@@ -210,7 +210,12 @@ fn run_rows(
     run_id: &str,
 ) -> Vec<Vec<rusqlite::types::Value>> {
     let sql = format!("SELECT * FROM {table} WHERE run_id = ?1 ORDER BY {order_by}");
-    let mut statement = conn.prepare(&sql).expect("prepare rows query");
+    query_rows(conn, &sql, run_id)
+}
+
+/// 执行带 `?1 = run_id` 的行查询并返回逐列 `Value` 快照。
+fn query_rows(conn: &Connection, sql: &str, run_id: &str) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut statement = conn.prepare(sql).expect("prepare rows query");
     let column_count = statement.column_count();
     let mut rows = statement.query([run_id]).expect("query rows");
     let mut out = Vec::new();
@@ -227,6 +232,18 @@ fn run_rows(
     out
 }
 
+/// v6 之前（W4a 前）的 `instances` 列快照：迁移对比只用历史列；v6 新增的
+/// `item_index`/`item_key` 对旧行恒为 `0/NULL`（由 trace crate 迁移测试断言）。
+fn instance_rows_legacy(conn: &Connection, run_id: &str) -> Vec<Vec<rusqlite::types::Value>> {
+    query_rows(
+        conn,
+        "SELECT instance_id, run_id, node_id, node_type, attempt, status, input, \
+         output_json, error, error_code, created_seq, started_at, finished_at, \
+         finished_seq FROM instances WHERE run_id = ?1 ORDER BY instance_id",
+        run_id,
+    )
+}
+
 /// 旧 run 的逐列快照（迁移前后必须完全一致：`events` 不改写、两表重建逐列复制）。
 fn old_run_snapshot(
     conn: &Connection,
@@ -235,10 +252,7 @@ fn old_run_snapshot(
     vec![
         ("runs", run_rows(conn, "runs", "run_id", run_id)),
         ("events", run_rows(conn, "events", "seq", run_id)),
-        (
-            "instances",
-            run_rows(conn, "instances", "instance_id", run_id),
-        ),
+        ("instances", instance_rows_legacy(conn, run_id)),
         ("transitions", run_rows(conn, "transitions", "seq", run_id)),
         (
             "gate_results",
@@ -295,7 +309,7 @@ fn replay_events_json(db: &Path, run_id: &str) -> Output {
     )
 }
 
-/// 在 v4 库上跑 seed 图（真 CLI `run`，顺带触发 v4→v5 迁移）。
+/// 在 v4 库上跑 seed 图（真 CLI `run`，顺带触发 v4→v5→v6 迁移）。
 fn run_seed_graph(db: &Path, cwd: &Path) -> Output {
     run_cli(
         &[
@@ -481,8 +495,8 @@ fn v4_seed_readonly_trace_and_replay_are_rejected_without_migration() {
         assert_exit(&output, 4, &format!("只读 {label} 对 v4 库应 exit 4"));
         let stderr = stderr_text(&output);
         assert!(
-            stderr.contains("unsupported schema version=4, expected 5"),
-            "{label} stderr 应说明 v4 < 5 且不迁移: {stderr}"
+            stderr.contains("unsupported schema version=4, expected 6"),
+            "{label} stderr 应说明 v4 < 6 且不迁移: {stderr}"
         );
         assert!(
             String::from_utf8_lossy(&output.stdout).trim().is_empty(),
@@ -508,10 +522,10 @@ fn v4_seed_readonly_trace_and_replay_are_rejected_without_migration() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. trace v4→v5 迁移：备份/元数据/逐列数据保留/回放 golden
+// 3. trace v4→v5→v6 迁移：备份/元数据/逐列数据保留/回放 golden
 // ---------------------------------------------------------------------------
 
-/// AC-16 e：真 CLI `run` 打开 v4 库 → 迁移 v5（备份恰一份 + 两表重建 + `human_decisions`），
+/// AC-16 e：真 CLI `run` 打开 v4 库 → 迁移 v6（逐版本备份 + 两表重建 + `human_decisions`），
 /// 旧 run 历史行逐列保留、`trace --json` 与**迁移前** v4-era golden 逐字节一致。
 #[test]
 fn v4_seed_migrates_to_v5_preserving_history_and_replay() {
@@ -535,7 +549,7 @@ fn v4_seed_migrates_to_v5_preserving_history_and_replay() {
     assert_ne!(new_run_id, old_run_id, "迁移后的新 run 必须是新 id");
 
     let conn = read_only_connect(&db);
-    assert_eq!(user_version(&conn), 5, "迁移后 user_version=5");
+    assert_eq!(user_version(&conn), 6, "迁移后 user_version=6");
     let versions: Vec<i64> = {
         let mut statement = conn
             .prepare("SELECT version FROM schema_migrations ORDER BY version")
@@ -546,20 +560,20 @@ fn v4_seed_migrates_to_v5_preserving_history_and_replay() {
             .map(|row| row.expect("version"))
             .collect()
     };
-    assert_eq!(versions, vec![1, 2, 3, 4, 5], "schema_migrations 1..5");
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6], "schema_migrations 1..6");
 
-    // 备份 = 迁移前 v4 快照。
+    // 备份 = 逐版本迁移前快照（v4→v5 与 v5→v6 各一份，W4b 机械同步）。
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 1, "v4→v5 恰一份备份: {backups:?}");
-    let backup_name = backups[0]
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    assert!(
-        backup_name.contains(".bak.v4-"),
-        "备份文件名应含 .bak.v4-: {backup_name}"
-    );
-    let backup_conn = Connection::open(&backups[0]).expect("open backup");
+    assert_eq!(backups.len(), 2, "v4→v6 逐版本两份备份: {backups:?}");
+    let backup = backups
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().contains(".bak.v4-"))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("missing .bak.v4- backup: {backups:?}"));
+    let backup_conn = Connection::open(backup).expect("open backup");
     assert_eq!(user_version(&backup_conn), 4, "备份保持 v4");
 
     // v5 新表/索引存在；无决策 run 不产生决策行。
@@ -1539,7 +1553,7 @@ fn ac16c_conflict_precheck_order_and_exit_codes() {
     let v4_payload = json_stdout(&v4_out);
     let v4_message = v4_payload["message"].as_str().expect("message");
     assert!(
-        v4_message.contains("unsupported schema version=4, expected 5"),
+        v4_message.contains("unsupported schema version=4, expected 6"),
         "message: {v4_message}"
     );
     assert!(
@@ -1795,7 +1809,7 @@ fn expected_v01_trace() -> Vec<Value> {
     serde_json::from_str(&text).expect("expected trace is JSON array")
 }
 
-/// AC-16 e：v3 seed（v0.1.0 形态）→ 真 CLI run 打开 → v3→v4→v5 链式迁移；
+/// AC-16 e：v3 seed（v0.1.0 形态）→ 真 CLI run 打开 → v3→v4→v5→v6 链式迁移；
 /// 旧 run 的 L1 `trace --json` 与 v0.1.0 golden 逐字节一致、replay == trace。
 #[test]
 fn ac16e_v3_seed_chain_to_v5_preserves_v01_golden() {
@@ -1809,7 +1823,7 @@ fn ac16e_v3_seed_chain_to_v5_preserves_v01_golden() {
     ] {
         assert_exit(&output, 4, "只读命令对 v3 库应 exit 4");
         assert!(
-            stderr_text(&output).contains("unsupported schema version=3, expected 5"),
+            stderr_text(&output).contains("unsupported schema version=3, expected 6"),
             "stderr: {}",
             stderr_text(&output)
         );
@@ -1819,14 +1833,14 @@ fn ac16e_v3_seed_chain_to_v5_preserves_v01_golden() {
         assert_eq!(user_version(&conn), 3, "只读拒绝不得迁移");
     }
 
-    // 真 CLI run 触发 v3→v4→v5 链式迁移。
+    // 真 CLI run 触发 v3→v4→v5→v6 链式迁移。
     let output = run_seed_graph(&db, dir.path());
     assert_exit(&output, 0, "v3 seed 上触发链式迁移的 run");
     assert_eq!(json_stdout(&output)["status"], json!("Completed"));
 
     {
         let conn = read_only_connect(&db);
-        assert_eq!(user_version(&conn), 5, "迁移后 user_version=5");
+        assert_eq!(user_version(&conn), 6, "迁移后 user_version=6");
         let versions: Vec<i64> = {
             let mut statement = conn
                 .prepare("SELECT version FROM schema_migrations ORDER BY version")
@@ -1837,13 +1851,13 @@ fn ac16e_v3_seed_chain_to_v5_preserves_v01_golden() {
                 .map(|row| row.expect("version"))
                 .collect()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5], "schema_migrations 1..5");
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6], "schema_migrations 1..6");
         let decisions: i64 = conn
             .query_row("SELECT COUNT(*) FROM human_decisions", [], |row| row.get(0))
             .expect("decisions count");
         assert_eq!(decisions, 0, "无 human 图不产生决策行");
     }
-    // 链式迁移每版本恰一份备份（v3→v4 与 v4→v5 各一份）。
+    // 链式迁移每版本恰一份备份（v3→v4、v4→v5、v5→v6 各一份）。
     let backups = backup_files(dir.path());
     let has_v3 = backups.iter().any(|path| {
         path.file_name()
@@ -1855,9 +1869,14 @@ fn ac16e_v3_seed_chain_to_v5_preserves_v01_golden() {
             .map(|name| name.to_string_lossy().contains(".bak.v4-"))
             .unwrap_or(false)
     });
+    let has_v5 = backups.iter().any(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().contains(".bak.v5-"))
+            .unwrap_or(false)
+    });
     assert!(
-        has_v3 && has_v4,
-        "链式迁移应有 .bak.v3-* 与 .bak.v4-*: {backups:?}"
+        has_v3 && has_v4 && has_v5,
+        "链式迁移应有 .bak.v3-*、.bak.v4-* 与 .bak.v5-*: {backups:?}"
     );
 
     // 旧 run（v0.1.0 形态）L1 golden 不变；replay == trace 逐字节。

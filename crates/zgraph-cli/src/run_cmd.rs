@@ -1825,8 +1825,10 @@ fn lifecycle_detail(input: &TraceInput) -> Option<String> {
         TraceInput::RunFinished(info) => {
             Some(format!("RunFinished status={}", info.status.as_str()))
         }
-        // 快照 / L2 记录 / llm_calls 都不是 `events` 行，不属于生命周期输出。
+        // 快照 / L2 记录 / llm_calls / foreach 展开事实都不是 `events` 行，
+        // 不属于生命周期输出。
         TraceInput::InstanceSnapshot(_)
+        | TraceInput::ForeachExpansion(_)
         | TraceInput::RecordedOutput(_)
         | TraceInput::LlmCall(_) => None,
     }

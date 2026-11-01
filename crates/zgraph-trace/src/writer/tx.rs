@@ -13,8 +13,9 @@ use serde_json::{json, Value};
 
 use crate::error::TraceError;
 use crate::model::{
-    json_opt, json_req, GateResultRecord, InstanceSnapshot, InstanceStatus, LlmCallRecord,
-    RecordedOutput, RunFinishedInfo, RunStartedInfo, RunStatus, TraceInput, TransitionRecord,
+    json_opt, json_req, ForeachExpansionRecord, GateResultRecord, InstanceSnapshot, InstanceStatus,
+    LlmCallRecord, RecordedOutput, RunFinishedInfo, RunStartedInfo, RunStatus, TraceInput,
+    TransitionRecord,
 };
 use crate::schema::{
     db_err, now_rfc3339_millis, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, TRACE_PAYLOAD_MAX_BYTES,
@@ -35,7 +36,7 @@ impl Batch {
         self.event_rows += 1;
     }
 
-    /// 追加一个只 upsert `instances` 的快照（不产生 events 行）。
+    /// 追加不产生 events 行的输入（实例快照 / foreach 展开事实，W4a）。
     pub(crate) fn push_snapshot(&mut self, input: TraceInput) {
         self.ops.push(WriteOp::Input(input));
     }
@@ -63,6 +64,10 @@ impl Batch {
     }
 }
 
+/// 批内写操作。`Input` 内联 `TraceInput`（写路径每个事件一次），不为消除与
+/// `Segment` 的尺寸差做装箱——`TraceInput` 尺寸由最大变体（Transition）决定；
+/// W4b 的 item 字段令该最大变体变大，装箱会引入每事件一次堆分配。
+#[allow(clippy::large_enum_variant)]
 enum WriteOp {
     Input(TraceInput),
     Segment(Segment),
@@ -187,6 +192,7 @@ fn write_op(tx: &Transaction<'_>, op: &WriteOp, tracker: &mut Tracker) -> Result
         }
         WriteOp::Input(TraceInput::RecordedOutput(record)) => write_recorded_output(tx, record),
         WriteOp::Input(TraceInput::LlmCall(record)) => write_llm_call(tx, record),
+        WriteOp::Input(TraceInput::ForeachExpansion(record)) => write_foreach_expansion(tx, record),
         WriteOp::Input(TraceInput::Streaming { .. }) => Err(TxError::Fatal(TraceError::Storage(
             "streaming input must be aggregated before writing".to_string(),
         ))),
@@ -683,22 +689,57 @@ fn segment_payload(segment: &Segment) -> Value {
     }
 }
 
+/// 写一行 foreach 展开事实（W4a / DR-007 §8.3；不产生 events 行）。
+fn write_foreach_expansion(
+    tx: &Transaction<'_>,
+    record: &ForeachExpansionRecord,
+) -> Result<(), TxError> {
+    let item_count = i64::try_from(record.item_count).map_err(|_| {
+        TxError::Fatal(TraceError::Storage(format!(
+            "foreach item_count overflow: {}",
+            record.item_count
+        )))
+    })?;
+    let keys_json = json_opt(record.keys.as_ref())?;
+    tx.execute(
+        "INSERT INTO foreach_expansions \
+         (run_id, expansion_id, node_id, source_instance_id, item_count, keys_json, at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            record.run_id,
+            record.expansion_id,
+            record.node_id,
+            record.source_instance_id,
+            item_count,
+            keys_json,
+            record.at
+        ],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
+
 fn upsert_instance(
     tx: &Transaction<'_>,
     snapshot: &InstanceSnapshot,
     finished_seq: Option<i64>,
 ) -> Result<(), TxError> {
+    // `item_key` 用 COALESCE：后续 transition/快照可能不携带 key（`None` = 按索引
+    // 派生），不得清空创建时已写入的显式键；`item_index` 是定位键，直接覆盖。
     let input = json_opt(snapshot.input.as_ref())?;
     let output_json = json_opt(snapshot.output.as_ref())?;
     let error = json_opt(snapshot.error.as_ref())?;
     tx.execute(
         "INSERT INTO instances \
-         (instance_id, run_id, node_id, node_type, attempt, status, input, output_json, error, \
-          error_code, created_seq, started_at, finished_at, finished_seq) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?13) \
+         (instance_id, run_id, node_id, node_type, attempt, item_index, item_key, status, \
+          input, output_json, error, error_code, created_seq, started_at, finished_at, \
+          finished_seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14, ?15) \
          ON CONFLICT(instance_id) DO UPDATE SET \
            node_id = excluded.node_id, node_type = excluded.node_type, \
            attempt = excluded.attempt, status = excluded.status, \
+           item_index = excluded.item_index, \
+           item_key = COALESCE(excluded.item_key, instances.item_key), \
            input = COALESCE(excluded.input, instances.input), \
            output_json = COALESCE(excluded.output_json, instances.output_json), \
            error = COALESCE(excluded.error, instances.error), \
@@ -712,6 +753,8 @@ fn upsert_instance(
             snapshot.node_id,
             snapshot.node_type,
             i64::from(snapshot.attempt),
+            i64::from(snapshot.item_index),
+            snapshot.item_key,
             snapshot.status.as_str(),
             input,
             output_json,

@@ -261,6 +261,11 @@ impl Writer {
                     .note_instance(&snapshot.instance_id, &snapshot.node_id);
                 batch.push_snapshot(TraceInput::InstanceSnapshot(snapshot));
             }
+            // W4a：展开事实不产生 events 行（events.kind 不变），与快照同走
+            // 非事件路径；批内 ops 顺序保持不变。
+            TraceInput::ForeachExpansion(record) => {
+                batch.push_snapshot(TraceInput::ForeachExpansion(record));
+            }
             TraceInput::Transition { record, snapshot } => {
                 self.state
                     .aggregator

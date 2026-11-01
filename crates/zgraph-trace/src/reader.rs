@@ -162,6 +162,10 @@ pub struct InstanceRow {
     pub node_type: String,
     /// 尝试序号。
     pub attempt: u32,
+    /// foreach 展开内下标（W4a；非 region 实例恒 0）。
+    pub item_index: u32,
+    /// 元素确定性键（`None` = 按索引派生，输出层以 `{"$index": i}` 表示）。
+    pub item_key: Option<String>,
     /// 当前状态。
     pub status: InstanceStatus,
     /// 触发输入快照。
@@ -180,6 +184,25 @@ pub struct InstanceRow {
     pub finished_at: Option<String>,
     /// 进入终态对应 events.seq。
     pub finished_seq: Option<i64>,
+}
+
+/// foreach 展开事实行（W4a / 06 §6.2.15；`TraceReader::foreach_expansions`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeachExpansionRow {
+    /// 展开事实 id（UUIDv7）。
+    pub expansion_id: String,
+    /// 所属 run。
+    pub run_id: String,
+    /// 声明 `foreach` 的节点 id（F）。
+    pub node_id: String,
+    /// 触发展开的投递来源实例（entry 注入/无实例时 `None`）。
+    pub source_instance_id: Option<String>,
+    /// 展开元素数 N（`0` 合法 = 空列表）。
+    pub item_count: u64,
+    /// `item_key` 数组（`None` = 未写 keys 列）。
+    pub keys: Option<Value>,
+    /// 展开时刻（RFC3339 毫秒 Z）。
+    pub at: String,
 }
 
 /// 状态迁移明细行（06 §6.2.7；`seq` 1:1 关联 events）。
@@ -433,9 +456,10 @@ impl TraceReader {
 
     /// 查询 run 的全部实例（按插入/rowid 顺序；M2 `created_seq` 允许 NULL）。
     pub fn instances(&self, run_id: &str) -> Result<Vec<InstanceRow>, TraceError> {
-        let sql = "SELECT instance_id, run_id, node_id, node_type, attempt, status, input, \
-                   output_json, error, error_code, created_seq, started_at, finished_at, \
-                   finished_seq FROM instances WHERE run_id = ?1 ORDER BY rowid ASC";
+        let sql = "SELECT instance_id, run_id, node_id, node_type, attempt, item_index, \
+                   item_key, status, input, output_json, error, error_code, created_seq, \
+                   started_at, finished_at, finished_seq FROM instances WHERE run_id = ?1 \
+                   ORDER BY rowid ASC";
         let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
         let mut rows = stmt.query([run_id]).map_err(db_err)?;
         let mut instances = Vec::new();
@@ -443,6 +467,22 @@ impl TraceReader {
             instances.push(map_instance_row(row)?);
         }
         Ok(instances)
+    }
+
+    /// 查询 run 的 foreach 展开事实（W4a；按 `(at, expansion_id)` 升序，DR-007 §8.3）。
+    ///
+    /// 无 foreach 的 run 返回空 `Vec`（`trace` 输出层据此不追加 ForeachExpansion 行）。
+    pub fn foreach_expansions(&self, run_id: &str) -> Result<Vec<ForeachExpansionRow>, TraceError> {
+        let sql = "SELECT expansion_id, run_id, node_id, source_instance_id, item_count, \
+                   keys_json, at FROM foreach_expansions WHERE run_id = ?1 \
+                   ORDER BY at ASC, expansion_id ASC";
+        let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
+        let mut rows = stmt.query([run_id]).map_err(db_err)?;
+        let mut expansions = Vec::new();
+        while let Some(row) = rows.next().map_err(db_err)? {
+            expansions.push(map_foreach_expansion_row(row)?);
+        }
+        Ok(expansions)
     }
 
     /// 查询状态迁移（按权威序 `seq` 升序）。
@@ -727,22 +767,37 @@ fn map_event_row(row: &rusqlite::Row<'_>) -> Result<EventRow, TraceError> {
 }
 
 fn map_instance_row(row: &rusqlite::Row<'_>) -> Result<InstanceRow, TraceError> {
-    let status: String = row.get(5).map_err(db_err)?;
+    let status: String = row.get(7).map_err(db_err)?;
     Ok(InstanceRow {
         instance_id: row.get(0).map_err(db_err)?,
         run_id: row.get(1).map_err(db_err)?,
         node_id: row.get(2).map_err(db_err)?,
         node_type: row.get(3).map_err(db_err)?,
         attempt: to_u32(row.get(4).map_err(db_err)?),
+        item_index: to_u32(row.get(5).map_err(db_err)?),
+        item_key: row.get(6).map_err(db_err)?,
         status: parse_status(&status)?,
-        input: parse_json_opt(row.get(6).map_err(db_err)?)?,
-        output_json: parse_json_opt(row.get(7).map_err(db_err)?)?,
-        error: parse_json_opt(row.get(8).map_err(db_err)?)?,
-        error_code: row.get(9).map_err(db_err)?,
-        created_seq: row.get(10).map_err(db_err)?,
-        started_at: row.get(11).map_err(db_err)?,
-        finished_at: row.get(12).map_err(db_err)?,
-        finished_seq: row.get(13).map_err(db_err)?,
+        input: parse_json_opt(row.get(8).map_err(db_err)?)?,
+        output_json: parse_json_opt(row.get(9).map_err(db_err)?)?,
+        error: parse_json_opt(row.get(10).map_err(db_err)?)?,
+        error_code: row.get(11).map_err(db_err)?,
+        created_seq: row.get(12).map_err(db_err)?,
+        started_at: row.get(13).map_err(db_err)?,
+        finished_at: row.get(14).map_err(db_err)?,
+        finished_seq: row.get(15).map_err(db_err)?,
+    })
+}
+
+/// 映射展开事实行（W4a / 06 §6.2.15）。
+fn map_foreach_expansion_row(row: &rusqlite::Row<'_>) -> Result<ForeachExpansionRow, TraceError> {
+    Ok(ForeachExpansionRow {
+        expansion_id: row.get(0).map_err(db_err)?,
+        run_id: row.get(1).map_err(db_err)?,
+        node_id: row.get(2).map_err(db_err)?,
+        source_instance_id: row.get(3).map_err(db_err)?,
+        item_count: to_u64(row.get(4).map_err(db_err)?),
+        keys: parse_json_opt(row.get(5).map_err(db_err)?)?,
+        at: row.get(6).map_err(db_err)?,
     })
 }
 

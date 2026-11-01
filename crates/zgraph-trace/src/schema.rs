@@ -18,9 +18,15 @@
 //! `idx_human_decisions_pending` 部分索引（C13 分表写者：decide INSERT / run consumer
 //! 只更新 `consumed_at`，[`crate::TraceWriter`] 不写该表）。
 //!
+//! v6 = W4a（DR-007 §8 + 06 §6.2.5/§6.2.15）：`instances` 增 `item_index`
+//! （非 foreach 实例恒 0）与 `item_key`（`NULL` = 按索引派生），唯一键改为
+//! `(run_id, node_id, attempt, item_index)`（12 步法重建、显式列复制、旧行取
+//! `0/NULL`）；新增 `foreach_expansions` 展开事实表 + `run_id` 索引（写入者为
+//! [`crate::TraceWriter`]：内核执行事实，不是 C13 决策表）。
+//!
 //! 版本策略：`PRAGMA user_version` 为权威；`0` = 新库（单事务建当前版本），
-//! `1` = spec 06 v1 库、`2` = v2 库、`3` = v3 库、`4` = v4 库（逐版本迁移到 v5），
-//! `5` = 就绪，`>5` = 拒绝。
+//! `1` = spec 06 v1 库、`2` = v2 库、`3` = v3 库、`4` = v4 库、`5` = v5 库
+//! （逐版本迁移到 v6），`6` = 就绪，`>6` = 拒绝。
 //! 迁移前 `VACUUM INTO '<db>.bak.v{old}-{ts}'` 备份；每版本一个事务；失败则恢复
 //! 备份并返回 [`TraceError::Storage`]（06 §6.7）。
 
@@ -32,8 +38,9 @@ use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
 use crate::error::TraceError;
 
 /// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2；
-/// v4 = W2a / DR-005，v5 = W3a / DR-006：`WaitingHuman` + `human_decisions`）。
-pub const TRACE_SCHEMA_VERSION: i64 = 5;
+/// v4 = W2a / DR-005，v5 = W3a / DR-006（`WaitingHuman` + `human_decisions`），
+/// v6 = W4a / DR-007（item 实例 + `foreach_expansions`））。
+pub const TRACE_SCHEMA_VERSION: i64 = 6;
 
 /// SQLite `busy_timeout`（毫秒，06 §6.2.1）。
 pub const DB_BUSY_TIMEOUT_MS: u32 = 5_000;
@@ -107,9 +114,10 @@ const GATE_RESULTS_V4_COLUMNS: &[(&str, &str)] = &[
 
 /// 当前版本**基表** DDL（全部 `IF NOT EXISTS`，单事务执行；06 §6.2 + v2/v3/v4/v5 增量）。
 ///
-/// v5 新增的 `human_decisions`/`idx_human_decisions_pending` 单独放在
-/// [`DDL_HUMAN_DECISIONS`]：新库建库与 v4→v5 迁移共用同一份 DDL，避免两处字面量漂移；
-/// 也保证 v1→v2 的中间态不提前创建 v5 表（该表在 v4→v5 步骤按 FK 顺序创建）。
+/// v5/v6 新增的 `human_decisions`/`idx_human_decisions_pending` 与
+/// `foreach_expansions` 单独放在 [`DDL_HUMAN_DECISIONS`]/[`DDL_FOREACH_EXPANSIONS`]：
+/// 新库建库与对应版本迁移共用同一份 DDL，避免两处字面量漂移；也保证 v1→v2 的
+/// 中间态不提前创建后续版本的表（按各迁移步骤的版本语义创建）。
 const DDL_CURRENT: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version     INTEGER PRIMARY KEY,
@@ -165,6 +173,8 @@ CREATE TABLE IF NOT EXISTS instances (
   node_type    TEXT NOT NULL CHECK (node_type IN
                ('start','end','python_node','agent_call','subgraph')),
   attempt      INTEGER NOT NULL DEFAULT 0,
+  item_index   INTEGER NOT NULL DEFAULT 0,
+  item_key     TEXT,
   status       TEXT NOT NULL CHECK (status IN
                ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
   input        TEXT,
@@ -175,12 +185,14 @@ CREATE TABLE IF NOT EXISTS instances (
   started_at   TEXT,
   finished_at  TEXT,
   finished_seq INTEGER,
-  UNIQUE (run_id, node_id, attempt)
+  UNIQUE (run_id, node_id, attempt, item_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_instances_run_node   ON instances(run_id, node_id);
 CREATE INDEX IF NOT EXISTS idx_instances_run_status ON instances(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_instances_error_code ON instances(error_code) WHERE error_code IS NOT NULL;
+-- W4a（v6，DR-007 §8.2）：item 实例定位索引（fresh 与 v5→v6 迁移必须一致）。
+CREATE INDEX IF NOT EXISTS idx_instances_run_node_item ON instances(run_id, node_id, item_index);
 
 CREATE TABLE IF NOT EXISTS events (
   seq         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,6 +411,77 @@ CREATE INDEX IF NOT EXISTS idx_transitions_instance   ON transitions(instance_id
 CREATE INDEX IF NOT EXISTS idx_transitions_run_status ON transitions(run_id, to_status);
 "#;
 
+/// v6 `foreach_expansions` 展开事实表 + `run_id` 索引（DR-007 §8.3 / 06 §6.2.15）。
+///
+/// 写入者是 [`crate::TraceWriter`]（内核执行事实，与 events/instances 同一写线程；
+/// C13 不适用——这不是决策表）。每次展开一行（`item_count=0` 也写）；展开校验
+/// 失败（非数组/超限/key 重复）**不写** expansion。新库与 v5→v6 迁移共用本 DDL。
+///
+/// `keys_json`：`item_key` 数组；`NULL` 键以 `{"$index": i}` 结构化对象表示
+/// （真实 string key 保持原字符串，不与 `{"$index"}` 撞表示）。
+const DDL_FOREACH_EXPANSIONS: &str = r#"
+CREATE TABLE IF NOT EXISTS foreach_expansions (
+  run_id             TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  expansion_id       TEXT PRIMARY KEY,
+  node_id            TEXT NOT NULL,
+  source_instance_id TEXT,
+  item_count         INTEGER NOT NULL CHECK (item_count >= 0),
+  keys_json          TEXT,
+  at                 TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_id);
+"#;
+
+/// v5→v6 重建 `instances`（SQLite 12 步法；DR-007 §8.2 / 06 §6.2.5）。
+///
+/// 新列 `item_index INTEGER NOT NULL DEFAULT 0`、`item_key TEXT`；唯一键由
+/// `(run_id,node_id,attempt)` 改为 `(run_id,node_id,attempt,item_index)`。
+/// 显式列清单复制：旧行一律 `item_index=0`、`item_key=NULL`；重建 3 索引 +
+/// 新增 `idx_instances_run_node_item`（与新库 DDL 保持同一索引集合）。
+const REBUILD_INSTANCES_V6: &str = r#"
+CREATE TABLE instances_v6 (
+  instance_id  TEXT PRIMARY KEY,
+  run_id       TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  node_id      TEXT NOT NULL,
+  node_type    TEXT NOT NULL CHECK (node_type IN
+               ('start','end','python_node','agent_call','subgraph')),
+  attempt      INTEGER NOT NULL DEFAULT 0,
+  item_index   INTEGER NOT NULL DEFAULT 0,
+  item_key     TEXT,
+  status       TEXT NOT NULL CHECK (status IN
+               ('Pending','Ready','Running','WaitingHuman','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  input        TEXT,
+  output_json  TEXT,
+  error        TEXT,
+  error_code   TEXT,
+  created_seq  INTEGER,
+  started_at   TEXT,
+  finished_at  TEXT,
+  finished_seq INTEGER,
+  UNIQUE (run_id, node_id, attempt, item_index)
+);
+
+INSERT INTO instances_v6 (
+  instance_id, run_id, node_id, node_type, attempt, item_index, item_key, status,
+  input, output_json, error, error_code, created_seq, started_at, finished_at,
+  finished_seq
+)
+SELECT
+  instance_id, run_id, node_id, node_type, attempt, 0, NULL, status,
+  input, output_json, error, error_code, created_seq, started_at, finished_at,
+  finished_seq
+FROM instances;
+
+DROP TABLE instances;
+ALTER TABLE instances_v6 RENAME TO instances;
+
+CREATE INDEX IF NOT EXISTS idx_instances_run_node   ON instances(run_id, node_id);
+CREATE INDEX IF NOT EXISTS idx_instances_run_status ON instances(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_instances_error_code ON instances(error_code) WHERE error_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_instances_run_node_item ON instances(run_id, node_id, item_index);
+"#;
+
 /// 打开（必要时创建）写库，完成版本检查与迁移并应用写连接 PRAGMA。
 pub(crate) fn open_writer_connection(path: &Path) -> Result<Connection, TraceError> {
     ensure_parent_dir(path)?;
@@ -527,6 +610,7 @@ fn create_current(conn: &mut Connection) -> Result<(), TraceError> {
     let tx = begin_immediate(conn)?;
     tx.execute_batch(DDL_CURRENT).map_err(db_err)?;
     tx.execute_batch(DDL_HUMAN_DECISIONS).map_err(db_err)?;
+    tx.execute_batch(DDL_FOREACH_EXPANSIONS).map_err(db_err)?;
     for version in 1..=TRACE_SCHEMA_VERSION {
         record_migration(&tx, version)?;
     }
@@ -535,7 +619,31 @@ fn create_current(conn: &mut Connection) -> Result<(), TraceError> {
 }
 
 /// 单版本迁移（`from` → `from+1`；单事务；06 §6.7）。
+///
+/// `from == 5`（v5→v6 重建 `instances`）期间临时关闭 FK 校验：`human_decisions`
+/// 以 `ON DELETE CASCADE` 引用 `instances`，SQLite 12 步法的 `DROP TABLE` 会级联
+/// 删除全部决策行（DR-007 §8.2 要求 human_decisions 结构/数据不变）。`PRAGMA
+/// foreign_keys` 在事务内无效，故在事务前后切换；失败路径连接随后被丢弃/回滚。
 fn migrate_step(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
+    let toggle_fk = from == 5;
+    if toggle_fk {
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(db_err)?;
+    }
+    let result = migrate_step_inner(conn, from);
+    if toggle_fk {
+        if let Err(restore_error) = conn.execute_batch("PRAGMA foreign_keys = ON;") {
+            return match result {
+                Ok(()) => Err(db_err(restore_error)),
+                Err(migration_error) => Err(migration_error),
+            };
+        }
+    }
+    result
+}
+
+/// `migrate_step` 的单事务主体（版本分支）。
+fn migrate_step_inner(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
     let tx = begin_immediate(conn)?;
     match from {
         1 => {
@@ -565,6 +673,17 @@ fn migrate_step(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
             tx.execute_batch(REBUILD_TRANSITIONS_V5).map_err(db_err)?;
             tx.execute_batch(DDL_HUMAN_DECISIONS).map_err(db_err)?;
             record_migration(&tx, 5)?;
+        }
+        5 => {
+            // v5→v6（DR-007 §8.2 / 06 §6.2.7）：单版本单事务。
+            // FK 顺序：先删可能残留的 foreach_expansions（其 FK 指向 runs，
+            // 不约束 instances；重建前删除仅为重入健壮性），再重建 instances，
+            // 最后建 expansion 表。旧行 item_index=0 / item_key=NULL。
+            tx.execute_batch("DROP TABLE IF EXISTS foreach_expansions;")
+                .map_err(db_err)?;
+            tx.execute_batch(REBUILD_INSTANCES_V6).map_err(db_err)?;
+            tx.execute_batch(DDL_FOREACH_EXPANSIONS).map_err(db_err)?;
+            record_migration(&tx, 6)?;
         }
         other => {
             return Err(TraceError::Storage(format!(
@@ -621,6 +740,7 @@ fn migration_description(version: i64) -> &'static str {
         3 => "v3: runs.global_vars_json (ISSUE-087)",
         4 => "v4: gate_results deferred/attempt/verdict (W2a)",
         5 => "v5: WaitingHuman statuses + human_decisions (W3a)",
+        6 => "v6: instances item_index/item_key + foreach_expansions (W4a)",
         _ => "unknown migration",
     }
 }

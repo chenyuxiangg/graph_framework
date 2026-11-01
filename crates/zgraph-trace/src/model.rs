@@ -247,6 +247,10 @@ pub struct InstanceSnapshot {
     pub node_type: String,
     /// 尝试序号（自环/重试 +1）。
     pub attempt: u32,
+    /// foreach 展开内下标（W4a / DR-007 §6.3；非 region 实例恒 0）。
+    pub item_index: u32,
+    /// 元素确定性键（`None` = 按索引派生；trace 读取侧以 `{"$index": i}` 表示）。
+    pub item_key: Option<String>,
     /// 当前状态。
     pub status: InstanceStatus,
     /// 触发时 buffer 快照。
@@ -409,6 +413,29 @@ pub struct LlmCallRecord {
     pub recorded_at: String,
 }
 
+/// foreach 展开事实（W4a / DR-007 §8.3；10 §1.5 风格输入记录）。
+///
+/// 一次 F 的展开一行（`item_count=0` 也写）；展开校验失败（非数组/超限/key 重复）
+/// **不写** expansion（无展开事实）。展开事实不产生 `events` 行（`events.kind`
+/// 不变），落 `foreach_expansions` 表。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeachExpansionRecord {
+    /// 所属 run。
+    pub run_id: String,
+    /// 展开事实 id（UUIDv7）。
+    pub expansion_id: String,
+    /// 声明 `foreach` 的节点 id（F）。
+    pub node_id: String,
+    /// 触发展开的投递来源实例（entry 注入/无实例时 `None`；DR-007 §8.3 N18）。
+    pub source_instance_id: Option<String>,
+    /// 展开元素数 N（`0` 合法 = 空列表）。
+    pub item_count: u64,
+    /// `item_key` 数组（`None` 键以 `{"$index": i}` 表示；无 key_field 时全为索引对象）。
+    pub keys: Option<Value>,
+    /// 展开时刻（RFC3339 毫秒 Z）。
+    pub at: String,
+}
+
 /// 写线程输入（cli 适配层把内核事件映射成这些值；签名冻结）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum TraceInput {
@@ -464,6 +491,8 @@ pub enum TraceInput {
     RecordedOutput(RecordedOutput),
     /// LLM 调用记录（仅 llm_calls 行）。
     LlmCall(LlmCallRecord),
+    /// foreach 展开事实（仅 foreach_expansions 行；不产生 events 行，W4a）。
+    ForeachExpansion(ForeachExpansionRecord),
 }
 
 /// 把 `Option<&Value>` 序列化为可空 TEXT（写线程内部使用）。

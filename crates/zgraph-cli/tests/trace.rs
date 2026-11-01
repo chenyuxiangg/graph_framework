@@ -90,6 +90,8 @@ fn transition(
         node_id: node.to_string(),
         node_type: node_type.to_string(),
         attempt: 0,
+        item_index: 0,
+        item_key: None,
         status: to,
         input: Some(json!({"in": 1})),
         output: if to == InstanceStatus::Completed {

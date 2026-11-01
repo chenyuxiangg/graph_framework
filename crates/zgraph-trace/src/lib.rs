@@ -30,6 +30,12 @@
 //!   框架迁移（备份 → 单事务 → 失败恢复）。C13 分表写者：`human_decisions` 由
 //!   [`DecisionStore`]（decide INSERT）与 [`DecisionConsumer`]（run 标 `consumed_at`）
 //!   写，[`TraceWriter`] 不写该表；[`TraceReader::human_decisions`] 只读。
+//! - schema 升 **v6**（W4a / DR-007 §8）：`instances` 增 `item_index`/`item_key`
+//!   （唯一键 `(run_id,node_id,attempt,item_index)`，12 步法重建；旧行 `0/NULL`），
+//!   新增 `foreach_expansions` 展开事实表（[`TraceInput::ForeachExpansion`] 写入、
+//!   [`TraceReader::foreach_expansions`] 读取；不产生 events 行）；v5 旧库按同一
+//!   forward-only 框架迁移（重建 `instances` 期间临时关闭 FK 校验以保留
+//!   `human_decisions` 行）。无 foreach 的旧 run 的 trace/回放 golden 不变。
 //! - 崩溃标定（06 §6.8）是两段式原语：`TraceWriter::interrupted_candidates` 查
 //!   `Running`/`Paused` 候选，`TraceWriter::mark_interrupted` 单事务标定为
 //!   `Failed + interrupted=1`；判活（`kill(pid, 0)`/heartbeat 陈旧）由调用方负责。
@@ -111,13 +117,13 @@ pub use decision::{
 };
 pub use error::TraceError;
 pub use model::{
-    GateResultRecord, InstanceSnapshot, InstanceStatus, LlmCallRecord, RecordMode, RecordedOutput,
-    RunFinishedInfo, RunMetrics, RunStartedInfo, RunStatus, StreamingEvent, TraceFailure,
-    TraceInput, TransitionRecord,
+    ForeachExpansionRecord, GateResultRecord, InstanceSnapshot, InstanceStatus, LlmCallRecord,
+    RecordMode, RecordedOutput, RunFinishedInfo, RunMetrics, RunStartedInfo, RunStatus,
+    StreamingEvent, TraceFailure, TraceInput, TransitionRecord,
 };
 pub use reader::{
-    EventQuery, EventRow, GateResultRow, GraphRow, InstanceRow, LlmCallRow, RecordedOutputRow,
-    RunRow, RunStats, StreamingRow, TraceReader, TransitionRow,
+    EventQuery, EventRow, ForeachExpansionRow, GateResultRow, GraphRow, InstanceRow, LlmCallRow,
+    RecordedOutputRow, RunRow, RunStats, StreamingRow, TraceReader, TransitionRow,
 };
 pub use recovery::{InterruptedCandidate, RecoveredRun, INTERRUPTED_ERROR_MESSAGE};
 pub use schema::{
