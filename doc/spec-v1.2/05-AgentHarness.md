@@ -22,7 +22,7 @@
 | H3 | Harness **不写** SQLite；所有可观测数据经 `NodeContext.emit` → 06 分册写路径 | 06 §6.4 |
 | H4 | **Python 调用一律在 worker 子进程执行；Harness 不得在事件循环线程做阻塞调用**。进程内不 import / 不执行用户 Python（含工具模块）；工具执行由 worker 子进程承担（§5.6.5），Harness 只 async 等待其帧与退出 | 00 §0.6 I8；D3/D4/D7；v1 的「`spawn_blocking` 调进程内 Python」已作废（D13） |
 | H5 | `AgentConfig` / prompt / 工具注册表均为**文件资产**，运行期只读；v1 不做热更新与资产写入 | 决策记录 §2.2 |
-| H6 | 错误必须收敛到 00 §0.3 的 `HarnessErrorKind` 八值 + `NodeError` 七变体；**除 M4 追加的 `ContextOverflow`（D18，Lead 裁定）外不得新增枚举值** | 00 §0.3/§0.4；映射见 §5.7 |
+| H6 | 错误必须收敛到 00 §0.3 的 `HarnessErrorKind` 八值 + `NodeError` 七变体；**除 M4 `ContextOverflow` 与 v0.3 REV-096 Lead 裁决 A 追加的 3 个 kind（`SkillInvalid`/`Mcp`/`Plugin`）外不得新增枚举值** | 00 §0.3/§0.4；映射见 §5.7/§5.14 |
 
 ### 5.1.2 组件分解
 
@@ -1252,7 +1252,7 @@ pub trait AgentProvider: Send + Sync {
 |---|---|---|
 | `BuiltinHarness` | ✅ 唯一实现 | v2 落地 = **`HarnessExecutor`**（`crates/zgraph-harness/src/executor.rs`，直接实现 `NodeExecutor` 并处理 `agent_call`）；`AgentProvider` 的 `run(agent, inputs, ctx)` 语义即其内部 `run_agent`（§5.5.4）。**M4 未引入独立的 `AgentProvider` trait 对象**，扩展位保留 |
 | `CodexAppServerProvider` | ❌（v2 候选） | 外挂子进程 + JSON-RPC；`dynamicTools` 仍 experimental；提供的是 turn 循环（与我们 loop 冲突，需"仅用其 transport"再评估） |
-| `AcpProvider` | ❌（v2 候选） | ACP 只上线语义事件、拿不到 token delta（`_research/harness-alternatives.md` §3.3），与 §5.8 冲突，需要降级策略 |
+| `AcpProvider` | ❌（v2 候选） | ACP 只上线语义事件、拿不到 token delta（`_research/harness-alternatives.md` §3.3），与 §5.8 冲突，需要降级策略。**v0.3 修正（REV-096）**：ACP 协议层有 `agent_message_chunk`/`agent_thought_chunk` chunk 通道；**DSH 服务端只发 committed 消息**（raw deltas 不上线）→ v0.3 按「一条消息一次 delta」降级（见 §5.14.3） |
 | `FakeProvider`（测试） | ✅ | 仅用于 `LlmProvider` 层（§5.3.4），不是 `AgentProvider` |
 
 > v1 选择器：`agent_call` 节点固定 `BuiltinHarness`；`AgentProviderKind` 的其余两值在配置中出现 → `HARNESS_CONFIG_LOAD{reason:"provider_not_implemented"}`。
@@ -1431,29 +1431,34 @@ pub trait AgentProvider: Send + Sync {
 
 ---
 
-## 5.11 v0.3 冻结草案：skills / MCP / harness 插件（2026-11-01，REV-096；待实现回写）
+## 5.14 v0.3 冻结草案：skills / MCP / harness 插件（2026-11-01，REV-096；待实现回写）
 
+> **编号注（REV-096 C5）**：Lead 裁决拟编 §5.13，但既有 §5.13 为「M4 v2 落地偏差记录（D13–D21）」；为避免改写历史节号，本草案顺延为 **§5.14（5.14.1–3）**，待复核确认。
+
+> **错误码（REV-096 Lead 裁决 A）**：v0.3 在 `HarnessErrorKind` 仅追加 **3** 个 kind：`SkillInvalid`（`HARNESS_SKILL_INVALID`）、`Mcp`（`HARNESS_MCP_ERROR`，detail.reason；工具调用失败仍 `TOOL_ERROR`）、`Plugin`（`HARNESS_PLUGIN_ERROR`，detail.reason 含 `timeout`；无独立 PLUGIN_TIMEOUT 码）；其余错误沿用既有码/`HARNESS_CONFIG_LOAD{reason}`。
 > 本节是 **V1 设计冻结草案**（docs-only）；实现波次见 DR-008 V2–V4。默认（不配置）行为不变；三能力均属 Harness Loading/AgentConfig，**不参与 `graph_hash`**。
 
-### 5.11.1 skills（DR-009）
+### 5.14.1 skills（DR-009）
 
 - 发现：`<skills_dir>/<name>/SKILL.md`（`--skills-dir` > `ZGRAPH_SKILLS_DIR` > `.zgraph/skills`）；frontmatter 必填 `name`/`description`，未知键拒绝；`SKILL.md` ≤256KiB。
 - 注入：system **仅索引**（`name: description`）；`skill_view(name)` 工具按需返回正文（≤32KiB，`truncated` 标记）；单 run ≤5 次（`MAX_SKILL_VIEWS`）。
 - 配置：`AgentConfig.skills?: string[]`（缺省 `[]`；`"*"` 显式全量）；不执行 skill 脚本；错误 `HARNESS_SKILL_*`（00 §0.4）。
 - 无 skills：不发现/不注入/不注册工具 → 既有输出不变。
 
-### 5.11.2 MCP（DR-010）
+### 5.14.2 MCP（DR-010）
 
-- client：Rust（rmcp 首选；stdio + Streamable HTTP；协议目标 `2026-07-28`）；registry `<assets_dir>/mcp_servers.json`；`AgentConfig.mcp?: {servers, allow?}`。
-- 工具：`mcp:<server>:<tool>` → `ToolDef`（inputSchema/description/截断 ≤32KiB）；allowlist/名称冲突 fail-closed；单响应多 tool_call 仍串行。
-- 生命周期：initialize → tools/list（run 级缓存）→ tools/call；超时/取消/进程组 kill（03 §3.9.4）；不重试。
+- client：Rust **rmcp 3.8.0**（Apache-2.0；`mcp` feature-gated，CLI release 默认开启）；**双 era** `2026-07-28`（无状态、每请求 `_meta` 协商）+ `2025-11-25`（initialize）；stdio + Streamable HTTP；registry `<assets_dir>/mcp_servers.json`；`AgentConfig.mcp?: {servers, allow?}`；`--allow-mcp` 显式开启（否则 `HARNESS_MCP_ERROR{reason:"not_allowed"}`）。
+- 工具：**`mcp__<server>__<tool>`** → `ToolDef`（inputSchema/description/截断 ≤32KiB）；**必须显式进 `AgentConfig.tools`**；allowlist/名称冲突 fail-closed；单响应多 tool_call 仍串行；`call_id` 保留原生 id、可识别性只用 `tool_name=mcp__<server>__<tool>`。
+- 生命周期：`2026-07-28` 无 initialize/session（每请求 `_meta` 版本协商；HTTP `MCP-Protocol-Version`/`Mcp-Method`）；legacy `2025-11-25` initialize 回落；tools/list（run 级缓存）→ tools/call（rmcp 自动 MRTR 10 轮；无 per-call 超时→自包 timeout）；`input_required` → `input_required_unsupported`；超时/取消/进程组 kill（03 §3.9.4）；不重试。
 - trace：**默认不新增 schema**（沿用 `StreamingEvent::ToolCall*`/`llm_calls`）；v7 仅候选（逐次审计），另立 DR。
 - 无 mcp：不读 registry/不启进程/不注册工具 → 既有输出不变。
 
-### 5.11.3 harness 插件（DR-011）
+### 5.14.3 harness 插件（DR-011）
 
 - seam：`AgentProvider`（Rust trait）实际选择；`AgentConfig.harness?: {kind:"builtin"| "subprocess", command,args?,protocol:"zgraph-harness/1",env?,timeout_ms?}`；缺省 builtin（现有 `HarnessExecutor` 路径不变）。
 - 子进程协议：NDJSON over stdio；`hello/hello_ok` → `run` → `event`（token/reasoning/tool_call/progress 子集）→ `final`（四字段 output）；版本/schema 校验、行 ≤1MiB。
 - 取消/超时：关闭 stdin → SIGTERM 3s → SIGKILL 进程组；超时走 `NODE_TIMEOUT` 语义；`HARNESS_PLUGIN_*` 错误闭集。
 - L2：外部 harness **不重跑**（`--mode=outputs` 用 `recorded_outputs`；events 重放不启动进程）。
-- Codex/DSH：薄 adapter（外部进程；不嵌入 Codex crate/不引入 DSH loop）；capabilities 协商（无 streaming 则降级）；真实适配器可 ext。
+- Codex/DSH：薄 adapter（外部进程；不嵌入 Codex crate/不引入 DSH loop）；**Codex 先**（`exec --json`/`--output-last-message`；无 token delta、iterations=1、退出码仅 0/1、cached tokens 丢弃）；**DSH ACP best-effort**（`dsh --profile acp`；ACP 有 chunk 通道但 DSH 只发 committed 消息；headless `--json`/sdk 不可依赖）；真实适配器不阻塞发布；**`StopReason` 不新增**（`Other{raw}`）。
+
+> **2026-07-28 ACP 修正（REV-096）**：05 §5.9.4 旧结论「ACP 只上线语义事件、拿不到 token delta」修正为：ACP 协议层有 `agent_message_chunk`/`agent_thought_chunk`，是 **DSH 服务端**选择只发 committed 消息（raw provider deltas 不上线）→ v0.3 按「一条消息一次 delta」降级，不是协议缺失。

@@ -2,10 +2,10 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.3（M8）**V1 设计冻结进行中**（分支 `docs/docs-v03-design`，REV-096）：skills + MCP + harness 可插拔三项设计（DR-008..011）+ spec 00/02/05/06/07 草案 + AC-18/19/20 设计；v0.2.0 已发布（tag `v0.2.0`）。
+**当前阶段**：v0.3（M8）**V1 设计冻结评审中**（分支 `docs/docs-v03-design`，REV-096；C1–C5 修正已提交，待复核）：skills + MCP + harness 可插拔三项设计（DR-008..011）+ spec 00/02/05/06/07 草案 + AC-18/19/20 设计；v0.2.0 已发布（tag `v0.2.0`）。
 
 **进行中任务**
-- docs `docs/docs-v03-design`（REV-096，作者 docs-dev）：待 arch-researcher 调研结论转发后锁定 research/MCP client/Codex·DSH 细节，再提交设计冻结。
+- docs `docs/docs-v03-design`（REV-096，作者 docs-dev）：**C1–C5 修正已提交，待 reviewer-a 复核**。
 
 **下一步**
 - V1 评审通过后：**V2 skills** → **V3 MCP** → **V4 harness 插件** → **V5 集成/兼容/性能/发布 v0.3.0**（DR-008 §3）。

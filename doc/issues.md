@@ -160,4 +160,4 @@
 | ISSUE-152 | P3 | research/harness | v0.3 V1：`codex exec --json` 事件形状/退出码/取消稳定性未验证；DSH 是否提供 headless/ACP 入口未确认；真实 adapter 可能延期 | V4 的 Codex/DSH 真实适配器范围不确定（骨架/fake 可先做） | spike 后锁定 adapter 边界；真实适配器可 ext，不阻塞 v0.3 发布（Lead 裁决项） | open | 2026-11-01 |
 | ISSUE-153 | P3 | research/skills | v0.3 V1：agentskills.io frontmatter 字段/大小限制/未知字段策略以当前公开资料为准，规范可能演进 | skills 校验规则需随规范调整（V2 前） | V2 实现前复核规范版本；DR-009 修订段记录差异 | open | 2026-11-01 |
 | ISSUE-154 | P3 | harness | v0.3 V1：外部 harness 的 L2/沙箱/凭据边界仅设计冻结；真实 Codex/DSH 进程行为/环境隔离未实测 | V4/V5 集成风险（外部进程崩溃/泄漏/密钥） | V4 fake external 覆盖协议；真实适配器测试前做安全/资源 spike（V5） | open | 2026-11-01 |
-| ISSUE-155 | P3 | docs/process | v0.3 V1：W5 共享评审队列延至 v0.4 为推荐项（Lead 裁决）；v0.3 范围是否包含 W5 需确认 | 影响 v0.3 发布范围/排期（设计冻结已按不含 W5） | Lead 裁决；若要求 W5 纳入则调整 DR-008 波次 | open | 2026-11-01 |
+| ISSUE-155 | P3 | docs/process | v0.3 V1：W5 共享评审队列延至 v0.4 为推荐项（Lead 裁决）；v0.3 范围是否包含 W5 需确认 | 影响 v0.3 发布范围/排期（设计冻结已按不含 W5） | **fixed（Lead 2026-11-01 裁决：W5 延至 v0.4/M9，v0.3 不含）**；v0.4 规划时跟踪 | fixed | 2026-11-01 |

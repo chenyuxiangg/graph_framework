@@ -196,7 +196,6 @@ interface SubgraphConfig { subgraph_id: string }  // v1：加载期校验通过�
 
 interface StartEndConfig {}         // 必须恰好 {}；on_error → DSL_UNSUPPORTED_FIELD，其它未知键 → DSL_PARSE_ERROR
 
-
 interface ForeachConfig {
   items_port: string;                  // 必填；本节点已声明 input 端口
   key_field?: string;                  // 可选；元素 object 字段名
@@ -564,7 +563,6 @@ interface SubgraphDefinition {      // v1：定义保留、仅校验、不执行
 | 2 | 每条边的 `gate` | `Gate`（内置 op） | `edges` 数组顺序 |
 | 3 | — | — | **无第三类**：Agent 级 skills/tools 不在图加载期解析（§2.5.7） |
 > **v0.3 澄清（REV-096）**：`AgentConfig.skills`/`mcp`/`harness` 是 Harness 资产字段，**不进入 DSL**、不参与 `graph_hash`（§2.8.3）；图加载期仍只校验 gate/python_node 符号格式与内置 op（§2.5.7）。
-
 
 - 去重按符号名；**同名跨 kind** 立即记为冲突（`DSL_SYMBOL_CONFLICT`），在 R14b 末尾统一报（定位：后出现的位置）。
 - 子图定义内的符号：v1 子图不执行 → **不收集**（子图定义段只做结构校验；节点运行时被拒，R14 不解析其符号）。
