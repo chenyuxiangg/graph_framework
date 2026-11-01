@@ -338,3 +338,41 @@ fn compiles_builtin_human_handler() {
     let worker = graph.nodes.get("worker").expect("worker");
     assert!(matches!(worker.handler, CompiledHandler::Python { .. }));
 }
+
+/// W4a：`foreach` 区域编译（fixture `valid_foreach.json`，DSL R18 已校验）。
+///
+/// 断言 `CompiledForeach` 的 region/exit/join 映射与 `CompiledGraph.foreach_owner`
+/// 归属（region 外节点不在地图中）。
+#[test]
+fn compiles_foreach_region_from_dsl() {
+    let graph = common::compile_fixture("valid_foreach.json");
+
+    let fanout = graph.nodes.get("F").expect("F");
+    let foreach = fanout.foreach.as_ref().expect("F.foreach");
+    assert_eq!(foreach.items_port, "items");
+    assert_eq!(foreach.key_field.as_deref(), Some("id"));
+    assert_eq!(foreach.join, "J");
+    assert_eq!(foreach.max_items, Some(3));
+    assert_eq!(foreach.exit_node, "E");
+    assert_eq!(foreach.exit_edge, 3, "E -> J is edge index 3");
+    assert_eq!(foreach.join_port, "results");
+    assert_eq!(
+        foreach.region,
+        vec!["F", "W", "E"],
+        "region keeps node order"
+    );
+
+    // region 归属（含 F 自身）；region 外节点不在表中。
+    assert_eq!(graph.foreach_owner.get("F").map(String::as_str), Some("F"));
+    assert_eq!(graph.foreach_owner.get("W").map(String::as_str), Some("F"));
+    assert_eq!(graph.foreach_owner.get("E").map(String::as_str), Some("F"));
+    assert!(!graph.foreach_owner.contains_key("J"));
+    assert!(!graph.foreach_owner.contains_key("start"));
+    assert!(!graph.foreach_owner.contains_key("end"));
+
+    // 非 foreach 节点保持 None；无 foreach 的图没有 region 归属。
+    assert!(graph.nodes.get("W").expect("W").foreach.is_none());
+    let parallel = common::compile_fixture("valid_parallel.json");
+    assert!(parallel.foreach_owner.is_empty());
+    assert!(parallel.nodes.values().all(|node| node.foreach.is_none()));
+}

@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::Value;
 
 use crate::types::{
-    Attempt, EdgeIdx, HumanDecision, InstanceId, InstanceStatus, NodeError, NodeId, PortName,
-    RunError, RunId, RunMetrics, RunStatus,
+    Attempt, EdgeIdx, ExpansionId, HumanDecision, InstanceId, InstanceStatus, ItemIndex, NodeError,
+    NodeId, PortName, RunError, RunId, RunMetrics, RunStatus,
 };
 
 /// 流式事件（节点 `ctx.emit` 产生；只进 trace，不参与数据通道）。
@@ -75,6 +75,10 @@ pub struct InstanceSnapshot {
     pub node_type: String,
     /// 尝试序号。
     pub attempt: Attempt,
+    /// foreach 展开内下标（W4a；非 region 节点恒 0）。
+    pub item_index: ItemIndex,
+    /// foreach item 键（W4a；`None` = 按索引派生，trace 以 `{"$index": i}` 表示）。
+    pub item_key: Option<String>,
     /// 当前状态。
     pub status: InstanceStatus,
     /// 派发时的输入快照（全部声明端口；未到为 null）。
@@ -104,6 +108,10 @@ pub struct TransitionRecord {
     pub node_id: NodeId,
     /// 尝试序号。
     pub attempt: Attempt,
+    /// foreach 展开内下标（W4a；非 region 节点恒 0）。
+    pub item_index: ItemIndex,
+    /// foreach item 键（W4a；`None` = 按索引派生）。
+    pub item_key: Option<String>,
     /// 迁移前状态。
     pub from: InstanceStatus,
     /// 迁移后状态。
@@ -150,6 +158,27 @@ pub struct GateResultRecord {
     pub verdict: Option<Value>,
     /// 求值时刻（UTC RFC3339 毫秒 Z）。
     pub ts: String,
+}
+
+/// `foreach` 展开事实记录（W4a / DR-007 §6.1/§8.3；**不是** `TraceEvent`）。
+///
+/// 每次成功展开恰一条（含 `item_count=0` 的空列表）；展开校验失败不落该记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeachExpansionRecord {
+    /// 所属 run。
+    pub run_id: RunId,
+    /// 展开事实 ID（UUIDv7）。
+    pub expansion_id: ExpansionId,
+    /// foreach 节点 F。
+    pub node_id: NodeId,
+    /// 使 controller 进入 Ready 的最后一条投递来源实例（entry 注入/无实例为 `None`）。
+    pub source_instance_id: Option<InstanceId>,
+    /// 展开元素数 N（`>= 0`）。
+    pub item_count: u32,
+    /// item_key 列表（`None` = 按索引派生；与 `item_count` 等长）。
+    pub keys: Vec<Option<String>>,
+    /// 展开时刻（UTC RFC3339 毫秒 Z）。
+    pub at: String,
 }
 
 /// 人工决策确认记录（W3a0 / DR-006 §7.1；**不是** `TraceEvent`）。
@@ -261,6 +290,11 @@ pub trait TraceSink: Send + Sync {
     /// 默认 no-op：库调用方/`trace_enabled=false` 场景无需实现（DR-006 §7.3 #7）。
     fn human_decided(&self, _record: HumanDecisionRecord) {}
 
+    /// `foreach` 展开事实（W4a；**不是** `TraceEvent`，不进 `events.kind`）。
+    ///
+    /// 每次成功展开发送恰一条（空列表 `item_count=0` 也发送）；默认 no-op。
+    fn foreach_expansion(&self, _record: ForeachExpansionRecord) {}
+
     /// 取走 trace 写端的**不可恢复**错误文本（fail-stop 轮询；06 §6.4.5）。
     ///
     /// 默认 `None`（内存/no-op sink 永不失败）。生产实现（CLI 的 trace 桥）应非阻塞地
@@ -367,6 +401,8 @@ pub enum TraceCall {
     Streaming,
     /// `human_decided`（W3a0）。
     HumanDecided,
+    /// `foreach_expansion`（W4a）。
+    ForeachExpansion,
     /// `run_finished`。
     RunFinished,
 }
@@ -398,6 +434,8 @@ struct MemoryTraceData {
     streaming: Vec<StreamingCall>,
     /// `human_decided` 确认记录（W3a0）。
     human_decided: Vec<HumanDecisionRecord>,
+    /// `foreach_expansion` 展开事实（W4a）。
+    foreach_expansions: Vec<ForeachExpansionRecord>,
     finished: Vec<RunFinishedInfo>,
     calls: Vec<TraceCall>,
 }
@@ -430,6 +468,7 @@ impl MemoryTraceSink {
             && data.abandoned.is_empty()
             && data.streaming.is_empty()
             && data.human_decided.is_empty()
+            && data.foreach_expansions.is_empty()
             && data.finished.is_empty()
             && data.calls.is_empty()
     }
@@ -477,6 +516,11 @@ impl MemoryTraceSink {
     /// `human_decided` 确认记录列表（W3a0；每次决策恰一条）。
     pub fn human_decided(&self) -> Vec<HumanDecisionRecord> {
         self.lock().human_decided.clone()
+    }
+
+    /// `foreach_expansion` 展开事实列表（W4a；每次成功展开恰一条）。
+    pub fn foreach_expansions(&self) -> Vec<ForeachExpansionRecord> {
+        self.lock().foreach_expansions.clone()
     }
 
     /// 按调用顺序记录的 sink 方法序列（断言 RunStarted 第一 / RunFinished 最后）。
@@ -577,6 +621,12 @@ impl TraceSink for MemoryTraceSink {
         data.human_decided.push(record);
     }
 
+    fn foreach_expansion(&self, record: ForeachExpansionRecord) {
+        let mut data = self.lock();
+        data.calls.push(TraceCall::ForeachExpansion);
+        data.foreach_expansions.push(record);
+    }
+
     fn run_finished(&self, info: RunFinishedInfo) {
         let mut data = self.lock();
         data.calls.push(TraceCall::RunFinished);
@@ -668,6 +718,18 @@ impl Emitter {
             return;
         }
         self.sink.human_decided(record);
+    }
+
+    /// `foreach` 展开事实（W4a）：与其它 sink 调用同一 `closed` 串行化。
+    pub(crate) fn foreach_expansion(&self, record: ForeachExpansionRecord) {
+        if !self.enabled {
+            return;
+        }
+        let closed = self.lock_closed();
+        if *closed {
+            return;
+        }
+        self.sink.foreach_expansion(record);
     }
 
     pub(crate) fn node_timed_out(

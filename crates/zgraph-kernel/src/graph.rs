@@ -7,7 +7,7 @@
 //! 编译在 run 启动前一次性完成：`CompiledGraph` 构造后不可变（`Arc` 只读共享），
 //! 运行期不再增删节点/边，因此事件循环可以放心把 `&CompiledGraph` 交给执行任务。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use zgraph_dsl::{
@@ -18,6 +18,30 @@ use zgraph_dsl::{
 
 use crate::gate::CompiledGate;
 use crate::types::{CompileError, EdgeIdx, NodeId, PortName};
+
+/// 编译后的 `foreach` 配置（W4a / DR-007 §2.3、§6；`None` = 普通节点）。
+///
+/// 区域信息（`region`/`exit_node`/`exit_edge`/`join_port`）由内核在编译期按
+/// DR-007 §4 的确定性算法从边表重建（DSL R18 已保证合法；此处只做防御性校验）。
+#[derive(Debug, Clone)]
+pub struct CompiledForeach {
+    /// 列表输入端口名（必须是 F 已声明的 input 端口）。
+    pub items_port: PortName,
+    /// 元素 object 的键字段（`None` = item_key 按索引派生）。
+    pub key_field: Option<String>,
+    /// join 节点 ID（region 外、`E→J` 唯一出口）。
+    pub join: NodeId,
+    /// 展开元素数上限（`None` = 无上限）。
+    pub max_items: Option<u32>,
+    /// region 唯一出口 `E`。
+    pub exit_node: NodeId,
+    /// `E→J` 边的边号（join 投递复用；`GateResult` 的 `edge_index`）。
+    pub exit_edge: EdgeIdx,
+    /// `E→J` 边的目标端口。
+    pub join_port: PortName,
+    /// region 节点（按 DSL `nodes` 数组序，含 F 自身）。
+    pub region: Vec<NodeId>,
+}
 
 /// 编译后的节点。
 #[derive(Debug, Clone)]
@@ -34,6 +58,8 @@ pub struct CompiledNode {
     pub trigger: Trigger,
     /// 编译后的处理入口。
     pub handler: CompiledHandler,
+    /// `foreach` 展开配置（W4a；`None` = 普通单实例节点）。
+    pub foreach: Option<CompiledForeach>,
     /// DSL 节点显式声明的实例超时（`config.timeout_ms`；未声明为 `None`）。
     ///
     /// 调度阶段按 spec 05 §5.2.6 的优先级链解析最终超时：
@@ -174,6 +200,10 @@ pub struct CompiledGraph {
     pub entry_points: Vec<NodeId>,
     /// 子图 id → 编译产物（v1 只校验，不执行）。
     pub subgraphs: BTreeMap<String, Arc<CompiledGraph>>,
+    /// W4a：foreach region 节点 → F（定位/寻址时判断节点属于哪个展开区域）。
+    ///
+    /// 非 region 节点不在表中（`item_index` 恒 0）；F 本身也在表中（值=自身）。
+    pub foreach_owner: HashMap<NodeId, NodeId>,
     /// 由 `edges` 构建的边索引（编译期一次性构建）。
     edge_index: EdgeIndex,
 }
@@ -187,8 +217,9 @@ impl CompiledGraph {
         let definition = &loaded.definition;
         let dsl_json = serde_json::to_string(loaded.raw())
             .map_err(|err| CompileError::new(format!("serialize dsl json: {err}")))?;
-        let (nodes, node_order) = compile_nodes(&definition.nodes)?;
+        let (mut nodes, node_order) = compile_nodes(&definition.nodes)?;
         let edges = compile_edges(&definition.edges)?;
+        let foreach_owner = wire_foreach(&definition.nodes, &edges, &mut nodes)?;
         let mut subgraphs = BTreeMap::new();
         for subgraph in &definition.subgraphs {
             let compiled = compile_subgraph(
@@ -209,6 +240,7 @@ impl CompiledGraph {
             edges,
             entry_points: definition.entry_points.clone(),
             subgraphs,
+            foreach_owner,
             edge_index,
         }))
     }
@@ -262,6 +294,8 @@ fn compile_node(node: &GraphNode) -> Result<CompiledNode, CompileError> {
         // W2b：DSL `max_fanout` 原样带出（`None` = 作者未声明 → 无运行期上限，
         // v0.1.0 行为）。运行期防守见 `run::RunLoop::reject_fanout_exceeded`。
         max_fanout: node.max_fanout,
+        // W4a：region/exit 需要边表，由 `wire_foreach` 在编译节点/边之后统一回填。
+        foreach: None,
     })
 }
 
@@ -400,8 +434,145 @@ fn compile_subgraph(
         edges,
         entry_points: Vec::new(),
         subgraphs: BTreeMap::new(),
+        // W4a：子图内禁止 foreach（R6 收敛），因此子图没有 region 归属。
+        foreach_owner: HashMap::new(),
         edge_index,
     })
+}
+
+/// W4a：编译 `foreach` 区域并回填 `CompiledNode.foreach` 与 `foreach_owner`。
+///
+/// DSL R18 已在加载期保证区域合法（唯一出口 E、`E→J` 恰一条无 gate 边、边界闭合、
+/// 禁止嵌套/相交）；这里按 DR-007 §4 的确定性算法**重建**同一边界（`nodes` 数组序 +
+/// 边数组序），对程序化构图/加载器不变量破坏做防御性 `CompileError`。
+fn wire_foreach(
+    dsl_nodes: &[GraphNode],
+    edges: &[CompiledEdge],
+    table: &mut HashMap<NodeId, CompiledNode>,
+) -> Result<HashMap<NodeId, NodeId>, CompileError> {
+    let mut owner: HashMap<NodeId, NodeId> = HashMap::new();
+    if !dsl_nodes.iter().any(|node| node.foreach.is_some()) {
+        return Ok(owner);
+    }
+    let mut outgoing: HashMap<&str, Vec<EdgeIdx>> = HashMap::new();
+    for (index, edge) in edges.iter().enumerate() {
+        outgoing.entry(edge.from.as_str()).or_default().push(index);
+    }
+    for dsl_node in dsl_nodes {
+        let Some(config) = &dsl_node.foreach else {
+            continue;
+        };
+        let f = dsl_node.id.clone();
+        let region_set = foreach_region(&f, &config.join, &outgoing, edges);
+        if config.join == f || region_set.contains(&config.join) {
+            return Err(CompileError::new(format!(
+                "foreach region of node '{f}': join '{}' is inside the region",
+                config.join
+            )));
+        }
+        let region_order: Vec<NodeId> = dsl_nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .filter(|node_id| region_set.contains(node_id))
+            .collect();
+        let exits: Vec<NodeId> = region_order
+            .iter()
+            .filter(|node_id| {
+                outgoing.get(node_id.as_str()).is_some_and(|indices| {
+                    indices.iter().any(|index| {
+                        edges
+                            .get(*index)
+                            .is_some_and(|edge| !region_set.contains(&edge.to_node))
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        let [exit_node] = exits.as_slice() else {
+            return Err(CompileError::new(format!(
+                "foreach region of node '{f}': expected exactly one exit, got {}",
+                exits.len()
+            )));
+        };
+        let exit_edges = outgoing
+            .get(exit_node.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let [exit_edge] = exit_edges.as_slice() else {
+            return Err(CompileError::new(format!(
+                "foreach region of node '{f}': exit '{exit_node}' must have exactly one out-edge, got {}",
+                exit_edges.len()
+            )));
+        };
+        let edge = edges.get(*exit_edge).ok_or_else(|| {
+            CompileError::new(format!(
+                "foreach region of node '{f}': exit edge {exit_edge} is missing"
+            ))
+        })?;
+        if edge.to_node != config.join {
+            return Err(CompileError::new(format!(
+                "foreach region of node '{f}': exit '{exit_node}' must target join '{}', got '{}'",
+                config.join, edge.to_node
+            )));
+        }
+        let compiled = CompiledForeach {
+            items_port: config.items_port.clone(),
+            key_field: config.key_field.clone(),
+            join: config.join.clone(),
+            max_items: config.max_items,
+            exit_node: exit_node.clone(),
+            exit_edge: *exit_edge,
+            join_port: edge.to_port.clone(),
+            region: region_order.clone(),
+        };
+        if let Some(node) = table.get_mut(&f) {
+            node.foreach = Some(compiled);
+        } else {
+            return Err(CompileError::new(format!(
+                "foreach node '{f}' is missing from compiled node table"
+            )));
+        }
+        for node_id in region_order {
+            if let Some(previous) = owner.insert(node_id.clone(), f.clone()) {
+                if previous != f {
+                    return Err(CompileError::new(format!(
+                        "foreach region of node '{f}' overlaps region of node '{previous}' at node '{node_id}'"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(owner)
+}
+
+/// `R = {F} ∪ {v | v 从 F 沿出边可达且路径不经过 J}`（DR-007 §4；BFS 确定性）。
+fn foreach_region(
+    f: &str,
+    join: &str,
+    outgoing: &HashMap<&str, Vec<EdgeIdx>>,
+    edges: &[CompiledEdge],
+) -> HashSet<String> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    visited.insert(f.to_string());
+    queue.push_back(f.to_string());
+    while let Some(current) = queue.pop_front() {
+        let Some(indices) = outgoing.get(current.as_str()) else {
+            continue;
+        };
+        for index in indices {
+            let Some(edge) = edges.get(*index) else {
+                continue;
+            };
+            if edge.to_node == join {
+                continue;
+            }
+            if visited.insert(edge.to_node.clone()) {
+                queue.push_back(edge.to_node.clone());
+            }
+        }
+    }
+    visited
 }
 
 /// 由边表构建索引；插入顺序即升序，保证确定性。

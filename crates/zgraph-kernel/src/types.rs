@@ -27,6 +27,14 @@ pub type InstanceId = String;
 /// 同一节点重建实例时的尝试序号（自环/重试从 0 起 +1）。
 pub type Attempt = u32;
 
+/// `foreach` 展开内元素下标（W4a；`0..N-1`，非 region 节点恒 0）。
+///
+/// 与 [`NodeId`] 组成 item 实例定位键 `(NodeId, ItemIndex)`（01 §1.2.5）。
+pub type ItemIndex = u32;
+
+/// 一次 `foreach` 展开事实的标识（UUIDv7；W4a / DR-007 §6.1）。
+pub type ExpansionId = String;
+
 /// 边的稳定标识：`CompiledGraph.edges` 数组下标。
 ///
 /// **命名说明**：任务给定的冻结 API 同时列出 `pub type EdgeIndex = usize` 与
@@ -56,6 +64,18 @@ pub const CODE_RUN_DEADLOCK: &str = "RUN_DEADLOCK";
 
 /// 用户取消。
 pub const CODE_RUN_CANCELLED: &str = "RUN_CANCELLED";
+
+/// `foreach.items_port` 的值不是 JSON array（W4a；展开前 run 级失败，无 item 实例）。
+pub const CODE_RUN_FOREACH_ITEMS_NOT_ARRAY: &str = "RUN_FOREACH_ITEMS_NOT_ARRAY";
+
+/// 展开元素数 `N` 超过 `foreach.max_items`（W4a；展开前 run 级失败）。
+pub const CODE_RUN_FOREACH_ITEMS_EXCEEDED: &str = "RUN_FOREACH_ITEMS_EXCEEDED";
+
+/// `key_field` 派生的非 NULL `item_key` 重复（W4a；展开前 run 级失败）。
+pub const CODE_RUN_FOREACH_ITEM_KEY_DUPLICATE: &str = "RUN_FOREACH_ITEM_KEY_DUPLICATE";
+
+/// region 某个 item 的出口 `E` 变 `Skipped`，join 无法完成（W4a；run 级冷峻失败）。
+pub const CODE_RUN_FOREACH_ITEM_INCOMPLETE: &str = "RUN_FOREACH_ITEM_INCOMPLETE";
 
 /// trace 写端不可恢复错误（fail-stop，06 §6.4.5）。
 ///
@@ -538,6 +558,20 @@ impl NodeError {
 /// 内核所有 `*_at`/`ts` 字段与 trace 记录统一走这里，避免精度/时区漂移。
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// JSON 值的类型名（W4a `RUN_FOREACH_ITEMS_NOT_ARRAY` 的 `got {actual_type}`）。
+///
+/// 与 DSL 的 `type_name` 同口径（`null`/`boolean`/`number`/`string`/`array`/`object`）。
+pub fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[cfg(test)]

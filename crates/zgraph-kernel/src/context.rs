@@ -16,7 +16,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::trace::{Emitter, StreamingEvent};
-use crate::types::{now_rfc3339, NodeError, NodeId, RunId};
+use crate::types::{now_rfc3339, ItemIndex, NodeError, NodeId, RunId};
 
 /// 构造 `NodeContext` 的内部参数包（避免公开构造面；`new` 仅内核派发路径可调）。
 pub(crate) struct NodeContextInit {
@@ -24,6 +24,8 @@ pub(crate) struct NodeContextInit {
     pub(crate) instance_id: String,
     pub(crate) node_id: NodeId,
     pub(crate) attempt: crate::types::Attempt,
+    pub(crate) item_index: ItemIndex,
+    pub(crate) item_key: Option<String>,
     pub(crate) user_id: String,
     pub(crate) global_vars: Arc<HashMap<String, Value>>,
     pub(crate) seed: u64,
@@ -40,6 +42,8 @@ pub struct NodeContext {
     instance_id: String,
     node_id: NodeId,
     attempt: crate::types::Attempt,
+    item_index: ItemIndex,
+    item_key: Option<String>,
     user_id: String,
     global_vars: Arc<HashMap<String, Value>>,
     seed: u64,
@@ -57,6 +61,8 @@ impl NodeContext {
             instance_id: init.instance_id,
             node_id: init.node_id,
             attempt: init.attempt,
+            item_index: init.item_index,
+            item_key: init.item_key,
             user_id: init.user_id,
             global_vars: init.global_vars,
             seed: init.seed,
@@ -85,6 +91,16 @@ impl NodeContext {
     /// 尝试序号（0 起；自环/重试新实例 +1）。
     pub fn attempt(&self) -> crate::types::Attempt {
         self.attempt
+    }
+
+    /// foreach 展开内下标（W4a；非 region 节点恒 0）。
+    pub fn item_index(&self) -> ItemIndex {
+        self.item_index
+    }
+
+    /// foreach item 键（W4a；`None` = 按索引派生）。
+    pub fn item_key(&self) -> Option<&str> {
+        self.item_key.as_deref()
     }
 
     /// 投递一个**可丢** streaming 事件（不阻塞、不 panic、无返回值）。
@@ -165,6 +181,8 @@ mod tests {
             instance_id: "inst-1".to_string(),
             node_id: "node-1".to_string(),
             attempt: 2,
+            item_index: 3,
+            item_key: Some("key-3".to_string()),
             user_id: "u1".to_string(),
             global_vars: Arc::new(vars),
             seed: 42,
@@ -173,6 +191,14 @@ mod tests {
             emitter: Emitter::new(Arc::new(NullTraceSink), false),
             deadline: Instant::now() + Duration::from_secs(1),
         })
+    }
+
+    /// W4a：NodeContext 暴露 item 身份（item_index/item_key）。
+    #[test]
+    fn exposes_foreach_item_identity() {
+        let context = context();
+        assert_eq!(context.item_index(), 3);
+        assert_eq!(context.item_key(), Some("key-3"));
     }
 
     #[test]

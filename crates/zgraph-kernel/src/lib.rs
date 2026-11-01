@@ -97,15 +97,17 @@ mod types;
 pub use context::NodeContext;
 pub use executor::{FakeBehavior, FakeExecutor, NodeExecution, NodeExecutor};
 pub use gate::{evaluate_gate, evaluate_gate_for, CompiledGate, GateEvaluation};
-pub use graph::{CompiledEdge, CompiledGraph, CompiledHandler, CompiledNode, EdgeIndex};
+pub use graph::{
+    CompiledEdge, CompiledForeach, CompiledGraph, CompiledHandler, CompiledNode, EdgeIndex,
+};
 #[cfg(feature = "test-hooks")]
 pub use run::TestHooks;
 pub use run::{
     run_to_completion, start_run, RunControl, RunHandle, RunOptions, RunOutcome, RunSpec,
 };
 pub use trace::{
-    AbandonedEvent, GateResultRecord, HumanDecisionRecord, InstanceSnapshot, MemoryTraceSink,
-    NullTraceSink, RunFinishedInfo, RunStartedInfo, StreamingCall, StreamingEvent, TimedOutEvent,
-    TraceCall, TraceSink, TransitionRecord,
+    AbandonedEvent, ForeachExpansionRecord, GateResultRecord, HumanDecisionRecord,
+    InstanceSnapshot, MemoryTraceSink, NullTraceSink, RunFinishedInfo, RunStartedInfo,
+    StreamingCall, StreamingEvent, TimedOutEvent, TraceCall, TraceSink, TransitionRecord,
 };
 pub use types::*;

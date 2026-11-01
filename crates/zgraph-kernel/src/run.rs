@@ -60,17 +60,19 @@ use zgraph_dsl::{NodeType, OnGateFalse, Trigger, DEFAULT_NODE_TIMEOUT_MS};
 use crate::context::{NodeContext, NodeContextInit};
 use crate::executor::{CatchPanic, NodeExecutor};
 use crate::gate::{evaluate_gate_for, GateEvaluation};
-use crate::graph::{CompiledEdge, CompiledGraph, CompiledHandler, CompiledNode};
+use crate::graph::{CompiledEdge, CompiledForeach, CompiledGraph, CompiledHandler, CompiledNode};
 use crate::trace::{
-    Emitter, GateResultRecord, HumanDecisionRecord, InstanceSnapshot, RunFinishedInfo,
-    RunStartedInfo, TraceSink, TransitionRecord,
+    Emitter, ForeachExpansionRecord, GateResultRecord, HumanDecisionRecord, InstanceSnapshot,
+    RunFinishedInfo, RunStartedInfo, TraceSink, TransitionRecord,
 };
 use crate::types::{
-    now_rfc3339, Attempt, EdgeIdx, HumanDecision, InstanceId, InstanceStatus, NodeError, NodeId,
-    PortName, RecordMode, RunError, RunId, RunMetrics, RunStartError, RunStatus,
-    CODE_NODE_FANOUT_EXCEEDED, CODE_NODE_INTERNAL, CODE_NODE_TIMEOUT, CODE_NODE_TYPE_UNSUPPORTED,
-    CODE_RUN_DEADLOCK, CODE_RUN_DELIVERY_TO_TERMINAL, CODE_RUN_ENTRY_INPUT_MISSING,
-    CODE_RUN_ENTRY_INVALID, CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR,
+    json_type_name, now_rfc3339, Attempt, EdgeIdx, HumanDecision, InstanceId, InstanceStatus,
+    ItemIndex, NodeError, NodeId, PortName, RecordMode, RunError, RunId, RunMetrics, RunStartError,
+    RunStatus, CODE_NODE_FANOUT_EXCEEDED, CODE_NODE_INTERNAL, CODE_NODE_TIMEOUT,
+    CODE_NODE_TYPE_UNSUPPORTED, CODE_RUN_DEADLOCK, CODE_RUN_DELIVERY_TO_TERMINAL,
+    CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID, CODE_RUN_FOREACH_ITEMS_EXCEEDED,
+    CODE_RUN_FOREACH_ITEMS_NOT_ARRAY, CODE_RUN_FOREACH_ITEM_INCOMPLETE,
+    CODE_RUN_FOREACH_ITEM_KEY_DUPLICATE, CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR,
 };
 
 // ---------------------------------------------------------------------------
@@ -383,6 +385,10 @@ struct InstanceRecord {
     instance_id: InstanceId,
     node_id: NodeId,
     attempt: Attempt,
+    /// W4a：foreach 展开内下标（非 region 节点恒 0）。
+    item_index: ItemIndex,
+    /// W4a：foreach item 键（`None` = 按索引派生）。
+    item_key: Option<String>,
     status: InstanceStatus,
     created_at: String,
     started_at: Option<String>,
@@ -402,6 +408,62 @@ struct InstanceBuffer {
     required: HashSet<PortName>,
 }
 
+/// 实例定位键（W4a）：`(node_id, item_index)`；非 region 节点 `item_index` 恒 0。
+type NodeKey = (NodeId, ItemIndex);
+
+/// `foreach` controller 状态（W4a / DR-007 §6.1；**不是实例**）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControllerState {
+    /// 已收到部分/全部入边但尚未就绪（或 items_port 未到）。
+    Collecting,
+    /// trigger 满足且 items_port 已到，等待展开（Pause 下冻结）。
+    Ready,
+    /// 已展开（item 实例已创建；后续到 F 的投递 → `RUN_DELIVERY_TO_TERMINAL`）。
+    Expanded,
+    /// 全部入边 settle=false / items_port 无数据 → region 不展开（按普通 skip 级联）。
+    Skipped,
+}
+
+impl ControllerState {
+    /// 状态名（死锁 message / 断言用）。
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Collecting => "Collecting",
+            Self::Ready => "Ready",
+            Self::Expanded => "Expanded",
+            Self::Skipped => "Skipped",
+        }
+    }
+}
+
+/// F 的非实例输入缓存（W4a / DR-007 §6.1，01 §1.6.1）。
+struct ControllerBuffer {
+    /// 已到达端口值。
+    values: HashMap<PortName, Value>,
+    /// 已到达端口。
+    arrived: HashSet<PortName>,
+    /// 已结算入边（含 gate=false settle）。
+    settled: HashSet<EdgeIdx>,
+    state: ControllerState,
+    /// 最后一条使 controller 进入 `Ready` 的投递来源（entry 注入 = `None`，N18）。
+    source_instance_id: Option<InstanceId>,
+    /// 展开后的 item_key 列表（与 item_count 等长；`None` = 按索引派生）。
+    keys: Vec<Option<String>>,
+}
+
+impl Default for ControllerBuffer {
+    fn default() -> Self {
+        Self {
+            values: HashMap::new(),
+            arrived: HashSet::new(),
+            settled: HashSet::new(),
+            state: ControllerState::Collecting,
+            source_instance_id: None,
+            keys: Vec::new(),
+        }
+    }
+}
+
 /// 一条 defer 边最近一次「deferred 决策」的挂账记录（W2a0 / DR-005 §3.1，01 §1.4.1）。
 ///
 /// **不因后续放行删除**（"最近一次 deferred 决策"语义）：dormant 判定只看目标节点
@@ -409,6 +471,10 @@ struct InstanceBuffer {
 struct DeferredReceipt {
     /// 边号（`CompiledGraph.edges` 下标）。
     edge_index: EdgeIdx,
+    /// 发布者 item 下标（W4a；非 region 恒 0）。
+    #[allow(dead_code)]
+    // W4a 冻结的审计字段：v2 内核读取方暂无（死锁 message 不含 item 以保持既有 golden）。
+    item_index: ItemIndex,
     /// 做出 deferred 决策的发布者实例。
     #[allow(dead_code)]
     // W2a0 冻结的审计字段：v2 内核暂无读取方（错误 message 只含 edge/target 以保持确定性）。
@@ -447,12 +513,18 @@ struct RunLoop {
     global_vars: Arc<HashMap<String, Value>>,
     status: RunStatus,
     instances: HashMap<InstanceId, InstanceRecord>,
-    node_current: HashMap<NodeId, InstanceId>,
+    /// W4a：`(node_id, item_index)` → 当前实例（非 region 节点 item_index 恒 0）。
+    node_current: HashMap<NodeKey, InstanceId>,
     buffers: HashMap<InstanceId, InstanceBuffer>,
-    settled_by_node: HashMap<NodeId, HashSet<EdgeIdx>>,
-    /// defer 边挂账（W2a0；BTreeMap = 按 `EdgeIdx` 升序，保证 dormant/死锁判定与
-    /// 错误 message 的确定性）。
-    deferred_receipts: BTreeMap<EdgeIdx, DeferredReceipt>,
+    /// W4a：`(node_id, item_index)` → 已结算入边（按 item 作用域）。
+    settled_by_node: HashMap<NodeKey, HashSet<EdgeIdx>>,
+    /// defer 边挂账（W2a0；BTreeMap = 按 `(EdgeIdx, item_index)` 升序，保证 dormant/
+    /// 死锁判定与错误 message 的确定性）。
+    deferred_receipts: BTreeMap<(EdgeIdx, ItemIndex), DeferredReceipt>,
+    /// W4a：F → controller buffer（**无 controller 实例**；Collecting/Ready/Expanded/Skipped）。
+    controllers: HashMap<NodeId, ControllerBuffer>,
+    /// W4a：F → (item_index → E.output)，满 N 时按 item_index 升序构造数组投递给 J。
+    join_buffers: HashMap<NodeId, BTreeMap<ItemIndex, Value>>,
     ready_queue: VecDeque<InstanceId>,
     tasks: HashMap<InstanceId, JoinHandle<()>>,
     last_event_at: Instant,
@@ -495,6 +567,7 @@ impl RunLoop {
         let emitter = Emitter::new(sink, options.trace_enabled);
         let (disable_settle, force_timeout_ms, force_max_fanout, tick_probe) =
             hook_values(&options);
+        let controllers = Self::initial_controllers(&graph);
         Self {
             run_id,
             graph,
@@ -507,6 +580,8 @@ impl RunLoop {
             buffers: HashMap::new(),
             settled_by_node: HashMap::new(),
             deferred_receipts: BTreeMap::new(),
+            controllers,
+            join_buffers: HashMap::new(),
             ready_queue: VecDeque::new(),
             tasks: HashMap::new(),
             last_event_at: Instant::now(),
@@ -527,6 +602,26 @@ impl RunLoop {
             tick_probe,
             final_outcome: None,
         }
+    }
+
+    /// W4a：为图中每个 F 初始化 controller buffer（`Collecting`，无实例）。
+    fn initial_controllers(graph: &CompiledGraph) -> HashMap<NodeId, ControllerBuffer> {
+        graph
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.foreach.is_some())
+            .map(|(node_id, _)| (node_id.clone(), ControllerBuffer::default()))
+            .collect()
+    }
+
+    /// W4a：某节点的 item_key（region 节点 = 所属 F 展开 keys[item_index]；否则 `None`）。
+    fn item_key_for(&self, node_id: &str, item_index: ItemIndex) -> Option<String> {
+        let owner = self.graph.foreach_owner.get(node_id)?;
+        let buffer = self.controllers.get(owner)?;
+        buffer
+            .keys
+            .get(item_index as usize)
+            .and_then(|key| key.clone())
     }
 
     /// 主循环（03 §3.3）：控制优先 → 派发/终止判定 → 等待事件。
@@ -623,7 +718,18 @@ impl RunLoop {
             .cloned()
             .collect();
         for node_id in entry_order {
-            let Some(instance_id) = self.create_instance(&node_id, 0, None) else {
+            // W4a：F 作为 entry 时只初始化 controller buffer（无 F 单实例）。
+            if self
+                .graph
+                .nodes
+                .get(&node_id)
+                .is_some_and(|node| node.foreach.is_some())
+            {
+                let values = self.entry_inputs.get(&node_id).cloned().unwrap_or_default();
+                self.controller_apply_entry(&node_id, values);
+                continue;
+            }
+            let Some(instance_id) = self.create_instance(&node_id, 0, None, 0) else {
                 return;
             };
             if let Some(values) = self.entry_inputs.get(&node_id).cloned() {
@@ -691,7 +797,11 @@ impl RunLoop {
             .instances
             .values()
             .filter(|record| record.status == InstanceStatus::Pending)
-            .filter(|record| self.node_current.get(&record.node_id) == Some(&record.instance_id))
+            .filter(|record| {
+                self.node_current
+                    .get(&(record.node_id.clone(), record.item_index))
+                    == Some(&record.instance_id)
+            })
             .map(|record| {
                 let order = self
                     .graph
@@ -769,10 +879,14 @@ impl RunLoop {
         if !self.transition_or_fail(instance_id, InstanceStatus::Completed, "human_decided") {
             return;
         }
-        // ④ 普通 publish：与 finish_builtin 同构（human 无执行任务、gate 在 loop 内求值）。
+        // ④ 普通 publish 或 join 收集（human 可能是 region 唯一出口 E；W4a）。
         let graph = self.graph.clone();
         let evaluations = evaluate_outgoing(&graph, &node_id, &output);
-        self.apply_publish(instance_id, &node_id, &output, &evaluations);
+        if self.foreach_exit_for(&node_id).is_some() {
+            self.on_join_item_completed(instance_id, &node_id, &output);
+        } else {
+            self.apply_publish(instance_id, &node_id, &output, &evaluations);
+        }
         // ⑤ 确认（CLI bridge 据此标 consumed_at + stderr 实时行）。
         self.emitter.human_decided(HumanDecisionRecord {
             run_id: self.run_id.clone(),
@@ -793,7 +907,12 @@ impl RunLoop {
         let Some(record) = self.instances.get(instance_id) else {
             return Some("instance_missing");
         };
-        if self.node_current.get(&record.node_id).map(String::as_str) != Some(instance_id) {
+        if self
+            .node_current
+            .get(&(record.node_id.clone(), record.item_index))
+            .map(String::as_str)
+            != Some(instance_id)
+        {
             return Some("not_current");
         }
         if record.status != InstanceStatus::WaitingHuman {
@@ -811,6 +930,20 @@ impl RunLoop {
     fn check_termination(&mut self) -> Option<RunOutcome> {
         if self.status != RunStatus::Running {
             return None;
+        }
+        if !self.instances_idle() {
+            return None;
+        }
+        // W4a（DR-007 §6.7）：静默后仍有未展开 controller → 确定性 RUN_DEADLOCK。
+        if let Some((foreach_node, state)) = self.active_controller() {
+            self.fail_run(RunError::new(
+                CODE_RUN_DEADLOCK,
+                format!(
+                    "foreach controller of node '{foreach_node}' is {} while run is silent",
+                    state.as_str()
+                ),
+            ));
+            return self.final_outcome.take();
         }
         if !self.is_quiescent() {
             return None;
@@ -831,7 +964,7 @@ impl RunLoop {
         let mut edges: Vec<String> = Vec::new();
         let mut targets: Vec<NodeId> = Vec::new();
         for receipt in self.deferred_receipts.values() {
-            if self.node_current.contains_key(&receipt.target_node) {
+            if self.target_has_instance(&receipt.target_node) {
                 continue;
             }
             edges.push(receipt.edge_index.to_string());
@@ -853,11 +986,8 @@ impl RunLoop {
         true
     }
 
-    /// 静默判定：无活跃实例（Pending/Ready/Running/**WaitingHuman**）且就绪队列为空。
-    ///
-    /// W3a0（DR-006 §3.5）：`WaitingHuman` 计入活跃等待态——纯人工等待时 run
-    /// **不得**判定静默/完成，必须等 decide、期限或取消。
-    fn is_quiescent(&self) -> bool {
+    /// 实例层静默：无活跃实例（Pending/Ready/Running/WaitingHuman）且就绪队列为空。
+    fn instances_idle(&self) -> bool {
         if !self.ready_queue.is_empty() {
             return false;
         }
@@ -865,6 +995,55 @@ impl RunLoop {
             .instances
             .values()
             .any(|record| record.status.is_active())
+    }
+
+    /// 静默判定（03 §3.10 / DR-007 §6.7）：实例层静默 + 无未展开 controller。
+    ///
+    /// W3a0：`WaitingHuman` 计入活跃等待态；W4a：`Collecting`/`Ready` 的 controller
+    /// 视为非静默（`Expanded`/`Skipped` 不算活跃）。
+    fn is_quiescent(&self) -> bool {
+        self.instances_idle() && self.active_controller().is_none()
+    }
+
+    /// 第一个未展开 controller（`Collecting`/`Ready`；按 `node_order` 确定性）。
+    fn active_controller(&self) -> Option<(NodeId, ControllerState)> {
+        for node_id in &self.graph.node_order {
+            if let Some(controller) = self.controllers.get(node_id) {
+                if matches!(
+                    controller.state,
+                    ControllerState::Collecting | ControllerState::Ready
+                ) {
+                    return Some((node_id.clone(), controller.state));
+                }
+            }
+        }
+        None
+    }
+
+    /// W4a：目标节点是否已有实例（controller 已 `Expanded`/`Skipped` 的 F 视为已实例化）。
+    fn target_has_instance(&self, node_id: &str) -> bool {
+        if self
+            .node_current
+            .keys()
+            .any(|(current_node, _)| current_node == node_id)
+        {
+            return true;
+        }
+        self.controllers.get(node_id).is_some_and(|controller| {
+            matches!(
+                controller.state,
+                ControllerState::Expanded | ControllerState::Skipped
+            )
+        })
+    }
+
+    /// W4a：边目标的 item 下标（region 内沿用源 item；region 外恒 0）。
+    fn target_item_for(&self, node_id: &str, source_item: ItemIndex) -> ItemIndex {
+        if self.graph.foreach_owner.contains_key(node_id) {
+            source_item
+        } else {
+            0
+        }
     }
 
     /// 派发就绪实例（03 §3.5；Paused 时冻结）。
@@ -979,15 +1158,18 @@ impl RunLoop {
         inputs: HashMap<PortName, Value>,
         deadline: Instant,
     ) {
-        let attempt = self
+        let (attempt, item_index, item_key) = self
             .instances
             .get(instance_id)
-            .map_or(0, |record| record.attempt);
+            .map(|record| (record.attempt, record.item_index, record.item_key.clone()))
+            .unwrap_or((0, 0, None));
         let ctx = NodeContext::new(NodeContextInit {
             run_id: self.run_id.clone(),
             instance_id: instance_id.to_string(),
             node_id: node.id.clone(),
             attempt,
+            item_index,
+            item_key,
             user_id: self.user_id.clone(),
             global_vars: self.global_vars.clone(),
             // D5：run 级 seed 进入 NodeContext，供跨进程执行器写入 run 载荷。
@@ -1086,9 +1268,16 @@ impl RunLoop {
             .nodes
             .get(&node_id)
             .is_some_and(|node| node.node_type == NodeType::End);
-        if !is_end {
-            self.apply_publish(&instance_id, &node_id, &output, &evaluations);
+        if is_end {
+            return;
         }
+        // W4a（DR-007 §6.5）：region 出口 E 的 item 完成 → 进 join buffer，
+        // 不走普通 publish（E→J 唯一出边由 join 统一投递）。
+        if self.foreach_exit_for(&node_id).is_some() {
+            self.on_join_item_completed(&instance_id, &node_id, &output);
+            return;
+        }
+        self.apply_publish(&instance_id, &node_id, &output, &evaluations);
     }
 
     /// 节点失败：按 `NodeError` 归一化后冷峻失败（04 §4.1.4）。
@@ -1190,6 +1379,430 @@ impl RunLoop {
         ));
     }
 
+    // -- W4a：foreach controller / 展开 / join ------------------------------
+
+    /// W4a：节点若为某 F 的 region 唯一出口 E，返回该 F。
+    fn foreach_exit_for(&self, node_id: &str) -> Option<NodeId> {
+        let owner = self.graph.foreach_owner.get(node_id)?;
+        let foreach = self.graph.nodes.get(owner)?.foreach.as_ref()?;
+        if foreach.exit_node == node_id {
+            Some(owner.clone())
+        } else {
+            None
+        }
+    }
+
+    /// W4a：entry 注入进入 F 的 controller buffer（无 F 单实例；source=NULL）。
+    fn controller_apply_entry(&mut self, foreach_node: &str, values: HashMap<PortName, Value>) {
+        let Some(controller) = self.controllers.get_mut(foreach_node) else {
+            return;
+        };
+        if controller.state != ControllerState::Collecting {
+            return;
+        }
+        for (port, value) in values {
+            controller.values.insert(port.clone(), value);
+            controller.arrived.insert(port);
+        }
+        controller.source_instance_id = None;
+        self.last_event_at = Instant::now();
+        self.controller_try_ready(foreach_node);
+        self.controller_try_expand(foreach_node);
+    }
+
+    /// W4a：一条到 F 的投递写入 controller buffer（gate 已在调用方记录）。
+    ///
+    /// 返回 `false` 表示 run 已因 `RUN_DELIVERY_TO_TERMINAL` 终态（调用方必须返回）。
+    fn controller_apply_delivery(
+        &mut self,
+        from_instance: &str,
+        edge: &CompiledEdge,
+        evaluation: &GateEvaluation,
+        output: &Value,
+    ) -> bool {
+        let foreach_node = edge.to_node.clone();
+        let Some(state) = self.controllers.get(&foreach_node).map(|c| c.state) else {
+            return true;
+        };
+        if matches!(state, ControllerState::Expanded | ControllerState::Skipped) {
+            // DR-007 §6.1 / E-9：单次展开，后续到 F 的投递 → 复用 RUN_DELIVERY_TO_TERMINAL。
+            self.fail_delivery_to_terminal(&foreach_node, edge.index);
+            return false;
+        }
+        if let Some(controller) = self.controllers.get_mut(&foreach_node) {
+            controller.settled.insert(edge.index);
+            if evaluation.passed {
+                controller
+                    .values
+                    .insert(edge.to_port.clone(), output.clone());
+                controller.arrived.insert(edge.to_port.clone());
+                controller.source_instance_id = Some(from_instance.to_string());
+            }
+        }
+        self.last_event_at = Instant::now();
+        self.controller_try_ready(&foreach_node);
+        if evaluation.passed {
+            self.controller_try_expand(&foreach_node);
+        } else {
+            // 非 defer 的 gate=false：结算后若全部入边已结算且不可就绪 → Skipped。
+            self.maybe_skip_controller(&foreach_node);
+        }
+        !self.status.is_terminal()
+    }
+
+    /// W4a：F 的 controller 是否满足 `trigger` 且 `items_port` 已到（DR-007 §6.1 C3）。
+    fn controller_ready(&self, foreach_node: &str) -> bool {
+        let Some(node) = self.graph.nodes.get(foreach_node) else {
+            return false;
+        };
+        let Some(controller) = self.controllers.get(foreach_node) else {
+            return false;
+        };
+        let Some(foreach) = node.foreach.as_ref() else {
+            return false;
+        };
+        if !controller.arrived.contains(&foreach.items_port) {
+            return false;
+        }
+        let required: Vec<&str> = node
+            .inputs
+            .iter()
+            .filter(|port| port.required)
+            .map(|port| port.name.as_str())
+            .collect();
+        match node.trigger {
+            Trigger::All => required
+                .iter()
+                .all(|port| controller.arrived.contains(*port)),
+            Trigger::Any => required
+                .iter()
+                .any(|port| controller.arrived.contains(*port)),
+        }
+    }
+
+    /// W4a：`Collecting → Ready`（trigger 满足 + items_port 已到）。
+    fn controller_try_ready(&mut self, foreach_node: &str) {
+        let Some(controller) = self.controllers.get(foreach_node) else {
+            return;
+        };
+        if controller.state != ControllerState::Collecting || !self.controller_ready(foreach_node) {
+            return;
+        }
+        if let Some(controller) = self.controllers.get_mut(foreach_node) {
+            controller.state = ControllerState::Ready;
+        }
+        self.last_event_at = Instant::now();
+    }
+
+    /// W4a：结算一条以 F 为目标的入边（无实例可结算，记在 controller）。
+    fn controller_settle_edge(&mut self, foreach_node: &str, edge_index: EdgeIdx) {
+        if let Some(controller) = self.controllers.get_mut(foreach_node) {
+            controller.settled.insert(edge_index);
+        }
+        self.last_event_at = Instant::now();
+    }
+
+    /// W4a：controller 全部入边已结算且不可就绪 → `Skipped`（不展开；N25 skip 路径）。
+    ///
+    /// controller-origin skip 不产生 GateResult/Delivery：只把 `E→J` 边结算给 J，
+    /// 由 J 的普通 skip/等待语义继续。
+    fn maybe_skip_controller(&mut self, foreach_node: &str) {
+        let Some(controller) = self.controllers.get(foreach_node) else {
+            return;
+        };
+        if controller.state != ControllerState::Collecting {
+            return;
+        }
+        if self.controller_ready(foreach_node) {
+            self.controller_try_ready(foreach_node);
+            return;
+        }
+        let incoming = self.graph.edge_index().incoming_edges(foreach_node);
+        if incoming.is_empty() {
+            return;
+        }
+        if !incoming
+            .iter()
+            .all(|edge_index| controller.settled.contains(edge_index))
+        {
+            return;
+        }
+        let Some(foreach) = self
+            .graph
+            .nodes
+            .get(foreach_node)
+            .and_then(|node| node.foreach.clone())
+        else {
+            return;
+        };
+        if let Some(controller) = self.controllers.get_mut(foreach_node) {
+            controller.state = ControllerState::Skipped;
+        }
+        self.last_event_at = Instant::now();
+        let target = foreach.join.clone();
+        if self
+            .graph
+            .nodes
+            .get(&target)
+            .is_some_and(|node| node.foreach.is_some())
+        {
+            self.controller_settle_edge(&target, foreach.exit_edge);
+            self.maybe_skip_controller(&target);
+        } else {
+            self.settle_edge(&target, foreach.exit_edge, 0);
+            self.maybe_skip_after_settle(&target, 0);
+        }
+    }
+
+    /// W4a：`Ready` → 展开（Pause 冻结；DR-007 §6.2/§6.4）。
+    ///
+    /// 校验顺序冻结：非 array → `RUN_FOREACH_ITEMS_NOT_ARRAY`；`N > max_items` →
+    /// `RUN_FOREACH_ITEMS_EXCEEDED`；非 NULL key 重复 → `RUN_FOREACH_ITEM_KEY_DUPLICATE`。
+    /// 失败为 run 级冷峻失败（无 item 实例）；成功则 emit expansion 并创建 N×region 实例。
+    fn controller_try_expand(&mut self, foreach_node: &str) {
+        if self.status != RunStatus::Running {
+            // DR-007 E-8：Pause 冻结展开（controller 保持 Ready，Resume 后展开）。
+            return;
+        }
+        let Some(controller) = self.controllers.get(foreach_node) else {
+            return;
+        };
+        if controller.state != ControllerState::Ready {
+            return;
+        }
+        let Some(foreach) = self
+            .graph
+            .nodes
+            .get(foreach_node)
+            .and_then(|node| node.foreach.clone())
+        else {
+            return;
+        };
+        let Some(items_value) = controller.values.get(&foreach.items_port).cloned() else {
+            return;
+        };
+        let Value::Array(items) = items_value else {
+            self.fail_run(RunError::new(
+                CODE_RUN_FOREACH_ITEMS_NOT_ARRAY,
+                format!(
+                    "foreach node '{foreach_node}' items_port '{}' is not an array (got {})",
+                    foreach.items_port,
+                    json_type_name(&items_value)
+                ),
+            ));
+            return;
+        };
+        let item_count = items.len();
+        if let Some(limit) = foreach.max_items {
+            if u64::try_from(item_count).unwrap_or(u64::MAX) > u64::from(limit) {
+                self.fail_run(RunError::new(
+                    CODE_RUN_FOREACH_ITEMS_EXCEEDED,
+                    format!(
+                        "foreach node '{foreach_node}' items {item_count} exceed max_items {limit}"
+                    ),
+                ));
+                return;
+            }
+        }
+        let keys = derive_item_keys(&items, foreach.key_field.as_deref());
+        if let Some((key, first, second)) = first_duplicate_key(&keys) {
+            self.fail_run(RunError::new(
+                CODE_RUN_FOREACH_ITEM_KEY_DUPLICATE,
+                format!(
+                    "foreach node '{foreach_node}' item key '{key}' is duplicated at indexes {first},{second}"
+                ),
+            ));
+            return;
+        }
+        let expansion_id = uuid::Uuid::now_v7().to_string();
+        let source_instance_id = controller.source_instance_id.clone();
+        self.emitter.foreach_expansion(ForeachExpansionRecord {
+            run_id: self.run_id.clone(),
+            expansion_id,
+            node_id: foreach_node.to_string(),
+            source_instance_id,
+            item_count: u32::try_from(item_count).unwrap_or(u32::MAX),
+            keys: keys.clone(),
+            at: now_rfc3339(),
+        });
+        if let Some(controller) = self.controllers.get_mut(foreach_node) {
+            controller.state = ControllerState::Expanded;
+            controller.keys = keys;
+        }
+        self.join_buffers
+            .entry(foreach_node.to_string())
+            .or_default();
+        self.last_event_at = Instant::now();
+        if item_count == 0 {
+            // DR-007 §6.5（C2）：空列表无 GateResult/Delivery，直接注入 [] 给 J。
+            self.inject_join_value(&foreach, Value::Array(Vec::new()));
+            return;
+        }
+        let declared: Vec<PortName> = self
+            .graph
+            .nodes
+            .get(foreach_node)
+            .map(|node| node.inputs.iter().map(|port| port.name.clone()).collect())
+            .unwrap_or_default();
+        let Some((controller_values, controller_arrived)) = self
+            .controllers
+            .get(foreach_node)
+            .map(|controller| (controller.values.clone(), controller.arrived.clone()))
+        else {
+            return;
+        };
+        for (index, item) in items.iter().enumerate() {
+            let item_index = u32::try_from(index).unwrap_or(u32::MAX);
+            for region_node in &foreach.region {
+                let Some(instance_id) = self.create_instance(region_node, 0, None, item_index)
+                else {
+                    return;
+                };
+                if region_node != foreach_node {
+                    continue;
+                }
+                // F 本身 per-item 执行：items_port=item[i]，其它端口沿用 controller buffer。
+                for port in &declared {
+                    if port == &foreach.items_port {
+                        self.buffer_write(&instance_id, port, item.clone());
+                    } else if controller_arrived.contains(port) {
+                        let value = controller_values.get(port).cloned().unwrap_or(Value::Null);
+                        self.buffer_write(&instance_id, port, value);
+                    }
+                }
+                self.maybe_make_ready(&instance_id);
+            }
+        }
+    }
+
+    /// W4a：把一次 join 值写入 J 的输入（N>0 走 GateResult+本函数；N=0 无 GateResult/Delivery）。
+    ///
+    /// J 可能是另一个 foreach 的 F（串行）→ 写入其 controller buffer。
+    fn inject_join_value(&mut self, foreach: &CompiledForeach, value: Value) {
+        let target = foreach.join.clone();
+        if self
+            .graph
+            .nodes
+            .get(&target)
+            .is_some_and(|node| node.foreach.is_some())
+        {
+            if let Some(controller) = self.controllers.get_mut(&target) {
+                controller.values.insert(foreach.join_port.clone(), value);
+                controller.arrived.insert(foreach.join_port.clone());
+                controller.source_instance_id = None;
+                controller.settled.insert(foreach.exit_edge);
+            }
+            self.last_event_at = Instant::now();
+            self.controller_try_ready(&target);
+            self.controller_try_expand(&target);
+            return;
+        }
+        let instance_id = match self.node_current.get(&(target.clone(), 0)).cloned() {
+            Some(instance_id) => {
+                let terminal = self
+                    .instances
+                    .get(&instance_id)
+                    .is_some_and(|record| record.status.is_terminal());
+                if terminal {
+                    self.fail_delivery_to_terminal(&target, foreach.exit_edge);
+                    return;
+                }
+                instance_id
+            }
+            None => {
+                let Some(instance_id) = self.create_instance(&target, 0, None, 0) else {
+                    return;
+                };
+                instance_id
+            }
+        };
+        self.buffer_write(&instance_id, &foreach.join_port, value);
+        self.settle_edge(&target, foreach.exit_edge, 0);
+        self.maybe_make_ready(&instance_id);
+        self.maybe_skip_after_settle(&target, 0);
+    }
+
+    /// W4a：E 的某个 item 完成 → 写 join buffer；满 N → 按 item_index 升序投递。
+    fn on_join_item_completed(&mut self, instance_id: &str, exit_node: &str, output: &Value) {
+        let Some(foreach_node) = self.foreach_exit_for(exit_node) else {
+            return;
+        };
+        let Some(item_index) = self
+            .instances
+            .get(instance_id)
+            .map(|record| record.item_index)
+        else {
+            return;
+        };
+        let Some(expected) = self
+            .controllers
+            .get(&foreach_node)
+            .map(|controller| controller.keys.len())
+        else {
+            return;
+        };
+        let buffer = self.join_buffers.entry(foreach_node.clone()).or_default();
+        buffer.insert(item_index, output.clone());
+        if buffer.len() != expected {
+            return;
+        }
+        self.deliver_join(&foreach_node, instance_id);
+    }
+
+    /// W4a：join 满 N → 按 `item_index` 升序构造数组并投递给 J（C2）。
+    fn deliver_join(&mut self, foreach_node: &str, last_instance: &str) {
+        let Some(foreach) = self
+            .graph
+            .nodes
+            .get(foreach_node)
+            .and_then(|node| node.foreach.clone())
+        else {
+            return;
+        };
+        let Some(expected) = self
+            .controllers
+            .get(foreach_node)
+            .map(|controller| controller.keys.len())
+        else {
+            return;
+        };
+        let Some(buffer) = self.join_buffers.get_mut(foreach_node) else {
+            return;
+        };
+        let mut array = Vec::with_capacity(expected);
+        for item_index in 0..expected {
+            let index = u32::try_from(item_index).unwrap_or(u32::MAX);
+            let Some(value) = buffer.get(&index).cloned() else {
+                return;
+            };
+            array.push(value);
+        }
+        buffer.clear();
+        // C2：join GateResult 的 source/attempt = 最后完成使 join 满 N 的 E item 实例。
+        let (from_node, attempt) = self
+            .instances
+            .get(last_instance)
+            .map(|record| (record.node_id.clone(), record.attempt))
+            .unwrap_or_default();
+        self.emitter.gate_result(GateResultRecord {
+            run_id: self.run_id.clone(),
+            instance_id: last_instance.to_string(),
+            node_id: from_node,
+            edge_index: foreach.exit_edge,
+            to_node: foreach.join.clone(),
+            to_port: foreach.join_port.clone(),
+            gate_fn: None,
+            passed: true,
+            error: None,
+            deferred: false,
+            attempt,
+            verdict: None,
+            ts: now_rfc3339(),
+        });
+        self.last_event_at = Instant::now();
+        self.inject_join_value(&foreach, Value::Array(array));
+    }
+
     // -- 投递应用（两阶段的后半段；01 §1.4 / 03 §3.4.2）--------------------
 
     /// 应用已求值的出边 gate 结果：门控记录 → 寻址 → 写 buffer/结算 → 就绪或 Skipped。
@@ -1218,6 +1831,10 @@ impl RunLoop {
         if self.reject_fanout_exceeded(from_instance, from_node, evaluations) {
             return;
         }
+        let from_item = self
+            .instances
+            .get(from_instance)
+            .map_or(0, |record| record.item_index);
         let mut ordered: Vec<&GateEvaluation> = evaluations.iter().collect();
         ordered.sort_by_key(|evaluation| evaluation.edge_index);
         for evaluation in ordered {
@@ -1235,23 +1852,45 @@ impl RunLoop {
                 return;
             };
             let defer_edge = edge.on_gate_false == OnGateFalse::Defer;
+            // W4a（DR-007 §6.1）：目标是 F（带 foreach）→ 投递进 controller buffer，
+            // **不创建 F 单实例**；GateResult 照常记录（to_node=F）。
+            if self
+                .graph
+                .nodes
+                .get(&edge.to_node)
+                .is_some_and(|node| node.foreach.is_some())
+            {
+                self.emit_gate_result(from_instance, from_node, &edge, evaluation);
+                // DR-007 §6.6：defer 边 gate=false 以 F 为目标 → 挂 receipt（不结算）。
+                if !evaluation.passed && defer_edge {
+                    self.record_deferred_receipt(from_instance, &edge, from_item);
+                    continue;
+                }
+                let applied =
+                    self.controller_apply_delivery(from_instance, &edge, evaluation, output);
+                if !applied {
+                    return;
+                }
+                continue;
+            }
+            let target_item = self.target_item_for(&edge.to_node, from_item);
             if !evaluation.passed {
                 // 两条 blocked 路径都先记录 GateResult（不可丢），再决定结算/挂账；
                 // 均不寻址（W2a0：defer 边 false 只写 receipt，不结算、不 Skipped）。
                 self.emit_gate_result(from_instance, from_node, &edge, evaluation);
                 if defer_edge {
-                    self.record_deferred_receipt(from_instance, &edge);
+                    self.record_deferred_receipt(from_instance, &edge, from_item);
                     continue;
                 }
-                self.settle_edge(&edge.to_node, edge.index);
-                self.maybe_skip_after_settle(&edge.to_node);
+                self.settle_edge(&edge.to_node, edge.index, target_item);
+                self.maybe_skip_after_settle(&edge.to_node, target_item);
                 continue;
             }
             // 放行：settle 边走 v0.1.0 寻址；defer 边走 attempt-per-activation。
             let target = if defer_edge {
-                self.resolve_defer_target(from_instance, &edge)
+                self.resolve_defer_target(from_instance, &edge, target_item)
             } else {
-                self.resolve_target(from_instance, &edge.to_node, edge.index)
+                self.resolve_target(from_instance, &edge.to_node, edge.index, target_item)
             };
             let Some(target) = target else {
                 // 寻址失败（`RUN_DELIVERY_TO_TERMINAL`）→ fail_run 已在 resolve 内完成，
@@ -1260,11 +1899,11 @@ impl RunLoop {
             };
             self.emit_gate_result(from_instance, from_node, &edge, evaluation);
             self.buffer_write(&target, &edge.to_port, output.clone());
-            self.settle_edge(&edge.to_node, edge.index);
+            self.settle_edge(&edge.to_node, edge.index, target_item);
             self.maybe_make_ready(&target);
             // 结算后统一复核：即便本条边是"放行"边，目标节点也可能因其它入边被
             // 拦截而永远无法就绪；若此时全部入边已结算 → 必须转 Skipped（01 §1.2.3）。
-            self.maybe_skip_after_settle(&edge.to_node);
+            self.maybe_skip_after_settle(&edge.to_node, target_item);
         }
     }
 
@@ -1297,15 +1936,14 @@ impl RunLoop {
         if actual <= limit {
             return false;
         }
-        let attempt = self
-            .instances
-            .get(from_instance)
-            .map_or(0, |record| record.attempt)
-            .saturating_add(1);
+        let (attempt, item_index) = self.instances.get(from_instance).map_or((0, 0), |record| {
+            (record.attempt.saturating_add(1), record.item_index)
+        });
         self.create_instance(
             from_node,
             attempt,
             Some(NodeError::FanoutExceeded { limit, actual }),
+            item_index,
         );
         self.fail_run(RunError::new(
             CODE_NODE_FANOUT_EXCEEDED,
@@ -1351,12 +1989,18 @@ impl RunLoop {
     ///
     /// 仅 defer 边 gate=false 时调用；同一 `EdgeIdx` 重复 deferred → 覆盖并刷新时刻；
     /// **放行不删除**（dormant 只看目标节点当前实例状态）。
-    fn record_deferred_receipt(&mut self, from_instance: &str, edge: &CompiledEdge) {
+    fn record_deferred_receipt(
+        &mut self,
+        from_instance: &str,
+        edge: &CompiledEdge,
+        item_index: ItemIndex,
+    ) {
         let source_attempt = self.instances.get(from_instance).map_or(0, |r| r.attempt);
         self.deferred_receipts.insert(
-            edge.index,
+            (edge.index, item_index),
             DeferredReceipt {
                 edge_index: edge.index,
+                item_index,
                 source_instance: from_instance.to_string(),
                 source_attempt,
                 target_node: edge.to_node.clone(),
@@ -1367,17 +2011,24 @@ impl RunLoop {
     }
 
     /// 解析投递目标实例（自环新建 attempt+1；其它惰性创建/校验终态）。
+    ///
+    /// W4a：目标实例按 `(node_id, item_index)` 定位；region 内沿用源 item。
     fn resolve_target(
         &mut self,
         from_instance: &str,
         to_node: &str,
         edge_index: EdgeIdx,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
         let from_node = self.instances.get(from_instance).map(|r| r.node_id.clone());
         if from_node.as_deref() == Some(to_node) {
-            return self.resolve_self_loop(from_instance, to_node, edge_index);
+            return self.resolve_self_loop(from_instance, to_node, edge_index, item_index);
         }
-        match self.node_current.get(to_node).cloned() {
+        match self
+            .node_current
+            .get(&(to_node.to_string(), item_index))
+            .cloned()
+        {
             Some(instance_id) => {
                 let terminal = self
                     .instances
@@ -1388,7 +2039,7 @@ impl RunLoop {
                 }
                 Some(instance_id)
             }
-            None => self.create_instance(to_node, 0, None),
+            None => self.create_instance(to_node, 0, None, item_index),
         }
     }
 
@@ -1411,6 +2062,7 @@ impl RunLoop {
         from_instance: &str,
         to_node: &str,
         edge_index: EdgeIdx,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
         let from_attempt = self.instances.get(from_instance).map_or(0, |r| r.attempt);
         let attempt = from_attempt.saturating_add(1);
@@ -1421,7 +2073,7 @@ impl RunLoop {
                     "self-loop of node '{to_node}' exceeded max_attempts ({max_attempts})"
                 ),
             };
-            let created = self.create_instance(to_node, attempt, Some(error));
+            let created = self.create_instance(to_node, attempt, Some(error), item_index);
             self.fail_run(RunError::new(
                 CODE_NODE_INTERNAL,
                 format!(
@@ -1430,7 +2082,7 @@ impl RunLoop {
             ));
             return created;
         }
-        self.create_instance(to_node, attempt, None)
+        self.create_instance(to_node, attempt, None, item_index)
     }
 
     // -- W2a0：defer 边寻址与 attempt-per-activation --------------------------
@@ -1448,12 +2100,17 @@ impl RunLoop {
         &mut self,
         from_instance: &str,
         edge: &CompiledEdge,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
         if edge.from == edge.to_node {
-            return self.resolve_defer_self_loop(from_instance, edge);
+            return self.resolve_defer_self_loop(from_instance, edge, item_index);
         }
-        let Some(current) = self.node_current.get(&edge.to_node).cloned() else {
-            return self.resolve_target(from_instance, &edge.to_node, edge.index);
+        let Some(current) = self
+            .node_current
+            .get(&(edge.to_node.clone(), item_index))
+            .cloned()
+        else {
+            return self.resolve_target(from_instance, &edge.to_node, edge.index, item_index);
         };
         let current_status = self.instances.get(&current).map(|record| record.status);
         match current_status {
@@ -1467,7 +2124,12 @@ impl RunLoop {
                     return self.fail_delivery_to_terminal(&edge.to_node, edge.index);
                 }
                 let current_attempt = self.instances.get(&current).map_or(0, |r| r.attempt);
-                self.resolve_defer_reentry(edge, current_attempt.saturating_add(1), &current)
+                self.resolve_defer_reentry(
+                    edge,
+                    current_attempt.saturating_add(1),
+                    &current,
+                    item_index,
+                )
             }
             Some(status) if status.is_terminal() => {
                 self.fail_delivery_to_terminal(&edge.to_node, edge.index)
@@ -1481,6 +2143,7 @@ impl RunLoop {
         &mut self,
         from_instance: &str,
         edge: &CompiledEdge,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
         let source_attempt = self.instances.get(from_instance).map_or(0, |r| r.attempt);
         let attempt = source_attempt.saturating_add(1);
@@ -1498,9 +2161,9 @@ impl RunLoop {
                 CODE_NODE_INTERNAL,
                 format!("{message} on edge {}", edge.index),
             );
-            return self.create_crashed_reentry(edge, attempt, message, run_error);
+            return self.create_crashed_reentry(edge, attempt, message, run_error, item_index);
         }
-        self.create_reentry_instance(edge, attempt, from_instance)
+        self.create_reentry_instance(edge, attempt, from_instance, item_index)
     }
 
     /// defer（非自环）重入：`attempt = 目标当前实例.attempt + 1`；超限 → Crashed。
@@ -1509,6 +2172,7 @@ impl RunLoop {
         edge: &CompiledEdge,
         attempt: Attempt,
         previous_instance: &str,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
         let max_attempts = self
             .graph
@@ -1521,9 +2185,9 @@ impl RunLoop {
                 edge.to_node, edge.index
             );
             let run_error = RunError::new(CODE_NODE_INTERNAL, message.clone());
-            return self.create_crashed_reentry(edge, attempt, message, run_error);
+            return self.create_crashed_reentry(edge, attempt, message, run_error, item_index);
         }
-        self.create_reentry_instance(edge, attempt, previous_instance)
+        self.create_reentry_instance(edge, attempt, previous_instance, item_index)
     }
 
     /// 超限：创建 Crashed 实例（`NodeError::Internal`）并 `fail_run(NODE_INTERNAL)`。
@@ -1537,6 +2201,7 @@ impl RunLoop {
         attempt: Attempt,
         crash_message: String,
         run_error: RunError,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
         let created = self.create_instance(
             &edge.to_node,
@@ -1544,6 +2209,7 @@ impl RunLoop {
             Some(NodeError::Internal {
                 message: crash_message,
             }),
+            item_index,
         );
         self.fail_run(run_error);
         created
@@ -1564,9 +2230,11 @@ impl RunLoop {
         edge: &CompiledEdge,
         attempt: Attempt,
         previous_instance: &str,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
-        let instance_id = self.create_instance(&edge.to_node, attempt, None)?;
-        self.settled_by_node.remove(&edge.to_node);
+        let instance_id = self.create_instance(&edge.to_node, attempt, None, item_index)?;
+        self.settled_by_node
+            .remove(&(edge.to_node.clone(), item_index));
         self.inherit_reentry_inputs(&instance_id, previous_instance, &edge.to_node);
         Some(instance_id)
     }
@@ -1618,12 +2286,16 @@ impl RunLoop {
             .collect()
     }
 
-    /// 创建实例（惰性/自环/入口共用）；`crash` 为 Some 时直接以 Crashed 创建。
+    /// 创建实例（惰性/自环/入口/展开共用）；`crash` 为 Some 时直接以 Crashed 创建。
+    ///
+    /// W4a：`item_index` 是定位键的一部分（非 region 恒 0）；`item_key` 由所属 F 的
+    /// 展开 keys 派生（`None` = 按索引派生）。
     fn create_instance(
         &mut self,
         node_id: &str,
         attempt: Attempt,
         crash: Option<NodeError>,
+        item_index: ItemIndex,
     ) -> Option<InstanceId> {
         let Some(node) = self.graph.nodes.get(node_id) else {
             self.fail_run(RunError::new(
@@ -1635,10 +2307,13 @@ impl RunLoop {
         let instance_id = uuid::Uuid::now_v7().to_string();
         let created_at = now_rfc3339();
         let crashed = crash.is_some();
+        let item_key = self.item_key_for(node_id, item_index);
         let record = InstanceRecord {
             instance_id: instance_id.clone(),
             node_id: node_id.to_string(),
             attempt,
+            item_index,
+            item_key,
             status: if crashed {
                 InstanceStatus::Crashed
             } else {
@@ -1670,7 +2345,7 @@ impl RunLoop {
         );
         self.instances.insert(instance_id.clone(), record);
         self.node_current
-            .insert(node_id.to_string(), instance_id.clone());
+            .insert((node_id.to_string(), item_index), instance_id.clone());
         if let Some(snapshot) = self.snapshot(&instance_id) {
             self.emitter.instance_snapshot(snapshot);
         }
@@ -1688,12 +2363,12 @@ impl RunLoop {
     }
 
     /// 结算一条入边（`test-hooks.disable_settle` 时不记账，用于制造死锁）。
-    fn settle_edge(&mut self, node_id: &str, edge_index: EdgeIdx) {
+    fn settle_edge(&mut self, node_id: &str, edge_index: EdgeIdx, item_index: ItemIndex) {
         if self.disable_settle {
             return;
         }
         self.settled_by_node
-            .entry(node_id.to_string())
+            .entry((node_id.to_string(), item_index))
             .or_default()
             .insert(edge_index);
     }
@@ -1705,8 +2380,8 @@ impl RunLoop {
     /// 也可能是"放行边"但节点 `trigger=all` 仍缺其它（被拦截的）端口；
     /// 若只从 blocked 分支触发级联，后一种情况会留下 Pending，
     /// 静默超过 `deadlock_grace_ms` 后被误判 `RUN_DEADLOCK`。
-    fn maybe_skip_after_settle(&mut self, node_id: &str) {
-        self.cascade_skip(node_id);
+    fn maybe_skip_after_settle(&mut self, node_id: &str, item_index: ItemIndex) {
+        self.cascade_skip(node_id, item_index);
     }
 
     /// 就绪判定（01 §1.3）：`start` 恒就绪；All 需 required 全覆盖；Any 需至少一个。
@@ -1798,13 +2473,13 @@ impl RunLoop {
     /// Skipped 级联（03 §3.4.2）：全部入边结算且不能就绪 → Skipped → 结算出边并迭代级联。
     ///
     /// 用显式栈迭代实现，避免门控环上深递归爆栈。
-    fn cascade_skip(&mut self, start_node: &str) {
-        let mut stack = vec![start_node.to_string()];
-        while let Some(node_id) = stack.pop() {
+    fn cascade_skip(&mut self, start_node: &str, item_index: ItemIndex) {
+        let mut stack = vec![(start_node.to_string(), item_index)];
+        while let Some((node_id, item)) = stack.pop() {
             if self.status.is_terminal() {
                 return;
             }
-            let Some(instance_id) = self.ensure_instance(&node_id) else {
+            let Some(instance_id) = self.ensure_instance(&node_id, item) else {
                 return;
             };
             let Some(record) = self.instances.get(&instance_id) else {
@@ -1813,7 +2488,7 @@ impl RunLoop {
             if record.status != InstanceStatus::Pending {
                 continue;
             }
-            if !self.all_incoming_settled(&node_id) {
+            if !self.all_incoming_settled(&node_id, item) {
                 continue;
             }
             if self.is_ready(&instance_id) {
@@ -1827,36 +2502,63 @@ impl RunLoop {
             ) {
                 return;
             }
+            // W4a（DR-007 §6.6）：region 唯一出口 E 的某个 item 变 Skipped → join
+            // 永远无法完成 → `RUN_FOREACH_ITEM_INCOMPLETE`（冷峻）。
+            if let Some(foreach_node) = self.foreach_exit_for(&node_id) {
+                self.fail_run(RunError::new(
+                    CODE_RUN_FOREACH_ITEM_INCOMPLETE,
+                    format!(
+                        "foreach node '{foreach_node}' item {item} exit node '{node_id}' was skipped"
+                    ),
+                ));
+                return;
+            }
             let outgoing: Vec<EdgeIdx> = self.graph.edge_index().outgoing_edges(&node_id).to_vec();
             for edge_index in outgoing {
                 let Some(edge) = self.graph.edges.get(edge_index) else {
                     continue;
                 };
                 let target = edge.to_node.clone();
-                self.settle_edge(&target, edge_index);
-                if target == node_id {
+                let target_item = self.target_item_for(&target, item);
+                // W4a：目标可能是另一个 foreach 的 F（串行）→ 结算进它的 controller。
+                if self
+                    .graph
+                    .nodes
+                    .get(&target)
+                    .is_some_and(|node| node.foreach.is_some())
+                {
+                    self.controller_settle_edge(&target, edge_index);
+                    self.maybe_skip_controller(&target);
                     continue;
                 }
-                if self.ensure_instance(&target).is_none() {
+                self.settle_edge(&target, edge_index, target_item);
+                if target == node_id && target_item == item {
+                    continue;
+                }
+                if self.ensure_instance(&target, target_item).is_none() {
                     return;
                 }
-                stack.push(target);
+                stack.push((target, target_item));
             }
         }
     }
 
-    /// 确保节点有当前实例（惰性创建 Pending）。
-    fn ensure_instance(&mut self, node_id: &str) -> Option<InstanceId> {
-        if let Some(instance_id) = self.node_current.get(node_id).cloned() {
+    /// 确保节点有当前实例（惰性创建 Pending；W4a 按 item 定位）。
+    fn ensure_instance(&mut self, node_id: &str, item_index: ItemIndex) -> Option<InstanceId> {
+        if let Some(instance_id) = self
+            .node_current
+            .get(&(node_id.to_string(), item_index))
+            .cloned()
+        {
             return Some(instance_id);
         }
-        self.create_instance(node_id, 0, None)
+        self.create_instance(node_id, 0, None, item_index)
     }
 
-    /// 节点的全部入边是否已结算。
-    fn all_incoming_settled(&self, node_id: &str) -> bool {
+    /// 节点的全部入边是否已结算（W4a：按 item 作用域）。
+    fn all_incoming_settled(&self, node_id: &str, item_index: ItemIndex) -> bool {
         let incoming = self.graph.edge_index().incoming_edges(node_id);
-        let settled = self.settled_by_node.get(node_id);
+        let settled = self.settled_by_node.get(&(node_id.to_string(), item_index));
         incoming
             .iter()
             .all(|edge_index| settled.is_some_and(|set| set.contains(edge_index)))
@@ -2127,7 +2829,7 @@ impl RunLoop {
             if node.node_type != NodeType::End {
                 continue;
             }
-            let Some(instance_id) = self.node_current.get(node_id) else {
+            let Some(instance_id) = self.node_current.get(&(node_id.clone(), 0)) else {
                 continue;
             };
             let Some(record) = self.instances.get(instance_id) else {
@@ -2218,6 +2920,8 @@ impl RunLoop {
                 instance_id: instance_id.to_string(),
                 node_id: snapshot.node_id.clone(),
                 attempt: snapshot.attempt,
+                item_index: snapshot.item_index,
+                item_key: snapshot.item_key.clone(),
                 from,
                 to,
                 reason: Some(reason.to_string()),
@@ -2250,6 +2954,8 @@ impl RunLoop {
             node_id: record.node_id.clone(),
             node_type: node.node_type.as_str().to_string(),
             attempt: record.attempt,
+            item_index: record.item_index,
+            item_key: record.item_key.clone(),
             status: record.status,
             input: record.input.clone(),
             output: record.output.clone(),
@@ -2318,6 +3024,45 @@ fn hook_values(
     Option<mpsc::UnboundedSender<Instant>>,
 ) {
     (false, None, None, None)
+}
+
+/// W4a：按 `key_field` 派生 item_key（DR-007 §6.2 / Lead 裁决 ①）。
+///
+/// string 原值；number/bool → canonical JSON 文本；缺键/null/object/array 或
+/// `key_field` 缺省 → `None`（按索引派生；不报错）。
+fn derive_item_key(item: &Value, key_field: Option<&str>) -> Option<String> {
+    let key_field = key_field?;
+    let Value::Object(object) = item else {
+        return None;
+    };
+    match object.get(key_field)? {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+/// W4a：全部元素派生 item_key。
+fn derive_item_keys(items: &[Value], key_field: Option<&str>) -> Vec<Option<String>> {
+    items
+        .iter()
+        .map(|item| derive_item_key(item, key_field))
+        .collect()
+}
+
+/// W4a：首个重复的非 NULL item_key（返回 `(key, first_index, second_index)`）。
+fn first_duplicate_key(keys: &[Option<String>]) -> Option<(String, usize, usize)> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for (index, key) in keys.iter().enumerate() {
+        let Some(key) = key.as_deref() else {
+            continue;
+        };
+        if let Some(previous) = seen.insert(key, index) {
+            return Some((key.to_string(), previous, index));
+        }
+    }
+    None
 }
 
 /// 宿主主机名（trace 的 `owner_host`；取不到时 `unknown`）。
