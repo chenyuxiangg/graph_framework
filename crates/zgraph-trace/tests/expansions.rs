@@ -181,6 +181,30 @@ fn expansion_requires_existing_run_foreign_key() {
 }
 
 #[test]
+fn item_count_overflowing_i64_is_a_storage_error() {
+    let fx = common::Fixture::new();
+    fx.handle.send(common::started("run-overflow"));
+    fx.handle.send(expansion(
+        "run-overflow",
+        "exp-overflow",
+        "foreach",
+        None,
+        u64::MAX,
+        None,
+        common::ts(10),
+    ));
+    let error = fx
+        .writer
+        .flush()
+        .expect_err("item_count beyond i64 must be a storage error");
+    assert!(
+        matches!(&error, TraceError::Storage(message)
+            if message.contains("foreach item_count overflow")),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
 fn duplicate_expansion_id_is_rejected() {
     let fx = common::Fixture::new();
     fx.handle.send(common::started("run-pk"));

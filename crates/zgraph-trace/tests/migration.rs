@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use zgraph_trace::{
-    EventQuery, RunStatus, TraceError, TraceReader, TraceWriter, TRACE_SCHEMA_VERSION,
+    EventQuery, InstanceSnapshot, InstanceStatus, RunStatus, TraceError, TraceInput, TraceReader,
+    TraceWriter, TRACE_SCHEMA_VERSION,
 };
 
 const EXPECTED_TABLES: &[&str] = &[
@@ -161,6 +162,232 @@ ALTER TABLE instances_v5 RENAME TO instances;
 CREATE INDEX IF NOT EXISTS idx_instances_run_node   ON instances(run_id, node_id);
 CREATE INDEX IF NOT EXISTS idx_instances_run_status ON instances(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_instances_error_code ON instances(error_code) WHERE error_code IS NOT NULL;
+"#;
+
+/// 真实 v0.1.0/v1 形状（spec 06 v1 的 6+2 张表）。
+///
+/// 与 v1 时代的 DDL 对齐：`runs` 无 v2/v3 增量列；`instances`/`transitions`
+/// status CHECK 无 `WaitingHuman`、无 item 列；`gate_results` 无
+/// deferred/attempt/verdict；无 `recorded_outputs`/`llm_calls`/`human_decisions`/
+/// `foreach_expansions`。用于 v1→v6 迁移必须基于**真实形状**跑通（REV-089 C1），
+/// 不得只建三张表导致测试假绿。
+const V1_DDL: &str = r#"
+CREATE TABLE schema_migrations (
+  version     INTEGER PRIMARY KEY,
+  description TEXT    NOT NULL,
+  applied_at  TEXT    NOT NULL
+);
+
+CREATE TABLE graphs (
+  graph_hash  TEXT PRIMARY KEY,
+  graph_name  TEXT,
+  dsl_version TEXT NOT NULL,
+  dsl_json    TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+CREATE TABLE runs (
+  run_id           TEXT PRIMARY KEY,
+  graph_hash       TEXT NOT NULL REFERENCES graphs(graph_hash),
+  status           TEXT NOT NULL
+                   CHECK (status IN ('Running','Paused','Completed','Failed','Cancelled')),
+  user_id          TEXT,
+  started_at       TEXT NOT NULL,
+  finished_at      TEXT,
+  entry_inputs     TEXT,
+  output_json      TEXT,
+  error_code       TEXT,
+  error_message    TEXT,
+  owner_pid        INTEGER,
+  owner_host       TEXT,
+  heartbeat_at     TEXT,
+  interrupted      INTEGER NOT NULL DEFAULT 0 CHECK (interrupted IN (0,1)),
+  recovered_at     TEXT,
+  last_seq         INTEGER NOT NULL DEFAULT 0,
+  event_count      INTEGER NOT NULL DEFAULT 0,
+  streaming_dropped INTEGER NOT NULL DEFAULT 0,
+  abandoned_tasks  INTEGER NOT NULL DEFAULT 0,
+  trace_backpressure INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_runs_status_started ON runs(status, started_at);
+CREATE INDEX idx_runs_unfinished ON runs(status) WHERE status IN ('Running','Paused');
+
+CREATE TABLE instances (
+  instance_id  TEXT PRIMARY KEY,
+  run_id       TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  node_id      TEXT NOT NULL,
+  node_type    TEXT NOT NULL CHECK (node_type IN
+               ('start','end','python_node','agent_call','subgraph')),
+  attempt      INTEGER NOT NULL DEFAULT 0,
+  status       TEXT NOT NULL CHECK (status IN
+               ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  input        TEXT,
+  output_json  TEXT,
+  error        TEXT,
+  error_code   TEXT,
+  created_seq  INTEGER,
+  started_at   TEXT,
+  finished_at  TEXT,
+  finished_seq INTEGER,
+  UNIQUE (run_id, node_id, attempt)
+);
+
+CREATE INDEX idx_instances_run_node   ON instances(run_id, node_id);
+CREATE INDEX idx_instances_run_status ON instances(run_id, status);
+CREATE INDEX idx_instances_error_code ON instances(error_code) WHERE error_code IS NOT NULL;
+
+CREATE TABLE events (
+  seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN
+              ('RunStarted','Transition','GateResult','NodeTimedOut',
+               'NodeAbandoned','Streaming','RunFinished')),
+  severity    TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info','warn','error')),
+  at          TEXT NOT NULL,
+  instance_id TEXT,
+  node_id     TEXT,
+  payload     TEXT NOT NULL
+);
+
+CREATE INDEX idx_events_run_seq  ON events(run_id, seq);
+CREATE INDEX idx_events_kind     ON events(kind, seq);
+CREATE INDEX idx_events_instance ON events(instance_id, seq) WHERE instance_id IS NOT NULL;
+
+CREATE TABLE transitions (
+  transition_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  seq           INTEGER NOT NULL UNIQUE REFERENCES events(seq) ON DELETE CASCADE,
+  run_id        TEXT NOT NULL,
+  instance_id   TEXT NOT NULL,
+  node_id       TEXT NOT NULL,
+  attempt       INTEGER NOT NULL,
+  from_status   TEXT NOT NULL CHECK (from_status IN
+                ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  to_status     TEXT NOT NULL CHECK (to_status IN
+                ('Pending','Ready','Running','Completed','Crashed','TimedOut','Cancelled','Skipped')),
+  reason        TEXT,
+  error_code    TEXT,
+  error         TEXT,
+  at            TEXT NOT NULL
+);
+
+CREATE INDEX idx_transitions_run_seq    ON transitions(run_id, seq);
+CREATE INDEX idx_transitions_instance   ON transitions(instance_id, seq);
+CREATE INDEX idx_transitions_run_status ON transitions(run_id, to_status);
+
+CREATE TABLE gate_results (
+  gate_result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  seq            INTEGER NOT NULL UNIQUE REFERENCES events(seq) ON DELETE CASCADE,
+  run_id         TEXT NOT NULL,
+  instance_id    TEXT NOT NULL,
+  node_id        TEXT NOT NULL,
+  edge_index     INTEGER NOT NULL,
+  to_node        TEXT NOT NULL,
+  to_port        TEXT NOT NULL,
+  gate_fn        TEXT,
+  passed         INTEGER NOT NULL CHECK (passed IN (0,1)),
+  error          TEXT,
+  at             TEXT NOT NULL
+);
+
+CREATE INDEX idx_gate_run_seq  ON gate_results(run_id, seq);
+CREATE INDEX idx_gate_run_edge ON gate_results(run_id, edge_index);
+CREATE INDEX idx_gate_passed   ON gate_results(run_id, passed);
+
+CREATE TABLE streaming_events (
+  streaming_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  seq            INTEGER NOT NULL UNIQUE REFERENCES events(seq) ON DELETE CASCADE,
+  run_id         TEXT NOT NULL,
+  instance_id    TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                 ('token','reasoning','tool_call_start','tool_call_end','progress')),
+  segment_index  INTEGER NOT NULL,
+  text           TEXT,
+  text_chars     INTEGER,
+  text_bytes     INTEGER,
+  truncated      INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  delta_count    INTEGER,
+  call_id        TEXT,
+  tool_name      TEXT,
+  ok             INTEGER,
+  summary        TEXT,
+  percent        INTEGER,
+  first_at       TEXT NOT NULL,
+  last_at        TEXT NOT NULL
+);
+
+CREATE INDEX idx_stream_run_seq   ON streaming_events(run_id, seq);
+CREATE INDEX idx_stream_instance  ON streaming_events(run_id, instance_id, segment_index);
+CREATE INDEX idx_stream_tool      ON streaming_events(run_id, call_id) WHERE call_id IS NOT NULL;
+CREATE INDEX idx_stream_kind      ON streaming_events(run_id, kind, segment_index);
+
+PRAGMA user_version = 1;
+"#;
+
+/// v1 历史数据：一条 Completed run + 实例/迁移/5 条事件/1 gate/1 流式段。
+const V1_SEED_SQL: &str = r#"
+INSERT INTO schema_migrations VALUES (1,'v1: base trace schema','2026-01-01T00:00:00.000Z');
+
+INSERT INTO graphs VALUES(
+  'v1graphhash00001','v1-seed','1.0','{"version":"1.0"}','2026-01-01T00:00:00.000Z'
+);
+
+INSERT INTO runs (
+  run_id, graph_hash, status, user_id, started_at, finished_at, entry_inputs,
+  output_json, error_code, error_message, owner_pid, owner_host, heartbeat_at,
+  interrupted, recovered_at, last_seq, event_count, streaming_dropped,
+  abandoned_tasks, trace_backpressure
+) VALUES (
+  'run-v1','v1graphhash00001','Completed','local',
+  '2026-01-01T00:00:00.000Z','2026-01-01T00:00:02.000Z',
+  '{"start":{"message":"seed"}}','{"result":"ok"}',NULL,NULL,0,'seed-host',
+  '2026-01-01T00:00:01.500Z',0,NULL,5,5,0,0,0
+);
+
+INSERT INTO instances (
+  instance_id, run_id, node_id, node_type, attempt, status, input, output_json,
+  error, error_code, created_seq, started_at, finished_at, finished_seq
+) VALUES (
+  'inst-v1','run-v1','node-v1','python_node',0,'Completed','{"in":1}',
+  '{"result":"ok"}',NULL,NULL,1,'2026-01-01T00:00:00.500Z',
+  '2026-01-01T00:00:01.500Z',2
+);
+
+INSERT INTO events VALUES(
+  1,'run-v1','RunStarted','info','2026-01-01T00:00:00.000Z',NULL,NULL,
+  '{"status":"Running","graph_hash":"v1graphhash00001","user_id":"local"}'
+);
+INSERT INTO events VALUES(
+  2,'run-v1','Transition','info','2026-01-01T00:00:01.000Z','inst-v1','node-v1',
+  '{"record":{"run_id":"run-v1","instance_id":"inst-v1","node_id":"node-v1","attempt":0,"from":"Pending","to":"Completed","reason":"execution ok","ts":"2026-01-01T00:00:01.000Z"}}'
+);
+INSERT INTO events VALUES(
+  3,'run-v1','Streaming','info','2026-01-01T00:00:01.100Z','inst-v1','node-v1',
+  '{"streaming":{"kind":"token","segment_index":0}}'
+);
+INSERT INTO events VALUES(
+  4,'run-v1','GateResult','warn','2026-01-01T00:00:01.200Z','inst-v1','node-v1',
+  '{"record":{"run_id":"run-v1","instance_id":"inst-v1","node_id":"node-v1","edge_index":0,"to_node":"node-next","to_port":"in","gate_fn":"check_output","passed":false,"error":null,"ts":"2026-01-01T00:00:01.200Z"}}'
+);
+INSERT INTO events VALUES(
+  5,'run-v1','RunFinished','info','2026-01-01T00:00:02.000Z',NULL,NULL,
+  '{"status":"Completed"}'
+);
+
+INSERT INTO transitions VALUES(
+  1,2,'run-v1','inst-v1','node-v1',0,'Pending','Completed','execution ok',
+  NULL,NULL,'2026-01-01T00:00:01.000Z'
+);
+
+INSERT INTO gate_results VALUES(
+  1,4,'run-v1','inst-v1','node-v1',0,'node-next','in','check_output',0,NULL,
+  '2026-01-01T00:00:01.200Z'
+);
+
+INSERT INTO streaming_events VALUES(
+  1,3,'run-v1','inst-v1','token',0,'hi',2,2,0,1,NULL,NULL,NULL,NULL,NULL,
+  '2026-01-01T00:00:01.100Z','2026-01-01T00:00:01.100Z'
+);
 "#;
 
 fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
@@ -320,6 +547,59 @@ fn human_decision_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
     )
 }
 
+/// v1 的 `runs` 列清单（迁移只加列，不改旧列值）。
+const RUNS_V1_COLUMNS: &str = "run_id, graph_hash, status, user_id, started_at, finished_at, \
+     entry_inputs, output_json, error_code, error_message, owner_pid, owner_host, heartbeat_at, \
+     interrupted, recovered_at, last_seq, event_count, streaming_dropped, abandoned_tasks, \
+     trace_backpressure";
+
+fn runs_v1_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    table_rows(
+        conn,
+        &format!("SELECT {RUNS_V1_COLUMNS} FROM runs ORDER BY run_id"),
+    )
+}
+
+/// v5→v6 不改变列集合的表的整行快照（`runs`/`graphs`/`recorded_outputs`/`llm_calls`）。
+fn full_table_rows(
+    conn: &Connection,
+    table: &str,
+    order_by: &str,
+) -> Vec<Vec<rusqlite::types::Value>> {
+    table_rows(conn, &format!("SELECT * FROM {table} ORDER BY {order_by}"))
+}
+
+fn streaming_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    table_rows(
+        conn,
+        "SELECT streaming_event_id, seq, run_id, instance_id, kind, segment_index, text, \
+         text_chars, text_bytes, truncated, delta_count, call_id, tool_name, ok, summary, \
+         percent, first_at, last_at FROM streaming_events ORDER BY streaming_event_id",
+    )
+}
+
+/// `PRAGMA foreign_key_check` 违规行数（迁移后必须为 0）。
+fn foreign_key_violations(conn: &Connection) -> i64 {
+    let mut stmt = conn
+        .prepare("PRAGMA foreign_key_check")
+        .expect("prepare foreign_key_check");
+    let mut rows = stmt.query([]).expect("query foreign_key_check");
+    let mut count = 0i64;
+    while rows.next().expect("fk row").is_some() {
+        count += 1;
+    }
+    count
+}
+
+/// v1 `gate_results` 的列投影（无 v4 增量列；迁移后仍可读旧值）。
+fn gate_result_rows_v1(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    table_rows(
+        conn,
+        "SELECT gate_result_id, seq, run_id, instance_id, node_id, edge_index, to_node, \
+         to_port, gate_fn, passed, error, at FROM gate_results ORDER BY gate_result_id",
+    )
+}
+
 fn gate_result_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
     table_rows(
         conn,
@@ -347,10 +627,11 @@ fn assert_trace_events_match(
         assert_eq!(event.at, raw_text(&raw[4]));
         assert_eq!(event.instance_id.as_deref(), raw_opt_text(&raw[5]));
         assert_eq!(event.node_id.as_deref(), raw_opt_text(&raw[6]));
+        let expected_payload: serde_json::Value =
+            serde_json::from_str(raw_text(&raw[7])).expect("stored payload is JSON");
         assert_eq!(
-            event.payload.to_string(),
-            raw_text(&raw[7]),
-            "trace payload 投影必须与迁移前存储一致"
+            event.payload, expected_payload,
+            "trace payload 投影必须与迁移前存储逐字段一致（JSON 语义比较）"
         );
     }
 }
@@ -719,50 +1000,189 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
     let path = dir.path().join("v1.db");
     create_v1_database(&path);
 
-    let writer = TraceWriter::open(&path).expect("upgrade v1 db");
+    // 迁移前：真实 v1 形状（6+2 表；无 v2+ 列/表；历史行齐备）。
+    let before = {
+        let conn = Connection::open(&path).expect("inspect v1");
+        assert_eq!(user_version(&conn), 1);
+        for table in [
+            "schema_migrations",
+            "graphs",
+            "runs",
+            "instances",
+            "events",
+            "transitions",
+            "gate_results",
+            "streaming_events",
+        ] {
+            assert!(table_exists(&conn, table), "v1 缺少真实表 {table}");
+        }
+        for table in [
+            "recorded_outputs",
+            "llm_calls",
+            "human_decisions",
+            "foreach_expansions",
+        ] {
+            assert!(!table_exists(&conn, table), "v1 不应有 {table}");
+        }
+        assert_eq!(
+            table_columns(&conn, "runs"),
+            vec![
+                "run_id",
+                "graph_hash",
+                "status",
+                "user_id",
+                "started_at",
+                "finished_at",
+                "entry_inputs",
+                "output_json",
+                "error_code",
+                "error_message",
+                "owner_pid",
+                "owner_host",
+                "heartbeat_at",
+                "interrupted",
+                "recovered_at",
+                "last_seq",
+                "event_count",
+                "streaming_dropped",
+                "abandoned_tasks",
+                "trace_backpressure",
+            ],
+            "v1 runs 列集合（无 v2/v3 增量列）"
+        );
+        let instance_columns = table_columns(&conn, "instances");
+        for column in ["item_index", "item_key"] {
+            assert!(
+                !instance_columns.iter().any(|name| name == column),
+                "v1 instances 不应有 {column}"
+            );
+        }
+        assert!(
+            !table_columns(&conn, "gate_results")
+                .iter()
+                .any(|name| name == "deferred"),
+            "v1 gate_results 无 v4 列"
+        );
+        let snapshot = (
+            runs_v1_rows(&conn),
+            instance_rows_v5(&conn),
+            transition_rows(&conn),
+            event_rows(&conn),
+            gate_result_rows_v1(&conn),
+            streaming_rows(&conn),
+        );
+        assert_eq!(snapshot.0.len(), 1, "seed 恰一条 run");
+        assert_eq!(snapshot.1.len(), 1, "seed 恰一条实例");
+        assert_eq!(snapshot.2.len(), 1, "seed 恰一条迁移");
+        assert_eq!(snapshot.3.len(), 5, "seed 恰五条事件");
+        assert_eq!(snapshot.4.len(), 1, "seed 恰一条 gate result");
+        assert_eq!(snapshot.5.len(), 1, "seed 恰一条流式段");
+        assert_eq!(foreign_key_violations(&conn), 0, "v1 fixture 自身 FK 完整");
+        snapshot
+    };
+
+    // C1 回归：真实 v1 库的 v1→v6 迁移必须成功（旧 DDL 会在 v1 step 因
+    // v6-only `idx_instances_run_node_item` 引用不存在的 item_index 而失败）。
+    let writer = TraceWriter::open(&path).expect("真实 v1→v6 迁移必须成功");
     let handle = writer.handle();
-    handle.send(common::started("run-v1"));
-    handle.send(common::finished("run-v1", RunStatus::Completed));
-    writer.flush().expect("flush");
+
     let reader = TraceReader::open_readonly(&path).expect("reader");
     assert_eq!(
         reader.schema_version().expect("version"),
         TRACE_SCHEMA_VERSION
     );
-    let run = reader.run("run-v1").expect("query").expect("run exists");
-    assert_eq!(run.seed, 42);
-    assert_eq!(run.record_mode.as_deref(), Some("hash"));
-    assert_eq!(run.killed_workers, 1);
-    assert_eq!(run.global_vars, Some(serde_json::json!({})));
+    let old_run = reader
+        .run("run-v1")
+        .expect("query")
+        .expect("legacy v1 run preserved");
+    assert_eq!(old_run.status, RunStatus::Completed);
+    assert_eq!(old_run.seed, 0, "v1 行补 v2 列默认值 seed=0");
+    assert_eq!(old_run.record_mode, None, "v1 行 record_mode=NULL");
+    assert_eq!(old_run.killed_workers, 0);
+    assert_eq!(old_run.global_vars, None, "v1 行无 v3 global_vars");
+    let old_instance = reader
+        .instances("run-v1")
+        .expect("instances")
+        .into_iter()
+        .find(|row| row.instance_id == "inst-v1")
+        .expect("legacy instance");
+    assert_eq!(old_instance.item_index, 0, "旧行 item_index=0");
+    assert_eq!(old_instance.item_key, None, "旧行 item_key=NULL");
 
-    let conn = Connection::open(&path).expect("inspect");
-    let runs_columns = table_columns(&conn, "runs");
-    for column in [
-        "seed",
-        "worker_versions_json",
-        "model_params_json",
-        "record_mode",
-        "global_vars_json",
-    ] {
-        assert!(
-            runs_columns.iter().any(|name| name == column),
-            "missing upgraded column {column}"
-        );
+    // 迁移后：版本/审计/新表/唯一键；旧行逐列保留；FK 完整。
+    let conn = Connection::open(&path).expect("inspect v6");
+    assert_eq!(user_version(&conn), TRACE_SCHEMA_VERSION);
+    for version in 1..=TRACE_SCHEMA_VERSION {
+        let migrated: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )
+            .expect("migration row");
+        assert_eq!(migrated, 1, "v1 库已有 v1 审计行，链式迁移补齐 1..6");
     }
-    assert!(table_exists(&conn, "llm_calls"));
-    assert!(table_exists(&conn, "human_decisions"), "v1→v5 链建 human");
-    assert!(
-        table_exists(&conn, "foreach_expansions"),
-        "v1→v6 链建 foreach_expansions"
+    assert!(table_exists(&conn, "human_decisions"));
+    assert!(table_exists(&conn, "foreach_expansions"));
+    assert_eq!(
+        unique_index_columns(&conn, "instances"),
+        vec!["run_id", "node_id", "attempt", "item_index"]
     );
-    assert!(table_columns(&conn, "instances")
-        .iter()
-        .any(|name| name == "item_index"));
+    assert_eq!(
+        runs_v1_rows(&conn),
+        before.0,
+        "v1→v6 必须保留 runs 的 v1 列值"
+    );
+    assert_eq!(
+        instance_rows_v5(&conn),
+        before.1,
+        "v1→v6 必须逐列保留 instances（item 列取默认值）"
+    );
+    assert_eq!(transition_rows(&conn), before.2, "transitions 逐列保留");
+    assert_eq!(
+        event_rows(&conn),
+        before.3,
+        "events 逐列保留（payload 不改写）"
+    );
+    assert_eq!(
+        gate_result_rows_v1(&conn),
+        before.4,
+        "gate_results 逐列保留（v4 列取默认值）"
+    );
+    assert_eq!(streaming_rows(&conn), before.5, "streaming_events 逐列保留");
+    for row in instance_rows_v6(&conn) {
+        if raw_text(&row[0]) == "inst-v1" {
+            assert_eq!(raw_i64(&row[5]), 0, "旧行 item_index=0");
+            assert_eq!(raw_opt_text(&row[6]), None, "旧行 item_key=NULL");
+        }
+    }
+    assert_eq!(
+        foreign_key_violations(&conn),
+        0,
+        "迁移后 PRAGMA foreign_key_check 必须为空"
+    );
+    // trace 读取 golden：旧 run 事件投影与迁移前逐字段一致。
+    assert_trace_events_match(&reader, "run-v1", &before.3);
     drop(conn);
+    // 迁移后的库可正常写新 run（新库路径功能完好）。
+    handle.send(common::started("run-v1-new"));
+    handle.send(common::finished("run-v1-new", RunStatus::Completed));
+    writer.flush().expect("migrated db accepts new writes");
+    let new_reader = TraceReader::open_readonly(&path).expect("new reader");
+    assert_eq!(
+        new_reader
+            .run("run-v1-new")
+            .expect("query")
+            .expect("new run")
+            .status,
+        RunStatus::Completed,
+        "迁移后新 run 正常落库"
+    );
+    drop(new_reader);
     drop(reader);
     writer.close().expect("close");
 
-    // 06 §6.7：每个版本迁移前各留一份备份（v1→v2 … v5→v6）。
+    // 每版本恰一份备份（v1..v5），各备份保留迁移前版本与形状。
     let backups = backup_files(dir.path());
     assert_eq!(
         backups.len(),
@@ -770,13 +1190,27 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
         "expected five migration backups: {backups:?}"
     );
     for old_version in 1..=5 {
-        assert!(
-            backups
-                .iter()
-                .any(|path| backup_name(path).contains(&format!(".bak.v{old_version}-"))),
-            "missing .bak.v{old_version}- backup: {backups:?}"
+        let backup = backups
+            .iter()
+            .find(|path| backup_name(path).contains(&format!(".bak.v{old_version}-")))
+            .unwrap_or_else(|| panic!("missing .bak.v{old_version}- backup: {backups:?}"));
+        let backup_conn = Connection::open(backup).expect("open backup");
+        assert_eq!(
+            user_version(&backup_conn),
+            old_version,
+            "备份回写 user_version"
         );
     }
+    let v1_backup = backups
+        .iter()
+        .find(|path| backup_name(path).contains(".bak.v1-"))
+        .expect("v1 backup");
+    let v1_backup_conn = Connection::open(v1_backup).expect("open v1 backup");
+    assert!(!table_exists(&v1_backup_conn, "recorded_outputs"));
+    assert!(!table_exists(&v1_backup_conn, "human_decisions"));
+    assert!(!table_columns(&v1_backup_conn, "instances")
+        .iter()
+        .any(|name| name == "item_index"));
 }
 
 #[test]
@@ -1111,6 +1545,10 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
             event_rows(&conn),
             human_decision_rows(&conn),
             gate_result_rows(&conn),
+            full_table_rows(&conn, "runs", "run_id"),
+            full_table_rows(&conn, "graphs", "graph_hash"),
+            full_table_rows(&conn, "recorded_outputs", "recorded_output_id"),
+            full_table_rows(&conn, "llm_calls", "llm_call_id"),
         );
         assert_eq!(
             snapshot.0.len(),
@@ -1119,11 +1557,15 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
         );
         assert_eq!(snapshot.3.len(), 1, "seed 恰一条 human decision");
         assert_eq!(snapshot.4.len(), 1, "seed 恰一条 gate result");
+        assert_eq!(snapshot.5.len(), 1, "seed 恰一条 run");
+        assert_eq!(snapshot.6.len(), 1, "seed 恰一条 graph");
+        assert_eq!(snapshot.7.len(), 1, "seed 恰一条 recorded_output");
+        assert_eq!(snapshot.8.len(), 1, "seed 恰一条 llm_call");
         snapshot
     };
 
     let writer = TraceWriter::open(&path).expect("upgrade v5 db");
-    writer.close().expect("close writer");
+    let handle = writer.handle();
 
     let reader = TraceReader::open_readonly(&path).expect("reader");
     assert_eq!(
@@ -1161,6 +1603,31 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
         gate_result_rows(&conn),
         before.4,
         "gate_results 逐列保留（v6 未重建该表）"
+    );
+    assert_eq!(
+        full_table_rows(&conn, "runs", "run_id"),
+        before.5,
+        "runs 逐列保留（v6 未改 runs 列）"
+    );
+    assert_eq!(
+        full_table_rows(&conn, "graphs", "graph_hash"),
+        before.6,
+        "graphs 逐列保留"
+    );
+    assert_eq!(
+        full_table_rows(&conn, "recorded_outputs", "recorded_output_id"),
+        before.7,
+        "recorded_outputs 逐列保留（结构未改）"
+    );
+    assert_eq!(
+        full_table_rows(&conn, "llm_calls", "llm_call_id"),
+        before.8,
+        "llm_calls 逐列保留（结构未改）"
+    );
+    assert_eq!(
+        foreign_key_violations(&conn),
+        0,
+        "v5→v6 迁移后 PRAGMA foreign_key_check 必须为空"
     );
     for row in instance_rows_v6(&conn) {
         assert_eq!(raw_i64(&row[5]), 0, "旧行 item_index=0");
@@ -1207,6 +1674,35 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
     drop(conn);
     drop(reader);
 
+    // PRAGMA foreign_keys 恢复 ON 的行为断言：迁移后写端连接仍强制 FK——对不存在
+    // 的 run 写实例快照必须在 flush 时报 FOREIGN KEY（若迁移窗口未恢复则会被接受）。
+    let fk_probe = InstanceSnapshot {
+        run_id: "run-missing".to_string(),
+        instance_id: "inst-fk-probe".to_string(),
+        node_id: "node-fk-probe".to_string(),
+        node_type: "python_node".to_string(),
+        attempt: 0,
+        item_index: 0,
+        item_key: None,
+        status: InstanceStatus::Completed,
+        input: None,
+        output: None,
+        error: None,
+        error_code: None,
+        created_at: "2026-01-01T00:00:02.000Z".to_string(),
+        started_at: None,
+        finished_at: None,
+    };
+    handle.send(TraceInput::InstanceSnapshot(fk_probe));
+    let fk_error = writer
+        .flush()
+        .expect_err("migrated writer must enforce foreign keys");
+    assert!(
+        matches!(&fk_error, TraceError::Storage(message) if message.contains("FOREIGN KEY")),
+        "迁移后 PRAGMA foreign_keys 必须恢复 ON: {fk_error:?}"
+    );
+    drop(writer);
+
     // 备份恰一份 v5 快照（user_version=5、无 item 列/expansions、旧数据）。
     let backups = backup_files(dir.path());
     assert_eq!(backups.len(), 1, "v5→v6 恰一份备份: {backups:?}");
@@ -1235,6 +1731,12 @@ fn failed_v5_to_v6_migration_restores_backup_and_leaves_v5_untouched() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("locked-v5.db");
     create_v5_database(&path);
+    let human_before = {
+        let conn = Connection::open(&path).expect("inspect v5");
+        let rows = human_decision_rows(&conn);
+        assert_eq!(rows.len(), 1, "v5 fixture 恰一条 human decision");
+        rows
+    };
     {
         // 故障注入：v5→v6 迁移在写 schema_migrations 审计行时 ABORT（单事务回滚）。
         let conn = Connection::open(&path).expect("install trigger");
@@ -1268,6 +1770,12 @@ fn failed_v5_to_v6_migration_restores_backup_and_leaves_v5_untouched() {
         "回滚后 v6 列必须不存在"
     );
     assert!(table_exists(&conn, "human_decisions"));
+    assert_eq!(
+        human_decision_rows(&conn),
+        human_before,
+        "失败/恢复路径必须逐列保留 human_decisions（DROP TABLE 不得级联删除）"
+    );
+    assert_eq!(foreign_key_violations(&conn), 0, "恢复后的 v5 库 FK 完整");
     drop(conn);
     assert!(
         backup_files(dir.path())
@@ -1289,6 +1797,16 @@ fn failed_v5_to_v6_migration_restores_backup_and_leaves_v5_untouched() {
         TRACE_SCHEMA_VERSION
     );
     assert!(reader.run("run-v5").expect("query").is_some());
+    let decisions = reader.human_decisions("run-v5").expect("decisions");
+    assert_eq!(decisions.len(), 1, "重试迁移后 human decision 保留");
+    assert_eq!(decisions[0].instance_id, "inst-waiting");
+    assert_eq!(decisions[0].decision, "approved");
+    let after_conn = Connection::open(&path).expect("inspect v6");
+    assert_eq!(
+        human_decision_rows(&after_conn),
+        human_before,
+        "重试迁移成功后 human_decisions 逐列保留"
+    );
 }
 
 #[test]
@@ -1490,9 +2008,15 @@ fn create_v5_database(path: &Path) {
          '{\"spec\":\"v5\"}');
          INSERT INTO human_decisions (run_id, instance_id, decision, approver, reason, \
          decision_id, decided_at, consumed_at) VALUES ('run-v5', 'inst-waiting', 'approved', \
-         'alice', 'lgtm', 'decision-v5', '2026-01-01T00:00:01.000Z', NULL);",
+         'alice', 'lgtm', 'decision-v5', '2026-01-01T00:00:01.000Z', NULL);
+         INSERT INTO recorded_outputs (run_id, instance_id, node_id, attempt, output_hash, \
+         output_json, recorded_at) VALUES ('run-v5', 'inst-run-v5', 'node-seed', 0, \
+         'hash-v5', '{\"result\":\"ok\"}', '2026-01-01T00:00:01.500Z');
+         INSERT INTO llm_calls (run_id, instance_id, call_index, request_json, response_json, \
+         status, recorded_at) VALUES ('run-v5', 'inst-run-v5', 0, '{\"model\":\"m\"}', \
+         '{\"ok\":true}', 'ok', '2026-01-01T00:00:01.600Z');",
     )
-    .expect("seed human decision");
+    .expect("seed human decision + L2 rows");
     assert_eq!(
         human_decision_rows(&conn).len(),
         1,
@@ -1544,28 +2068,10 @@ fn create_v2_database(path: &Path) {
     assert_eq!(user_version(&conn), 2);
 }
 
+/// 造一个**真实 v0.1.0/v1 形状**库（spec 06 v1 的 6+2 张表 + 历史数据）。
 fn create_v1_database(path: &Path) {
     let conn = Connection::open(path).expect("create v1 db");
-    conn.execute_batch(
-        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, description TEXT NOT NULL, \
-         applied_at TEXT NOT NULL);\
-         CREATE TABLE graphs (graph_hash TEXT PRIMARY KEY, graph_name TEXT, dsl_version TEXT NOT NULL, \
-         dsl_json TEXT NOT NULL, created_at TEXT NOT NULL);\
-         CREATE TABLE runs (\
-           run_id TEXT PRIMARY KEY,\
-           graph_hash TEXT NOT NULL REFERENCES graphs(graph_hash),\
-           status TEXT NOT NULL CHECK (status IN ('Running','Paused','Completed','Failed','Cancelled')),\
-           user_id TEXT, started_at TEXT NOT NULL, finished_at TEXT, entry_inputs TEXT, \
-           output_json TEXT, error_code TEXT, error_message TEXT, owner_pid INTEGER, \
-           owner_host TEXT, heartbeat_at TEXT,\
-           interrupted INTEGER NOT NULL DEFAULT 0 CHECK (interrupted IN (0,1)),\
-           recovered_at TEXT, last_seq INTEGER NOT NULL DEFAULT 0,\
-           event_count INTEGER NOT NULL DEFAULT 0,\
-           streaming_dropped INTEGER NOT NULL DEFAULT 0,\
-           abandoned_tasks INTEGER NOT NULL DEFAULT 0,\
-           trace_backpressure INTEGER NOT NULL DEFAULT 0);\
-         PRAGMA user_version = 1;",
-    )
-    .expect("create v1 schema");
+    conn.execute_batch(V1_DDL).expect("create real v1 schema");
+    conn.execute_batch(V1_SEED_SQL).expect("seed v1 rows");
     assert_eq!(user_version(&conn), 1);
 }

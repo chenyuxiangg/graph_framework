@@ -118,6 +118,10 @@ const GATE_RESULTS_V4_COLUMNS: &[(&str, &str)] = &[
 /// `foreach_expansions` 单独放在 [`DDL_HUMAN_DECISIONS`]/[`DDL_FOREACH_EXPANSIONS`]：
 /// 新库建库与对应版本迁移共用同一份 DDL，避免两处字面量漂移；也保证 v1→v2 的
 /// 中间态不提前创建后续版本的表（按各迁移步骤的版本语义创建）。
+///
+/// **v6-only 的 `idx_instances_run_node_item` 不在本 DDL 内**（[`DDL_INSTANCES_V6_INDEX`]）：
+/// v1→v2 步骤会对真实 v1 库执行本 DDL，而 v1 `instances` 无 `item_index` 列
+/// （REV-089 C1）。
 const DDL_CURRENT: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version     INTEGER PRIMARY KEY,
@@ -191,8 +195,6 @@ CREATE TABLE IF NOT EXISTS instances (
 CREATE INDEX IF NOT EXISTS idx_instances_run_node   ON instances(run_id, node_id);
 CREATE INDEX IF NOT EXISTS idx_instances_run_status ON instances(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_instances_error_code ON instances(error_code) WHERE error_code IS NOT NULL;
--- W4a（v6，DR-007 §8.2）：item 实例定位索引（fresh 与 v5→v6 迁移必须一致）。
-CREATE INDEX IF NOT EXISTS idx_instances_run_node_item ON instances(run_id, node_id, item_index);
 
 CREATE TABLE IF NOT EXISTS events (
   seq         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,6 +413,15 @@ CREATE INDEX IF NOT EXISTS idx_transitions_instance   ON transitions(instance_id
 CREATE INDEX IF NOT EXISTS idx_transitions_run_status ON transitions(run_id, to_status);
 "#;
 
+/// v6-only `instances` item 定位索引（DR-007 §8.2）。
+///
+/// **不得放进 [`DDL_CURRENT`]**：`migrate_step` 的 v1→v2 步骤会对**真实 v1 库**
+/// 执行 `DDL_CURRENT`，而 v1 `instances` 没有 `item_index` 列 → 建索引会
+/// `no such column`（REV-089 C1）。新库在 [`create_current`] 建完全部列后单独执行；
+/// v5→v6 迁移由 [`REBUILD_INSTANCES_V6`] 重建同一索引，保证 fresh/migrated 一致。
+const DDL_INSTANCES_V6_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_instances_run_node_item \
+     ON instances(run_id, node_id, item_index);";
+
 /// v6 `foreach_expansions` 展开事实表 + `run_id` 索引（DR-007 §8.3 / 06 §6.2.15）。
 ///
 /// 写入者是 [`crate::TraceWriter`]（内核执行事实，与 events/instances 同一写线程；
@@ -609,6 +620,8 @@ pub(crate) fn db_err(err: rusqlite::Error) -> TraceError {
 fn create_current(conn: &mut Connection) -> Result<(), TraceError> {
     let tx = begin_immediate(conn)?;
     tx.execute_batch(DDL_CURRENT).map_err(db_err)?;
+    // v6-only 索引：DDL_CURRENT 不含它（见 `DDL_INSTANCES_V6_INDEX` 文档）。
+    tx.execute_batch(DDL_INSTANCES_V6_INDEX).map_err(db_err)?;
     tx.execute_batch(DDL_HUMAN_DECISIONS).map_err(db_err)?;
     tx.execute_batch(DDL_FOREACH_EXPANSIONS).map_err(db_err)?;
     for version in 1..=TRACE_SCHEMA_VERSION {
@@ -625,21 +638,32 @@ fn create_current(conn: &mut Connection) -> Result<(), TraceError> {
 /// 删除全部决策行（DR-007 §8.2 要求 human_decisions 结构/数据不变）。`PRAGMA
 /// foreign_keys` 在事务内无效，故在事务前后切换；失败路径连接随后被丢弃/回滚。
 fn migrate_step(conn: &mut Connection, from: i64) -> Result<(), TraceError> {
-    let toggle_fk = from == 5;
-    if toggle_fk {
-        conn.execute_batch("PRAGMA foreign_keys = OFF;")
-            .map_err(db_err)?;
+    if from == 5 {
+        with_foreign_keys_disabled(conn, |conn| migrate_step_inner(conn, from))
+    } else {
+        migrate_step_inner(conn, from)
     }
-    let result = migrate_step_inner(conn, from);
-    if toggle_fk {
-        if let Err(restore_error) = conn.execute_batch("PRAGMA foreign_keys = ON;") {
-            return match result {
-                Ok(()) => Err(db_err(restore_error)),
-                Err(migration_error) => Err(migration_error),
-            };
-        }
+}
+
+/// 在 FK 校验关闭的窗口内执行 `run`，**无论成功/失败**随后恢复
+/// `PRAGMA foreign_keys = ON`（`PRAGMA` 在事务内设置无效，故必须事务外切换；
+/// DR-007 §8.2 的重建 `instances` 需要它，否则 `human_decisions` 会被级联删除）。
+fn with_foreign_keys_disabled<T>(
+    conn: &mut Connection,
+    run: impl FnOnce(&mut Connection) -> Result<T, TraceError>,
+) -> Result<T, TraceError> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(db_err)?;
+    let result = run(conn);
+    let restore = conn
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(db_err);
+    match (result, restore) {
+        (Ok(value), Ok(())) => Ok(value),
+        // 迁移错误优先返回（恢复失败时连接将被丢弃/由调用方恢复备份）。
+        (Err(migration_error), _) => Err(migration_error),
+        (Ok(_), Err(restore_error)) => Err(restore_error),
     }
-    result
 }
 
 /// `migrate_step` 的单事务主体（版本分支）。
@@ -901,4 +925,57 @@ fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, TraceErr
         columns.push(row.map_err(db_err)?);
     }
     Ok(columns)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn foreign_keys_enabled(conn: &Connection) -> bool {
+        conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+            .expect("read foreign_keys")
+            == 1
+    }
+
+    #[test]
+    fn foreign_keys_are_disabled_inside_and_restored_after_the_window() {
+        let mut conn = Connection::open_in_memory().expect("open memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable foreign keys");
+        assert!(foreign_keys_enabled(&conn), "前置：FK 已开启");
+
+        let outcome = with_foreign_keys_disabled(&mut conn, |conn| {
+            assert!(
+                !foreign_keys_enabled(conn),
+                "重建窗口内 FK 必须关闭（否则 DROP TABLE 会级联删除 human_decisions）"
+            );
+            Ok(7)
+        })
+        .expect("helper succeeds");
+        assert_eq!(outcome, 7);
+        assert!(
+            foreign_keys_enabled(&conn),
+            "迁移窗口结束后 PRAGMA foreign_keys 必须恢复 ON"
+        );
+    }
+
+    #[test]
+    fn foreign_keys_are_restored_even_when_the_window_fails() {
+        let mut conn = Connection::open_in_memory().expect("open memory db");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable foreign keys");
+
+        let error = with_foreign_keys_disabled(&mut conn, |_conn| -> Result<(), TraceError> {
+            Err(TraceError::Storage("injected window failure".to_string()))
+        })
+        .expect_err("injected failure must surface");
+        assert!(
+            matches!(&error, TraceError::Storage(message) if message.contains("injected window failure")),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            foreign_keys_enabled(&conn),
+            "失败路径同样必须恢复 PRAGMA foreign_keys = ON"
+        );
+    }
 }
