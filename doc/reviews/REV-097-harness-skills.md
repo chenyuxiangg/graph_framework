@@ -80,3 +80,14 @@ git status --porcelain                      # 空
 
 - **V2 后续（V5 e2e 前）**：N1 wildcard 口径修复/测试；N2 L2 正文口径（AC-18 e）；N3 目录路径/元数据；N4 字符 vs 字节；N5/N6 YAML/可达 reason；N7 预算 map 清理。
 - **无 P0/P1**；无附加条件；分支可合并进入 V3 MCP。
+
+## 7. 第二评审 · 跨模块机械/追加改动（Lead 追加，2026-11-01）
+
+- **评审人**：`lead`（**≠ 作者** `kernel-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`29ee6d3..6844573`）：
+  1. `crates/zgraph-cli/src/run_cmd.rs`：`--skills-dir` 参数/usage/env（`ZGRAPH_SKILLS`）/解析/透传 `HarnessExecutor::with_skills_dir`；`validate` 不变；无退出码/默认行为变化。
+  2. `crates/zgraph-kernel/src/types.rs`：append-only —— 新常量 `CODE_HARNESS_SKILL_INVALID`、`HarnessErrorKind::SkillInvalid` variant、`code()` arm；既有常量/枚举 arm/行为均未改。
+- **核对结论（通过）**：cli 为纯机械接线（无业务逻辑/默认路径变化）；kernel 为合同要求的 append-only 新 kind/码（DR-009 §6），无既有错误码/行为改动；无 Cargo.toml/Cargo.lock 依赖变更；无其它跨模块文件。
+- **Lead 亲自验证**：`git diff 29ee6d3..6844573 --stat` 仅 harness 8 + cli 1 + kernel 1（+ REV 记录）；`cargo test --workspace --offline` 953/0/3（见评审记录）；`cargo test -p zgraph-harness --offline` 184/1 ignored。
+- **裁决引用**：REV-097 P2①（wildcard/too_many_skills）已由作者 `6844573` 修复并有测试；P2②（llm_calls 快照含正文）按 Lead 裁决**不改代码**，AC-18 e 仅覆盖 events/streaming/tool 摘要（V5 docs 回写口径）。
+- **结论**：**通过（第二评审）**。跨模块改动与主审结论合并生效；分支满足合并前置。
