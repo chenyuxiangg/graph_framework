@@ -182,6 +182,19 @@ impl HarnessExecutor {
         self
     }
 
+    /// v0.3/V3（REV-098 #3）：关闭本执行器所有 MCP 连接/子进程组并清空 run 缓存。
+    ///
+    /// **幂等**：无 MCP（或已关闭）→ no-op；可重复调用。CLI 在 run 结束
+    /// （Completed/Failed/Cancelled/错误路径、`--json`/human 两条出口）**必须**调用一次，
+    /// 保证 stdio 子进程组在 run 结束时立即回收，而不是等下一次 run 或进程退出。
+    /// `feature = "mcp"` 关闭时同样安全（不编译 rmcp，只清理空槽）。
+    pub async fn close_mcp(&self) {
+        let mut guard = self.mcp_run.lock().await;
+        if let Some((_, run)) = guard.take() {
+            run.shutdown().await;
+        }
+    }
+
     /// v0.3/V3：注入 MCP 客户端工厂（测试 seam；生产用默认 rmcp 工厂）。
     pub fn with_mcp_factory(mut self, factory: Arc<dyn crate::mcp::McpClientFactory>) -> Self {
         self.mcp_factory = factory;
@@ -1503,6 +1516,74 @@ mod tests {
             .first()
             .map(|request| request.tools.iter().map(|tool| tool.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// v0.3/V3（REV-098 #3）：`close_mcp` 幂等关闭全部 MCP 连接（Fake 记录 shutdown）。
+    #[tokio::test]
+    async fn close_mcp_shuts_down_once_and_is_idempotent() {
+        let dir = assets_with_mcp();
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "noop"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        // 记录 shutdown 的 fake client（通过 factory 注入）。
+        let client = crate::mcp::testing::FakeMcpClient::new()
+            .with_tools(vec![crate::mcp::McpTool {
+                server: String::new(),
+                name: "echo".to_string(),
+                description: "echo".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+            }])
+            .with_default_outcome("ok", false);
+        let factory =
+            crate::mcp::testing::FakeMcpFactory::new().with_client("fake", client.clone());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_mcp_allow(true)
+                .with_mcp_factory(factory as _),
+        );
+        let (outcome, _sink) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            RunStatus::Completed,
+            "error: {:?}",
+            outcome.error
+        );
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "run 期间连接保持常驻"
+        );
+        executor.close_mcp().await;
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        executor.close_mcp().await;
+        assert_eq!(
+            client.shutdowns.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "second close is a no-op"
+        );
+    }
+
+    /// 无 MCP 的默认执行器：`close_mcp` no-op（两次调用不 panic）。
+    #[tokio::test]
+    async fn close_mcp_is_noop_without_mcp() {
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "x"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = HarnessExecutor::new(settings(dir.path(), &fake, &runner));
+        executor.close_mcp().await;
+        executor.close_mcp().await;
     }
 
     #[tokio::test]

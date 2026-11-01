@@ -933,13 +933,17 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         decision_observer,
     ) {
         Ok(started) => started,
-        Err(code) => return code,
+        Err(code) => {
+            // v0.3/V3（REV-098 #3）：错误路径也关闭 MCP 连接/子进程组（幂等）。
+            built.harness.close_mcp().await;
+            return code;
+        }
     };
     debug_assert_eq!(traced.run_id(), run_id);
     // consumer 与 run 同生命周期：run 已启动（可能已产生 RunStarted）后再起专线程。
     let consumer =
         human_consumer.then(|| DecisionSession::spawn(&db_path, &run_id, args.quiet, decision_rx));
-    wait_and_report(
+    let exit = wait_and_report(
         args,
         traced,
         lifecycle,
@@ -951,7 +955,11 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
             recovery: &recovery,
         },
     )
-    .await
+    .await;
+    // v0.3/V3（REV-098 #3）：run 结束（Completed/Failed/Cancelled/错误）后**立即**关闭
+    // 所有 MCP 连接与 stdio 子进程组；`--json`/human/普通出口均经过此处。幂等。
+    built.harness.close_mcp().await;
+    exit
 }
 
 /// 图是否含人工等待节点（`builtin.human` → [`CompiledHandler::Human`]）。
