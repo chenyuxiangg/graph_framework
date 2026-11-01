@@ -105,3 +105,17 @@ git diff --name-only main...HEAD -- doc/reviews/         # 仅 README.md（既�
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（结论为 `通过`，无附加条件）。
+
+## 7. P2/P3 收口确认（2026-11-01）
+
+> 复审对象：作者收口提交 **`15d98d3`**（父 `875dac2`；`git diff 875dac2..15d98d3` = **10 files 纯 `doc/**`**，+23/−16）。评审人对 §3 的 N1–N6（P2/P3）做快速确认。
+
+**结论：通过**（P2/P3 已收口；分支最终评审状态以此节为准）
+
+- **P2-1（trace SHA 溯源）✅**：`49806c2`/`dc25340` 已全局替换为 main 实际祖先 **`93a5f23`**（impl）/**`e057cef`**（fix）；`doc/`（排除 `reviews/` 历史评审记录）**零残留**；DR-007 §14.1/DR-004 §10/08 §8.11.1/PROVENANCE §2 第 25 条/06/ISSUE-142 已同步；06/08 SHA 已重算（PROVENANCE §3 实测 9/9 ALL_MATCH）。
+- **P2-2（08 source-breaking 完整性）✅**：08 §8.11.2 新增 **#9–#12**——kernel `TransitionRecord` item 字段（breaking）、`TraceSink::foreach_expansion` 默认 no-op（source-compatible）、dsl `ForeachConfig`/`OnItemError`（additive）、additive API（`NodeContext`/`TraceCall`/`MemoryTraceSink`/`ItemIndex`/`ExpansionId`）；08 行数 **600→604**、SHA 已重算。
+- **P3 ✅**：`doc/index.md` reviews 范围改为 **REV-038–094**；`doc/reviews/README.md` 补 **REV-085/086/087** 三行；DR-007 §14.1/DR-004 §10 执行顺序改为真实 main 顺序（kernel→cli→fix→e2e）；07 资产「11→**12** 图」、通过标准改为 **6/3 连跑**实测口径；progress 保持 **15 行四块**（W4b 完成 → 发布收口）。
+- **门禁复核 ✅**：`git diff 875dac2..HEAD` 纯 `doc/**`；PROVENANCE §3 脚本复核 00–08=**7202**、spec 目录=**7592**、00–08 numstat **+81/−33（净+48）**、全 spec **+111/−51（净+60）**、**9/9 SHA-256+行数 ALL_MATCH**；spec README 行数表（含 08=604）一致；`bash scripts/dev/check.sh` **PASSED**；worktree 干净。
+- **评审人顺手修正（本确认提交内）**：`doc/reviews/README.md` 两处表格格式问题——REV-084 与 REV-085 之间被插入的空行（会切断 Markdown 表格）、REV-087 与 REV-088 合并为一行（缺换行）；修正后 REV 表 **1–91 行连续、每行 6 列**（92 行记录，037/051/059 未创建）。
+- **遗留（非阻塞，合并后 housekeeping）**：`doc/index.md` 文本仍写「REV-094 W4b as-built docs（本分支待评审）」且未点出 REV-087，可由 docs/Lead 在合并后小改；不影响合并与结论。
+- **合并建议**：满足 merge.sh 前置（结论通过、worktree 干净、基于 main `201341b`）；合并 + push 后进入 **v0.2.0 发布收口**（性能基线/兼容矩阵/`tag v0.2.0`，需用户确认 tag/Release）。
