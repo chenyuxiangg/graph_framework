@@ -12,7 +12,7 @@
 | 传输 | stdio + Streamable HTTP（rmcp `transport-child-process`/`transport-streamable-http-client-reqwest`；旧 HTTP+SSE 不支持） |
 | registry | `<assets-dir>/mcp_servers.json`（受信配置；不允许来自 DSL/graph）；需 `--allow-mcp` 显式开启 |
 | AgentConfig | `mcp: {servers: string[], allow?: string[]}`（additive；缺省=不启用）；MCP 工具**必须显式进 `AgentConfig.tools`** |
-| 工具命名 | **`mcp__<server>__<tool>`**（`serverInfo.name` 跨 server 不唯一/LLM function name 安全）；`call_id = mcp__<server>__<tool>#<n>` |
+| 工具命名 | **`mcp__<server>__<tool>`**（`serverInfo.name` 跨 server 不唯一/LLM function name 安全）；`call_id` 保留 provider/LLM 原生 id（**不伪造 `#n`**）；MCP/skill 可识别性只用 `tool_name` |
 | 生命周期 | `2026-07-28`：无 session/initialize，每请求 `params._meta` 版本协商；HTTP 头 `MCP-Protocol-Version`+`Mcp-Method`/`Mcp-Name`；`2025-11-25`：initialize + `notifications/initialized` + `Mcp-Session-Id`（由 rmcp 兼容） |
 | 调用 | `tools/list`（分页/`ttlMs` 提示）；`tools/call`；rmcp 自动 MRTR（默认 10 轮）；**无 per-call 超时**→ 自包 `tokio::time::timeout` |
 | `input_required` | v0.3 不支持：`clientCapabilities={}`；收到 `resultType:"input_required"` → 结构化工具失败 `input_required_unsupported`（不静默/AI 代答） |
@@ -71,7 +71,7 @@
 - `mcp?: {servers: string[], allow?: string[]}`；缺省无=不启用（不读 registry/不启进程/不注册工具）。
 - server 不存在 → `HARNESS_MCP_ERROR{reason:"server_not_found"}`；allow 非法/未匹配 → 配置错误（fail-closed）。
 - **白名单**：MCP 工具必须在 `AgentConfig.tools` 显式列出（与「已注册但未列出 → `HARNESS_UNKNOWN_TOOL`」一致）；`allow` 进一步收窄（交集）；否则不可见/不可调用。
-- **`--allow-mcp` 显式开关（Lead 裁决）**：默认关闭；`AgentConfig.mcp` 非空但未传 `--allow-mcp` → 受控错误 **`HARNESS_MCP_ERROR{reason:"not_allowed"}`**（不新增 MCP_NOT_ALLOWED 码）（run 启动/Harness Loading 失败，不启动 server、不执行图；不产生 run 或按既有 config-load 失败路径，由 CLI 实现选择其一并冻结；v0.3 推荐 run 启动前失败）。开启时 stderr 打印所用 server 完整命令（不含密钥/env 值）。
+- **`--allow-mcp` 显式开关（Lead 裁决）**：默认关闭；`AgentConfig.mcp` 非空但未传 `--allow-mcp` → 受控错误 **`HARNESS_MCP_ERROR{reason:"not_allowed"}`**（不新增 MCP_NOT_ALLOWED 码）（**冻结：run 启动前失败、不产生 run、不启动 server；CLI exit 3，沿用 `RUN_ENTRY_INVALID` 入口校验口径**；AC-19 c 断言）。开启时 stderr 打印所用 server 完整命令（不含密钥/env 值）。
 - 名称冲突（与内置/Python 工具同名）→ `HARNESS_MCP_ERROR{reason:"name_conflict"}`。
 
 ## 3. 工具映射与调用
@@ -123,7 +123,7 @@
 
 ## 7. trace 决策（不新增 schema）
 
-- **不升 v7**：MCP 工具调用沿用 `streaming_events` 的 `tool_call_start/tool_call_end` + `llm_calls` 汇总；`tool_name`=`mcp__<server>__<tool>`、`call_id`=`mcp__<server>__<tool>#<n>`（逐调用递增，run 内唯一）。
+- **不升 v7**：MCP 工具调用沿用 `streaming_events` 的 `tool_call_start/tool_call_end` + `llm_calls` 汇总；`tool_name`=`mcp__<server>__<tool>`；`call_id` 保留 provider/LLM 原生 id（不伪造；MCP 可识别性只用 tool_name）。
 - 不写新表/列；`events.kind` 不变；`trace`/`replay` 输出沿用既有路径。
 - 安全/膨胀：只记 args_summary/result_summary（既有上限），不写参数/结果全文与密钥。
 - **v7 候选（不在 v0.3）**：按 server 维度健康/延迟/失败率聚合（`mcp_servers` 表或 `streaming_events.server` 列）、builtin vs external provider 列；需另立 DR。
@@ -133,7 +133,6 @@
 | 码/载体 | 触发 | detail.reason |
 |---|---|---|
 | `HARNESS_MCP_ERROR`（`HarnessErrorKind::Mcp`） | MCP 配置/开关/lifecycle/崩溃（不用于工具调用失败） | `server_not_found`/`not_allowed`（未传 `--allow-mcp`）/`config_invalid`（registry/AgentConfig/双传输/名称冲突/env 未定义）/`init_failed`/`protocol_version`/`tool_not_found`（未注册或不在 tools/allow）/`name_conflict`/`http_insecure`/`input_required_unsupported` |
-| `HARNESS_CONFIG_LOAD{reason:"mcp_server_not_found"}` | **不单列**：缺失 server 统一用 `HARNESS_MCP_ERROR{reason:"server_not_found"}`（Lead 裁决 D） | — |
 | `TOOL_ERROR` | **MCP 工具调用失败**（超时/崩溃/isError/参数校验/协议 -326xx） | 喂回 LLM；不新增 MCP 调用码 |
 
 - 映射：MCP_ERROR → 节点 `Crashed(HarnessErrorKind::Mcp)`（配置/开关/初始化阶段）；`TOOL_ERROR` → 工具结果、run 继续。
@@ -145,7 +144,7 @@
 | 场景 | 期望 |
 |---|---|
 | 无 `mcp` 配置 | 不读 registry/不启进程/不注册工具；AgentConfig/run/trace/replay 逐字节不变 |
-| 有 `mcp` 但无 `--allow-mcp` | `HARNESS_MCP_ERROR{reason:"not_allowed"}`；不启动 server（fail-closed） |
+| 有 `mcp` 但无 `--allow-mcp` | `HARNESS_MCP_ERROR{reason:"not_allowed"}`；**run 启动前失败、不产生 run、CLI exit 3** |
 | 仅 legacy server | 双 era 回落成功（AC-19 a） |
 | 默认路径性能 | 无 MCP 不实例化 client、无 IO；`mcp` feature 默认开但运行时零开销 |
 | graph_hash | 不变（MCP 配置不参与 hash） |
@@ -156,7 +155,7 @@
 |---|---|---|
 | a | 双 era stdio | 新（`2026-07-28` 无状态）/旧（`2025-11-25` initialize）两个 fake server 均能 list/call；现代失败→legacy 回落 |
 | b | Streamable HTTP | fake HTTP（JSON/SSE）：头 `MCP-Protocol-Version`/`Mcp-Method` 校验；https；`allow_insecure_http` 门控 |
-| c | 映射/白名单/allow-mcp | `mcp__<server>__<tool>` 命名；必须在 `tools`+`allow`；未在 tools 不可见；无 `--allow-mcp` → `HARNESS_MCP_ERROR{reason:"not_allowed"}` |
+| c | 映射/白名单/allow-mcp | `mcp__<server>__<tool>` 命名；必须在 `tools`+`allow`；未在 tools 不可见；无 `--allow-mcp` → `HARNESS_MCP_ERROR{reason:"not_allowed"}`（run 启动前失败、不产生 run、exit 3） |
 | d | 超时/取消/崩溃/进程组 | call 超时（自包 timeout）/取消/崩溃 → 工具错误；进程组 kill 无泄漏；同 run 最多重启 1 次 |
 | e | 结果/安全/MRTR | >32KiB 截断；annotations 不可信；`input_required` → `input_required_unsupported`；密钥不落日志/trace |
 | f | trace 不变 | 不新增表/列/`events.kind`；`tool_call_*` + `llm_calls`；`call_id` 保留原生 id（只用 `tool_name=mcp__<server>__<tool>` 识别） |
@@ -172,7 +171,7 @@
 |---|---|---|
 | 1 | 双 era | **必须**（`2026-07-28` + `2025-11-25`；rmcp `ClientLifecycleMode`） |
 | 2 | client | **rmcp 3.8.0** feature-gated；支持不足允许最小 stdio fallback（V3 spike） |
-| 3 | 命名 | **`mcp__<server>__<tool>`**；`call_id` 同前缀 + `#<n>` |
+| 3 | 命名 | **`mcp__<server>__<tool>`**；`call_id` 保留原生 id（不伪造）；MCP/skill 可识别性只用 `tool_name` |
 | 4 | 白名单 | MCP 工具**必须显式进 `AgentConfig.tools`**；`allow` 交集 |
 | 5 | HTTP | 默认 **https**；`http://` 需 `allow_insecure_http:true` + 警示 |
 | 6 | 鉴权 | **仅静态 env Bearer**；不做 OAuth/DCR |

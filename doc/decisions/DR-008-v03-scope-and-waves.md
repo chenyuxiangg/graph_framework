@@ -36,9 +36,9 @@
 
 | 能力 | 归属 | 配置/资产 | 关键 API/码位 | 默认行为（不配置） |
 |---|---|---|---|---|
-| skills | Harness | `skills/<name>/SKILL.md`；`--skills-dir`/`ZGRAPH_SKILLS_DIR`；`AgentConfig.skills` | `skill_view` 内置工具；`HARNESS_SKILL_*`（append-only） | 不发现/不注入/不新增工具；输出不变 |
+| skills | Harness | `<assets-dir>/skills/<name>/SKILL.md`；`--skills-dir`/`ZGRAPH_SKILLS`；`AgentConfig.skills` | `skill_view` 内置工具；`HARNESS_SKILL_INVALID` + `HARNESS_CONFIG_LOAD{skill_not_found}` | 不发现/不注入/不新增工具；输出不变 |
 | MCP | Harness | `mcp_servers.json`；`AgentConfig.mcp` | `ToolDef`（`mcp__<server>__<tool>`）；`HARNESS_MCP_ERROR`（append-only） | 不启动 server/不注册工具；输出不变 |
-| harness 插件 | Harness | `AgentConfig.harness`（builtin/subprocess） | `AgentProvider` trait；`HARNESS_PLUGIN_*`（append-only） | `builtin`（现有 HarnessExecutor 路径逐字节不变） |
+| harness 插件 | Harness | `AgentConfig.harness`（builtin/subprocess） | `AgentProvider` trait；`HARNESS_PLUGIN_ERROR`（append-only） | `builtin`（现有 HarnessExecutor 路径逐字节不变） |
 
 ## 3. 波次与依赖（V1–V5）
 
@@ -80,7 +80,7 @@ V1 docs 设计冻结（本批，REV-096）
 | 编号 | 主题 | 用例数（设计） | 关键断言 | 落点 |
 |---|---|---|---|---|
 | AC-18 | skills | a–f（6） | 目录/frontmatter 校验、索引注入、`skill_view` 按需加载、token 预算/截断、路径安全/不可信内容、默认无 skills 不变 | 07 §AC-18 |
-| AC-19 | MCP | a–g（7） | stdio initialize/tools-list/call、Streamable HTTP、`mcp__<server>__<tool>` 映射/allowlist、超时/取消/崩溃、结果截断、trace 默认不变、默认无 MCP 不变 | 07 §AC-19 |
+| AC-19 | MCP | a–g（7） | **新/旧两桩**（2026-07-28 无状态 + 2025-11-25 legacy）双 era、Streamable HTTP、`mcp__<server>__<tool>` 映射/allowlist/allow-mcp、超时/取消/崩溃、结果截断、trace 默认不变、默认无 MCP 不变 | 07 §AC-19 |
 | AC-20 | harness 插件 | a–h（8） | builtin 默认不变、subprocess 协议握手/事件/最终输出、流式映射、取消/超时/输出上限、L2 不重跑、fake external 真链路、安全/错误映射 | 07 §AC-20 |
 
 > 详细断言见 07；W4a/W4b 不涉及；本批只冻结断言口径，V2–V4 实现后 V5 回写实测。

@@ -51,7 +51,7 @@ pub trait AgentProvider: Send + Sync {
 {"v":1,"type":"cancel"}
 // 子→父
 {"v":1,"type":"hello_ok","protocol":"zgraph-harness/1","provider":"codex_exec","capabilities":{"streaming":true,"reasoning":false}}
-{"v":1,"type":"event","kind":"delta","text":"..."}                        // → TokenDelta（Codex 仅整消息一次；DSH committed 消息）
+{"v":1,"type":"event","kind":"delta","text":"..."}                        // → TokenDelta（仅 capabilities.streaming=true；Codex false 不发）
 {"v":1,"type":"event","kind":"reasoning","text":"..."}                    // → ReasoningDelta（无则不发）
 {"v":1,"type":"event","kind":"tool_start","call_id":"c1","tool":"...","args_summary":{}}
 {"v":1,"type":"event","kind":"tool_end","call_id":"c1","ok":true,"result_summary":{}}
@@ -76,7 +76,7 @@ pub trait AgentProvider: Send + Sync {
 ### 3.1 Codex（先做）
 
 - 依赖面：`codex exec --json`（JSONL `ThreadEvent`：thread.started/turn.completed/turn.failed/item.*）+ `-o/--output-last-message` 读最终消息；`--skip-git-repo-check`/`-C`/`-s`/`--ephemeral` 按需。
-- **无 token 级 delta**：`agent_message` 只在 item started/updated/completed 给整段文本 → `capabilities.streaming=false`（无 token 级）；adapter 仍可发**一条整消息 `delta`**（语义为「一条消息一次」，非 token 级），文档写死。
+- **无 token 级 delta**：`agent_message` 只在 item started/updated/completed 给整段文本 → `capabilities.streaming=false`；**此时只发 `result`、不发任何 event delta（TokenDelta 不产生）**，文档写死。
 - `iterations` 无对应物 → **固定 1**（降级）；trace summary 记 `event_count`/`item_count`。
 - 退出码只有 0/1（无区分度）→ 成功需结合 `turn.completed`/`turn.failed`，不能只看 code。
 - usage：`input_tokens→prompt_tokens`、`output_tokens→completion_tokens`、`reasoning_output_tokens→reasoning_tokens`；`cached_input_tokens`/`cache_write_input_tokens` **丢弃**（文档注明）。
@@ -135,7 +135,7 @@ pub trait AgentProvider: Send + Sync {
 |---|---|---|
 | a | builtin 默认不变 | 无 harness/显式 builtin：AgentConfig/run/trace/replay 与 v0.2 golden 逐字节一致 |
 | b | subprocess 协议 | fake external：hello/hello_ok → run → result；四字段正确；版本/行超限 fail-closed |
-| c | 流式映射与降级 | delta/reasoning/tool_start/tool_end/progress → 既有 StreamingEvent；Codex 整消息一次/DSH committed；未知 event 忽略+warn |
+| c | 流式映射与降级 | streaming=true 时 delta/reasoning/tool_start/tool_end/progress → 既有 StreamingEvent；**Codex streaming=false 只发 result（无 event delta）**；DSH committed；未知 event 忽略+warn |
 | d | 取消/超时/进程组 | cancel 帧 → SIGTERM 2s→SIGKILL 进程组；超时 NODE_TIMEOUT；无孤儿 |
 | e | 输出/协议错误/安全 | 行/总输出/事件超限、非法 JSON/无 result、非 0 退出 → `HARNESS_PLUGIN_ERROR`；stderr 截断、无密钥 |
 | f | L2 不重跑 | `--mode=events/outputs` 不启动外部进程；无命令环境可回放；结果一致 |

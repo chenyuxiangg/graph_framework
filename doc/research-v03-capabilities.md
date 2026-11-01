@@ -49,7 +49,7 @@
 
 - 02 §2.5.7/§2.11 C-20 已冻结：skills 归 **Harness Loading**，不参与 DSL/`graph_hash`；05 §5.10 把 skills 列在保留扩展位。
 - 现有 `AgentConfig` 是严格白名单（`deny_unknown_fields`）；新增 `skills` 必须 additive（缺省=无 skills，旧配置逐字节不变）。
-- 资产发现沿用 `--assets-dir`/`HARNESS_CONFIG_LOAD` 体系；skills 目录独立 `--skills-dir`（env `ZGRAPH_SKILLS_DIR`），缺省 `.zgraph/skills`（与 assets 并列）。
+- 资产发现沿用 `--assets-dir`/`HARNESS_CONFIG_LOAD` 体系；skills 目录独立 `--skills-dir` > env `ZGRAPH_SKILLS` > `<assets-dir>/skills`（与 tools 同构）。
 
 ### 1.3 风险
 
@@ -69,7 +69,7 @@
 
 - **stdio**：client 启动 server 子进程（command/args/env），JSON-RPC over stdin/stdout；错误日志走 stderr。
 - **Streamable HTTP**：POST JSON-RPC；按规范处理 SSE 流/会话 id；只允许 http/https，TLS 校验默认开启。
-- 生命周期：`initialize`（协议版本/能力协商）→ `tools/list`（缓存，含 `inputSchema`）→ 按需 `tools/call` → 取消（notifications/cancelled）→ 关闭（stdio 终止进程组）。
+- 生命周期（**双 era**）：`2026-07-28` 无 initialize/session（每请求 `_meta` 版本协商；HTTP `MCP-Protocol-Version`/`Mcp-Method`；取消=关闭流）；`2025-11-25` legacy initialize/initialized/`Mcp-Session-Id`；`tools/list`（缓存，含 `inputSchema`）→ 按需 `tools/call` → 关闭（stdio 终止进程组）。
 - 工具命名空间：`mcp__<server>__<tool>`，映射为自有 `ToolDef`（name 唯一，schema 来自 `inputSchema`）；冲突/非法名 → Harness 配置错误。
 
 ### 2.2 Rust client 选型（待 spike 锁定）

@@ -1440,9 +1440,9 @@ pub trait AgentProvider: Send + Sync {
 
 ### 5.14.1 skills（DR-009）
 
-- 发现：`<skills_dir>/<name>/SKILL.md`（`--skills-dir` > `ZGRAPH_SKILLS_DIR` > `.zgraph/skills`）；frontmatter 必填 `name`/`description`，未知键拒绝；`SKILL.md` ≤256KiB。
+- 发现：`<assets-dir>/skills/<name>/SKILL.md`（`--skills-dir` > `ZGRAPH_SKILLS` > `<assets-dir>/skills`）；frontmatter 必填 `name`（=父目录）/`description`（1–1024，**>1024 拒绝** `description_too_long`），未知顶层键拒绝；`SKILL.md` ≤256KiB。
 - 注入：system **仅索引**（`name: description`）；`skill_view(name)` 工具按需返回正文（≤32KiB，`truncated` 标记）；单 run ≤5 次（`MAX_SKILL_VIEWS`）。
-- 配置：`AgentConfig.skills?: string[]`（缺省 `[]`；`"*"` 显式全量）；不执行 skill 脚本；错误 `HARNESS_SKILL_*`（00 §0.4）。
+- 配置：`AgentConfig.skills?: string[]`（缺省 `[]`；`"*"` 显式全量）；不执行 skill 脚本；错误：被引用不存在→`HARNESS_CONFIG_LOAD{reason:"skill_not_found"}`、存在但非法→`HARNESS_SKILL_INVALID`（00 §0.4）。
 - 无 skills：不发现/不注入/不注册工具 → 既有输出不变。
 
 ### 5.14.2 MCP（DR-010）

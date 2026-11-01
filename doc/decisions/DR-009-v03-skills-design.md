@@ -130,7 +130,7 @@ Skill directory: <assets>/skills/pdf-processing
 | `HARNESS_SKILL_INVALID{reason}` | 被引用的 skill 存在但非法；reason 闭集：`unknown_field`/`unparseable_yaml`/`invalid_frontmatter`/`invalid_name`/`name_mismatch`/`missing_description`/`name_too_long`/`duplicate_name`/`too_many_skills`/`too_large`/`path_escape`/`not_utf8`/`description_too_long` |
 | `TOOL_ERROR{reason}` | `skill_view` 读取失败/IO/`view_budget`（喂回 LLM，不 fail run；不新增码） |
 
-- 映射：配置/加载类 → 节点 `Crashed(Config)`；`skill_view` 的未知/预算错误 → 工具结果（喂回 LLM，不 fail run）。
+- 映射：`HARNESS_SKILL_INVALID` → 节点 `Crashed(HarnessErrorKind::SkillInvalid)`；`HARNESS_CONFIG_LOAD{skill_not_found}` → `Crashed(Config)`；`skill_view` 的未知/预算错误 → `TOOL_ERROR` 工具结果（喂回 LLM，不 fail run）。
 - 既有码不变；新码只追加 00 §0.4 Harness 域。
 
 ## 7. 安全
