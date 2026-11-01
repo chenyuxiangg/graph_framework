@@ -1,0 +1,40 @@
+# zgraph v0.2.0 性能基线（Lead 实测；发布门禁依据）
+
+日期：2026-11-01
+二进制：release（target/release/zgraph）；v0.1.0 参考二进制来自 dist tar（v0.1.0 release 包）
+方法：同机、无并发、3 次取中位数；fake LLM；`--record=hash`（除非注明）
+环境：CARGO_HOME=<repo>/.cargo-home；.venv/bin/python；`--python-path python`
+
+## 1. AC-01 customer_ticket 单 run（fake LLM, hash）
+
+- v0.2：88 ms（中位）
+- v0.1：75 ms（中位）
+- 变化：+17.3%（回退，门禁内 ≤20%）
+- 图 hash：ec320e4244b365ab
+
+## 2. AC-12 同图 10 并发 run（wall time）
+
+- v0.2：217.0 ms（中位）
+- v0.1：187.1 ms（中位）
+- 变化：+16.0%（回退，门禁内 ≤20%）
+- 注：首轮 324.7 ms 含进程/缓存预热，已剔除；仅统计稳态 3 次中位。
+
+## 3. SOP smoke 11/18（fake LLM, approved profile）
+
+- v0.2：115 ms
+- v0.1：135 ms
+- 变化：-14.8%（改善）
+- 图 hash：df9341c04063b80a
+
+## 4. SOP full 60/100（validate 与运行期）
+
+- validate：v0.2 7.2 ms / v0.1 7.7 ms
+- 运行期：**未测**（发布已知限制/例外）
+- 图 hash：3d8d735b1d5e8a1b
+- 原因：full-60 的 fake LLM 全局调用序不稳定（并发节点调用序交错），无法获得确定性基线；见 ISSUE-112（P2，v0.2 发布已知限制，待清理）。e2e 运行期以 `--profile rework-item` 单 item（5/7）覆盖。
+
+## 5. 发布门禁结论
+
+- 三项可测回退（customer_ticket / 10 并发 / smoke）均 **≤20%** → **通过**（+17.3% / +16.0% / -14.8%）。
+- full-60 仅 validate 对比；运行期按 ISSUE-112 记为已知限制，不参与门禁。
+- 兼容：v0.1.0 图 hash/validate/run 回归由既有测试与本轮实测覆盖；默认（无 foreach/human）行为不变。

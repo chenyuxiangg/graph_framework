@@ -43,7 +43,7 @@ fn code(output: &Output) -> i32 {
 fn version_flag_prints_versions() {
     let output = zgraph(&["--version"]);
     assert_eq!(code(&output), 0);
-    assert!(stdout(&output).contains("zgraph 0.1.0"));
+    assert!(stdout(&output).contains(&format!("zgraph {}", env!("CARGO_PKG_VERSION"))));
     assert!(stdout(&output).contains("DSL 1.0"));
 }
 
