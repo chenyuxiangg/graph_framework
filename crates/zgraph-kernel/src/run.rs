@@ -1659,8 +1659,22 @@ impl RunLoop {
         else {
             return;
         };
-        let Some(items_value) = controller.values.get(&foreach.items_port).cloned() else {
+        let Some(port_value) = controller.values.get(&foreach.items_port).cloned() else {
             return;
+        };
+        // W4b（REV-092 / Lead 裁决 A）：v1「整包广播」下的 items_port 取值规则。
+        //
+        // 边投递把发布者**整包 output** 写进目标端口（`buffer_write(to_port, output)`）；
+        // python worker 输出必须是 dict、agent_call 输出是四字段 object、entry 注入也是
+        // object——因此合法图里 items_port 常收到 `{"items":[...]}` 形状的整包 object。
+        // 冻结取值：是 array → 直接用；是 object 且含**与 items_port 同名的键** → 取该键值；
+        // 其余 → NOT_ARRAY。**只取一层同名字段，不做点分路径**（DR-007 §6.2 as-built 解释）。
+        let items_value = match port_value {
+            Value::Object(object) if object.contains_key(&foreach.items_port) => object
+                .get(&foreach.items_port)
+                .cloned()
+                .unwrap_or(Value::Null),
+            other => other,
         };
         let Value::Array(items) = items_value else {
             self.fail_run(RunError::new(

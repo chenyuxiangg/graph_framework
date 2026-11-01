@@ -1267,3 +1267,154 @@ async fn expansion_source_not_overwritten_while_paused() {
         Some(instance_of("X").as_str())
     );
 }
+
+// ---------------------------------------------------------------------------
+// REV-092（W4b A）：items_port 整包广播字段提取（unwrap）
+// ---------------------------------------------------------------------------
+
+/// entry 注入 → start 整包广播：`start(items=[..]) -> F(foreach) -> end`。
+///
+/// v1 下 start 输出 = 入口注入 object `{"items":[...]}`，边投递把它整包写给 F 的
+/// items 端口；内核按「object 含与 items_port 同名键」unwrap 后展开。
+const ENTRY_TEMPLATE: &str = r#"{
+  "version": "1.0",
+  "metadata": {"name": "foreach-entry"},
+  "entry_points": ["start"],
+  "nodes": [
+    {"id": "start", "type": "start",
+     "inputs": [{"name": "items", "type": "any", "required": true}], "config": {}},
+    {"id": "F", "type": "python_node",
+     "inputs": [{"name": "items", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "fanout"},
+     "foreach": {"items_port": "items", "join": "end"}},
+    {"id": "end", "type": "end",
+     "inputs": [{"name": "results", "type": "any", "required": true}], "config": {}}
+  ],
+  "edges": [
+    {"from": "start", "to_node": "F", "to_input_port": "items"},
+    {"from": "F", "to_node": "end", "to_input_port": "results"}
+  ]
+}"#;
+
+/// 真 worker 形状的 object 输出 `{"items":[...], "meta":1}` → unwrap 同名键后展开。
+#[tokio::test]
+async fn object_items_port_unwraps_same_key() {
+    let executor = Arc::new(
+        ScriptedExecutor::new()
+            .respond("prep", |_| Ok(json!({"items": ["a", "b", "c"], "meta": 1}))),
+    );
+    let (outcome, sink) = common::run_with_sink(
+        spec_for(&pipeline_json("", ""), foreach_options()),
+        executor,
+    )
+    .await;
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "error: {:?}",
+        outcome.error
+    );
+    let expansions = sink.foreach_expansions();
+    assert_eq!(expansions.len(), 1);
+    assert_eq!(expansions[0].item_count, 3);
+    let expected: Vec<Value> = ["a", "b", "c"]
+        .iter()
+        .map(|item| expected_exit_output(&json!(item)))
+        .collect();
+    assert_eq!(outcome.output, Some(json!({"results": expected})));
+}
+
+/// entry 注入 `{"items":[a,b,c]}` → start 整包广播 object → F.items unwrap → 展开 3。
+#[tokio::test]
+async fn entry_injection_object_unwraps_for_foreach() {
+    let mut spec = common::spec(
+        common::compile_text(ENTRY_TEMPLATE),
+        common::entry_inputs(&[("start", "items", json!(["a", "b", "c"]))]),
+    );
+    spec.options = foreach_options();
+    let (outcome, sink) = common::run_with_sink(spec, Arc::new(FakeExecutor::new())).await;
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "error: {:?}",
+        outcome.error
+    );
+    let expansions = sink.foreach_expansions();
+    assert_eq!(expansions.len(), 1);
+    assert_eq!(expansions[0].item_count, 3);
+    assert_eq!(
+        common::last_status(&sink, "end"),
+        Some(InstanceStatus::Completed)
+    );
+}
+
+/// 负例：object 无同名键 / 同名键非 array / 标量 → 仍 `RUN_FOREACH_ITEMS_NOT_ARRAY`，
+/// 且不产生 expansion / item 实例。
+#[tokio::test]
+async fn items_port_non_array_shapes_stay_not_array() {
+    let cases = [
+        (json!({"other": ["a", "b"]}), "object"),
+        (json!({"items": {"nested": 1}}), "object"),
+        (json!("not-a-list"), "string"),
+    ];
+    for (port_value, expected_type) in cases {
+        let executor =
+            Arc::new(ScriptedExecutor::new().respond("prep", move |_| Ok(port_value.clone())));
+        let (outcome, sink) = common::run_with_sink(
+            spec_for(&pipeline_json("", ""), foreach_options()),
+            executor,
+        )
+        .await;
+        assert_eq!(outcome.status, RunStatus::Failed);
+        let error = outcome.error.expect("run error");
+        assert_eq!(error.code, "RUN_FOREACH_ITEMS_NOT_ARRAY");
+        assert_eq!(
+            error.message,
+            format!("foreach node 'F' items_port 'items' is not an array (got {expected_type})")
+        );
+        assert!(sink.foreach_expansions().is_empty());
+        assert!(common::snapshots_of(&sink, "F").is_empty());
+    }
+}
+
+/// max_items 校验作用于 unwrap 后的列表。
+#[tokio::test]
+async fn max_items_applies_after_unwrap() {
+    let executor = Arc::new(
+        ScriptedExecutor::new().respond("prep", |_| Ok(json!({"items": ["a", "b", "c"]}))),
+    );
+    let (outcome, sink) = common::run_with_sink(
+        spec_for(&pipeline_json(r#", "max_items": 2"#, ""), foreach_options()),
+        executor,
+    )
+    .await;
+    assert_eq!(outcome.status, RunStatus::Failed);
+    let error = outcome.error.expect("run error");
+    assert_eq!(error.code, "RUN_FOREACH_ITEMS_EXCEEDED");
+    assert_eq!(error.message, "foreach node 'F' items 3 exceed max_items 2");
+    assert!(sink.foreach_expansions().is_empty());
+}
+
+/// key_field 校验作用于 unwrap 后的列表（同 id=1 重复）。
+#[tokio::test]
+async fn key_duplicate_applies_after_unwrap() {
+    let executor = Arc::new(
+        ScriptedExecutor::new().respond("prep", |_| Ok(json!({"items": [{"id": 1}, {"id": 1}]}))),
+    );
+    let (outcome, sink) = common::run_with_sink(
+        spec_for(
+            &pipeline_json(r#", "key_field": "id""#, ""),
+            foreach_options(),
+        ),
+        executor,
+    )
+    .await;
+    assert_eq!(outcome.status, RunStatus::Failed);
+    let error = outcome.error.expect("run error");
+    assert_eq!(error.code, "RUN_FOREACH_ITEM_KEY_DUPLICATE");
+    assert_eq!(
+        error.message,
+        "foreach node 'F' item key '1' is duplicated at indexes 0,1"
+    );
+    assert!(sink.foreach_expansions().is_empty());
+}
