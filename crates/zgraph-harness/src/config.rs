@@ -69,6 +69,8 @@ pub struct AgentConfig {
     pub constraints_file: Option<String>,
     /// 本 Agent 可见工具引用（顺序即发给 LLM 的 schema 顺序）。
     pub tools: Vec<String>,
+    /// v0.3 skills 引用（缺省 `[]`；`"*"` = 全部可用；≤16；DR-009 §3）。
+    pub skills: Vec<String>,
     /// 节点端口 → Agent 输入字段（05 §5.2.2/§5.9.3）。
     pub input_mapping: BTreeMap<String, String>,
     /// LLM 请求轮次上限。
@@ -94,6 +96,8 @@ pub struct LoadedAgent {
     pub api_key: SecretString,
     /// 已按 `config.tools` 顺序解析的工具定义。
     pub tools: Vec<ToolDef>,
+    /// 已按 `config.skills` 解析的 skill 条目（`skills` 非空时含内置 `skill_view`）。
+    pub skills: Vec<crate::skills::SkillEntry>,
 }
 
 impl std::fmt::Debug for LoadedAgent {
@@ -103,6 +107,7 @@ impl std::fmt::Debug for LoadedAgent {
             .field("role_prompt_chars", &self.role_prompt.chars().count())
             .field("constraints", &self.constraints)
             .field("tools", &self.config.tools)
+            .field("skills", &self.config.skills)
             .field("api_key", &"<redacted>")
             .finish()
     }
@@ -121,7 +126,7 @@ impl LoadedAgent {
 }
 
 /// 顶层允许键（05 §5.2.2 + `$schema` 白名单）。
-const TOP_LEVEL_KEYS: [&str; 13] = [
+const TOP_LEVEL_KEYS: [&str; 14] = [
     "id",
     "name",
     "schema_version",
@@ -129,6 +134,7 @@ const TOP_LEVEL_KEYS: [&str; 13] = [
     "role_prompt_file",
     "constraints_file",
     "tools",
+    "skills",
     "input_mapping",
     "max_iterations",
     "llm_timeout_ms",
@@ -261,6 +267,20 @@ pub fn load_agent(
     registry: &ToolRegistry,
     fake_mode: bool,
 ) -> Result<LoadedAgent, HarnessError> {
+    load_agent_with_skills(assets_dir, agent_id, registry, fake_mode, None)
+}
+
+/// [`load_agent`] 的 skills-aware 变体（v0.3/V2；DR-009）。
+///
+/// `skills_dir` 为 CLI `--skills-dir` 显式覆盖；`None` 时按 `$ZGRAPH_SKILLS` →
+/// `<assets-dir>/skills`（仅当 `AgentConfig.skills` 非空时才扫描）。
+pub fn load_agent_with_skills(
+    assets_dir: &Path,
+    agent_id: &str,
+    registry: &ToolRegistry,
+    fake_mode: bool,
+    skills_dir: Option<&Path>,
+) -> Result<LoadedAgent, HarnessError> {
     let assets_dir = absolute(assets_dir);
     let index = agent_index(&assets_dir)?;
     let path = index.get(agent_id).cloned().ok_or_else(|| {
@@ -294,7 +314,12 @@ pub fn load_agent(
             "$.constraints_file",
         )?),
     };
-    let tools = resolve_tools(&config, registry)?;
+    let mut tools = resolve_tools(&config, registry)?;
+    let skills = resolve_skills(&assets_dir, &config, skills_dir)?;
+    if !skills.is_empty() {
+        // v0.3：内置 `skill_view` 仅当 skills 非空时注册（DR-009 §3/§4）。
+        tools.push(crate::skills::skill_view_tool(&skills));
+    }
     let api_key = resolve_api_key(&config, fake_mode)?;
     Ok(LoadedAgent {
         config,
@@ -302,7 +327,94 @@ pub fn load_agent(
         constraints,
         api_key,
         tools,
+        skills,
     })
+}
+
+/// 解析 `AgentConfig.skills` → 已校验 skill 条目（无 skills 配置时**不扫描**）。
+///
+/// 目录优先级（DR-009 §1）：`--skills-dir`（`skills_dir`）> env `ZGRAPH_SKILLS` >
+/// `<assets-dir>/skills`。未被引用的非法 skill 跳过并写 stderr warn（不阻塞加载）。
+fn resolve_skills(
+    assets_dir: &Path,
+    config: &AgentConfig,
+    skills_dir: Option<&Path>,
+) -> Result<Vec<crate::skills::SkillEntry>, HarnessError> {
+    if config.skills.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = skills_dir
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os(SKILLS_ENV)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| assets_dir.join("skills"));
+    let index = crate::skills::SkillsIndex::discover(&root);
+    for warning in index.warnings() {
+        eprintln!("warning: {warning}");
+    }
+    for warning in index.skip_warnings(&config.skills) {
+        eprintln!("{warning}");
+    }
+    index.resolve(&config.skills)
+}
+
+/// skills 目录环境变量（DR-009 §1；CLI 侧同名常量独立定义）。
+const SKILLS_ENV: &str = "ZGRAPH_SKILLS";
+
+/// 解析 `AgentConfig.skills`（可选字符串数组；≤16；`"*"` 显式全量）。
+fn parse_skills(object: &Map<String, Value>, path: &Path) -> Result<Vec<String>, HarnessError> {
+    let Some(value) = object.get("skills") else {
+        return Ok(Vec::new());
+    };
+    let Some(array) = value.as_array() else {
+        return Err(type_error(
+            path,
+            "$.skills",
+            "array of strings",
+            json_type_name(value),
+            "skills must be an array",
+        ));
+    };
+    if array.len() > crate::constants::MAX_SKILLS {
+        return Err(config_error(
+            "out_of_range",
+            Some(&path.display().to_string()),
+            Some("$.skills"),
+            Some(Value::from(format!(
+                "<= {} items",
+                crate::constants::MAX_SKILLS
+            ))),
+            Some(Value::from(array.len())),
+            "too many skill references".to_string(),
+        ));
+    }
+    let mut skills = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let Some(reference) = item.as_str() else {
+            return Err(type_error(
+                path,
+                &format!("$.skills[{index}]"),
+                "string",
+                json_type_name(item),
+                "skill reference must be a string",
+            ));
+        };
+        if reference.trim().is_empty() {
+            return Err(config_error(
+                "unsupported_value",
+                Some(&path.display().to_string()),
+                Some(&format!("$.skills[{index}]")),
+                Some(Value::from("non-empty skill directory name or all")),
+                Some(value.clone()),
+                "empty skill reference".to_string(),
+            ));
+        }
+        skills.push(reference.to_string());
+    }
+    Ok(skills)
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +437,7 @@ fn parse_agent_config(
     let role_prompt_file = parse_role_prompt_file(object, path)?;
     let constraints_file = optional_string(object, "constraints_file", path, "$.constraints_file")?;
     let tools = parse_tools(object, path)?;
+    let skills = parse_skills(object, path)?;
     let input_mapping = parse_input_mapping(object, path)?;
     let max_iterations = parse_max_iterations(object, path)?;
     let (llm_timeout_ms, llm_max_retries, node_timeout_ms) = parse_timeouts(object, path)?;
@@ -337,6 +450,7 @@ fn parse_agent_config(
         role_prompt_file,
         constraints_file,
         tools,
+        skills,
         input_mapping,
         max_iterations,
         llm_timeout_ms,
@@ -1849,5 +1963,183 @@ mod tests {
             .expect("write");
         }
         assert_eq!(peek_agent_node_timeout(dir.path(), "dup"), Some(11_000));
+    }
+
+    // ------------------------------------------------------------------
+    // v0.3 skills（DR-009 / REV-097）：AgentConfig.skills 解析与 Loading 集成
+    // ------------------------------------------------------------------
+
+    fn write_skill(assets: &std::path::Path, name: &str, description: &str) {
+        let dir = assets.join("skills").join(name);
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\nbody\n"),
+        )
+        .expect("SKILL.md");
+    }
+
+    fn agent_with_skills(skills: Value) -> Value {
+        let mut agent = valid_agent();
+        agent
+            .as_object_mut()
+            .expect("object")
+            .insert("skills".to_string(), skills);
+        agent
+    }
+
+    #[test]
+    fn parses_skills_and_loads_catalog_and_skill_view_tool() {
+        let dir = asset_dir(&agent_with_skills(json!(["code-review"])), "role", None);
+        write_skill(dir.path(), "code-review", "Review a patch");
+        write_skill(dir.path(), "unused", "Not referenced");
+        let agent = load_agent_with_skills(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+        )
+        .expect("load agent");
+        assert_eq!(agent.config.skills, vec!["code-review".to_string()]);
+        assert_eq!(agent.skills.len(), 1);
+        assert_eq!(agent.skills[0].name, "code-review");
+        // 仅引用到的 skill 注册 `skill_view`，且工具定义追加在既有工具之后。
+        let tool = agent
+            .tools
+            .iter()
+            .find(|tool| tool.name == "skill_view")
+            .expect("skill_view tool");
+        let enum_values = tool.parameters["properties"]["name"]["enum"]
+            .as_array()
+            .expect("enum");
+        assert_eq!(enum_values.len(), 1);
+        assert_eq!(enum_values[0], json!("code-review"));
+        assert_eq!(agent.tools.len(), 3);
+        // catalog 只在运行时注入（`assemble_system_with_skills`）；此处校验内容。
+        let catalog = crate::skills::build_catalog(&agent.skills);
+        assert!(catalog.contains("<name>code-review</name>"));
+        assert!(!catalog.contains("Not referenced"));
+    }
+
+    #[test]
+    fn no_skills_config_does_not_scan_or_register_skill_view() {
+        let dir = asset_dir(&valid_agent(), "role", None);
+        // 即使 skills 目录存在且非法，未配置 skills 也不得扫描/报错/注册工具。
+        write_skill(dir.path(), "broken", "desc");
+        std::fs::write(dir.path().join("skills/broken/SKILL.md"), "not yaml").expect("broken");
+        let agent = load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+            .expect("load agent");
+        assert!(agent.config.skills.is_empty());
+        assert!(agent.skills.is_empty());
+        assert!(agent.tools.iter().all(|tool| tool.name != "skill_view"));
+    }
+
+    #[test]
+    fn missing_referenced_skill_is_config_load_skill_not_found() {
+        let dir = asset_dir(&agent_with_skills(json!(["ghost"])), "role", None);
+        let error = load_agent_with_skills(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+        )
+        .expect_err("missing skill");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
+        assert_eq!(error.detail["reason"], "skill_not_found");
+    }
+
+    #[test]
+    fn invalid_referenced_skill_is_skill_invalid() {
+        let dir = asset_dir(&agent_with_skills(json!(["broken"])), "role", None);
+        let skill_dir = dir.path().join("skills/broken");
+        std::fs::create_dir_all(&skill_dir).expect("dir");
+        // name 与父目录不一致 → name_mismatch；`$schema` 缺失不影响。
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: other\ndescription: d\n---\n",
+        )
+        .expect("SKILL.md");
+        let error = load_agent_with_skills(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+        )
+        .expect_err("invalid skill");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::SkillInvalid);
+        assert_eq!(error.code, "HARNESS_SKILL_INVALID");
+        assert_eq!(error.detail["reason"], "name_mismatch");
+    }
+
+    #[test]
+    fn unreferenced_invalid_skill_is_skipped() {
+        let dir = asset_dir(&agent_with_skills(json!(["good"])), "role", None);
+        write_skill(dir.path(), "good", "good skill");
+        let bad_dir = dir.path().join("skills/bad");
+        std::fs::create_dir_all(&bad_dir).expect("bad dir");
+        std::fs::write(bad_dir.join("SKILL.md"), "no frontmatter").expect("bad SKILL.md");
+        let agent = load_agent_with_skills(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+        )
+        .expect("unreferenced invalid skill is skipped");
+        assert_eq!(agent.skills.len(), 1);
+        assert_eq!(agent.skills[0].name, "good");
+    }
+
+    #[test]
+    fn star_skill_reference_expands_all_valid_skills() {
+        let dir = asset_dir(&agent_with_skills(json!(["*"])), "role", None);
+        write_skill(dir.path(), "alpha", "a");
+        write_skill(dir.path(), "beta", "b");
+        let agent = load_agent_with_skills(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+        )
+        .expect("load agent");
+        let names: Vec<&str> = agent
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn skills_config_validates_shape_and_limit() {
+        for bad in [json!("code-review"), json!([1, 2]), json!([""])] {
+            let dir = asset_dir(&agent_with_skills(bad), "role", None);
+            let error = load_agent_with_skills(
+                dir.path(),
+                "parser",
+                &registry(&["echo", "add"]),
+                true,
+                None,
+            )
+            .expect_err("invalid skills shape");
+            assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
+        }
+        let items: Vec<Value> = (0..(crate::constants::MAX_SKILLS + 1))
+            .map(|index| Value::from(format!("skill-{index}")))
+            .collect();
+        let dir = asset_dir(&agent_with_skills(Value::Array(items)), "role", None);
+        let error = load_agent_with_skills(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+        )
+        .expect_err("too many skill references");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
     }
 }

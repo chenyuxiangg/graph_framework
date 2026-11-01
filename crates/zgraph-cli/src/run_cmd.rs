@@ -115,6 +115,7 @@ options:
   --db <path>            trace database (default: $ZGRAPH_DB or .zgraph/trace.db)
   --assets-dir <dir>     agent asset root (default: $ZGRAPH_ASSETS or .)
   --tools-dir <dir>      tool directory (default: $ZGRAPH_TOOLS or <assets-dir>/tools)
+  --skills-dir <dir>     skills directory (default: $ZGRAPH_SKILLS or <assets-dir>/skills)
   --python <exe>         Python interpreter (default: $PYO3_PYTHON > $ZGRAPH_PYTHON > python3)
   --python-path <dir>    prepend a module search path; repeatable (PYTHONPATH)
   --fake-llm[=<script>]  scripted LLM provider (bare flag = built-in default script)
@@ -139,6 +140,9 @@ pub const ASSETS_ENV: &str = "ZGRAPH_ASSETS";
 
 /// 工具目录环境变量（06 §6.10.1）。
 pub const TOOLS_ENV: &str = "ZGRAPH_TOOLS";
+
+/// skills 目录环境变量（v0.3 DR-009 §1；`--skills-dir` 优先级更高）。
+pub const SKILLS_ENV: &str = "ZGRAPH_SKILLS";
 
 /// Python 解释器环境变量（spec 权威口径：04 §4.3.6 / 06 §6.10.3 / 08 N-02）。
 pub const PYO3_PYTHON_ENV: &str = "PYO3_PYTHON";
@@ -195,6 +199,9 @@ pub struct RunArgs {
     pub assets_dir: Option<PathBuf>,
     /// `--tools-dir` 显式路径（`None` 时按 `$ZGRAPH_TOOLS` → `<assets-dir>/tools`）。
     pub tools_dir: Option<PathBuf>,
+    /// `--skills-dir` 显式路径（`None` 时按 `$ZGRAPH_SKILLS`；再缺省由 harness 用
+    /// `<assets-dir>/skills`，且仅当 AgentConfig.skills 非空时才扫描；DR-009 §1）。
+    pub skills_dir: Option<PathBuf>,
     /// `--python` 显式解释器（`None` 时按 `$ZGRAPH_PYTHON` → `python3`）。
     pub python: Option<String>,
     /// `--python-path`（可重复；按序叠加到 `PYTHONPATH` 之前）。
@@ -247,6 +254,7 @@ struct ParseState {
     db: Option<PathBuf>,
     assets_dir: Option<PathBuf>,
     tools_dir: Option<PathBuf>,
+    skills_dir: Option<PathBuf>,
     python: Option<String>,
     python_paths: Vec<PathBuf>,
     fake_llm: FakeLlmMode,
@@ -266,6 +274,7 @@ impl Default for ParseState {
             db: None,
             assets_dir: None,
             tools_dir: None,
+            skills_dir: None,
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,
@@ -302,6 +311,9 @@ impl ParseState {
             }
             "--tools-dir" => {
                 self.tools_dir = Some(PathBuf::from(option_value(iter, "--tools-dir")?));
+            }
+            "--skills-dir" => {
+                self.skills_dir = Some(PathBuf::from(option_value(iter, "--skills-dir")?));
             }
             "--python" => self.python = Some(option_value(iter, "--python")?),
             "--python-path" => {
@@ -347,6 +359,7 @@ impl ParseState {
             db: self.db,
             assets_dir: self.assets_dir,
             tools_dir: self.tools_dir,
+            skills_dir: self.skills_dir,
             python: self.python,
             python_paths: self.python_paths,
             fake_llm: self.fake_llm,
@@ -670,6 +683,12 @@ fn resolve_tools_dir(args: &RunArgs, assets_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| assets_dir.join("tools"))
 }
 
+/// skills 目录：`--skills-dir` > `$ZGRAPH_SKILLS` > `None`（harness 再回退
+/// `<assets-dir>/skills`；仅当 AgentConfig.skills 非空时才扫描，DR-009 §1）。
+fn resolve_skills_dir(args: &RunArgs) -> Option<PathBuf> {
+    args.skills_dir.clone().or_else(|| env_path(SKILLS_ENV))
+}
+
 /// 读取非空环境变量为路径。
 fn env_path(name: &str) -> Option<PathBuf> {
     let value = std::env::var_os(name)?;
@@ -836,6 +855,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     };
     let assets_dir = resolve_assets_dir(args);
     let tools_dir = resolve_tools_dir(args, &assets_dir);
+    let skills_dir = resolve_skills_dir(args);
     let (graph, entry_inputs) = match load_graph_and_inputs(args, &assets_dir) {
         Ok(loaded) => loaded,
         Err(code) => {
@@ -868,7 +888,14 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     let trace_handle = writer.handle();
     // run id 由 CLI 预生成：`llm_calls` 记录器在启动前就需要 run_id（快照不含 run）。
     let run_id = uuid::Uuid::now_v7().to_string();
-    let built = match prepare_executor(args, &assets_dir, &tools_dir, &trace_handle, &run_id) {
+    let built = match prepare_executor(
+        args,
+        &assets_dir,
+        &tools_dir,
+        skills_dir,
+        &trace_handle,
+        &run_id,
+    ) {
         Ok(built) => built,
         Err(code) => {
             close_quietly(writer);
@@ -980,6 +1007,7 @@ fn prepare_executor(
     args: &RunArgs,
     assets_dir: &Path,
     tools_dir: &Path,
+    skills_dir: Option<PathBuf>,
     trace_handle: &TraceHandle,
     run_id: &str,
 ) -> Result<BuiltExecutors, ExitCode> {
@@ -992,6 +1020,7 @@ fn prepare_executor(
         args,
         assets_dir,
         tools_dir,
+        skills_dir,
         provider,
         fake_mode,
         trace_handle,
@@ -1186,10 +1215,13 @@ struct BuiltExecutors {
 }
 
 /// 组合执行器：Recording → Routing（Harness / Worker）。
+// CLI 组合根的参数聚合（与既有 `prepare_executor` 同风格）；拆结构体反而降低可读性。
+#[allow(clippy::too_many_arguments)]
 fn build_executor(
     args: &RunArgs,
     assets_dir: &Path,
     tools_dir: &Path,
+    skills_dir: Option<PathBuf>,
     provider: Arc<dyn LlmProvider>,
     fake_mode: bool,
     trace_handle: &TraceHandle,
@@ -1211,11 +1243,13 @@ fn build_executor(
         tool_runner: Arc::new(WorkerToolRunner::new(config)),
     };
     let harness = match recorder {
-        Some(recorder) => Arc::new(HarnessExecutor::with_llm_recorder_and_tool_limits(
-            settings, recorder, limits,
-        )),
-        None => Arc::new(HarnessExecutor::with_tool_limits(settings, limits)),
+        Some(recorder) => {
+            HarnessExecutor::with_llm_recorder_and_tool_limits(settings, recorder, limits)
+        }
+        None => HarnessExecutor::with_tool_limits(settings, limits),
     };
+    // v0.3（DR-009 §1）：`--skills-dir`/env 显式覆盖；None 时 harness 回退资产默认。
+    let harness = Arc::new(harness.with_skills_dir(skills_dir));
     let routing: Arc<dyn NodeExecutor> = Arc::new(RoutingExecutor {
         harness: Arc::clone(&harness),
         worker: Arc::clone(&worker),
@@ -2026,6 +2060,7 @@ mod tests {
         assert_eq!(parsed.db, None);
         assert_eq!(parsed.assets_dir, None);
         assert_eq!(parsed.tools_dir, None);
+        assert_eq!(parsed.skills_dir, None);
         assert_eq!(parsed.python, None);
         assert!(parsed.python_paths.is_empty());
         assert_eq!(parsed.fake_llm, FakeLlmMode::Off);
@@ -2050,6 +2085,8 @@ mod tests {
             "assets",
             "--tools-dir",
             "tools",
+            "--skills-dir",
+            "skills",
             "--python",
             "/venv/bin/python",
             "--python-path",
@@ -2069,6 +2106,7 @@ mod tests {
         assert_eq!(parsed.db, Some(PathBuf::from("/tmp/t.db")));
         assert_eq!(parsed.assets_dir, Some(PathBuf::from("assets")));
         assert_eq!(parsed.tools_dir, Some(PathBuf::from("tools")));
+        assert_eq!(parsed.skills_dir, Some(PathBuf::from("skills")));
         assert_eq!(parsed.python.as_deref(), Some("/venv/bin/python"));
         assert_eq!(
             parsed.python_paths,
@@ -2173,6 +2211,7 @@ mod tests {
             db: None,
             assets_dir: None,
             tools_dir: None,
+            skills_dir: None,
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,

@@ -10,7 +10,7 @@
 //! v2 偏差：取消 = 轮询（[`CancelToken`]），deadline 预检先于 provider 错误分类
 //! （05 §5.7.3）；重试编排在 Harness 内部（不在 adapter）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,13 +21,14 @@ use zgraph_dsl::InputPort;
 use zgraph_kernel::{NodeError, PortName, StreamingEvent};
 
 use crate::assemble::{
-    assemble_initial_messages, assemble_system, assemble_user_json, effective_input_mapping,
+    assemble_initial_messages, assemble_system_with_skills, assemble_user_json,
+    effective_input_mapping,
 };
 use crate::budget::{check_and_trim, prompt_budget};
 use crate::config::LoadedAgent;
 use crate::constants::{
-    BACKOFF_BASE_MS, BACKOFF_MAX_MS, DEFAULT_TOOL_TIMEOUT_MS, MAX_TOOL_CALLS_PER_RESPONSE,
-    RETRY_AFTER_MAX_MS,
+    BACKOFF_BASE_MS, BACKOFF_MAX_MS, DEFAULT_TOOL_TIMEOUT_MS, MAX_SKILL_VIEWS,
+    MAX_TOOL_CALLS_PER_RESPONSE, RETRY_AFTER_MAX_MS, SKILL_VIEW_TOOL_NAME,
 };
 use crate::ctx::{wait_cancelled, CancelToken, HarnessCtx, StreamSink};
 use crate::error::HarnessError;
@@ -39,6 +40,7 @@ use crate::record::{
     error_response_snapshot, record_safely, request_snapshot, success_response_snapshot,
     LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK,
 };
+use crate::skills;
 use crate::tools::{
     acquire_tool_permits, serialize_tool_result, summarize_args, summarize_result,
     tool_error_content, validate_tool_arguments, ToolCallRequest, ToolDef, ToolFailure, ToolRunner,
@@ -186,13 +188,24 @@ struct LoopState {
     last_pending: Vec<String>,
     /// 连续空响应计数（05 §5.5.3）。
     empty_streak: u32,
+    /// v0.3：`skill_view` 已激活正文缓存（同 session 重复激活去重；不重复计预算）。
+    skill_view_cache: HashMap<String, String>,
+    /// v0.3：`skill_view` 已消耗预算次数（`MAX_SKILL_VIEWS` 超限 → `view_budget`）。
+    skill_view_count: u32,
 }
 
 impl LoopState {
     /// Assembling（05 §5.4）：组装 system/user 消息并做首次预算校验。
     fn new(run: &AgentRun<'_>) -> Result<Self, RunFailure> {
         let config = &run.agent.config;
-        let system = assemble_system(&run.agent.role_prompt, run.agent.constraints.as_deref());
+        // v0.3（DR-009 §4）：仅当 skills 非空时注入 catalog（无 skills → 逐字节不变）。
+        let catalog = skills::build_catalog(&run.agent.skills);
+        let catalog = (!catalog.is_empty()).then_some(catalog);
+        let system = assemble_system_with_skills(
+            &run.agent.role_prompt,
+            run.agent.constraints.as_deref(),
+            catalog.as_deref(),
+        );
         let mapping =
             effective_input_mapping(run.declared_ports, run.node_mapping, &config.input_mapping);
         let user_json = assemble_user_json(run.declared_ports, run.inputs, &mapping);
@@ -210,6 +223,8 @@ impl LoopState {
             last_content: None,
             last_pending: Vec::new(),
             empty_streak: 0,
+            skill_view_cache: HashMap::new(),
+            skill_view_count: 0,
         })
     }
 
@@ -345,12 +360,23 @@ impl LoopState {
                 tool_name: call.name.clone(),
                 args_summary: summarize_args(&call.args),
             });
-            let (ok, tool_content) = execute_tool(run, tool, call).await?;
+            // v0.3（DR-009 §4）：`skill_view` 是框架内置工具（进程内、不启动 worker），
+            // 且 trace 只记字符数、不落正文。
+            let (ok, tool_content) = if tool.name == SKILL_VIEW_TOOL_NAME {
+                self.execute_skill_view(run, tool, call)
+            } else {
+                execute_tool(run, tool, call).await?
+            };
+            let result_summary = if tool.name == SKILL_VIEW_TOOL_NAME {
+                Some(json!({"chars": tool_content.chars().count()}))
+            } else {
+                Some(summarize_result(&tool_content, ok))
+            };
             run.ctx.emit(StreamingEvent::ToolCallEnd {
                 call_id: call.call_id.clone(),
                 tool_name: call.name.clone(),
                 ok,
-                result_summary: Some(summarize_result(&tool_content, ok)),
+                result_summary,
             });
             self.messages.push(LlmMessage::Tool {
                 tool_call_id: call.call_id.clone(),
@@ -359,6 +385,54 @@ impl LoopState {
             });
         }
         Ok(())
+    }
+
+    /// v0.3（DR-009 §4）：执行内置 `skill_view(name)`。
+    ///
+    /// - 参数先走统一 schema 校验（enum/required/additionalProperties 由本工具定义约束）；
+    /// - 未知 name → `TOOL_ERROR`（兜底；正常 LLM 应只选 enum 内值）；
+    /// - 重复激活去重：同 name 返回缓存正文、不重复计预算；
+    /// - 单实例 ≤ `MAX_SKILL_VIEWS` 次，超限 → `TOOL_ERROR{reason:"view_budget"}`；
+    /// - 返回 `<skill_content>` 文本（≤32 KiB 截断 + 资源清单）；失败不终止 run。
+    ///
+    /// **预算保护（DR-009 §4）**：正文作为 `LlmMessage::Tool` 进入上下文；v1 的
+    /// [`check_and_trim`] 不做裁剪（溢出即 `HARNESS_CONTEXT_OVERFLOW`），因此 skill
+    /// 正文天然不会被跨轮压缩裁掉；此处只保证不进入 system/developer 指令（不可信数据）。
+    fn execute_skill_view(
+        &mut self,
+        run: &AgentRun<'_>,
+        tool: &ToolDef,
+        call: &ToolCall,
+    ) -> (bool, String) {
+        if let Err(failure) = validate_tool_arguments(tool, &call.args) {
+            return (false, tool_error_content(&failure));
+        }
+        let Some(name) = call.args.get("name").and_then(Value::as_str) else {
+            let failure = ToolFailure::new("invalid_args", "skill_view requires string 'name'");
+            return (false, tool_error_content(&failure));
+        };
+        let Some(skill) = run.agent.skills.iter().find(|skill| skill.name == name) else {
+            let failure = ToolFailure::new(
+                "unknown_skill",
+                format!("skill '{name}' is not available to this agent"),
+            );
+            return (false, tool_error_content(&failure));
+        };
+        if let Some(cached) = self.skill_view_cache.get(name) {
+            return (true, cached.clone());
+        }
+        if self.skill_view_count >= MAX_SKILL_VIEWS {
+            let failure = ToolFailure::new(
+                "view_budget",
+                format!("skill_view budget exhausted ({MAX_SKILL_VIEWS} per instance)"),
+            );
+            return (false, tool_error_content(&failure));
+        }
+        let content = skills::skill_view_text(skill);
+        self.skill_view_count = self.skill_view_count.saturating_add(1);
+        self.skill_view_cache
+            .insert(name.to_string(), content.clone());
+        (true, content)
     }
 }
 
@@ -845,6 +919,7 @@ mod tests {
                 role_prompt_file: "prompt.md".to_string(),
                 constraints_file: None,
                 tools: tool_names,
+                skills: Vec::new(),
                 input_mapping: BTreeMap::new(),
                 max_iterations,
                 llm_timeout_ms: 5_000,
@@ -855,6 +930,7 @@ mod tests {
             constraints: None,
             api_key: SecretString::new("test-key"),
             tools,
+            skills: Vec::new(),
         }
     }
 
@@ -1689,5 +1765,250 @@ mod tests {
         assert_eq!(output.content, "ok");
         assert_eq!(ctx.token_text(), "ok", "记录器 panic 不影响 streaming");
         assert_eq!(recorder.len(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.3 skills（DR-009 / REV-097）：catalog 注入 + 内置 skill_view
+    // ------------------------------------------------------------------
+
+    fn skill_entry(name: &str, description: &str, body: &str) -> crate::skills::SkillEntry {
+        crate::skills::SkillEntry {
+            name: name.to_string(),
+            description: description.to_string(),
+            license: None,
+            compatibility: None,
+            metadata: std::collections::BTreeMap::new(),
+            allowed_tools: None,
+            body: body.to_string(),
+            resources: vec!["references/REFERENCE.md".to_string()],
+            resources_truncated: false,
+        }
+    }
+
+    fn loaded_agent_with_skills(
+        skills: Vec<crate::skills::SkillEntry>,
+        max_iterations: u32,
+        role_prompt: &str,
+    ) -> LoadedAgent {
+        let mut agent = loaded_agent(Vec::new(), max_iterations, 1, role_prompt);
+        if !skills.is_empty() {
+            agent.tools.push(crate::skills::skill_view_tool(&skills));
+        }
+        agent.skills = skills;
+        agent
+    }
+
+    fn system_content(request: &LlmRequest) -> String {
+        request
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                LlmMessage::System { content } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("system message")
+    }
+
+    #[tokio::test]
+    async fn no_skills_system_prompt_is_byte_identical() {
+        let fake = script(json!({"calls": [text("ok")]}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent(vec![], 5, 1, "you are a parser");
+        let ctx = TestCtx::new();
+        let output = execute(&agent, &ToolRegistry::default(), &fake, &runner, &ctx)
+            .await
+            .expect("run");
+        assert_eq!(output.content, "ok");
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        let expected = crate::assemble::assemble_system("you are a parser", None).text;
+        assert_eq!(
+            system_content(&requests[0]),
+            expected,
+            "无 skills 的 system prompt 必须逐字节不变"
+        );
+        assert!(
+            requests[0].tools.is_empty(),
+            "无 skills 不得注册 skill_view"
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_catalog_is_injected_into_system_prompt() {
+        let skills = vec![
+            skill_entry("zeta", "last skill", "z body"),
+            skill_entry("alpha", "first skill", "a body"),
+        ];
+        let fake = script(json!({"calls": [text("ok")]}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent_with_skills(skills.clone(), 5, "role");
+        let ctx = TestCtx::new();
+        execute(&agent, &ToolRegistry::default(), &fake, &runner, &ctx)
+            .await
+            .expect("run");
+        let requests = fake.requests();
+        let system = system_content(&requests[0]);
+        assert!(system.contains("## 技能"), "catalog section present");
+        assert!(system.contains("<available_skills>"));
+        let alpha = system.find("<name>alpha</name>").expect("alpha");
+        let zeta = system.find("<name>zeta</name>").expect("zeta");
+        assert!(alpha < zeta, "catalog is name-sorted");
+        assert!(system.contains("<description>first skill</description>"));
+        assert!(!system.contains("a body"), "正文默认不注入");
+        // 请求的 tools 含 skill_view（enum 为全部已解析 skill）。
+        let tool = requests[0]
+            .tools
+            .iter()
+            .find(|tool| tool.name == "skill_view")
+            .expect("skill_view registered");
+        let enum_values = tool.parameters["properties"]["name"]["enum"]
+            .as_array()
+            .expect("enum");
+        assert_eq!(enum_values.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn skill_view_returns_body_resources_and_chars_only_summary() {
+        let skills = vec![skill_entry(
+            "code-review",
+            "review code",
+            "STEP ONE
+STEP TWO",
+        )];
+        let fake = script(json!({
+            "calls": [
+                tool_calls(json!([{"call_id": "c1", "name": "skill_view", "args": {"name": "code-review"}}])),
+                text("done")
+            ]
+        }));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent_with_skills(skills, 5, "role");
+        let ctx = TestCtx::new();
+        let output = execute(&agent, &ToolRegistry::default(), &fake, &runner, &ctx)
+            .await
+            .expect("run");
+        assert_eq!(output.content, "done");
+        assert_eq!(output.iterations, 2);
+
+        let requests = fake.requests();
+        let tool_message = requests[1]
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                LlmMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("tool message");
+        assert!(tool_message.contains("<skill_content name=\"code-review\">"));
+        assert!(tool_message.contains("STEP ONE\nSTEP TWO"));
+        assert!(tool_message.contains("<file>references/REFERENCE.md</file>"));
+        assert!(!tool_message.contains("/tmp"), "no absolute path");
+
+        // trace：ToolCallStart(text=skill_view) → ToolCallEnd；summary 只含 chars、不落正文。
+        let events = tool_events(&ctx);
+        assert!(matches!(
+            &events[0],
+            StreamingEvent::ToolCallStart { call_id, tool_name, .. }
+                if call_id == "c1" && tool_name == "skill_view"
+        ));
+        match &events[1] {
+            StreamingEvent::ToolCallEnd {
+                call_id,
+                tool_name,
+                ok,
+                result_summary,
+            } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(tool_name, "skill_view");
+                assert!(*ok);
+                let summary = result_summary.as_ref().expect("summary");
+                assert_eq!(summary["chars"], json!(tool_message.chars().count()));
+                assert!(
+                    !summary.to_string().contains("STEP ONE"),
+                    "trace 不得落 skill 正文: {summary}"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_view_dedupes_and_does_not_consume_budget_repeatedly() {
+        let skills = vec![skill_entry("code-review", "review code", "BODY")];
+        let mut calls = Vec::new();
+        for index in 0..6 {
+            calls.push(call("skill_view", index));
+        }
+        let fake =
+            script(json!({"calls": calls.into_iter().chain([text("done")]).collect::<Vec<_>>()}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent_with_skills(skills, 8, "role");
+        let ctx = TestCtx::new();
+        let output = execute(&agent, &ToolRegistry::default(), &fake, &runner, &ctx)
+            .await
+            .expect("repeated activation is deduped (no view_budget)");
+        assert_eq!(output.content, "done");
+        let ends: Vec<bool> = tool_events(&ctx)
+            .into_iter()
+            .filter_map(|event| match event {
+                StreamingEvent::ToolCallEnd { ok, tool_name, .. } if tool_name == "skill_view" => {
+                    Some(ok)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends.len(), 6);
+        assert!(ends.iter().all(|ok| *ok), "cached activation stays ok");
+    }
+
+    #[tokio::test]
+    async fn skill_view_budget_exhausted_reports_tool_error() {
+        let skills: Vec<crate::skills::SkillEntry> = (0..6)
+            .map(|index| skill_entry(&format!("skill-{index}"), "desc", "BODY"))
+            .collect();
+        let calls: Vec<Value> = (0..6)
+            .map(|index| {
+                json!({"kind": "tool_calls", "content": null,
+                       "tool_calls": [{"call_id": format!("c{index}"), "name": "skill_view",
+                                       "args": {"name": format!("skill-{index}")}}]})
+            })
+            .collect();
+        let mut all = calls;
+        all.push(text("done"));
+        let fake = script(json!({"calls": all}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent_with_skills(skills, 8, "role");
+        let ctx = TestCtx::new();
+        let output = execute(&agent, &ToolRegistry::default(), &fake, &runner, &ctx)
+            .await
+            .expect("tool error is fed back, run continues");
+        assert_eq!(output.content, "done");
+        let requests = fake.requests();
+        let last_tool = requests
+            .last()
+            .expect("request")
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                LlmMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("tool message");
+        assert!(last_tool.contains("view_budget"), "content: {last_tool}");
+        let failed = tool_events(&ctx)
+            .into_iter()
+            .filter(|event| matches!(event, StreamingEvent::ToolCallEnd { ok: false, .. }))
+            .count();
+        assert_eq!(failed, 1, "only the 6th view exceeds budget");
+    }
+
+    fn call(tool_name: &str, index: usize) -> Value {
+        json!({
+            "kind": "tool_calls", "content": null,
+            "tool_calls": [{"call_id": format!("c{index}"), "name": tool_name,
+                            "args": {"name": "code-review"}}]
+        })
     }
 }

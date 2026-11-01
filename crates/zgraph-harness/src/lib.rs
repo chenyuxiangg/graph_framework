@@ -57,6 +57,7 @@ mod error;
 mod executor;
 mod llm;
 mod record;
+pub mod skills;
 mod tools;
 
 pub use agent_loop::{AgentOutput, RunFailure};
@@ -79,6 +80,7 @@ pub use llm::{
     StopReason, ToolCall, Usage, UsageSource,
 };
 pub use record::{LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
+pub use skills::SkillEntry;
 pub use tools::{
     FakeToolBehavior, FakeToolRunner, ToolCallRequest, ToolDef, ToolFailure, ToolRegistry,
     ToolRunner, ToolSchema, WorkerToolRunner,

@@ -102,3 +102,43 @@ pub const WORKER_RUNTIME_MODULE: &str = "zgraph_worker.runtime";
 
 /// 工具注册表 Bridge 的固定 Python module（task-3 / 05 §5.6.2）。
 pub const TOOL_RUNNER_MODULE: &str = "zgraph_worker.tool_runner";
+
+// ---------------------------------------------------------------------------
+// v0.3 skills（DR-009 §5；00 §0.5 append-only）
+// ---------------------------------------------------------------------------
+
+/// skill 数上限（`MAX_SKILLS`；超出：被引用超限 → `too_many_skills`，否则忽略+warn）。
+pub const MAX_SKILLS: usize = 16;
+
+/// 单个 `SKILL.md` 文件字节上限（`SKILL_FILE_MAX_BYTES` = 256 KiB）。
+pub const SKILL_FILE_MAX_BYTES: u64 = 256 * 1024;
+
+/// `skill_view` 返回正文的字符上限（`SKILL_BODY_MAX_CHARS` = 32 KiB；超出首尾保留+中间标记）。
+pub const SKILL_BODY_MAX_CHARS: usize = 32_768;
+
+/// system catalog 总字符上限（`SKILL_CATALOG_MAX_CHARS` = 4096）。
+pub const SKILL_CATALOG_MAX_CHARS: usize = 4_096;
+
+/// `description` 字符上限（超过 → `description_too_long` 拒绝）。
+pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1_024;
+
+/// skill 名（=父目录名）字符上限。
+pub const MAX_SKILL_NAME_CHARS: usize = 64;
+
+/// `compatibility` 字符上限（1..=500；仅记录）。
+pub const MAX_SKILL_COMPATIBILITY_CHARS: usize = 500;
+
+/// 单实例 `skill_view` 调用次数上限（超限 → `TOOL_ERROR{reason:"view_budget"}`）。
+pub const MAX_SKILL_VIEWS: u32 = 5;
+
+/// `skill_view` 资源清单条数上限（超出追加截断标记）。
+pub const MAX_SKILL_RESOURCES: usize = 50;
+
+/// skill 目录遍历条目上限（防 DoS；超出 → `too_large`）。
+pub const MAX_SKILL_DIR_ENTRIES: usize = 5_000;
+
+/// 内置 `skill_view` 工具名（仅 skills 非空时注册）。
+pub const SKILL_VIEW_TOOL_NAME: &str = "skill_view";
+
+/// 内置 `skill_view` 工具来源（`ToolDef.source`；仅诊断/分发用）。
+pub const SKILL_VIEW_TOOL_SOURCE: &str = "builtin.skills";

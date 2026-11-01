@@ -141,6 +141,12 @@ pub const CODE_HARNESS_TOOL_ERROR: &str = "TOOL_ERROR";
 /// 上下文预算裁剪后仍溢出（M4 追加；00 §0.4 已有该码，而 §0.3 七值缺该 kind，见 05 §5.13）。
 pub const CODE_HARNESS_CONTEXT_OVERFLOW: &str = "HARNESS_CONTEXT_OVERFLOW";
 
+/// 被引用的 skill 存在但格式/路径非法（v0.3/V2 追加，DR-009 §6；00 §0.4 append-only）。
+///
+/// 缺失引用走 [`CODE_HARNESS_CONFIG_LOAD`]`{reason:"skill_not_found"}`，不新增
+/// `HARNESS_SKILL_NOT_FOUND`。
+pub const CODE_HARNESS_SKILL_INVALID: &str = "HARNESS_SKILL_INVALID";
+
 /// 记忆检索/写入失败（降级告警，不终止）。
 pub const CODE_HARNESS_MEMORY_DEGRADED: &str = "HARNESS_MEMORY_DEGRADED";
 
@@ -412,6 +418,11 @@ pub enum HarnessErrorKind {
     MemoryDegraded,
     /// 上下文预算裁剪后仍溢出（M4 追加，见 05 §5.13；00 §0.4 `HARNESS_CONTEXT_OVERFLOW`）。
     ContextOverflow,
+    /// 被引用的 skill 存在但格式/路径非法（v0.3/V2 追加，DR-009 §6）。
+    ///
+    /// `detail.reason` 为闭集（`unknown_field`/`unparseable_yaml`/…）；
+    /// 缺失引用仍走 [`Self::ConfigLoad`]（`skill_not_found`）。
+    SkillInvalid,
 }
 
 impl HarnessErrorKind {
@@ -426,6 +437,7 @@ impl HarnessErrorKind {
             Self::ToolError => CODE_HARNESS_TOOL_ERROR,
             Self::MemoryDegraded => CODE_HARNESS_MEMORY_DEGRADED,
             Self::ContextOverflow => CODE_HARNESS_CONTEXT_OVERFLOW,
+            Self::SkillInvalid => CODE_HARNESS_SKILL_INVALID,
         }
     }
 }

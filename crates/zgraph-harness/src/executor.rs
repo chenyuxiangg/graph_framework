@@ -22,7 +22,7 @@ use zgraph_kernel::{
 use zgraph_worker::WorkerLimits;
 
 use crate::agent_loop::{run_agent, AgentRun, RunFailure};
-use crate::config::{load_agent, peek_agent_node_timeout, ModelConfig};
+use crate::config::{load_agent_with_skills, peek_agent_node_timeout, ModelConfig};
 use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
 use crate::ctx::{CancelToken, HarnessCtx};
 use crate::error::HarnessError;
@@ -66,6 +66,10 @@ pub struct HarnessExecutor {
     tool_limits: Option<Arc<WorkerLimits>>,
     /// 本 run 用到的模型参数摘要（ISSUE-082；按 run 聚合、canonical 去重）。
     model_params: Mutex<HashMap<String, BTreeSet<String>>>,
+    /// v0.3：`--skills-dir` 显式覆盖（`None` → env `ZGRAPH_SKILLS` → `<assets>/skills`）。
+    ///
+    /// 独立字段而非 [`HarnessSettings`] 字段：保持冻结面（e2e/CLI 结构体字面量）不变。
+    skills_dir: Option<PathBuf>,
 }
 
 impl HarnessExecutor {
@@ -77,6 +81,7 @@ impl HarnessExecutor {
             recorder: None,
             tool_limits: None,
             model_params: Mutex::new(HashMap::new()),
+            skills_dir: None,
         }
     }
 
@@ -94,6 +99,7 @@ impl HarnessExecutor {
             recorder: Some(recorder),
             tool_limits: None,
             model_params: Mutex::new(HashMap::new()),
+            skills_dir: None,
         }
     }
 
@@ -109,6 +115,7 @@ impl HarnessExecutor {
             recorder: None,
             tool_limits: Some(limits),
             model_params: Mutex::new(HashMap::new()),
+            skills_dir: None,
         }
     }
 
@@ -124,12 +131,21 @@ impl HarnessExecutor {
             recorder: Some(recorder),
             tool_limits: Some(limits),
             model_params: Mutex::new(HashMap::new()),
+            skills_dir: None,
         }
     }
 
     /// 执行器配置（只读）。
     pub fn settings(&self) -> &HarnessSettings {
         &self.settings
+    }
+
+    /// v0.3（DR-009 §1）：注入 `--skills-dir` 显式覆盖（`None` = env/资产默认）。
+    ///
+    /// **只增不破**：不修改 [`HarnessSettings`] 字段集合；未配置 skills 的路径行为不变。
+    pub fn with_skills_dir(mut self, skills_dir: Option<PathBuf>) -> Self {
+        self.skills_dir = skills_dir;
+        self
     }
 
     /// 本 run 用到的模型参数摘要（ISSUE-082；JSON 对象数组，**不含密钥**）。
@@ -347,11 +363,12 @@ impl HarnessExecutor {
             .registry(&job.ctx)
             .await
             .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
-        let agent = load_agent(
+        let agent = load_agent_with_skills(
             &self.settings.assets_dir,
             &job.agent_id,
             &registry,
             self.settings.fake_mode,
+            self.skills_dir.as_deref(),
         )
         .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
         // ISSUE-082：记录本 run 的模型参数摘要（去重；失败 run 也保留已加载的摘要）。
@@ -479,7 +496,7 @@ mod tests {
         RunSpec, RunStatus, StreamingEvent,
     };
 
-    use crate::llm::{FakeLlmProvider, LlmProvider};
+    use crate::llm::{FakeLlmProvider, LlmMessage, LlmProvider};
     use crate::record::{LlmCallRecorder, LLM_CALL_STATUS_OK};
     use crate::test_support::CapturingRecorder;
     use crate::tools::{FakeToolBehavior, FakeToolRunner, ToolDef, ToolRunner};
@@ -1085,5 +1102,68 @@ mod tests {
             snapshot_status(&sink, "worker"),
             Some(InstanceStatus::TimedOut)
         );
+    }
+
+    /// v0.3（DR-009 / REV-097）：skills 目录经执行器注入 → catalog 进 system、
+    /// `skill_view` 注册并可真实调用（FakeLlmProvider 真链路、无 worker）。
+    #[tokio::test]
+    async fn skills_dir_is_wired_through_executor() {
+        let mut agent = agent_config("parser", &[]);
+        agent
+            .as_object_mut()
+            .expect("agent object")
+            .insert("skills".to_string(), json!(["code-review"]));
+        let dir = assets(agent, "你是解析器。");
+        let skill_dir = dir.path().join("skills").join("code-review");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: code-review\ndescription: Review a patch\n---\n\n# Review\nlook closely\n",
+        )
+        .expect("SKILL.md");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null,
+                 "tool_calls": [{"call_id": "c1", "name": "skill_view",
+                                 "args": {"name": "code-review"}}]},
+                {"kind": "text", "content": "approved", "stop_reason": "EndTurn"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_skills_dir(Some(dir.path().join("skills"))),
+        );
+        let (outcome, _sink) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            RunStatus::Completed,
+            "error: {:?}",
+            outcome.error
+        );
+
+        let requests = fake.requests();
+        assert!(requests.len() >= 2);
+        let system_text = format!("{:?}", requests[0].messages[0]);
+        assert!(
+            system_text.contains("## 技能") && system_text.contains("<name>code-review</name>"),
+            "system prompt carries catalog: {system_text}"
+        );
+        assert!(requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "skill_view"));
+        // 第二轮请求里带 skill 正文（tool 消息），trace 只在事件里记 chars。
+        let tool_content = requests[1]
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                LlmMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("tool message");
+        assert!(tool_content.contains("<skill_content name=\"code-review\">"));
+        assert!(tool_content.contains("look closely"));
     }
 }

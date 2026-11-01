@@ -132,6 +132,23 @@ impl HarnessError {
         )
     }
 
+    /// 被引用的 skill 存在但格式/路径非法（v0.3/V2；DR-009 §6）。
+    ///
+    /// 错误码 `HARNESS_SKILL_INVALID`；`detail.reason` 为冻结闭集 reason；
+    /// 缺失引用仍走 [`Self::config_load`]`{reason:"skill_not_found"}`。
+    pub fn skill_invalid(reason: &str, name: &str, message: impl Into<String>) -> Self {
+        let code = HarnessErrorKind::SkillInvalid.code();
+        let mut detail = Self::detail(code, Stage::Load);
+        detail.insert("reason".to_string(), Value::from(reason));
+        detail.insert("name".to_string(), Value::from(name));
+        Self::new(
+            HarnessErrorKind::SkillInvalid,
+            code,
+            message,
+            Value::Object(detail),
+        )
+    }
+
     /// LLM 调用了未注册工具（05 §5.7.2：Crashed）。
     pub fn unknown_tool(tool: &str, iteration: u32, available: &[String]) -> Self {
         let code = HarnessErrorKind::UnknownTool.code();
@@ -499,5 +516,24 @@ mod tests {
             "严格 ≤ max_chars（ISSUE-074 ±1 修正）"
         );
         assert!(summary.ends_with('…'));
+    }
+
+    /// v0.3（V2 / DR-009 §6）：`HARNESS_SKILL_INVALID` 为 append-only 新码，
+    /// `detail.reason/name/stage` 形状稳定；映射到 `HarnessErrorKind::SkillInvalid`。
+    #[test]
+    fn skill_invalid_uses_new_kind_code_and_detail() {
+        let error = HarnessError::skill_invalid("unknown_field", "code-review", "bad field");
+        assert_eq!(error.kind, HarnessErrorKind::SkillInvalid);
+        assert_eq!(error.code, "HARNESS_SKILL_INVALID");
+        assert_eq!(error.detail["code"], "HARNESS_SKILL_INVALID");
+        assert_eq!(error.detail["reason"], "unknown_field");
+        assert_eq!(error.detail["name"], "code-review");
+        assert_eq!(error.detail["stage"], "load");
+        match error.into_node_error() {
+            NodeError::Harness { kind, .. } => {
+                assert_eq!(kind, HarnessErrorKind::SkillInvalid);
+            }
+            other => panic!("unexpected node error: {other:?}"),
+        }
     }
 }

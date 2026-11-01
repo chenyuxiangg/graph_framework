@@ -34,6 +34,19 @@ pub struct SystemPrompt {
 /// 规则：constraints 为 `None` 或全空白 → **整段（含标题）省略**；段间固定两个换行；
 /// role prompt 原样注入（`{{var}}` 不做模板渲染）。
 pub fn assemble_system(role_prompt: &str, constraints: Option<&str>) -> SystemPrompt {
+    assemble_system_with_skills(role_prompt, constraints, None)
+}
+
+/// 组装 system 消息（含 v0.3 skills catalog 段；DR-009 §4）。
+///
+/// `catalog` 为 `Some` 且非空时，按冻结位置追加在 `## 约束` 之后（v1 记忆/KB 段恒空，
+/// 因此即 system 末尾）；段间固定两个换行。`None`/空 → 与 [`assemble_system`] 逐字节相同。
+/// catalog 由 [`crate::skills::build_catalog`] 生成（仅 name+description，≤4096 字符）。
+pub fn assemble_system_with_skills(
+    role_prompt: &str,
+    constraints: Option<&str>,
+    catalog: Option<&str>,
+) -> SystemPrompt {
     let mut text = role_prompt.to_string();
     let mut constraints_tokens = 0;
     if let Some(constraints) = constraints {
@@ -43,8 +56,16 @@ pub fn assemble_system(role_prompt: &str, constraints: Option<&str>) -> SystemPr
             constraints_tokens = estimate_tokens(constraints);
         }
     }
+    let mut system_tokens = estimate_tokens(role_prompt);
+    if let Some(catalog) = catalog {
+        if !catalog.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(catalog);
+            system_tokens = system_tokens.saturating_add(estimate_tokens(catalog));
+        }
+    }
     SystemPrompt {
-        system_tokens: estimate_tokens(role_prompt),
+        system_tokens,
         constraints_tokens,
         text,
     }
@@ -233,5 +254,26 @@ mod tests {
                 }
             ]
         );
+    }
+
+    /// v0.3（DR-009 §4）：catalog `None`/空 → 与无 catalog 逐字节相同；
+    /// 有 catalog 时追加在约束段之后、段间两个换行。
+    #[test]
+    fn skills_catalog_appends_after_constraints_without_changing_default() {
+        let base = assemble_system("role", Some("be brief"));
+        let same = assemble_system_with_skills("role", Some("be brief"), None);
+        assert_eq!(base, same);
+        let empty = assemble_system_with_skills("role", Some("be brief"), Some(""));
+        assert_eq!(base, empty);
+
+        let catalog = "## 技能\n<available_skills>\n</available_skills>";
+        let with = assemble_system_with_skills("role", Some("be brief"), Some(catalog));
+        assert_eq!(
+            with.text,
+            format!("{}\n\n{catalog}", base.text),
+            "catalog 在约束段之后（v1 记忆/KB 段恒空）"
+        );
+        assert!(with.system_tokens > base.system_tokens);
+        assert_eq!(with.constraints_tokens, base.constraints_tokens);
     }
 }
