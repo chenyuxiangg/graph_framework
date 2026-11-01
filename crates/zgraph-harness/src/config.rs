@@ -2115,6 +2115,25 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_skills_over_limit_is_config_load_too_many_skills() {
+        let dir = asset_dir(&agent_with_skills(json!(["*"])), "role", None);
+        for index in 0..(crate::constants::MAX_SKILLS + 2) {
+            let name = format!("skill-{index:02}");
+            write_skill(dir.path(), &name, "desc");
+        }
+        let error = load_agent_with_skills(
+            dir.path(),
+            "parser",
+            &registry(&["echo", "add"]),
+            true,
+            None,
+        )
+        .expect_err("wildcard over limit");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
+        assert_eq!(error.detail["reason"], "too_many_skills");
+    }
+
+    #[test]
     fn skills_config_validates_shape_and_limit() {
         for bad in [json!("code-review"), json!([1, 2]), json!([""])] {
             let dir = asset_dir(&agent_with_skills(bad), "role", None);

@@ -14,7 +14,7 @@
 //!
 //! 本模块只做纯函数/只读 IO；`skill_view` 由 `agent_loop` 在进程内调用（不启动 worker）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -67,6 +67,12 @@ pub(crate) struct SkillsIndex {
     valid: BTreeMap<String, SkillEntry>,
     /// 目录名 → 非法原因（被引用时转 `HARNESS_SKILL_INVALID`；未引用跳过+warn）。
     problems: BTreeMap<String, SkillProblem>,
+    /// 超过 `MAX_SKILLS` 而被忽略的目录名（**未解析**；显式引用 → `too_many_skills`）。
+    ///
+    /// 冻结语义（REV-097 C1 / Lead 裁决）：合法 skill 数 > `MAX_SKILLS` 时 **不静默截断**；
+    /// `"*"` 解析全部合法 skills，超限 → `HARNESS_CONFIG_LOAD{reason:"too_many_skills"}`；
+    /// 未被引用的额外目录忽略 + stderr warn。
+    overflow: BTreeSet<String>,
     /// 全局警告（根不可读/非 UTF-8 目录名等；未引用时不报错）。
     warnings: Vec<String>,
 }
@@ -132,31 +138,23 @@ impl SkillsIndex {
             }
         }
         dirs.sort();
-        let mut valid_count = 0usize;
-        for dir_name in dirs {
-            if valid_count >= MAX_SKILLS {
-                index.problems.insert(
-                    dir_name.clone(),
-                    SkillProblem {
-                        reason: "too_many_skills",
-                        message: format!(
-                            "skill directory '{dir_name}' exceeds MAX_SKILLS ({MAX_SKILLS})"
-                        ),
-                    },
-                );
-                continue;
+        for (position, dir_name) in dirs.iter().enumerate() {
+            // 已发现 > MAX_SKILLS 个合法 skill：不静默截断——剩余目录记为 overflow
+            // （不解析；显式引用 → `too_many_skills`；`"*"` → CONFIG_LOAD too_many_skills）。
+            if index.valid.len() > MAX_SKILLS {
+                index.overflow.extend(dirs[position..].iter().cloned());
+                break;
             }
-            let skill_dir = canonical_root.join(&dir_name);
-            match load_skill(&canonical_root, &skill_dir, &dir_name) {
+            let skill_dir = canonical_root.join(dir_name);
+            match load_skill(&canonical_root, &skill_dir, dir_name) {
                 Ok(Some(skill)) => {
-                    valid_count += 1;
-                    index.valid.insert(dir_name, skill);
+                    index.valid.insert(dir_name.clone(), skill);
                 }
                 Ok(None) => {
                     // 无 SKILL.md 的目录不是 skill（有引用时 resolve 报 skill_not_found）。
                 }
                 Err(problem) => {
-                    index.problems.insert(dir_name, problem);
+                    index.problems.insert(dir_name.clone(), problem);
                 }
             }
         }
@@ -168,9 +166,13 @@ impl SkillsIndex {
         &self.warnings
     }
 
-    /// 未被引用的非法 skill → 跳过并返回 warn 行（DR-009 §3/§8）。
+    /// 未被引用的非法/超限 skill → 跳过并返回 warn 行（DR-009 §3/§8）。
+    ///
+    /// **`"*"` 不是「引用具体目录」**（REV-097 C1）：wildcard 不会吞掉非法目录的 warn，
+    /// 只有**显式引用**某目录时才不 warn（该路径由 `resolve` 报错）。
     pub(crate) fn skip_warnings(&self, referenced: &[String]) -> Vec<String> {
-        self.problems
+        let mut warnings: Vec<String> = self
+            .problems
             .iter()
             .filter(|(name, _)| !references_name(referenced, name))
             .map(|(name, problem)| {
@@ -179,7 +181,15 @@ impl SkillsIndex {
                     problem.reason, problem.message
                 )
             })
-            .collect()
+            .collect();
+        for name in &self.overflow {
+            if !references_name(referenced, name) {
+                warnings.push(format!(
+                    "warning: ignoring skill directory '{name}' (exceeds MAX_SKILLS = {MAX_SKILLS})"
+                ));
+            }
+        }
+        warnings
     }
 
     /// 解析 `AgentConfig.skills` 引用 → 已校验条目（按 name 升序，含 `"*"` 展开）。
@@ -191,6 +201,20 @@ impl SkillsIndex {
         let mut names: Vec<String> = Vec::new();
         for reference in references {
             if reference == "*" {
+                // 冻结语义（REV-097 C1）：`"*"` = 解析**全部**合法 skills；> MAX_SKILLS
+                // 不静默截断 → `HARNESS_CONFIG_LOAD{reason:"too_many_skills"}`。
+                if self.valid.len() > MAX_SKILLS || !self.overflow.is_empty() {
+                    return Err(HarnessError::config_load(
+                        "too_many_skills",
+                        None,
+                        Some("$.skills"),
+                        Some(Value::from(format!("<= {MAX_SKILLS} skills"))),
+                        Some(Value::from(self.valid.len() + self.overflow.len())),
+                        format!(
+                            "wildcard '*' resolves more than {MAX_SKILLS} skills; list explicit names instead"
+                        ),
+                    ));
+                }
                 for name in self.valid.keys() {
                     if !names.contains(name) {
                         names.push(name.clone());
@@ -200,6 +224,22 @@ impl SkillsIndex {
             }
             if names.iter().any(|name| name == reference) {
                 continue;
+            }
+            // 显式引用超限目录/第 17+ 个合法 skill → `HARNESS_SKILL_INVALID{too_many_skills}`。
+            let over_limit_valid = self.valid.len() > MAX_SKILLS
+                && !self
+                    .valid
+                    .keys()
+                    .take(MAX_SKILLS)
+                    .any(|name| name == reference);
+            if self.overflow.contains(reference) || over_limit_valid {
+                return Err(HarnessError::skill_invalid(
+                    "too_many_skills",
+                    reference,
+                    format!(
+                        "skill '{reference}' exceeds MAX_SKILLS ({MAX_SKILLS}); reference an earlier directory"
+                    ),
+                ));
             }
             if self.valid.contains_key(reference) {
                 names.push(reference.clone());
@@ -239,11 +279,9 @@ impl SkillsIndex {
     }
 }
 
-/// 引用的 skill 名是否命中某非法目录（精确名或 `"*"`）。
+/// 引用的 skill 名是否**显式**命中某目录（`"*"` 不算引用具体目录，REV-097 C1）。
 fn references_name(references: &[String], name: &str) -> bool {
-    references
-        .iter()
-        .any(|reference| reference == "*" || reference == name)
+    references.iter().any(|reference| reference == name)
 }
 
 /// 隐藏目录 / 依赖目录（DR-009 §1）。
@@ -1134,24 +1172,68 @@ mod tests {
     }
 
     #[test]
-    fn discovery_caps_skill_count() {
+    fn discovery_over_limit_wildcard_is_config_load_too_many_skills() {
         let dir = TempDir::new().expect("tempdir");
         for index in 0..(MAX_SKILLS + 2) {
-            let name = format!("skill-{index}");
+            let name = format!("skill-{index:02}");
             write_skill(dir.path(), &name, &skill_md(&name, "desc"));
         }
         let index = SkillsIndex::discover(dir.path());
-        assert_eq!(index.valid.len(), MAX_SKILLS);
-        let overflow = index
-            .problems
-            .values()
-            .find(|problem| problem.reason == "too_many_skills");
-        assert!(overflow.is_some(), "extras must be too_many_skills");
-        let referenced: Vec<String> = index.valid.keys().cloned().collect();
         assert_eq!(
-            index.resolve(&referenced).expect("valid refs").len(),
-            MAX_SKILLS
+            index.valid.len(),
+            MAX_SKILLS + 1,
+            "保留 17 个探测超限，不静默截断到 16"
         );
+
+        // "*" → HARNESS_CONFIG_LOAD{reason:"too_many_skills"}。
+        let error = index
+            .resolve(&["*".to_string()])
+            .expect_err("wildcard over limit");
+        assert_eq!(error.kind, HarnessErrorKind::ConfigLoad);
+        assert_eq!(error.detail["reason"], "too_many_skills");
+
+        // 显式引用超限目录（第 18 个，overflow）→ HARNESS_SKILL_INVALID{too_many_skills}。
+        let error = index
+            .resolve(&["skill-17".to_string()])
+            .expect_err("overflow explicit ref");
+        assert_eq!(error.kind, HarnessErrorKind::SkillInvalid);
+        assert_eq!(error.detail["reason"], "too_many_skills");
+
+        // 显式引用前 16 个之一仍可用；额外目录 warn 可见（"*" 不算显式引用）。
+        assert_eq!(
+            index
+                .resolve(&["skill-00".to_string()])
+                .expect("allowed")
+                .len(),
+            1
+        );
+        let warnings = index.skip_warnings(&["*".to_string()]);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("skill-17")
+                    && warning.contains("exceeds MAX_SKILLS")),
+            "overflow dir warn visible: {warnings:?}"
+        );
+    }
+
+    /// REV-097 C1：`"*"` 不得把非法目录当「已引用」而吞掉 warn；非法目录仍跳过+warn。
+    #[test]
+    fn wildcard_does_not_suppress_invalid_dir_warnings() {
+        let dir = TempDir::new().expect("tempdir");
+        write_skill(dir.path(), "ok", &skill_md("ok", "good"));
+        write_skill(dir.path(), "bad", "---\nname: bad\n---\n");
+        let index = SkillsIndex::discover(dir.path());
+        let warnings = index.skip_warnings(&["*".to_string()]);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("bad"),
+            "invalid dir warn: {warnings:?}"
+        );
+        // "*" 只解析合法 skills（非法目录未引用 → 跳过，不报错）。
+        let resolved = index.resolve(&["*".to_string()]).expect("wildcard");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "ok");
     }
 
     #[test]

@@ -113,7 +113,12 @@ pub const MAX_SKILLS: usize = 16;
 /// 单个 `SKILL.md` 文件字节上限（`SKILL_FILE_MAX_BYTES` = 256 KiB）。
 pub const SKILL_FILE_MAX_BYTES: u64 = 256 * 1024;
 
-/// `skill_view` 返回正文的字符上限（`SKILL_BODY_MAX_CHARS` = 32 KiB；超出首尾保留+中间标记）。
+/// `skill_view` 返回正文的**字符**上限（`SKILL_BODY_MAX_CHARS` = 32768）。
+///
+/// 单位对齐说明（REV-097 P3）：DR-009 §5 写「32 KiB」，spec 00 §0.5 冻结的常量名是
+/// `SKILL_BODY_MAX_CHARS`（chars）。v0.3 按**字符**口径实现（32K chars ≈ 32 KiB ASCII
+/// 文本；UTF-8 多字节字符不会被切坏），非 ASCII 正文的实际字节数可能略超 32 KiB。
+/// 超出时保留首尾 + 中间 `[…truncated K chars…]` 标记（`truncate_skill_body`）。
 pub const SKILL_BODY_MAX_CHARS: usize = 32_768;
 
 /// system catalog 总字符上限（`SKILL_CATALOG_MAX_CHARS` = 4096）。
