@@ -283,6 +283,14 @@ impl kernel::TraceSink for TraceBridge {
         }
     }
 
+    /// W4b（W4a / DR-007 §8.3）：foreach 展开事实落 `foreach_expansions` 表
+    /// （不产生 `events` 行，`events.kind` 不变）。
+    fn foreach_expansion(&self, record: kernel::ForeachExpansionRecord) {
+        self.send_event(trace::TraceInput::ForeachExpansion(map_foreach_expansion(
+            &record,
+        )));
+    }
+
     /// fail-stop 轮询（06 §6.4.5）：非阻塞取走 trace 写线程的不可恢复错误。
     fn take_error(&self) -> Option<String> {
         self.handle.take_error()
@@ -632,10 +640,10 @@ fn map_snapshot(snapshot: &kernel::InstanceSnapshot) -> trace::InstanceSnapshot 
         node_id: snapshot.node_id.clone(),
         node_type: snapshot.node_type.clone(),
         attempt: snapshot.attempt,
-        // W4b（REV-089）跨模块机械占位：kernel 尚未提供 item 字段；
-        // kernel 分支阶段 2 在此替换为 kernel::InstanceSnapshot 的真实 item 值。
-        item_index: 0,
-        item_key: None,
+        // W4b（REV-090）：kernel `InstanceSnapshot` 的 foreach item 字段透传
+        // （非 region 实例为 0/NULL；trace v6 `instances` 列同类型 u32/Option<String>）。
+        item_index: snapshot.item_index,
+        item_key: snapshot.item_key.clone(),
         status: map_instance_status(snapshot.status),
         input: snapshot.input.clone(),
         output: snapshot.output.clone(),
@@ -684,6 +692,32 @@ fn map_gate_result(record: &kernel::GateResultRecord) -> trace::GateResultRecord
         attempt: record.attempt,
         verdict: record.verdict.clone(),
         ts: record.ts.clone(),
+    }
+}
+
+/// 映射 foreach 展开事实（kernel → trace v6 `foreach_expansions`）。
+///
+/// kernel `keys: Vec<Option<String>>` → trace `keys: Option<Value>`：
+/// `item_count` 显式 `u64::from`（trace 列类型）；`None` 键按冻结表示转为
+/// `{"$index": i}` 对象，真实 string key 保持字符串（DR-007 §6.1/§8.3）。
+fn map_foreach_expansion(record: &kernel::ForeachExpansionRecord) -> trace::ForeachExpansionRecord {
+    let keys: Vec<Value> = record
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| match key {
+            Some(key) => Value::String(key.clone()),
+            None => json!({"$index": index}),
+        })
+        .collect();
+    trace::ForeachExpansionRecord {
+        run_id: record.run_id.clone(),
+        expansion_id: record.expansion_id.clone(),
+        node_id: record.node_id.clone(),
+        source_instance_id: record.source_instance_id.clone(),
+        item_count: u64::from(record.item_count),
+        keys: Some(Value::Array(keys)),
+        at: record.at.clone(),
     }
 }
 
@@ -1053,6 +1087,8 @@ mod tests {
             node_id: "n1".to_string(),
             node_type: "python_node".to_string(),
             attempt: 0,
+            item_index: 0,
+            item_key: None,
             status: InstanceStatus::Running,
             input: Some(serde_json::json!({"x": 1})),
             output: None,
@@ -1104,6 +1140,43 @@ mod tests {
             owner_host: "test-host".to_string(),
             started_at: "2026-10-28T09:12:03.104Z".to_string(),
         }
+    }
+
+    /// W4b：`foreach_expansion` 落 `foreach_expansions` 表（不产生 events 行）；
+    /// `None` key 以 `{"$index": i}` 表示、`item_count` 由 u32 显式转 u64。
+    #[test]
+    fn foreach_expansion_persists_row_with_index_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let bridge = TraceBridge::new(writer.handle());
+        bridge.run_started(kernel_run_started());
+        bridge.foreach_expansion(zgraph_kernel::ForeachExpansionRecord {
+            run_id: "run-1".to_string(),
+            expansion_id: "0192f0d0-0000-7000-8000-0000000000aa".to_string(),
+            node_id: "F".to_string(),
+            source_instance_id: Some("inst-prep".to_string()),
+            item_count: 2,
+            keys: vec![Some("k0".to_string()), None],
+            at: "2026-11-01T00:00:00.000Z".to_string(),
+        });
+        writer.flush().expect("flush writer");
+
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        let rows = reader
+            .foreach_expansions("run-1")
+            .expect("foreach expansions");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].node_id, "F");
+        assert_eq!(rows[0].item_count, 2);
+        assert_eq!(rows[0].source_instance_id.as_deref(), Some("inst-prep"));
+        assert_eq!(
+            rows[0].keys,
+            Some(serde_json::json!(["k0", {"$index": 1}])),
+            "None key 以 {{\"$index\": i}} 表示"
+        );
+        drop(reader);
+        writer.close().expect("close writer");
     }
 
     /// W3a0：`human_decided` 只转发确认给观察者，**不写 trace**（C13：桥不写决策表、
@@ -1182,6 +1255,8 @@ mod tests {
             instance_id: instance.to_string(),
             node_id: node.to_string(),
             attempt: 0,
+            item_index: 0,
+            item_key: None,
             from: InstanceStatus::WaitingHuman,
             to,
             reason: Some("human_decided".to_string()),
@@ -1193,6 +1268,8 @@ mod tests {
             node_id: node.to_string(),
             node_type: "python_node".to_string(),
             attempt: 0,
+            item_index: 0,
+            item_key: None,
             status: to,
             input: Some(serde_json::json!({"payload": {}})),
             output,
@@ -1325,6 +1402,8 @@ mod tests {
             node_id: "n1".to_string(),
             node_type: "python_node".to_string(),
             attempt: 0,
+            item_index: 0,
+            item_key: None,
             status: InstanceStatus::Running,
             input: Some(serde_json::json!({"x": 1})),
             output: None,
