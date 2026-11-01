@@ -143,3 +143,18 @@ bash scripts/dev/check.sh                 # PASSED
 ### 7.4 复审结论
 
 **C1 + N1–N4 全部关闭；复审无 P0/P1；最终结论：通过。** 建议 Lead 追加跨模块第二评审后 merge（HEAD `dc25340` + 本记录提交）。
+
+## 8. 第二评审 · 跨模块机械改动（Lead 追加，2026-11-01）
+
+- **评审人**：`lead`（**≠ 作者** `trace-dev`；Lead 已批准跨模块机械改动，按 AGENTS §2 由 Lead 追加第二评审）
+- **范围**（`42f93d7..dc25340`，仅机械）：
+  1. `crates/zgraph-cli/src/bridge.rs`：`map_snapshot` 增 `item_index:0, item_key:None` 占位（kernel 阶段 2 替换真实值）；测试 observer 新 `TraceInput::ForeachExpansion` kind arm。
+  2. `crates/zgraph-cli/src/run_cmd.rs`：`lifecycle_detail` 新变体 → `None`（展开事实不是 events 行，不产生生命周期行）。
+  3. `crates/zgraph-cli/tests/{decide,trace}.rs`：`InstanceSnapshot` 构造点补 item 默认字段；decide 版本期望 5→6、newer 6→7。
+  4. `tests/e2e/gate_defer.rs` / `tests/e2e/human_decide.rs`：schema 版本期望 5→6、`schema_migrations 1..6`、逐版本备份份数 2→3 / 1→2、只读 `expected 6`、human 迁移前快照改用 legacy 列清单（v6 新列由 trace 迁移测试断言）。
+- **核对结论（通过）**：
+  1. 仅枚举新变体导致的穷举 arm / 结构体新字段占位 / 版本与备份期望同步；**零行为变化**（无 foreach 图输出/events/回放语义不变），未放宽任何断言（版本期望是 schema v6 的强制同步；legacy 列快照另由 trace 迁移测试逐列覆盖 item 默认值）。
+  2. 未改 kernel 源文件；改动点与作者声明一致（`git diff 42f93d7..dc25340 --stat` 仅 trace 源/测试 + 上述 cli/e2e 机械文件）。
+  3. 占位字段将在 kernel 分支阶段 2 由 Lead 批准的 kernel 跨模块项替换为真实 item 值（不遗留占位）。
+- **Lead 亲自验证**：`cargo test -p zgraph-cli --offline` = 206 passed / 0 failed；`cargo test -p zgraph-e2e --test gate_defer --offline` = 8 passed / 0 failed。
+- **结论**：**通过（第二评审）**。跨模块机械改动与主审结论合并生效；分支满足合并前置。
