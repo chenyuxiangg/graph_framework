@@ -98,6 +98,8 @@
 | [REV-094](REV-094-docs-dynamic-spec.md) | 2026-11-01 | docs | `docs/docs-dynamic-spec` | 通过（W4b as-built 回写：spec 00/01/02/03/04/06/07/08 + DR-007 §14.1 + AC-17 实测 21 用例 + PROVENANCE 第 25 条；e2e 106/0/2、workspace 915/0/3、PROVENANCE §3 9/9 SHA/行数实测一致；P2/P3 建议见记录 §3） | reviewer-a |
 | [REV-095](REV-095-process-v02-release.md) | 2026-11-01 | process/docs（含 cli 测试 1 行） | `chore/process-v02-release` | 通过（v0.2.0 版本 bump/Cargo.lock 本地 7 crate、release `--version`=0.2.0、perf baseline 数字+门禁、workspace 915/0/3、e2e 106/0/2、pytest 170、check.sh；无 dist/token；P2/P3 见记录 §3） | reviewer-b |
 | [REV-096](REV-096-docs-v03-design.md) | 2026-11-01 | docs | `docs/docs-v03-design` | 通过（首轮有条件通过 → C1–C5 + 6 项跨文档残留由 `80a42c1`/`7659ec8` 关闭后复审通过；v0.3 V1 设计冻结：DR-008..011 + spec 00/02/05/06/07 草案 + AC-18/19/20 设计；§5.14 编号保留；P2/P3 见记录 §6.4） | reviewer-a（主审）+ lead（裁决/第二评审） |
+| [REV-097](REV-097-harness-skills.md) | 2026-11-01 | harness（含 cli/kernel 机械） | `feat/harness-skills` | 通过（V2 skills：发现/校验/索引注入/`skill_view`/预算/安全；harness 182/0/1、workspace 951/0/3；P2/P3 见记录 §3） | reviewer-b |
+| [REV-098](REV-098-harness-mcp.md) | 2026-11-01 | harness（含 cli/kernel/Cargo 机械） | `feat/harness-mcp` | 有条件通过（V3 MCP：rmcp 3.8.0 feature-gated 双 era/registry/`--allow-mcp`/工具桥接/`close_mcp` 幂等；harness 200/1、workspace 970/0/3；C1–C2 见记录 §6；P2/P3 见记录 §3） | reviewer-a（主审）+ lead（裁决/第二评审） |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
