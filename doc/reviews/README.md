@@ -86,7 +86,10 @@
 | [REV-082](REV-082-cli-human-record.md) | 2026-11-01 | cli | `fix/cli-human-record` | 通过（human L2 recorded_outputs 补录 + replay outputs handler 替换；cli 206、workspace 798/0/3；P3 建议 → ISSUE-140） | reviewer-a |
 | [REV-083](REV-083-e2e-human-decide.md) | 2026-11-01 | e2e | `test/e2e-human-decide` | 通过（AC-16 a–g 真链路 + L2 human outputs；human_decide 21/0、e2e 85/0/2、workspace 819/0/3、3 次稳定；P3 建议 → ISSUE-138/139） | reviewer-b |
 | [REV-084](REV-084-docs-human-spec.md) | 2026-11-01 | docs | `docs/docs-human-spec` | 通过（W3a as-built 回写：spec 00/01/03/04/06/07/08 + DR-006 §15 + AC-16 实测 21 用例 + PROVENANCE 第 22 条；e2e 85/0/2、workspace 819/0/3、PROVENANCE §3 9/9 SHA/行数实测一致；P3 建议见记录 §3） | reviewer-a |
-| [REV-088](REV-088-dsl-foreach.md) | 2026-11-01 | dsl | `feat/dsl-foreach` | 通过（foreach 字段/R17/R18/19 码/22 fixtures；dsl 118/0；fixture 跨模块 Lead 第二评审；P3 → ISSUE-147） | reviewer-a |
+
+| [REV-085](REV-085-docs-w3a-wrapup.md) | 2026-11-01 | docs/process | `docs/docs-w3a-wrapup` | 通过（W3a 合并后 progress 最终态 + REV-086 残余 N21–N27；仅 `doc/progress.md` 等文字） | reviewer-a |
+| [REV-086](REV-086-docs-dynamic-fanout-design.md) | 2026-11-01 | docs | `docs/docs-dynamic-fanout-design` | 通过（W4a 动态 N/foreach 设计冻结；首轮有条件通过 → C1–C5 + P2/P3 关闭后复审通过；DR-007 + spec 冻结 + SOP v1.2 + AC-17 a–j 设计） | reviewer-b |
+| [REV-087](REV-087-docs-w4a-wrapup.md) | 2026-11-01 | docs/process | `docs/docs-w4a-wrapup` | 通过（W4a 合并后 progress 最终态 + REV-086 残余收口） | reviewer-a || [REV-088](REV-088-dsl-foreach.md) | 2026-11-01 | dsl | `feat/dsl-foreach` | 通过（foreach 字段/R17/R18/19 码/22 fixtures；dsl 118/0；fixture 跨模块 Lead 第二评审；P3 → ISSUE-147） | reviewer-a |
 | [REV-089](REV-089-trace-dynamic.md) | 2026-11-01 | trace（含 cli/e2e 机械） | `feat/trace-dynamic` | 通过（首轮不通过 → 修复后通过；schema v6/item 列/expansions/真实 v1→v6/FK 窗口；trace 94/0；P1 ISSUE-142 fixed；P3 → ISSUE-149） | reviewer-b（主审）+ lead（第二评审） |
 | [REV-090](REV-090-kernel-dynamic-fanout.md) | 2026-11-01 | kernel（含 cli bridge） | `feat/kernel-dynamic-fanout` | 通过（有条件通过 → 复审通过；controller/item/join/4 码；kernel 149/159、cli 222；P3 → ISSUE-144/145） | reviewer-b（主审）+ lead（cli 第二评审） |
 | [REV-091](REV-091-cli-dynamic.md) | 2026-11-01 | cli | `feat/cli-dynamic` | 通过（trace ForeachExpansion/L2 per-item/预检；cli 222/0；P3 → ISSUE-146） | reviewer-a |

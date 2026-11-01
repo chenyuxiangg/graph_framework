@@ -491,10 +491,10 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 | 模块 | 分支 / 实现提交 | 评审 | 合并点（main） | 测试证据 |
 |---|---|---|---|---|
 | dsl | `feat/dsl-foreach` / `9efc41c` | REV-088（reviewer-a；fixture 跨模块 Lead 第二评审） | `45cd7c6` | dsl **118/0**；fixtures 56 bad/8 valid；既有 42 fixture A/B 84/84 |
-| trace | `feat/trace-dynamic` / `49806c2` + 修复 `dc25340` | REV-089（reviewer-b；首轮不通过 → 修复后通过；跨模块第二评审 lead） | `948d677` | trace **94/0**（migration 18/expansions 5/item 5）；workspace 834/0/3 |
+| trace | `feat/trace-dynamic` / `93a5f23` + 修复 `e057cef` | REV-089（reviewer-b；首轮不通过 → 修复后通过；跨模块第二评审 lead） | `948d677` | trace **94/0**（migration 18/expansions 5/item 5）；workspace 834/0/3 |
 | kernel | `feat/kernel-dynamic-fanout` / `53b42ca` + `211c2be` + 修复 `f6e8ed9` | REV-090（reviewer-b；有条件通过 → 复审通过；cli 第二评审 lead） | `519066d` | kernel **149/0**、test-hooks **159/0**、cli **222/0**；`foreach.rs` 25 |
-| fix | `fix/kernel-foreach-items-unwrap` / `8846240` | REV-092（reviewer-b） | `683260b` | kernel 149/159、cli 222、workspace 894/0/3 |
 | cli | `feat/cli-dynamic` / `59c7443` | REV-091（reviewer-a） | `4a1ff0f` | cli **222/0**（`foreach_dynamic.rs` 9）；workspace 889/0/3 |
+| fix | `fix/kernel-foreach-items-unwrap` / `8846240` | REV-092（reviewer-b） | `683260b` | kernel 149/159、cli 222、workspace 894/0/3 |
 | e2e | `test/e2e-dynamic-fanout` / `a82943d` + `e1fdcd1` | REV-093（reviewer-b） | `201341b`（e2e 评审后 main 头） | e2e **106/0/2**（dynamic_fanout **21/0**，6 连跑）；workspace **915/0/3**；全量 e2e 3 连跑稳定 |
 | docs | `docs/docs-dynamic-spec`（本批） | REV-094（reviewer-a） | 本分支待合并 | check.sh / PROVENANCE §3 实测 |
 
