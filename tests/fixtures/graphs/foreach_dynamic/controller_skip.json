@@ -1,0 +1,74 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "foreach-controller-skip",
+    "description": "AC-17 f 边界（C3）：F 唯一入边 gate=false 全部 settle=false → controller Skipped、不展开、无 item 实例"
+  },
+  "entry_points": [
+    "start"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    },
+    {
+      "id": "F",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "fanout"
+      },
+      "foreach": {
+        "items_port": "items",
+        "join": "end"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "inputs": [
+        {
+          "name": "results",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "F",
+      "to_input_port": "items",
+      "gate": {
+        "function": "check_output",
+        "params": {
+          "path": "go",
+          "equals": true
+        }
+      }
+    },
+    {
+      "from": "F",
+      "to_node": "end",
+      "to_input_port": "results"
+    }
+  ]
+}

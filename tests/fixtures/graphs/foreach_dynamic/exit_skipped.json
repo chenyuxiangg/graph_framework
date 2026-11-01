@@ -1,0 +1,114 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "foreach-exit-skipped",
+    "description": "AC-17 j：W→E gate=false → 某 item E Skipped → RUN_FOREACH_ITEM_INCOMPLETE（无 Crashed、无 join 投递）"
+  },
+  "entry_points": [
+    "start"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    },
+    {
+      "id": "F",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "fanout"
+      },
+      "foreach": {
+        "items_port": "items",
+        "join": "end"
+      }
+    },
+    {
+      "id": "W",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "task",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "work"
+      }
+    },
+    {
+      "id": "E",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "work",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "exit_node"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "inputs": [
+        {
+          "name": "results",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "F",
+      "to_input_port": "items"
+    },
+    {
+      "from": "F",
+      "to_node": "W",
+      "to_input_port": "task"
+    },
+    {
+      "from": "W",
+      "to_node": "E",
+      "to_input_port": "work",
+      "gate": {
+        "function": "check_output",
+        "params": {
+          "path": "go",
+          "equals": true
+        }
+      }
+    },
+    {
+      "from": "E",
+      "to_node": "end",
+      "to_input_port": "results"
+    }
+  ]
+}

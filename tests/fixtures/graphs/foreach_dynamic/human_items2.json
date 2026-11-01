@@ -1,0 +1,88 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "foreach-human-items2",
+    "description": "AC-17 h：region 内 builtin.human（N=2）——2 个 WaitingHuman item 实例分别 decide、join 有序结果"
+  },
+  "entry_points": [
+    "start"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    },
+    {
+      "id": "F",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "fanout"
+      },
+      "foreach": {
+        "items_port": "items",
+        "join": "end",
+        "key_field": "id"
+      }
+    },
+    {
+      "id": "H",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "payload",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "builtin",
+        "function": "human"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "inputs": [
+        {
+          "name": "results",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "F",
+      "to_input_port": "items"
+    },
+    {
+      "from": "F",
+      "to_node": "H",
+      "to_input_port": "payload"
+    },
+    {
+      "from": "H",
+      "to_node": "end",
+      "to_input_port": "results"
+    }
+  ]
+}

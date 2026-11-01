@@ -1,0 +1,147 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "foreach-upstream-items",
+    "description": "AC-17 b：上游 python list_source 输出 {\"items\":[...]} → F foreach（运行期决定 N）"
+  },
+  "entry_points": [
+    "start"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [
+        {
+          "name": "seed",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    },
+    {
+      "id": "prep",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "seed",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "list_source"
+      }
+    },
+    {
+      "id": "F",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "fanout"
+      },
+      "foreach": {
+        "items_port": "items",
+        "join": "J"
+      }
+    },
+    {
+      "id": "W",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "task",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "work"
+      }
+    },
+    {
+      "id": "E",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "work",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "exit_node"
+      }
+    },
+    {
+      "id": "J",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "results",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "join"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "inputs": [
+        {
+          "name": "result",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "prep",
+      "to_input_port": "seed"
+    },
+    {
+      "from": "prep",
+      "to_node": "F",
+      "to_input_port": "items"
+    },
+    {
+      "from": "F",
+      "to_node": "W",
+      "to_input_port": "task"
+    },
+    {
+      "from": "W",
+      "to_node": "E",
+      "to_input_port": "work"
+    },
+    {
+      "from": "E",
+      "to_node": "J",
+      "to_input_port": "results"
+    },
+    {
+      "from": "J",
+      "to_node": "end",
+      "to_input_port": "result"
+    }
+  ]
+}

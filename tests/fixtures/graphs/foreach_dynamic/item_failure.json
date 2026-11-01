@@ -1,0 +1,107 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "foreach-item-failure",
+    "description": "AC-17 d：item 执行抛错 → run Failed（节点错误码），其它 item Cancelled，无 join 投递"
+  },
+  "entry_points": [
+    "start"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    },
+    {
+      "id": "F",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "fanout"
+      },
+      "foreach": {
+        "items_port": "items",
+        "join": "end"
+      }
+    },
+    {
+      "id": "W",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "task",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "work"
+      }
+    },
+    {
+      "id": "E",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "work",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "exit_node"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "inputs": [
+        {
+          "name": "results",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "F",
+      "to_input_port": "items"
+    },
+    {
+      "from": "F",
+      "to_node": "W",
+      "to_input_port": "task"
+    },
+    {
+      "from": "W",
+      "to_node": "E",
+      "to_input_port": "work"
+    },
+    {
+      "from": "E",
+      "to_node": "end",
+      "to_input_port": "results"
+    }
+  ]
+}

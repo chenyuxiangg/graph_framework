@@ -19,9 +19,15 @@
 //!   4. 无 foreach 默认图：hash/validate/run/trace 输出不变（无 `ForeachExpansion` 行、
 //!      `foreach_expansions` 空、`instances.item_index=0`/`item_key=NULL`）。
 //!
-//! - **阶段 2（kernel fix 合并后）**：AC-17 a/b/c/d/e/f/g/h/j 真链路（entry 列表、上游列表、
-//!   空列表、item 失败、key duplicate/canonical、max_items/not-array、取消传播、region 内
-//!   per-item human、`RUN_FOREACH_ITEM_INCOMPLETE`）与 L1/L2 回放。
+//! - **阶段 2（AC-17 a–j 真链路，kernel「items_port 整包字段提取」fix 合并后）**：
+//!   entry 列表 3 items（item 实例/有序 join/C2 join 来源）、上游列表决定 N、空列表
+//!   （N=0：无 item 实例/expansion count=0/join `[]`）、item 失败（节点错误码 + 其它 item
+//!   Cancelled）、key duplicate 与 canonical（number/bool/null/object/array/string）、
+//!   max_items/not-array（含 unwrap 三变体）、取消传播（SIGINT）、region 内 per-item human
+//!   （2×WaitingHuman 分别 decide + 有序 join + `:memory:` 拒绝）、E Skipped →
+//!   `RUN_FOREACH_ITEM_INCOMPLETE`、controller 全部 settle=false → Skipped；trace
+//!   `ForeachExpansion` 行顺序、`--stats` 不新增字段、L1 replay 逐字节一致、L2 per-item
+//!   outputs 回放、旧 v5 库迁移后端到端 foreach + L2。
 //!
 //! 稳定性约定：每用例独立 `tempfile::TempDir`/trace DB；等待用轮询 + 宽松上限，不做 sleep
 //! 猜测；不新增 ignore、不放宽既有断言。
@@ -34,13 +40,16 @@ mod cli_support;
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Child, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use serde_json::{json, Value};
 
 use zgraph_trace::{
-    InstanceStatus as TraceInstanceStatus, RunStatus as TraceRunStatus, TraceReader,
+    ForeachExpansionRow, GateResultRow, InstanceRow, InstanceStatus as TraceInstanceStatus,
+    RunStatus as TraceRunStatus, TraceReader,
 };
 
 use cli_support::{
@@ -786,4 +795,1328 @@ fn default_run_has_no_foreach_artifacts() {
     let replay = replay_events_json(&db, &run_id);
     assert_exit(&replay, 0, "默认 run replay");
     assert_eq!(replay.stdout, trace.stdout, "replay 与 trace 逐字节一致");
+}
+
+// ===========================================================================
+// 阶段 2：AC-17 a–j 真链路（真 CLI + 真 Python worker + 真 SQLite）
+// ===========================================================================
+//
+// kernel `items_port` 取值（Lead 裁决 A / REV-092）：端口值是 array → 直接用；是 object
+// 且含**与 `items_port` 同名键** → 取该键值（必须 array）；否则 NOT_ARRAY。下方图按此
+// 构造：entry `{"items":[...]}` / 上游 python 输出 `{"items":[...]}`。
+
+/// 子进程等待上限（真 worker 冷启动 + 取消/决策轮询余量）。
+const CHILD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 挂起/可见性轮询间隔。
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// `tests/fixtures/graphs/foreach_dynamic/<name>`。
+fn foreach_fixture(name: &str) -> PathBuf {
+    graphs_root().join("foreach_dynamic").join(name)
+}
+
+/// e2e fixture worker 目录（`foreach_dynamic` 模块；真 CLI 以 `--python-path` 注入）。
+fn foreach_python_path() -> PathBuf {
+    repo_root().join("tests/e2e/fixtures/py")
+}
+
+/// 真 CLI `run` 参数（真 Python worker：仓库 `python/` + e2e fixture `py/`）。
+fn foreach_run_args(db: &Path, graph: &Path, inputs: &str, record_full: bool) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        arg(graph),
+        "--inputs".to_string(),
+        inputs.to_string(),
+        "--db".to_string(),
+        arg(db),
+        "--python".to_string(),
+        python_program(),
+        "--python-path".to_string(),
+        arg(&repo_root().join("python")),
+        "--python-path".to_string(),
+        arg(&foreach_python_path()),
+    ];
+    if record_full {
+        args.push("--record=full".to_string());
+    }
+    args.push("--json".to_string());
+    args
+}
+
+/// 同步跑一次 `zgraph run <foreach_dynamic 图>`。
+fn run_foreach(cwd: &Path, db: &Path, fixture: &str, inputs: &str, record_full: bool) -> Output {
+    run_cli(
+        &foreach_run_args(db, &foreach_fixture(fixture), inputs, record_full),
+        cwd,
+    )
+}
+
+/// 挂起/取消场景的 `zgraph run` 子进程守卫（Drop 兜底 kill）。
+struct ForeachRun {
+    child: Option<Child>,
+}
+
+impl ForeachRun {
+    /// 启动 `zgraph run`（piped stdout/stderr）；`record_full` 控制 L2 记录。
+    fn spawn(cwd: &Path, db: &Path, fixture: &str, inputs: &str, record_full: bool) -> Self {
+        let child = cli_support::zgraph_command()
+            .args(foreach_run_args(
+                db,
+                &foreach_fixture(fixture),
+                inputs,
+                record_full,
+            ))
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn zgraph run");
+        Self { child: Some(child) }
+    }
+
+    /// run 进程 pid。
+    fn pid(&self) -> u32 {
+        self.child.as_ref().expect("child alive").id()
+    }
+
+    /// 等待退出（超时 SIGKILL 后 panic）。
+    fn wait(mut self, context: &str) -> Output {
+        let child = self.child.take().expect("child");
+        wait_child_output(child, context, CHILD_TIMEOUT)
+    }
+}
+
+impl Drop for ForeachRun {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// 等待子进程退出（读线程 + 超时 SIGKILL，不静默跳过）。
+fn wait_child_output(child: Child, context: &str, timeout: Duration) -> Output {
+    let pid = child.id() as i32;
+    let (sender, receiver) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let _ = sender.send(child.wait_with_output());
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(output)) => {
+            let _ = thread.join();
+            output
+        }
+        Ok(Err(error)) => panic!("{context}: 等待子进程失败: {error}"),
+        Err(_) => {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+            let _ = thread.join();
+            panic!("{context}: 子进程未在 {timeout:?} 内退出（已 SIGKILL）");
+        }
+    }
+}
+
+/// 对 run 子进程发 SIGINT（CLI 取消路径 → exit 130）。
+fn send_sigint(pid: u32) {
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGINT,
+    )
+    .expect("send SIGINT to zgraph run");
+}
+
+/// 只读打开 trace DB（未就绪/暂不可读 → `None`）。
+fn try_read_only(db: &Path) -> Option<Connection> {
+    if !db.is_file() {
+        return None;
+    }
+    Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .ok()
+        .inspect(|conn| {
+            let _ = conn.busy_timeout(Duration::from_millis(1_000));
+        })
+}
+
+/// 轮询直到 `node_id` 有 `count` 个 `WaitingHuman` item 实例可见；
+/// 返回按 `item_index` 升序的 `(item_index, instance_id)`。
+fn poll_waiting_items(db: &Path, node_id: &str, count: usize) -> Vec<(u32, String)> {
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    loop {
+        if let Some(conn) = try_read_only(db) {
+            // DB 文件可能已创建但 schema/迁移尚未落库（CLI 启动早期）→ 容忍并继续轮询。
+            if let Ok(mut statement) = conn.prepare(
+                "SELECT item_index, instance_id FROM instances \
+                 WHERE node_id = ?1 AND status = 'WaitingHuman' ORDER BY item_index",
+            ) {
+                if let Ok(iter) =
+                    statement.query_map([node_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                {
+                    let rows: Vec<(u32, String)> = iter.filter_map(Result::ok).collect();
+                    if rows.len() >= count {
+                        return rows;
+                    }
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node {node_id} 未在 {CHILD_TIMEOUT:?} 内出现 {count} 个 WaitingHuman item"
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// 轮询直到 `node_id` 有 item 实例处于 `Running`（取消传播用例的稳定触发点）。
+fn poll_item_running(db: &Path, node_id: &str) {
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    loop {
+        if let Some(conn) = try_read_only(db) {
+            let running: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM instances WHERE node_id = ?1 AND status = 'Running'",
+                    [node_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if running >= 1 {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node {node_id} 未在 {CHILD_TIMEOUT:?} 内进入 Running"
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// 某 run 的展开事实（按 `(at, expansion_id)` 升序）。
+fn expansions(reader: &TraceReader, run_id: &str) -> Vec<ForeachExpansionRow> {
+    reader
+        .foreach_expansions(run_id)
+        .expect("query foreach_expansions")
+}
+
+/// 某节点的全部 item 实例（按 `item_index` 升序）。
+fn item_instances(reader: &TraceReader, run_id: &str, node_id: &str) -> Vec<InstanceRow> {
+    let mut rows: Vec<InstanceRow> = reader
+        .instances(run_id)
+        .expect("query instances")
+        .into_iter()
+        .filter(|row| row.node_id == node_id)
+        .collect();
+    rows.sort_by_key(|row| (row.item_index, row.attempt));
+    rows
+}
+
+/// 某节点的 gate_results（按 seq/插入序）。
+fn node_gates(reader: &TraceReader, run_id: &str, node_id: &str) -> Vec<GateResultRow> {
+    reader
+        .gate_results(run_id)
+        .expect("query gate_results")
+        .into_iter()
+        .filter(|gate| gate.node_id == node_id)
+        .collect()
+}
+
+/// 真 `zgraph decide`（复用 W3a；每 item 独立 instance_id）。
+fn decide_item(
+    cwd: &Path,
+    db: &Path,
+    run_id: &str,
+    instance_id: &str,
+    decision: &str,
+    approver: &str,
+    reason: Option<&str>,
+) -> Output {
+    let mut args = vec![
+        "decide".to_string(),
+        run_id.to_string(),
+        "--instance".to_string(),
+        instance_id.to_string(),
+        "--decision".to_string(),
+        decision.to_string(),
+        "--approver".to_string(),
+        approver.to_string(),
+        "--db".to_string(),
+        arg(db),
+        "--json".to_string(),
+    ];
+    if let Some(reason) = reason {
+        args.push("--reason".to_string());
+        args.push(reason.to_string());
+    }
+    run_cli(&args, cwd)
+}
+
+/// `trace --json` 的 kind 序列。
+fn trace_kinds(output: &Output) -> Vec<String> {
+    ndjson_lines(output)
+        .into_iter()
+        .map(|line| line["kind"].as_str().expect("kind string").to_string())
+        .collect()
+}
+
+/// 展开行的 `keys`（`None` → `Null` 语义）。
+fn expansion_keys(row: &ForeachExpansionRow) -> Value {
+    row.keys.clone().unwrap_or(Value::Null)
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 a：entry 列表 3 items 展开 + 有序 join + trace/L1/L2
+// ---------------------------------------------------------------------------
+
+/// AC-17 a：entry `start.items` 3 items → F/W/E 各 3 个 item 实例（0..2）、join 有序数组、
+/// run Completed；expansion（count/keys/source=start 实例）、C2 的 join 来源=最后完成的
+/// E item、trace ForeachExpansion 行、L1 replay 逐字节一致、L2 per-item outputs 回放匹配。
+#[test]
+fn ac17a_entry_items_expand_per_item_and_join_in_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("a.db");
+    // item1 延迟 500ms → 最后完成（C2 join 来源确定；余量抵御并行负载下的 worker 冷启动抖动）。
+    let inputs = r#"{"start":{"items":[{"id":"a"},{"id":"b","delay_ms":500},{"id":"c"}]}}"#;
+    let output = run_foreach(dir.path(), &db, "entry_items3.json", inputs, true);
+    assert_exit(&output, 0, "AC-17 a run");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+    let expected_results = json!([
+        {"item": {"id": "a"}, "ok": true},
+        {"item": {"id": "b", "delay_ms": 500}, "ok": true},
+        {"item": {"id": "c"}, "ok": true},
+    ]);
+    assert_eq!(
+        payload["run_output"],
+        json!({"result": {"count": 3, "results": expected_results}}),
+        "join 数组必须按 item_index 升序"
+    );
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    // expansion：count=3、keys 全按索引、source=start 实例（唯一入边投递来源）。
+    let expansion_rows = expansions(&reader, &run_id);
+    assert_eq!(expansion_rows.len(), 1, "恰一次展开");
+    assert_eq!(expansion_rows[0].node_id, "F");
+    assert_eq!(expansion_rows[0].item_count, 3);
+    assert_eq!(
+        expansion_keys(&expansion_rows[0]),
+        json!([{"$index": 0}, {"$index": 1}, {"$index": 2}])
+    );
+    let start_instance = item_instances(&reader, &run_id, "start")
+        .into_iter()
+        .next()
+        .expect("start 实例");
+    assert_eq!(
+        expansion_rows[0].source_instance_id.as_deref(),
+        Some(start_instance.instance_id.as_str()),
+        "expansion.source_instance_id = 使 controller Ready 的投递来源（start 实例）"
+    );
+
+    // item 实例：F/W/E 各 item_index 0..2 全部 Completed、attempt=0、无 key_field → NULL。
+    for node in ["F", "W", "E"] {
+        let rows = item_instances(&reader, &run_id, node);
+        assert_eq!(
+            rows.iter().map(|row| row.item_index).collect::<Vec<u32>>(),
+            vec![0, 1, 2],
+            "{node} item_index"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.status == TraceInstanceStatus::Completed && row.attempt == 0),
+            "{node} 全部 Completed/attempt=0"
+        );
+        assert!(
+            rows.iter().all(|row| row.item_key.is_none()),
+            "{node} 无 key_field → item_key NULL"
+        );
+    }
+    // 无 controller「非 item」实例：F 的实例全部是 item 实例。
+    assert_eq!(item_instances(&reader, &run_id, "F").len(), 3);
+
+    // join：J 的 input/result 有序；end 聚合。
+    let join = item_instances(&reader, &run_id, "J")
+        .into_iter()
+        .next()
+        .expect("J 实例");
+    assert_eq!(join.item_index, 0, "join 节点为普通实例 item_index=0");
+    assert_eq!(
+        join.input.clone().expect("J input")["results"],
+        expected_results,
+        "J 收到的 results = 有序 E 输出数组"
+    );
+    let end_input = item_instances(&reader, &run_id, "end")
+        .into_iter()
+        .next()
+        .expect("end 实例")
+        .input
+        .expect("end input");
+    assert_eq!(end_input["result"]["results"], expected_results);
+
+    // C2：E→J 的 GateResult 来源 = 最后完成的 E item（item1，delay 120ms）。
+    let e_items = item_instances(&reader, &run_id, "E");
+    let join_gates: Vec<GateResultRow> = node_gates(&reader, &run_id, "E")
+        .into_iter()
+        .filter(|gate| gate.to_node == "J")
+        .collect();
+    assert_eq!(join_gates.len(), 1, "join 投递恰一条 GateResult");
+    let gate = &join_gates[0];
+    assert_eq!(gate.attempt, 0);
+    let last = e_items
+        .iter()
+        .max_by(|left, right| {
+            left.finished_at
+                .cmp(&right.finished_at)
+                .then(left.item_index.cmp(&right.item_index))
+        })
+        .expect("E item 实例");
+    assert_eq!(
+        last.item_index,
+        1,
+        "item1（delay 500ms）应是最后完成的 E item: {:?}",
+        e_items
+            .iter()
+            .map(|row| (row.item_index, row.finished_at.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        gate.instance_id, last.instance_id,
+        "C2：join GateResult.instance_id = 最后完成使 join 满 N 的 E item 实例"
+    );
+    assert!(item_instances(&reader, &run_id, "W")
+        .iter()
+        .all(|row| row.status == TraceInstanceStatus::Completed));
+    drop(reader);
+
+    // trace --json：事件行之后追加恰一条 ForeachExpansion（不写 events.kind）。
+    let trace = trace_json(&db, &run_id);
+    assert_exit(&trace, 0, "AC-17 a trace --json");
+    let kinds = trace_kinds(&trace);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| *kind == "ForeachExpansion")
+            .count(),
+        1,
+        "ForeachExpansion 恰一行: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("ForeachExpansion"),
+        "展开行追加在事件行之后: {kinds:?}"
+    );
+    let expansion_line = ndjson_lines(&trace).pop().expect("last line");
+    assert_eq!(expansion_line["node_id"], json!("F"));
+    assert_eq!(expansion_line["item_count"], json!(3));
+    assert_eq!(
+        expansion_line["source_instance_id"],
+        json!(start_instance.instance_id)
+    );
+    assert_eq!(
+        expansion_line["keys"],
+        json!([{"$index": 0}, {"$index": 1}, {"$index": 2}])
+    );
+    assert!(expansion_line["expansion_id"].is_string());
+
+    // L1 replay 与 trace --json 逐字节一致。
+    let replay = replay_events_json(&db, &run_id);
+    assert_exit(&replay, 0, "AC-17 a replay events");
+    assert_eq!(replay.stdout, trace.stdout, "L1 replay 与 trace 逐字节一致");
+
+    // L2 per-item outputs：--record=full 下 F/W/E 每 item + J 均有记录，重放匹配。
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    let records = reader.recorded_outputs(&run_id).expect("recorded outputs");
+    assert_eq!(records.len(), 10, "F/W/E × 3 items + J = 10 条 L2 记录");
+    drop(reader);
+    let l2 = run_cli(
+        &[
+            "replay".to_string(),
+            "--run".to_string(),
+            run_id.clone(),
+            "--mode".to_string(),
+            "outputs".to_string(),
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&l2, 0, "AC-17 a L2 outputs replay");
+    let l2_payload = json_stdout(&l2);
+    assert_eq!(l2_payload["ok"], json!(true));
+    assert_eq!(l2_payload["matched"], json!(true));
+    assert_eq!(l2_payload["recorded_outputs"], json!(10));
+    assert_eq!(
+        l2_payload["original_output"], l2_payload["replayed_output"],
+        "L2 重放输出与原 run 一致（per-item 记录回放）"
+    );
+    assert_eq!(cli_support::runs_count(&db), 1, "L2 replay 不得产生新 run");
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 b：上游输出列表决定 N（同一张图，运行期数据决定）
+// ---------------------------------------------------------------------------
+
+/// AC-17 b：同一张图（同一 graph_hash）两次 run 分别展开 N=2 / N=4；join 顺序=item_index。
+#[test]
+fn ac17b_upstream_list_decides_n_at_runtime() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cases = [
+        (json!(["x", "y"]), 2usize),
+        (json!(["x", "y", "z", "w"]), 4usize),
+    ];
+    let mut hashes = Vec::new();
+    for (index, (seed, expected_n)) in cases.into_iter().enumerate() {
+        let db = dir.path().join(format!("b{index}.db"));
+        let inputs = json!({"start": {"seed": seed}}).to_string();
+        let output = run_foreach(dir.path(), &db, "upstream_items.json", &inputs, false);
+        assert_exit(&output, 0, "AC-17 b run");
+        let payload = json_stdout(&output);
+        assert_eq!(payload["status"], json!("Completed"));
+        let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+        let results: Vec<Value> = (0..expected_n)
+            .map(|item_index| {
+                json!({"item": seed.as_array().expect("seed").get(item_index).expect("seed item").clone(), "ok": true})
+            })
+            .collect();
+        assert_eq!(
+            payload["run_output"],
+            json!({"result": {"count": expected_n, "results": results}}),
+            "N={expected_n} 时 join 数组长度/顺序"
+        );
+
+        let reader = TraceReader::open_readonly(&db).expect("open trace");
+        let rows = expansions(&reader, &run_id);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].item_count as usize, expected_n);
+        assert_eq!(
+            expansion_keys(&rows[0]),
+            Value::Array(
+                (0..expected_n)
+                    .map(|item_index| json!({"$index": item_index as u64}))
+                    .collect()
+            )
+        );
+        let w_items = item_instances(&reader, &run_id, "W");
+        assert_eq!(w_items.len(), expected_n, "W item 实例数 = 运行期 N");
+        drop(reader);
+        hashes.push(
+            common::run_row(
+                &TraceReader::open_readonly(&db).expect("open trace"),
+                &run_id,
+            )
+            .graph_hash,
+        );
+    }
+    assert_eq!(
+        hashes[0], hashes[1],
+        "N 由运行期数据决定：同一张图 graph_hash 不变（非 codegen）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 c：空列表（N=0，无 item 实例、expansion count=0、join []）
+// ---------------------------------------------------------------------------
+
+/// AC-17 c：`items=[]` → 无 item 实例、`foreach_expansions` 一行 count=0/keys=[]、
+/// J(end) 输入 `[]`、无 GateResult（无 E 实例）、run Completed。
+#[test]
+fn ac17c_empty_list_completes_with_empty_join_array() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("c.db");
+    let output = run_foreach(
+        dir.path(),
+        &db,
+        "empty_items.json",
+        r#"{"start":{"items":[]}}"#,
+        false,
+    );
+    assert_exit(&output, 0, "AC-17 c run");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+    assert_eq!(
+        payload["run_output"],
+        json!({"results": []}),
+        "空列表 join 直接投递 [] 给 end"
+    );
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    let rows = expansions(&reader, &run_id);
+    assert_eq!(rows.len(), 1, "N=0 仍写一条 expansion 行");
+    assert_eq!(rows[0].node_id, "F");
+    assert_eq!(rows[0].item_count, 0);
+    assert_eq!(expansion_keys(&rows[0]), json!([]));
+    for node in ["F", "W", "E"] {
+        assert!(
+            item_instances(&reader, &run_id, node).is_empty(),
+            "N=0 不得创建 {node} item 实例"
+        );
+    }
+    let end_input = item_instances(&reader, &run_id, "end")
+        .into_iter()
+        .next()
+        .expect("end 实例")
+        .input
+        .expect("end input");
+    assert_eq!(end_input, json!({"results": []}), "J(end) 输入为 []");
+    assert!(
+        node_gates(&reader, &run_id, "E").is_empty(),
+        "N=0 无 E 实例 → 无 join GateResult"
+    );
+    assert!(!reader
+        .instances(&run_id)
+        .expect("instances")
+        .iter()
+        .any(|row| row.status == TraceInstanceStatus::Crashed));
+    drop(reader);
+
+    // trace：expansion 行 count=0（REV-092 P3①）；L1 replay 一致。
+    let trace = trace_json(&db, &run_id);
+    assert_exit(&trace, 0, "AC-17 c trace");
+    let lines = ndjson_lines(&trace);
+    assert_eq!(
+        lines.last().expect("last")["kind"],
+        json!("ForeachExpansion")
+    );
+    assert_eq!(lines.last().expect("last")["item_count"], json!(0));
+    assert_eq!(lines.last().expect("last")["keys"], json!([]));
+    let replay = replay_events_json(&db, &run_id);
+    assert_exit(&replay, 0, "AC-17 c replay");
+    assert_eq!(replay.stdout, trace.stdout);
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 d：item 失败（冷峻）— run Failed（节点错误码）、其它 item 取消、无 join 投递
+// ---------------------------------------------------------------------------
+
+/// AC-17 d：某 item 节点抛 Python 异常 → run Failed（error_code=节点错误码
+/// `NODE_PYTHON_EXCEPTION`）、该 item Crashed、其它 item Cancelled、无 join GateResult。
+#[test]
+fn ac17d_item_failure_fails_run_and_cancels_other_items() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("d.db");
+    let inputs = r#"{"start":{"items":[{"id":"boom","fail":true},{"id":1,"slow":true},{"id":2,"slow":true},{"id":3,"slow":true}]}}"#;
+    let output = run_foreach(dir.path(), &db, "item_failure.json", inputs, false);
+    assert_exit(&output, 1, "AC-17 d run 应 Failed 退出 1");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(
+        payload["error"]["code"],
+        json!("NODE_PYTHON_EXCEPTION"),
+        "run error.code = 节点错误码（非 FOREACH 码）"
+    );
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    let run_row = common::run_row(&reader, &run_id);
+    assert_eq!(run_row.status, TraceRunStatus::Failed);
+    assert_eq!(run_row.error_code.as_deref(), Some("NODE_PYTHON_EXCEPTION"));
+    assert_eq!(expansions(&reader, &run_id).len(), 1, "展开已发生");
+    let w_items = item_instances(&reader, &run_id, "W");
+    assert_eq!(w_items.len(), 4, "4 个 item 均有 W 实例");
+    assert_eq!(
+        w_items[0].status,
+        TraceInstanceStatus::Crashed,
+        "失败 item 的 W 实例 Crashed"
+    );
+    assert_eq!(
+        w_items[0].error_code.as_deref(),
+        Some("NODE_PYTHON_EXCEPTION")
+    );
+    for (index, row) in w_items.iter().enumerate().skip(1) {
+        assert_eq!(
+            row.status,
+            TraceInstanceStatus::Cancelled,
+            "其它 item 的 W 实例应 Cancelled（item {index}）"
+        );
+    }
+    assert!(
+        node_gates(&reader, &run_id, "E")
+            .iter()
+            .all(|gate| gate.to_node != "J"),
+        "失败路径不得产生 join 投递（无 E→J GateResult）"
+    );
+    drop(reader);
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 e / j：key_field 重复 / key canonical
+// ---------------------------------------------------------------------------
+
+/// AC-17 e：`key_field=id` 重复 → 展开前失败 `RUN_FOREACH_ITEM_KEY_DUPLICATE`；
+/// 无 item 实例、无 expansion 行、run Failed（exit 1）。
+#[test]
+fn ac17e_duplicate_key_fails_before_instances() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("e.db");
+    let output = run_foreach(
+        dir.path(),
+        &db,
+        "dup_keys.json",
+        r#"{"start":{"items":[{"id":"x"},{"id":"x"}]}}"#,
+        false,
+    );
+    assert_exit(&output, 1, "AC-17 e run 应 Failed 退出 1");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(
+        payload["error"]["code"],
+        json!("RUN_FOREACH_ITEM_KEY_DUPLICATE")
+    );
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    assert_eq!(
+        common::run_row(&reader, &run_id).error_message.as_deref(),
+        Some("foreach node 'F' item key 'x' is duplicated at indexes 0,1"),
+        "message 冻结"
+    );
+    assert!(
+        expansions(&reader, &run_id).is_empty(),
+        "展开校验失败无 expansion 行"
+    );
+    for node in ["F", "W", "E"] {
+        assert!(item_instances(&reader, &run_id, node).is_empty());
+    }
+    drop(reader);
+}
+
+/// AC-17 j（key canonical）：number→`"1"`、bool→`"true"`、null/object/array→
+/// `{"$index":i}`、string 原值；非 NULL 重复 → KEY_DUPLICATE；真实 string key 不与
+/// 索引对象撞表示。
+#[test]
+fn ac17j_key_canonical_maps_and_duplicates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 成功：canonical 映射。
+    let ok_db = dir.path().join("k_ok.db");
+    let ok = run_foreach(
+        dir.path(),
+        &ok_db,
+        "keys_canonical.json",
+        r#"{"start":{"items":[{"id":1},{"id":true},{"id":null},{"id":{"a":1}},"s"]}}"#,
+        false,
+    );
+    assert_exit(&ok, 0, "canonical keys run");
+    let ok_payload = json_stdout(&ok);
+    assert_eq!(ok_payload["status"], json!("Completed"));
+    let ok_run = ok_payload["run_id"].as_str().expect("run_id").to_string();
+    let reader = TraceReader::open_readonly(&ok_db).expect("open trace");
+    assert_eq!(
+        expansion_keys(&expansions(&reader, &ok_run)[0]),
+        json!(["1", "true", {"$index": 2}, {"$index": 3}, {"$index": 4}]),
+        "number/bool canonical；null/object → 索引表示；string 原值"
+    );
+    drop(reader);
+
+    // 非 NULL 重复（canonical number）→ KEY_DUPLICATE。
+    let dup_db = dir.path().join("k_dup.db");
+    let dup = run_foreach(
+        dir.path(),
+        &dup_db,
+        "keys_canonical.json",
+        r#"{"start":{"items":[{"id":1},{"id":1}]}}"#,
+        false,
+    );
+    assert_exit(&dup, 1, "canonical 重复 run");
+    let dup_payload = json_stdout(&dup);
+    assert_eq!(
+        dup_payload["error"]["code"],
+        json!("RUN_FOREACH_ITEM_KEY_DUPLICATE")
+    );
+    let dup_run = dup_payload["run_id"].as_str().expect("run_id").to_string();
+    let reader = TraceReader::open_readonly(&dup_db).expect("open trace");
+    assert_eq!(
+        common::run_row(&reader, &dup_run).error_message.as_deref(),
+        Some("foreach node 'F' item key '1' is duplicated at indexes 0,1")
+    );
+    drop(reader);
+
+    // 真实 string key `{"$index":0}`（JSON 文本）与索引对象不撞表示。
+    let text_db = dir.path().join("k_text.db");
+    let text = run_foreach(
+        dir.path(),
+        &text_db,
+        "keys_canonical.json",
+        r#"{"start":{"items":[{"id":"{\"$index\":0}"},{"id":null}]}}"#,
+        false,
+    );
+    assert_exit(&text, 0, "string-key run");
+    let text_run = json_stdout(&text)["run_id"]
+        .as_str()
+        .expect("run_id")
+        .to_string();
+    let reader = TraceReader::open_readonly(&text_db).expect("open trace");
+    assert_eq!(
+        expansion_keys(&expansions(&reader, &text_run)[0]),
+        json!(["{\"$index\":0}", {"$index": 1}]),
+        "string key 保持字符串、索引派生为对象"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 f：max_items 超限 / items_port 非数组（含 unwrap 两种负例）
+// ---------------------------------------------------------------------------
+
+/// AC-17 f：N > max_items → `RUN_FOREACH_ITEMS_EXCEEDED`；items_port 非数组三变体
+/// （无同名键 object / 同名键非 array / 同名键标量）→ `RUN_FOREACH_ITEMS_NOT_ARRAY`；
+/// 均无 item 实例、无 expansion 行。
+#[test]
+fn ac17f_max_items_and_not_array_fail_before_instances() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // max_items=2，items 4 → EXCEEDED。
+    let exceeded_db = dir.path().join("f_exceeded.db");
+    let exceeded = run_foreach(
+        dir.path(),
+        &exceeded_db,
+        "exceeded.json",
+        r#"{"start":{"items":[1,2,3,4]}}"#,
+        false,
+    );
+    assert_exit(&exceeded, 1, "max_items 超限 run");
+    let exceeded_payload = json_stdout(&exceeded);
+    assert_eq!(
+        exceeded_payload["error"]["code"],
+        json!("RUN_FOREACH_ITEMS_EXCEEDED")
+    );
+    let exceeded_run = exceeded_payload["run_id"]
+        .as_str()
+        .expect("run_id")
+        .to_string();
+    let reader = TraceReader::open_readonly(&exceeded_db).expect("open trace");
+    assert_eq!(
+        common::run_row(&reader, &exceeded_run)
+            .error_message
+            .as_deref(),
+        Some("foreach node 'F' items 4 exceed max_items 2")
+    );
+    assert!(expansions(&reader, &exceeded_run).is_empty());
+    assert!(item_instances(&reader, &exceeded_run, "F").is_empty());
+    drop(reader);
+
+    // NOT_ARRAY 三变体。
+    let not_array_cases = [
+        (
+            r#"{"start":{"items":{"bad":1}}}"#,
+            "foreach node 'F' items_port 'items' is not an array (got object)",
+        ),
+        (
+            r#"{"start":{"items":{"items":{"x":1}}}}"#,
+            "foreach node 'F' items_port 'items' is not an array (got object)",
+        ),
+        (
+            r#"{"start":{"items":"oops"}}"#,
+            "foreach node 'F' items_port 'items' is not an array (got string)",
+        ),
+    ];
+    for (index, (inputs, expected_message)) in not_array_cases.into_iter().enumerate() {
+        let db = dir.path().join(format!("f_not_array_{index}.db"));
+        let output = run_foreach(dir.path(), &db, "not_array.json", inputs, false);
+        assert_exit(&output, 1, "NOT_ARRAY run");
+        let payload = json_stdout(&output);
+        assert_eq!(
+            payload["error"]["code"],
+            json!("RUN_FOREACH_ITEMS_NOT_ARRAY"),
+            "variant {index}"
+        );
+        let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+        let reader = TraceReader::open_readonly(&db).expect("open trace");
+        assert_eq!(
+            common::run_row(&reader, &run_id).error_message.as_deref(),
+            Some(expected_message),
+            "variant {index} 冻结 message"
+        );
+        assert!(expansions(&reader, &run_id).is_empty(), "variant {index}");
+        assert!(item_instances(&reader, &run_id, "F").is_empty());
+    }
+}
+
+/// AC-17 f 边界（C3）：F 唯一入边 gate=false（全部 settle=false）→ controller Skipped、
+/// 不展开、无 item 实例；run Completed（正常 skip 级联）。
+#[test]
+fn ac17f_controller_all_edges_settle_false_skips_without_expansion() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("controller_skip.db");
+    let output = run_foreach(
+        dir.path(),
+        &db,
+        "controller_skip.json",
+        r#"{"start":{"items":[1,2]}}"#,
+        false,
+    );
+    assert_exit(&output, 0, "controller skip run");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    assert!(
+        expansions(&reader, &run_id).is_empty(),
+        "controller Skipped 不展开 → 无 expansion 行"
+    );
+    for node in ["F", "W", "E"] {
+        assert!(item_instances(&reader, &run_id, node).is_empty());
+    }
+    let start_gates = node_gates(&reader, &run_id, "start");
+    assert_eq!(start_gates.len(), 1, "F 入边照常记 GateResult（to_node=F）");
+    assert_eq!(start_gates[0].to_node, "F");
+    assert!(!start_gates[0].passed, "gate=false");
+    drop(reader);
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 g：取消传播（全部 item Cancelled、run Cancelled）
+// ---------------------------------------------------------------------------
+
+/// AC-17 g：item 在飞时对 run 进程发 SIGINT → CLI 取消路径（exit 130）；
+/// 全部 W/E item 实例 Cancelled、run Cancelled、无 join 投递、`RunFinished{Cancelled}`。
+#[test]
+fn ac17g_cancel_propagates_to_all_items() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("cancel.db");
+    let inputs = r#"{"start":{"items":[{"id":0,"slow":true},{"id":1,"slow":true},{"id":2,"slow":true},{"id":3,"slow":true}]}}"#;
+    let run = ForeachRun::spawn(dir.path(), &db, "cancel.json", inputs, false);
+    let pid = run.pid();
+    poll_item_running(&db, "W");
+    send_sigint(pid);
+    let output = run.wait("AC-17 g cancel run");
+    assert_exit(&output, 130, "SIGINT 取消应 exit 130");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Cancelled"));
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    assert_eq!(
+        common::run_row(&reader, &run_id).status,
+        TraceRunStatus::Cancelled
+    );
+    for node in ["W", "E"] {
+        let rows = item_instances(&reader, &run_id, node);
+        assert!(!rows.is_empty(), "{node} 应有 item 实例");
+        assert!(
+            rows.iter()
+                .all(|row| row.status == TraceInstanceStatus::Cancelled),
+            "{node} 全部 item 实例应 Cancelled: {:?}",
+            rows.iter()
+                .map(|row| (row.item_index, row.status))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        item_instances(&reader, &run_id, "F")
+            .iter()
+            .all(|row| row.status.is_terminal()),
+        "取消后不得残留非终态 F item 实例"
+    );
+    assert!(
+        node_gates(&reader, &run_id, "E")
+            .iter()
+            .all(|gate| gate.to_node != "end"),
+        "取消路径不得产生 join 投递"
+    );
+    let finished = common::run_finished_payload(&reader, &run_id);
+    assert_eq!(finished["status"], json!("Cancelled"));
+    drop(reader);
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 h：region 内 human（每 item 独立 WaitingHuman / decide / join 有序）
+// ---------------------------------------------------------------------------
+
+/// AC-17 h：region 内 `builtin.human`，N=2 → 2 个 WaitingHuman item 实例（item_index 0/1），
+/// 分别 decide → join 有序结果、`human_decisions` 2 行不同 instance 且 consumed；
+/// trace 顺序 events → HumanDecision×2 → ForeachExpansion；human 图 `:memory:` 仍拒绝。
+#[test]
+fn ac17h_human_region_two_items_decide_separately_and_join_ordered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("human.db");
+    let run = ForeachRun::spawn(
+        dir.path(),
+        &db,
+        "human_items2.json",
+        r#"{"start":{"items":[{"id":"a"},{"id":"b"}]}}"#,
+        false,
+    );
+    let waiting = poll_waiting_items(&db, "H", 2);
+    assert_eq!(
+        waiting
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<Vec<u32>>(),
+        vec![0, 1],
+        "2 个 WaitingHuman item 实例 item_index 0/1"
+    );
+    let run_id: String = {
+        let conn = read_only_connect(&db);
+        conn.query_row(
+            "SELECT run_id FROM runs WHERE status IN ('Running','Paused')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("running run")
+    };
+    let decide0 = decide_item(
+        dir.path(),
+        &db,
+        &run_id,
+        &waiting[0].1,
+        "approved",
+        "alice",
+        Some("first"),
+    );
+    assert_exit(&decide0, 0, "item 0 decide approved");
+    let decide1 = decide_item(
+        dir.path(),
+        &db,
+        &run_id,
+        &waiting[1].1,
+        "rejected",
+        "bob",
+        Some("second"),
+    );
+    assert_exit(&decide1, 0, "item 1 decide rejected");
+
+    let output = run.wait("AC-17 h run");
+    assert_exit(&output, 0, "AC-17 h run 应 Completed");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let expected_results = json!([
+        {"decision": "approved", "reason": "first"},
+        {"decision": "rejected", "reason": "second"},
+    ]);
+    assert_eq!(
+        payload["run_output"],
+        json!({"results": expected_results}),
+        "join 有序结果 = 各 item human output 按 item_index 升序"
+    );
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    assert_eq!(
+        item_instances(&reader, &run_id, "H")
+            .iter()
+            .map(|row| (row.item_index, row.status))
+            .collect::<Vec<(u32, TraceInstanceStatus)>>(),
+        vec![
+            (0, TraceInstanceStatus::Completed),
+            (1, TraceInstanceStatus::Completed)
+        ]
+    );
+    let rows = expansions(&reader, &run_id);
+    assert_eq!(rows[0].item_count, 2);
+    assert_eq!(expansion_keys(&rows[0]), json!(["a", "b"]), "key_field=id");
+    let decisions = reader.human_decisions(&run_id).expect("decisions");
+    assert_eq!(decisions.len(), 2, "每 item 一行决策");
+    assert_ne!(decisions[0].instance_id, decisions[1].instance_id);
+    assert!(decisions.iter().all(|row| row.consumed_at.is_some()));
+    drop(reader);
+
+    // trace 顺序：events → HumanDecision×2 → ForeachExpansion；L1 replay 逐字节一致。
+    let trace = trace_json(&db, &run_id);
+    assert_exit(&trace, 0, "AC-17 h trace");
+    let kinds = trace_kinds(&trace);
+    let human_positions: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| kind.as_str() == "HumanDecision")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(human_positions.len(), 2);
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("ForeachExpansion"),
+        "展开行在 HumanDecision 之后: {kinds:?}"
+    );
+    let expansion_index = kinds.len() - 1;
+    assert!(
+        human_positions.iter().all(|index| *index < expansion_index),
+        "HumanDecision 行先于 ForeachExpansion: {kinds:?}"
+    );
+    let replay = replay_events_json(&db, &run_id);
+    assert_exit(&replay, 0, "AC-17 h replay");
+    assert_eq!(replay.stdout, trace.stdout);
+
+    // human 图 + `:memory:` 启动前预检拒绝（AC-17 h 尾）。
+    let memory = run_cli(
+        &[
+            "run".to_string(),
+            arg(&foreach_fixture("human_items2.json")),
+            "--inputs".to_string(),
+            r#"{"start":{"items":[{"id":"a"}]}}"#.to_string(),
+            "--db".to_string(),
+            ":memory:".to_string(),
+            "--python".to_string(),
+            python_program(),
+            "--python-path".to_string(),
+            arg(&repo_root().join("python")),
+            "--python-path".to_string(),
+            arg(&foreach_python_path()),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&memory, 3, ":memory: + human foreach 图应启动前拒绝");
+    let stderr = stderr_text(&memory);
+    assert!(stderr.contains("RUN_ENTRY_INVALID"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("trace_required_for_human"),
+        "stderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 j：E Skipped → RUN_FOREACH_ITEM_INCOMPLETE（无 Crashed、其它 item Cancelled）
+// ---------------------------------------------------------------------------
+
+/// AC-17 j：某 item 的 E 全部入边 gate=false → E Skipped → `RUN_FOREACH_ITEM_INCOMPLETE`
+/// （run Failed、无实例 Crashed、其它 item Cancelled、无 join 投递）。
+#[test]
+fn ac17j_exit_skipped_fails_item_incomplete_without_crash_or_join() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("exit_skipped.db");
+    let output = run_foreach(
+        dir.path(),
+        &db,
+        "exit_skipped.json",
+        r#"{"start":{"items":[{"id":0},{"skip":true},{"id":2}]}}"#,
+        false,
+    );
+    assert_exit(&output, 1, "AC-17 j run 应 Failed 退出 1");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Failed"));
+    assert_eq!(
+        payload["error"]["code"],
+        json!("RUN_FOREACH_ITEM_INCOMPLETE")
+    );
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    assert_eq!(
+        common::run_row(&reader, &run_id).error_message.as_deref(),
+        Some("foreach node 'F' item 1 exit node 'E' was skipped"),
+        "message 冻结"
+    );
+    let instances = reader.instances(&run_id).expect("instances");
+    assert!(
+        instances
+            .iter()
+            .all(|row| row.status != TraceInstanceStatus::Crashed),
+        "ITEM_INCOMPLETE 不得产生 Crashed 实例"
+    );
+    let e_items = item_instances(&reader, &run_id, "E");
+    assert_eq!(
+        e_items
+            .iter()
+            .map(|row| row.item_index)
+            .collect::<Vec<u32>>(),
+        vec![0, 1, 2],
+        "E 每个 item 一个实例"
+    );
+    assert_eq!(
+        e_items[1].status,
+        TraceInstanceStatus::Skipped,
+        "E item1（gate=false）Skipped"
+    );
+    // 其余 item 在冷峻失败时已被取消或已先完成（两者都是合法终态；不得残留非终态）。
+    for row in [&e_items[0], &e_items[2]] {
+        assert!(
+            matches!(
+                row.status,
+                TraceInstanceStatus::Cancelled | TraceInstanceStatus::Completed
+            ),
+            "E item{} 终态为 Cancelled/Completed，实际 {:?}",
+            row.item_index,
+            row.status
+        );
+    }
+    assert!(
+        item_instances(&reader, &run_id, "W")
+            .iter()
+            .all(|row| row.status.is_terminal()),
+        "失败后不得残留非终态 W item 实例"
+    );
+    assert!(
+        node_gates(&reader, &run_id, "E").is_empty(),
+        "E 无实例完成 → 无 join 投递（无 E 相关 GateResult）"
+    );
+    drop(reader);
+}
+
+// ---------------------------------------------------------------------------
+// AC-17 i 补充：trace 输出顺序 / --stats 不新增字段 / L1 replay / v5 迁移后 foreach 端到端
+// ---------------------------------------------------------------------------
+
+/// AC-17 i / REV-091 P3：`trace --json` 仅在事件行后追加 ForeachExpansion；
+/// `--stats` 不新增字段；人类可读输出含 `foreach node='F' items=3`；L1 replay 逐字节一致。
+#[test]
+fn ac17i_trace_expansion_output_order_and_stats_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("trace_i.db");
+    let output = run_foreach(
+        dir.path(),
+        &db,
+        "entry_items3.json",
+        r#"{"start":{"items":[{"id":"a"},{"id":"b"},{"id":"c"}]}}"#,
+        false,
+    );
+    assert_exit(&output, 0, "AC-17 i run");
+    let run_id = json_stdout(&output)["run_id"]
+        .as_str()
+        .expect("run_id")
+        .to_string();
+
+    let trace = trace_json(&db, &run_id);
+    assert_exit(&trace, 0, "trace --json");
+    let lines = ndjson_lines(&trace);
+    let expansion_lines: Vec<&Value> = lines
+        .iter()
+        .filter(|line| line["kind"] == json!("ForeachExpansion"))
+        .collect();
+    assert_eq!(expansion_lines.len(), 1);
+    let event_kinds = [
+        "RunStarted",
+        "Transition",
+        "GateResult",
+        "NodeTimedOut",
+        "NodeAbandoned",
+        "Streaming",
+        "RunFinished",
+    ];
+    assert!(
+        lines
+            .iter()
+            .take(lines.len() - 1)
+            .all(|line| event_kinds.contains(&line["kind"].as_str().expect("kind"))),
+        "展开行之前的行必须是既有 7 类事件（events.kind 不变）"
+    );
+
+    // --stats：字段集合冻结（不新增 human/foreach 统计）。
+    let stats = run_cli(
+        &[
+            "trace".to_string(),
+            run_id.clone(),
+            "--db".to_string(),
+            arg(&db),
+            "--stats".to_string(),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&stats, 0, "trace --stats");
+    let stats_payload = json_stdout(&stats);
+    let mut keys: Vec<&str> = stats_payload
+        .as_object()
+        .expect("stats object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "abandoned",
+            "db",
+            "duration_ms",
+            "events",
+            "instances",
+            "run_id",
+            "status",
+            "streaming",
+            "timeouts",
+            "trace_backpressure",
+        ],
+        "--stats 不新增字段（REV-091 P3）: {stats_payload}"
+    );
+
+    // 人类可读输出含展开摘要。
+    let human = run_cli(
+        &[
+            "trace".to_string(),
+            run_id.clone(),
+            "--db".to_string(),
+            arg(&db),
+        ],
+        dir.path(),
+    );
+    assert_exit(&human, 0, "trace 人类输出");
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout.contains("foreach node='F' items=3 keys=["),
+        "人类可读展开摘要: {stdout}"
+    );
+
+    let replay = replay_events_json(&db, &run_id);
+    assert_exit(&replay, 0, "replay events");
+    assert_eq!(replay.stdout, trace.stdout, "L1 replay 与 trace 逐字节一致");
+}
+
+/// AC-17 i：旧 v5 库上端到端跑 foreach 图（真 CLI run 触发 v5→v6 迁移）→ 迁移+展开+join
+/// 全部成立；旧 run L1 golden 不变；新 run L2 per-item outputs 回放匹配。
+#[test]
+fn ac17i_v5_migrated_db_foreach_run_and_l2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (db, old_run_id) = seeded_v5_db(dir.path());
+    let output = run_foreach(
+        dir.path(),
+        &db,
+        "entry_items3.json",
+        r#"{"start":{"items":[{"id":"a"},{"id":"b"},{"id":"c"}]}}"#,
+        true,
+    );
+    assert_exit(&output, 0, "旧 v5 库上的 foreach run");
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let new_run_id = payload["run_id"].as_str().expect("run_id").to_string();
+    assert_ne!(new_run_id, old_run_id);
+
+    let conn = read_only_connect(&db);
+    assert_eq!(user_version(&conn), 6, "v5→v6 迁移完成");
+    assert_eq!(migration_versions(&conn), vec![1, 2, 3, 4, 5, 6]);
+    assert!(sqlite_object_exists(&conn, "table", "foreach_expansions"));
+    assert_eq!(backup_files(dir.path()).len(), 1, "v5→v6 恰一份备份");
+    drop(conn);
+
+    let reader = TraceReader::open_readonly(&db).expect("open trace");
+    let rows = expansions(&reader, &new_run_id);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].item_count, 3);
+    assert_eq!(
+        item_instances(&reader, &new_run_id, "W")
+            .iter()
+            .map(|row| row.item_index)
+            .collect::<Vec<u32>>(),
+        vec![0, 1, 2]
+    );
+    drop(reader);
+
+    // 旧 run：与迁移前 v5 golden 一致。
+    let old_trace = trace_json(&db, &old_run_id);
+    assert_exit(&old_trace, 0, "迁移后旧 run trace");
+    assert_eq!(
+        ndjson_lines(&old_trace),
+        expected_trace("v5_expected_trace.json"),
+        "旧 v5 run L1 golden 不变"
+    );
+
+    // 新 run：L2 per-item outputs 回放匹配。
+    let l2 = run_cli(
+        &[
+            "replay".to_string(),
+            "--run".to_string(),
+            new_run_id.clone(),
+            "--mode".to_string(),
+            "outputs".to_string(),
+            "--db".to_string(),
+            arg(&db),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_exit(&l2, 0, "迁移后 foreach run L2 replay");
+    let l2_payload = json_stdout(&l2);
+    assert_eq!(l2_payload["matched"], json!(true));
+    assert_eq!(l2_payload["recorded_outputs"], json!(10));
+    assert_eq!(l2_payload["original_output"], l2_payload["replayed_output"]);
 }

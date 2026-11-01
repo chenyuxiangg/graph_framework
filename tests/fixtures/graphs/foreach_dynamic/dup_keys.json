@@ -1,0 +1,108 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "foreach-dup-key",
+    "description": "AC-17 e：key_field=id 重复 → RUN_FOREACH_ITEM_KEY_DUPLICATE（展开前失败、无 item 实例）"
+  },
+  "entry_points": [
+    "start"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    },
+    {
+      "id": "F",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "items",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "fanout"
+      },
+      "foreach": {
+        "items_port": "items",
+        "join": "end",
+        "key_field": "id"
+      }
+    },
+    {
+      "id": "W",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "task",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "work"
+      }
+    },
+    {
+      "id": "E",
+      "type": "python_node",
+      "inputs": [
+        {
+          "name": "work",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {
+        "module": "foreach_dynamic",
+        "function": "exit_node"
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "inputs": [
+        {
+          "name": "results",
+          "type": "any",
+          "required": true
+        }
+      ],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to_node": "F",
+      "to_input_port": "items"
+    },
+    {
+      "from": "F",
+      "to_node": "W",
+      "to_input_port": "task"
+    },
+    {
+      "from": "W",
+      "to_node": "E",
+      "to_input_port": "work"
+    },
+    {
+      "from": "E",
+      "to_node": "end",
+      "to_input_port": "results"
+    }
+  ]
+}
