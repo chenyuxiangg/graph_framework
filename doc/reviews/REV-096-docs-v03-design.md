@@ -2,6 +2,8 @@
 
 > **评审基准**：分支 `docs/docs-v03-design` 提交 `2babdc8`（基于 main `5d7cc89`；14 files 纯 `doc/**`，+861/−9）。**注**：评审期间作者工作区已出现 DR-008/009/010/011、research、00/05/07 的**未提交**修改（docs-dev 按 arch-researcher 结论收口中），不属于本记录基准；本记录条件针对 `2babdc8`，关闭后由评审人追加 §6 确认。
 >
+> **最终状态（2026-11-01）**：首轮「有条件通过」（C1–C5）→ 作者收口 `80a42c1`（C1–C5 主体）+ `7659ec8`（6 项跨文档残留）→ 评审人只读复核 + `check.sh` 通过，**结论已改为「通过」**（见 §6；§1.1/§1.2 的 ⚠️ 为首轮核对历史，条件已关闭）。
+>
 > **输入材料**：task-54（用户决策/口径）、task-55（作者任务）、Lead 裁决（DR-008 §8 八项）、spec-v1.2 00/02/05/06/07、DR-001..007、`doc/analysis/research-harness-alternatives.md`/`research-codex-embed.md`、`doc/research-v03-capabilities.md`、DR-008..011、**arch-researcher 498 行报告**（`/tmp/v03-research.md`，2026-11-01；Lead 转发要点已纳入 C1–C4）。
 
 - **分支**：`docs/docs-v03-design`
@@ -13,9 +15,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-范围/波次/兼容红线/AC 矩阵与 Lead 八项裁决**主体成立**；但 **arch-researcher 结论（2026-11-01）与作者稿存在多处事实冲突**，且发现若干**文档内部矛盾与格式缺陷**。P0=0；**P1 条件 C1–C5**（均可由 docs 单 commit 关闭）；P2/P3 建议见 §4。
+> **结论历史**：首轮（2026-11-01，基准 `2babdc8`）为「**有条件通过**」——C1–C5 条件；作者收口提交 `80a42c1`（C1–C5 主体）+ `7659ec8`（6 项跨文档残留）后，评审人只读复核 + `bash scripts/dev/check.sh` 通过，条件全部关闭（逐条见 §6），结论改为**通过**。
+>
+> 首轮核对结论（历史保留）：范围/波次/兼容红线/AC 矩阵与 Lead 八项裁决**主体成立**；但 arch-researcher 结论（2026-11-01）与作者稿存在多处事实冲突，且发现若干文档内部矛盾与格式缺陷。P0=0；P1 条件 C1–C5（均由 docs 单 commit 关闭）；P2/P3 建议见 §4。以下 §1.1/§1.2 为**首轮核对快照**（⚠️ 项均已在 §6 关闭）。
 
 ### 1.1 范围 / 波次 / 裁决核对
 
@@ -136,18 +140,59 @@ git diff --name-only main...HEAD | grep -c PROVENANCE   # 0（V1 不重算，V5 
 - arch-researcher 报告（`/tmp/v03-research.md`，498 行）关键事实已用于 C1（MCP 双 era/rmcp 3.8/命名/超时）、C2（Codex 8 事件/无 token delta/ACP 修正）、C3（skills 严格字段）、C4（trace 不 v7 确认）——评审人核对了其引用来源与结论表述（报告未入库，需由 docs-dev 以 URL 引用方式并入 research/DR）。
 - **注**：作者工作区在本记录落盘时已有未提交的收口修改（DR-008/009/010/011、research、00、05、07 共 8 files），docs-dev 依据 Lead 转发的 arch-researcher 结论正在关闭 C1–C3/C5 部分项；本记录条件以 `2babdc8` 为基准，最终以作者 commit + 评审人 §6 复审为准。
 
-## 6. 条件关闭记录（"有条件通过"）
+## 6. 条件关闭复核（"有条件通过" → "通过"）
 
-| 条件 | 状态 | 关闭要求 |
+### 6.1 条件关闭状态
+
+| 条件 | 状态 | 关闭证据（作者提交 / 文件） |
 |---|---|---|
-| C1 DR-010 按 arch 事实重写（双 era/无状态/rmcp/命名/MRTR/超时/进程/─allow-mcp→`--allow-mcp`/trace） | **open** | docs commit：DR-010 + 05/06/07/research 同步 |
-| C2 DR-011 Codex 降级映射 + ACP 修正 + 进程模型 + 组合约束 | **open** | docs commit：DR-011 + 07 AC-20 + 05 §5.13.3 |
-| C3 DR-009 严格细节（name/description/registry/metadata/allowed-tools/catalog/skill_view/无效与未引用/默认目录） | **open** | docs commit：DR-009 + 07 AC-18 + research §1 |
-| C4 spec 一致性（05 改号 §5.13/ACP 注记/H6 错误枚举/HARNESS_PLUGIN_TIMEOUT/常量） | **open** | docs commit：00/05 + DR-011/010 引用 |
-| C5 文档一致性/格式（DR-008 依赖与 W5、DR-010 https/错误码、index/06/02 格式、research/progress 状态） | **open** | docs commit（可与 C1–C4 同一 commit） |
+| C1 DR-010 按 arch 事实重写（双 era/无状态/rmcp/命名/MRTR/超时/进程/`--allow-mcp`/trace） | **closed** | `80a42c1`：DR-010 全文重写（§0/§1 双 era/§2/§3/§4/§5/§6/§7/§8/§9/§10/§11）；05 §5.14.2、06 §6.14、07 AC-19、research §0.1/§4 同步；`7659ec8`：`call_id` 三处改原生 id（`DR-010:15/126/175`），与 05/06/07 一致；`#<n>` 全库 0 残留 |
+| C2 DR-011 Codex 降级映射 + ACP 修正 + 进程模型 + 组合约束 | **closed** | `80a42c1`：DR-011 §0/§1/§2/§3/§4/§5/§6/§8/§9（Codex 8 类 ThreadEvent/无 token delta/iterations=1/退出码 0 或 1/`-o` 文件/cached 丢弃；ACP 修正；每 run 常驻/attempt 新 session/`provider_capability_conflict`/禁止双写/常量/StopReason 不新增）；`7659ec8`：`streaming=false → 只发 result（无 event delta）`，DR-011 §2.1/§3.1/AC-20 c 统一，07 AC-20 b/c/e 改 result |
+| C3 DR-009 严格细节（name/description/registry/metadata/allowed-tools/catalog/skill_view/无效与未引用/默认目录） | **closed** | `80a42c1`：DR-009 全文（`<assets-dir>/skills`/`ZGRAPH_SKILLS`/strict name=父目录/description 1–1024 且 >1024 拒绝/`compatibility`/`metadata map<string,string>`/`allowed-tools` 不授权/单层/`MAX_SKILLS=16`/catalog 4096/正文 32KiB 首尾截断/资源清单/去重/缺失 vs 非法 vs 未引用/`TOOL_ERROR{view_budget}`）；`7659ec8`：05 §5.14.1、DR-008 §2 表、00 banner 同步单码与新目录/env；research §1.2/§2.1 同步 |
+| C4 spec 一致性（05 改号 §5.13→§5.14/ACP 注记/H6 错误枚举/PLUGIN_TIMEOUT/常量） | **closed** | `80a42c1`：05 H6 增 3 kind 例外；00 §0.3 `SkillInvalid`/`Mcp`/`Plugin` + §0.4 单码（`HARNESS_SKILL_INVALID`/`HARNESS_MCP_ERROR`/`HARNESS_PLUGIN_ERROR`；MCP 工具失败仍 `TOOL_ERROR`；无 PLUGIN_TIMEOUT）；§0.5 补 `MCP_INIT_TIMEOUT_MS`/`MCP_TOOLS_LIST_TIMEOUT_MS`/`MAX_SKILLS`/`SKILL_CATALOG_MAX_CHARS`/`MCP_HTTP_MAX_CONCURRENCY`/`MCP_CONTROL_REQUEST_TIMEOUT_MS`/`HARNESS_PLUGIN_TOTAL_OUTPUT_MAX_BYTES`/`MAX_EVENTS`/`CANCEL_GRACE_MS`；05 §5.14 节首编号注（既有 `## 5.13` 确为 M4 D13–D21）；05:1255 ACP 修正；missing-server 统一 `HARNESS_MCP_ERROR{server_not_found}`；`7659ec8`：DR-009 §6 映射 `SkillInvalid`、07 AC-18 d `TOOL_ERROR`、00 banner 单码 |
+| C5 文档一致性/格式（DR-008 依赖与 W5、DR-010 https/错误码、index/06/02 格式、research/progress 状态） | **closed** | `80a42c1`：DR-008 §0 串行/§7 W5 已裁决；DR-010 §6 旧 http 句删；index 行合并修复；06 M6 banner 拆行；02 双空行清理；research 状态/§0.1/URL；progress；ISSUE-155 fixed；裁决表 A–D；perf-baseline 引用；AC-19 双 era 两桩；`7659ec8`：DR-008 §5 AC-19 双 era 措辞、DR-010 §8「不单列」行去除 |
 
-- 关闭方式：作者单 docs commit（建议 `docs(docs): 收口 REV-096 条件（arch-researcher 事实/格式）`，正文 `Review: REV-096` + `Agent: docs-dev`）→ 评审人逐条复核 + `bash scripts/dev/check.sh` + 追加本表「closed」并把 §1 结论改为**通过**（保留首轮有条件通过记录）→ Lead merge + push。
-- 合并门禁：当前 HEAD 为 `2babdc8` 时**不可 merge**（结论为有条件通过）；条件全部关闭并复审通过后 merge。
+### 6.2 首轮复核残留（6 项）关闭确认
+
+| # | 首轮残留 | 状态 | `7659ec8` 关闭证据 |
+|---|---|---|---|
+| R1 | DR-010 `call_id` 仍伪造 `#<n>`（`:15/:126/:175`） | **closed** | 三处改「保留 provider/LLM 原生 id（不伪造）；识别只用 `tool_name`」；全库 `#<n>` 0 残留 |
+| R2 | streaming 语义矛盾（`streaming=false` 却可发整消息 delta；07 AC-20 c/e 用旧 `final`） | **closed** | `streaming=false → 只发 result、不发 event delta`；DR-011 §2.1/§3.1/AC-20 c 与 07 AC-20 b/c/e 统一用 `result` |
+| R3 | 05 §5.14.1 / DR-008 §2 / 00 banner 仍用旧目录/env/码位 | **closed** | 05 §5.14.1、DR-008 §2 skills/harness 行、00:10 banner 全部改 `<assets-dir>/skills`/`ZGRAPH_SKILLS`/3 个单码 |
+| R4 | DR-009 §6 `Crashed(Config)` 与 00 `SkillInvalid` 冲突 | **closed** | DR-009:133 改 `HARNESS_SKILL_INVALID → Crashed(HarnessErrorKind::SkillInvalid)`；`HARNESS_CONFIG_LOAD{skill_not_found}` → `Crashed(Config)` |
+| R5 | 07 AC-18 d `view_budget` 码写 `HARNESS_SKILL_INVALID` | **closed** | 改 `TOOL_ERROR{reason:"view_budget"}`（不新增码），与 DR-009 §5/§6、00 一致 |
+| R6 | research `:72` 旧 initialize 生命周期、`:52` 旧目录/env | **closed** | 改双 era（`2026-07-28` 无状态 + `2025-11-25` legacy）；`<assets-dir>/skills`/`ZGRAPH_SKILLS` |
+| P2 | DR-010:74 `--allow-mcp` 失败路径未冻结 | **closed** | 冻结为「run 启动前失败、不产生 run、不启动 server；CLI exit 3（`RUN_ENTRY_INVALID` 入口校验口径）」；DR-010 §2.2/§9 + AC-19 c 断言同步 |
+
+### 6.3 最终门禁复核（评审人执行）
+
+```bash
+git status --porcelain                 # 空（worktree 干净）
+git diff --stat 80a42c1..7659ec8       # 8 files, +21/−22（纯 doc/**）
+bash scripts/dev/check.sh              # CHECK PASSED
+# 残留抽查（全库）：
+grep -r '#<n>' doc/decisions doc/spec-v1.2                      # 0
+grep -r 'ZGRAPH_SKILLS_DIR|.zgraph/skills|<skills_dir>' doc/    # 0（历史评审记录/本记录除外）
+grep -r 'HARNESS_PLUGIN_TIMEOUT|HARNESS_MCP_CONFIG|HARNESS_PLUGIN_CONFIG' doc/  # 仅「无/不新增」否定句
+grep -r 'mcp:<server>' doc/decisions doc/spec-v1.2              # 0
+# 正向确认：DR-010 三处 + 05/06/07 共 4 处「原生 id」；DR-009/00 各「HarnessErrorKind::SkillInvalid」；
+# 07 AC-18 d「TOOL_ERROR{view_budget}」；DR-010「exit 3」3 处（§2.2/§9/AC-19 c）
+```
+
+- **分支累计**：`5d7cc89..7659ec8` = **17 files, +1105/−11**（纯 `doc/**`；含新增 5 文件 + 既有 spec/index/台账更新；无代码/测试）。
+- **结论**：C1–C5 全部 closed，首轮 6 项残留全部 closed；**通过**。
+
+### 6.4 非阻塞 P2/P3（本批未要求关闭，建议 V2 前顺手修或登台账）
+
+- **P2-a**：05 §5.14.3 与 DR-011/00 有两处小漂移——取消宽限写 **SIGTERM 3s**（DR-011 §0/§9 与 00 `HARNESS_PLUGIN_CANCEL_GRACE_MS=2000` 为 **2s**）；`HARNESS_PLUGIN_*` 应写 `HARNESS_PLUGIN_ERROR`；协议字段 `final` 应写 `result`。以 DR-011/00 为准，建议 05 一行修正（不阻塞 V1）。
+- **P2-b**：05 §5.14.2 未写 `--allow-mcp` 的「run 启动前失败/不产生 run/exit 3」（DR-010 §2.2/§9、07 AC-19 c 已冻结）；registry 写作 `<assets_dir>`（DR-010 为 `<assets-dir>`）——建议同步一句。
+- **P3-a**：07 AC-18 a/b 仍用 `skills/<name>` 与「元数据」措辞（DR-009 为 `<assets-dir>/skills`/资源清单）；AC-18 b「重复调用幂等」与「重复激活去重」可再统一。
+- **P3-b**：00 §0.5 `MCP_DEFAULT_TIMEOUT_MS` 注释仍写「initialize/tools-list/call 默认超时」（init/list 已有独立 10s 常量），建议注释改为 call 默认。
+- 以上均**不阻塞** V1 merge；建议 V2（skills 实现）前随文档小修或登记 ISSUE-156+。
+
+### 6.5 合并门禁
+
+- 结论已为 `通过`；worktree 干净、基于 `origin/main`（`5d7cc89`）；评审记录含 `分支: docs/docs-v03-design` 与 `结论：通过` → 满足 `merge.sh` 前置，Lead 可 merge + push；之后开 V2（skills 实现）。
 
 ## 7. 遗留问题
 
