@@ -1,4 +1,4 @@
-# v3/v4 trace seed 与 expected trace 的生成方式（AC-14 h / ISSUE-104 / AC-16 e）
+# v3/v4/v5 trace seed 与 expected trace 的生成方式（AC-14 h / ISSUE-104 / AC-16 e / AC-17 i）
 
 > 资产：
 > - `schema_v3_seed.sql`（v3 schema + 一条 Completed 旧 run，`PRAGMA user_version=3`）、
@@ -6,7 +6,10 @@
 >   `seed_graph.json`（生成 seed 的确定性小图）；
 > - **W3a / AC-16 e 新增**：`schema_v4_seed.sql`（v4 schema + 一条 Completed 旧 run，
 >   `PRAGMA user_version=4`）与 `v4_expected_trace.json`（**v4-era CLI 在迁移前**生成的
->   旧 run `zgraph trace --json` 冻结 golden；用于断言 v4→v5 迁移不改写历史事件）。
+>   旧 run `zgraph trace --json` 冻结 golden；用于断言 v4→v5 迁移不改写历史事件）；
+> - **W4b / AC-17 i 新增**：`schema_v5_seed.sql`（v5 schema + 一条 Completed 旧 run，
+>   `PRAGMA user_version=5`）与 `v5_expected_trace.json`（v5-era CLI 迁移前 golden；
+>   用于断言 v5→v6 迁移不改写历史事件、旧 run 的 item 列默认 0/NULL）。
 >
 > 背景：v3 seed / v0.1.0 expected 是 W1 的遗留缺口（**ISSUE-104**），由 W2a e2e 交付（DR-005 §4.3/§7 h）。
 > 旧 run 的 `events.payload` 保持 v3 形态（`GateResult.record` **不含** `deferred/attempt/verdict`）；
@@ -99,12 +102,12 @@ PY
 
 校验（e2e 内同样断言）：
 
-- 迁移后 `user_version=5`、`schema_migrations` 1/2/3/4/5、`.bak.v3-*` 存在且备份
-  `user_version=3`（W3a / schema v5 起；v3→v4 迁移步骤本身不变，链式继续到 v5）；
+- 迁移后 `user_version=6`、`schema_migrations` 1..6、`.bak.v3-*`/`.bak.v4-*`/`.bak.v5-*`
+  各一份且备份版本分别为 3/4/5（v3→v4→v5→v6 链式；各步迁移 SQL 本身不变）；
 - 旧 `gate_results` 三列 = `0 / 0 / NULL`；旧 `GateResult.record` 不含三键；
 - `zgraph trace <old> --json` == `v0.1.0_expected_trace.json`；
 - `zgraph replay --run <old> --mode events --json` 与 `trace --json` 逐字节一致；
-- 只读 `trace` 对未迁移的 v3 库 exit 4（`unsupported schema version=3, expected 5`）且不迁移。
+- 只读 `trace` 对未迁移的 v3 库 exit 4（`unsupported schema version=3, expected 6`）且不迁移。
 
 ## 5. v4 seed 与 v4 expected trace（W3a AC-16 e）
 
@@ -149,10 +152,11 @@ PY
 
 - `schema_v4_seed.sql` 建库后 `user_version=4`、1 条 Completed run、7 events、
   2 instances（start Completed / b Skipped）、4 transitions、1 gate_result；
-- v5 CLI 只读 `trace`/`replay` 对 v4 → exit 4（`unsupported schema version=4, expected 5`），
+- 当前 v6 CLI 只读 `trace`/`replay` 对 v4 → exit 4（`unsupported schema version=4, expected 6`），
   `user_version` 仍 4、无 `.bak.*` 备份；
-- v5 CLI `run` 打开 v4 → 迁移 v5：`.bak.v4-*` 恰一份且备份 `user_version=4`、
-  `user_version=5`、`schema_migrations` 1..5、`human_decisions` + pending 索引存在、
+- 当前 v6 CLI `run` 打开 v4 → 链式迁移 v5→v6：`.bak.v4-*`/`.bak.v5-*` 各一份且备份
+  `user_version=4`/`5`、`user_version=6`、`schema_migrations` 1..6、`human_decisions` +
+  pending 索引存在、`foreach_expansions` 表存在、`instances` 新列 `item_index=0`/`item_key=NULL`、
   `instances`/`transitions`/`gate_results`/`events` 行逐列保留；
 - 迁移后旧 run `trace --json` == `v4_expected_trace.json`，`replay --mode=events --json`
   与 `trace --json` 逐字节一致。

@@ -84,3 +84,7 @@ path = "max_fanout.rs"
 [[test]]
 name = "human_decide"
 path = "human_decide.rs"
+
+[[test]]
+name = "dynamic_fanout"
+path = "dynamic_fanout.rs"
