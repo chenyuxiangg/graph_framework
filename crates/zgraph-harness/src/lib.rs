@@ -57,6 +57,8 @@ mod error;
 mod executor;
 mod llm;
 pub mod mcp;
+mod plugin;
+mod provider;
 mod record;
 pub mod skills;
 mod tools;
@@ -70,7 +72,10 @@ pub use budget::{
     check_and_trim, estimate_message_tokens, estimate_messages_tokens, estimate_tokens,
     prompt_budget, BudgetSegments,
 };
-pub use config::{agent_index, agent_uses_mcp, load_agent, AgentConfig, LoadedAgent, ModelConfig};
+pub use config::{
+    agent_index, agent_uses_mcp, load_agent, AgentConfig, HarnessConfig, HarnessKind, LoadedAgent,
+    ModelConfig,
+};
 pub use constants::*;
 pub use ctx::{CancelToken, HarnessCtx};
 pub use error::{HarnessError, CODE_CONTEXT_OVERFLOW, CODE_TOOL_ERROR};
@@ -85,6 +90,10 @@ pub use mcp::RealMcpFactory;
 pub use mcp::{
     McpCallOutcome, McpClient, McpClientError, McpClientErrorKind, McpClientFactory, McpConfig,
     McpPlan, McpRun, McpServerSpec, McpTool, McpTransport,
+};
+pub use plugin::SubprocessProvider;
+pub use provider::{
+    AgentProvider, AgentProviderKind, BuiltinProvider, ProviderRequest, ProviderTrace,
 };
 pub use record::{LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
 pub use skills::SkillEntry;

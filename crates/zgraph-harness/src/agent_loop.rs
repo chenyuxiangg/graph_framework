@@ -965,6 +965,7 @@ mod tests {
                 tools: tool_names,
                 skills: Vec::new(),
                 mcp: None,
+                harness: None,
                 input_mapping: BTreeMap::new(),
                 max_iterations,
                 llm_timeout_ms: 5_000,

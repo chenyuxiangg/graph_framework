@@ -22,12 +22,15 @@ use zgraph_kernel::{
 };
 use zgraph_worker::WorkerLimits;
 
-use crate::agent_loop::{run_agent, AgentRun, RunFailure};
-use crate::config::{load_agent_with_options, peek_agent_node_timeout, ModelConfig};
+use crate::agent_loop::RunFailure;
+use crate::assemble::effective_input_mapping;
+use crate::config::{load_agent_with_options, peek_agent_node_timeout, HarnessKind, ModelConfig};
 use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
-use crate::ctx::{CancelToken, HarnessCtx};
+use crate::ctx::HarnessCtx;
 use crate::error::HarnessError;
 use crate::llm::LlmProvider;
+use crate::plugin::SubprocessProvider;
+use crate::provider::{AgentProvider, BuiltinProvider, ProviderRequest, ProviderTrace};
 use crate::record::LlmCallRecorder;
 use crate::tools::{acquire_tool_permits, ToolRegistry, ToolRunner};
 
@@ -85,6 +88,12 @@ pub struct HarnessExecutor {
     /// REV-098 C1：同一 run 的多个 agent 共享 client/tools 缓存，但 servers/allow
     /// 按 agent 隔离；换 run 时关闭旧 pool。
     mcp_run: tokio::sync::Mutex<Option<McpSessionRuns>>,
+    /// v0.3/V4：内置 provider（缺省；包装既有 `run_agent` 路径，行为不变）。
+    builtin_provider: BuiltinProvider,
+    /// v0.3/V4：外部子进程 harness（每 run 每 provider 常驻 adapter）。
+    ///
+    /// 懒启动：无 `harness.kind="subprocess"` 配置时零进程/零 IO。
+    subprocess_provider: SubprocessProvider,
 }
 
 /// 单 run 的 MCP 会话状态（executor 内部）。
@@ -108,6 +117,8 @@ impl HarnessExecutor {
             mcp_allowed: false,
             mcp_factory: crate::mcp::default_factory(),
             mcp_run: tokio::sync::Mutex::new(None),
+            builtin_provider: BuiltinProvider::new(),
+            subprocess_provider: SubprocessProvider::new(),
         }
     }
 
@@ -130,6 +141,8 @@ impl HarnessExecutor {
             mcp_allowed: false,
             mcp_factory: crate::mcp::default_factory(),
             mcp_run: tokio::sync::Mutex::new(None),
+            builtin_provider: BuiltinProvider::new(),
+            subprocess_provider: SubprocessProvider::new(),
         }
     }
 
@@ -150,6 +163,8 @@ impl HarnessExecutor {
             mcp_allowed: false,
             mcp_factory: crate::mcp::default_factory(),
             mcp_run: tokio::sync::Mutex::new(None),
+            builtin_provider: BuiltinProvider::new(),
+            subprocess_provider: SubprocessProvider::new(),
         }
     }
 
@@ -170,6 +185,8 @@ impl HarnessExecutor {
             mcp_allowed: false,
             mcp_factory: crate::mcp::default_factory(),
             mcp_run: tokio::sync::Mutex::new(None),
+            builtin_provider: BuiltinProvider::new(),
+            subprocess_provider: SubprocessProvider::new(),
         }
     }
 
@@ -203,6 +220,14 @@ impl HarnessExecutor {
         if let Some(session) = guard.take() {
             session.pool.shutdown().await;
         }
+    }
+
+    /// v0.3/V4：关闭全部外部 harness 进程（幂等；CLI 所有 run 出口调用）。
+    ///
+    /// 与 [`Self::close_mcp`] 并列：无 subprocess provider 时零开销。DR-011 §2.2：
+    /// 关 stdin → `SIGTERM` 2s → `SIGKILL` 进程组；不残留孤儿进程。
+    pub async fn close_provider(&self) {
+        self.subprocess_provider.close_provider().await;
     }
 
     /// v0.3/V3：注入 MCP 客户端工厂（测试 seam；生产用默认 rmcp 工厂）。
@@ -335,6 +360,9 @@ impl NodeExecutor for HarnessExecutor {
             agent_id,
             node_mapping,
             node_max_iterations,
+            node_id: execution.ctx.node_id().to_string(),
+            attempt: execution.ctx.attempt(),
+            item_index: execution.ctx.item_index(),
             ctx: self.context_for(execution.ctx),
             inputs: execution.inputs.clone(),
             declared_ports: execution.node.inputs.clone(),
@@ -412,6 +440,12 @@ struct AgentCallJob {
     agent_id: String,
     node_mapping: BTreeMap<String, String>,
     node_max_iterations: Option<u32>,
+    /// 执行节点 ID（外部 harness `run.trace.node_id`）。
+    node_id: String,
+    /// 尝试序号（外部 harness session reset 判定）。
+    attempt: u32,
+    /// foreach item 下标（非 region 恒 0）。
+    item_index: u32,
     ctx: Arc<dyn HarnessCtx>,
     inputs: HashMap<PortName, Value>,
     declared_ports: Vec<InputPort>,
@@ -469,24 +503,60 @@ impl HarnessExecutor {
             .clamp(1, 50);
         let tools_dir = absolute(&self.settings.tools_dir);
         let skill_view_budget = self.skill_view_budget(job.ctx.run_id());
-        let cancel = CancelToken::new(job.ctx.clone());
-        let run = AgentRun {
-            agent: &agent,
+        // v0.3/V4：provider 选择（缺省 builtin；显式 builtin 等义）。
+        let harness_kind = agent
+            .config
+            .harness
+            .as_ref()
+            .map(|harness| harness.kind)
+            .unwrap_or(HarnessKind::Builtin);
+        if harness_kind == HarnessKind::Subprocess && job.node_max_iterations.is_some() {
+            // 外部 harness 拥有自己的 loop：节点级 max_iterations 覆盖 → 能力冲突。
+            return Err(config_failure(
+                HarnessError::config_load(
+                    "provider_capability_conflict",
+                    None,
+                    Some("$.max_iterations"),
+                    Some(serde_json::json!("absent")),
+                    Some(serde_json::json!(job.node_max_iterations)),
+                    "subprocess harness owns its loop: node max_iterations must be absent"
+                        .to_string(),
+                ),
+                &job.ctx,
+                job.resolved_timeout_ms,
+            ));
+        }
+        let request = ProviderRequest {
+            agent: &agent.config,
+            inputs: mapped_agent_inputs(&job, &agent.config),
+            port_inputs: &job.inputs,
+            ctx: job.ctx.clone(),
+            trace: ProviderTrace {
+                run_id: job.ctx.run_id().to_string(),
+                instance_id: job.ctx.instance_id().to_string(),
+                node_id: job.node_id.clone(),
+                attempt: job.attempt,
+                item_index: job.item_index,
+            },
+            cwd: &self.settings.assets_dir,
+            node_timeout_ms,
+            loaded_agent: &agent,
             tools_dir: &tools_dir,
-            provider: &self.settings.provider,
+            llm: &self.settings.provider,
             tool_runner: &self.settings.tool_runner,
-            inputs: &job.inputs,
+            max_iterations: effective_max_iterations,
             declared_ports: &job.declared_ports,
             node_mapping: &job.node_mapping,
-            max_iterations: effective_max_iterations,
-            node_timeout_ms,
-            ctx: job.ctx.clone(),
-            cancel,
             recorder: self.recorder.as_ref(),
             skill_view_budget: &skill_view_budget,
             mcp: mcp_run.as_deref(),
         };
-        run_agent(run)
+        let provider: &dyn AgentProvider = match harness_kind {
+            HarnessKind::Builtin => &self.builtin_provider,
+            HarnessKind::Subprocess => &self.subprocess_provider,
+        };
+        provider
+            .run(request)
             .await
             .map(|output| output.to_json())
             .map_err(RunFailure::into_node_error)
@@ -641,6 +711,23 @@ fn config_failure(
     }
 }
 
+/// 映射后的 agent 输入（外部 harness `run.inputs`；端口名 → agent 字段）。
+///
+/// 与 builtin 相同的 05 §5.9.3 映射规则（节点级 `input_mapping` 优先）；
+/// 未到端口为 `null`（与整包透传一致）。
+fn mapped_agent_inputs(
+    job: &AgentCallJob,
+    agent: &crate::config::AgentConfig,
+) -> BTreeMap<String, Value> {
+    effective_input_mapping(&job.declared_ports, &job.node_mapping, &agent.input_mapping)
+        .into_iter()
+        .map(|(port, field)| {
+            let value = job.inputs.get(&port).cloned().unwrap_or(Value::Null);
+            (field, value)
+        })
+        .collect()
+}
+
 /// 绝对化工具目录（worker 侧 `discover`/`call` 需要 abs 路径）。
 fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
@@ -678,6 +765,27 @@ mod tests {
         {"id": "worker", "type": "agent_call",
          "inputs": [{"name": "message", "type": "any", "required": true}],
          "config": {"agent_id": "parser"}},
+        {"id": "end", "type": "end",
+         "inputs": [{"name": "result", "type": "any", "required": true}], "config": {}}
+      ],
+      "edges": [
+        {"from": "start", "to_node": "worker", "to_input_port": "message"},
+        {"from": "worker", "to_node": "end", "to_input_port": "result"}
+      ]
+    }"#;
+
+    /// 与 [`AGENT_GRAPH`] 相同，但 `agent_call` 节点显式覆盖 `max_iterations`
+    /// （v0.3/V4 能力冲突测试：外部 harness 拥有自己的 loop）。
+    const AGENT_GRAPH_WITH_ITERATIONS: &str = r#"{
+      "version": "1.0",
+      "metadata": {"name": "harness-agent-iterations"},
+      "entry_points": ["start"],
+      "nodes": [
+        {"id": "start", "type": "start",
+         "inputs": [{"name": "message", "type": "any", "required": true}], "config": {}},
+        {"id": "worker", "type": "agent_call",
+         "inputs": [{"name": "message", "type": "any", "required": true}],
+         "config": {"agent_id": "parser", "max_iterations": 3}},
         {"id": "end", "type": "end",
          "inputs": [{"name": "result", "type": "any", "required": true}], "config": {}}
       ],
@@ -1825,5 +1933,75 @@ mod tests {
         let (outcome, _sink) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
         let error = outcome.error.expect("run must fail");
         assert_eq!(error.code, "HARNESS_MCP_ERROR");
+    }
+    /// v0.3/V4：显式 `harness.kind="builtin"` 与缺省路径行为一致（AC-20 a）。
+    #[tokio::test]
+    async fn explicit_builtin_harness_behaves_like_the_default_path() {
+        let script = json!([
+            {"kind": "text", "content": "ok", "stop_reason": "EndTurn"}
+        ]);
+        let fake =
+            Arc::new(FakeLlmProvider::from_script(fake_script(script.clone())).expect("script"));
+        let runner = Arc::new(FakeToolRunner::new());
+
+        // 缺省（无 harness 字段）。
+        let default_dir = assets(agent_config("parser", &[]), "你是解析器。");
+        let default_executor = Arc::new(HarnessExecutor::new(settings(
+            default_dir.path(),
+            &fake,
+            &runner,
+        )));
+        let (default_outcome, default_sink) =
+            run_graph(AGENT_GRAPH, default_executor, json!("hi")).await;
+
+        // 显式 builtin。
+        let mut agent = agent_config("parser", &[]);
+        agent["harness"] = json!({"kind": "builtin"});
+        let builtin_dir = assets(agent, "你是解析器。");
+        let builtin_executor = Arc::new(HarnessExecutor::new(settings(
+            builtin_dir.path(),
+            &fake,
+            &runner,
+        )));
+        let (builtin_outcome, builtin_sink) =
+            run_graph(AGENT_GRAPH, builtin_executor.clone(), json!("hi")).await;
+
+        assert_eq!(default_outcome.status, zgraph_kernel::RunStatus::Completed);
+        assert_eq!(builtin_outcome.status, zgraph_kernel::RunStatus::Completed);
+        assert_eq!(
+            builtin_sink.snapshots().len(),
+            default_sink.snapshots().len(),
+            "explicit builtin must keep the same instance lifecycle"
+        );
+        builtin_executor.close_provider().await;
+    }
+
+    /// v0.3/V4：subprocess harness + 节点级 `max_iterations` → 能力冲突
+    /// `HARNESS_CONFIG_LOAD{reason:"provider_capability_conflict"}`（不 spawn 进程）。
+    #[tokio::test]
+    async fn subprocess_harness_rejects_node_max_iterations_conflict() {
+        let mut agent = agent_config("parser", &[]);
+        agent["harness"] = json!({
+            "kind": "subprocess",
+            "command": "definitely-not-a-real-harness-binary",
+            "protocol": "zgraph-harness/1"
+        });
+        let dir = assets(agent, "你是解析器。");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
+        let (outcome, _) =
+            run_graph(AGENT_GRAPH_WITH_ITERATIONS, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("HARNESS_CONFIG_LOAD")
+        );
+        executor.close_provider().await;
     }
 }

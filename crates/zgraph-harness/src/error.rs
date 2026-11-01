@@ -172,6 +172,33 @@ impl HarnessError {
         Self::new(HarnessErrorKind::Mcp, code, message, Value::Object(detail))
     }
 
+    /// 外部 harness（子进程 adapter）错误（v0.3/V4；DR-011 §6 单一 `HARNESS_PLUGIN_ERROR`）。
+    ///
+    /// `detail.reason` 闭集：`spawn_failed`/`handshake`/`version`/`protocol`/
+    /// `result_invalid`/`line_too_large`/`output_limit`/`event_limit`/`exit_nonzero`/`timeout`。
+    /// `extra` 允许附带 `provider`/`stderr_tail`（已按 8 KiB 截断）等结构化字段。
+    pub fn plugin(
+        reason: &str,
+        stage: Stage,
+        message: impl Into<String>,
+        extra: Option<Value>,
+    ) -> Self {
+        let code = HarnessErrorKind::Plugin.code();
+        let mut detail = Self::detail(code, stage);
+        detail.insert("reason".to_string(), Value::from(reason));
+        if let Some(Value::Object(extra)) = extra {
+            for (key, value) in extra {
+                detail.insert(key, value);
+            }
+        }
+        Self::new(
+            HarnessErrorKind::Plugin,
+            code,
+            message,
+            Value::Object(detail),
+        )
+    }
+
     /// LLM 调用了未注册工具（05 §5.7.2：Crashed）。
     pub fn unknown_tool(tool: &str, iteration: u32, available: &[String]) -> Self {
         let code = HarnessErrorKind::UnknownTool.code();
@@ -402,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn seven_kinds_map_to_spec_error_codes() {
+    fn harness_kinds_map_to_spec_error_codes() {
         let cases = [
             (HarnessErrorKind::ConfigLoad, "HARNESS_CONFIG_LOAD"),
             (HarnessErrorKind::UnknownTool, "HARNESS_UNKNOWN_TOOL"),
@@ -411,6 +438,13 @@ mod tests {
             (HarnessErrorKind::LlmTimeout, "HARNESS_LLM_TIMEOUT"),
             (HarnessErrorKind::ToolError, "TOOL_ERROR"),
             (HarnessErrorKind::MemoryDegraded, "HARNESS_MEMORY_DEGRADED"),
+            (
+                HarnessErrorKind::ContextOverflow,
+                "HARNESS_CONTEXT_OVERFLOW",
+            ),
+            (HarnessErrorKind::SkillInvalid, "HARNESS_SKILL_INVALID"),
+            (HarnessErrorKind::Mcp, "HARNESS_MCP_ERROR"),
+            (HarnessErrorKind::Plugin, "HARNESS_PLUGIN_ERROR"),
         ];
         for (kind, code) in cases {
             assert_eq!(HarnessError::code_for(kind), code, "kind {kind:?}");

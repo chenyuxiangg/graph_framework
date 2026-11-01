@@ -936,6 +936,8 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         Err(code) => {
             // v0.3/V3（REV-098 #3）：错误路径也关闭 MCP 连接/子进程组（幂等）。
             built.harness.close_mcp().await;
+            // v0.3/V4（DR-011 §2.2）：错误路径同样关闭外部 harness 进程组（幂等）。
+            built.harness.close_provider().await;
             return code;
         }
     };
@@ -959,6 +961,9 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     // v0.3/V3（REV-098 #3）：run 结束（Completed/Failed/Cancelled/错误）后**立即**关闭
     // 所有 MCP 连接与 stdio 子进程组；`--json`/human/普通出口均经过此处。幂等。
     built.harness.close_mcp().await;
+    // v0.3/V4（DR-011 §2.2）：run 结束/取消后关闭外部 harness 进程组（幂等、
+    // 无 subprocess provider 时零开销；AC-20 d/f 无孤儿进程）。
+    built.harness.close_provider().await;
     exit
 }
 

@@ -15,8 +15,8 @@ use serde_json::{json, Map, Value};
 use crate::constants::{
     DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_LLM_MAX_RETRIES, DEFAULT_LLM_MAX_TOKENS,
     DEFAULT_LLM_TEMPERATURE, DEFAULT_LLM_TIMEOUT_MS, DEFAULT_MAX_ITERATIONS,
-    DEFAULT_NODE_TIMEOUT_MS, MAX_AGENT_CONFIG_BYTES, MAX_PROMPT_BYTES, MAX_TOOLS_PER_AGENT,
-    SUPPORTED_SCHEMA_VERSION,
+    DEFAULT_NODE_TIMEOUT_MS, HARNESS_PLUGIN_PROTOCOL, MAX_AGENT_CONFIG_BYTES, MAX_PROMPT_BYTES,
+    MAX_TOOLS_PER_AGENT, SUPPORTED_SCHEMA_VERSION,
 };
 use crate::error::HarnessError;
 use crate::llm::{ModelRef, ProviderKind, SecretString};
@@ -52,6 +52,66 @@ impl ModelConfig {
     }
 }
 
+/// 外部 harness 选择（v0.3/V4；DR-011 §1/§2.2）。
+///
+/// `builtin`（缺省）= 现有 `HarnessExecutor` + `run_agent` 路径（行为逐字节不变）；
+/// `subprocess` = 外部 adapter 进程（`zgraph-harness/1` NDJSON over stdio）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessKind {
+    /// 内置 harness（默认）。
+    Builtin,
+    /// 外部子进程 adapter。
+    Subprocess,
+}
+
+impl HarnessKind {
+    /// JSON 字面量。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Subprocess => "subprocess",
+        }
+    }
+
+    /// 从 JSON 字符串解析（未知返回 `None`）。
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "builtin" => Some(Self::Builtin),
+            "subprocess" => Some(Self::Subprocess),
+            _ => None,
+        }
+    }
+}
+
+/// `AgentConfig.harness` 的校验后值（v0.3/V4；DR-011 §1）。
+///
+/// 语义：
+/// - `builtin`：不允许 `command`/`args`/`env`/`timeout_ms`/`protocol`（fail-closed）；
+/// - `subprocess`：`command` 必填（非空）、`protocol` 必填且必须是
+///   [`crate::constants::HARNESS_PLUGIN_PROTOCOL`]；`args`/`env`/`timeout_ms` 可选。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessConfig {
+    /// 类型（builtin / subprocess）。
+    pub kind: HarnessKind,
+    /// 外部命令（仅 subprocess；用户自备二进制）。
+    pub command: Option<String>,
+    /// 命令参数（按序传入，不经过 shell）。
+    pub args: Vec<String>,
+    /// 额外环境变量（覆盖继承环境中的同名项）。
+    pub env: BTreeMap<String, String>,
+    /// 外部 harness 默认超时（毫秒；`None` = `HARNESS_PLUGIN_DEFAULT_TIMEOUT_MS`）。
+    pub timeout_ms: Option<u64>,
+    /// 协议名（仅 subprocess；恒为 `zgraph-harness/1`）。
+    pub protocol: Option<String>,
+}
+
+impl HarnessConfig {
+    /// 是否 subprocess 模式。
+    pub fn is_subprocess(&self) -> bool {
+        self.kind == HarnessKind::Subprocess
+    }
+}
+
 /// 校验后的 AgentConfig（05 §5.2.2 字段级；未知字段一律拒绝）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentConfig {
@@ -73,6 +133,8 @@ pub struct AgentConfig {
     pub skills: Vec<String>,
     /// v0.3 MCP 配置（additive；缺省 `None` = 不启用；DR-010 §2.2）。
     pub mcp: Option<crate::mcp::McpConfig>,
+    /// v0.3/V4 可插拔 harness 选择（additive；缺省 `None` = builtin）。
+    pub harness: Option<HarnessConfig>,
     /// 节点端口 → Agent 输入字段（05 §5.2.2/§5.9.3）。
     pub input_mapping: BTreeMap<String, String>,
     /// LLM 请求轮次上限。
@@ -131,7 +193,7 @@ impl LoadedAgent {
 }
 
 /// 顶层允许键（05 §5.2.2 + `$schema` 白名单）。
-const TOP_LEVEL_KEYS: [&str; 15] = [
+const TOP_LEVEL_KEYS: [&str; 16] = [
     "id",
     "name",
     "schema_version",
@@ -141,6 +203,7 @@ const TOP_LEVEL_KEYS: [&str; 15] = [
     "tools",
     "skills",
     "mcp",
+    "harness",
     "input_mapping",
     "max_iterations",
     "llm_timeout_ms",
@@ -319,6 +382,14 @@ pub fn load_agent_with_options(
     })?;
     let value = read_json_file(&path, MAX_AGENT_CONFIG_BYTES)?;
     let config = parse_agent_config(&value, &path, agent_id)?;
+    if config
+        .harness
+        .as_ref()
+        .is_some_and(HarnessConfig::is_subprocess)
+    {
+        // 外部 harness 拥有自己的 agent loop：能力面必须为空（fail-closed，DR-011 §1）。
+        check_subprocess_capabilities(&config, &path)?;
+    }
     let agent_dir = path.parent().unwrap_or(Path::new("."));
     let role_prompt = read_prompt(
         agent_dir,
@@ -387,7 +458,16 @@ pub fn load_agent_with_options(
         // v0.3：内置 `skill_view` 仅当 skills 非空时注册（DR-009 §3/§4）。
         tools.push(crate::skills::skill_view_tool(&skills));
     }
-    let api_key = resolve_api_key(&config, fake_mode)?;
+    let api_key = if config
+        .harness
+        .as_ref()
+        .is_some_and(HarnessConfig::is_subprocess)
+    {
+        // 外部 harness 自带鉴权（Codex/DSH 自己的凭据）：zgraph 侧不要求 api_key_env。
+        SecretString::new("")
+    } else {
+        resolve_api_key(&config, fake_mode)?
+    };
     Ok(LoadedAgent {
         config,
         role_prompt,
@@ -490,6 +570,237 @@ fn parse_mcp(
         }
     }
     Ok(Some(crate::mcp::McpConfig { servers, allow }))
+}
+
+/// `harness` 段允许键（v0.3/V4；DR-011 §1）。
+const HARNESS_KEYS: [&str; 6] = ["kind", "command", "args", "env", "timeout_ms", "protocol"];
+
+/// v0.3/V4：解析并校验 `AgentConfig.harness`（additive；缺省 `None` = builtin）。
+///
+/// 非法配置一律 `HARNESS_CONFIG_LOAD{reason}`（DR-011 §6）：`harness_kind_unsupported`/
+/// `harness_command_missing`/`harness_protocol_missing`/`harness_protocol_unsupported`/
+/// `harness_builtin_options_not_allowed`；能力冲突见 [`check_subprocess_capabilities`]。
+fn parse_harness(
+    object: &Map<String, Value>,
+    path: &Path,
+) -> Result<Option<HarnessConfig>, HarnessError> {
+    let Some(value) = object.get("harness") else {
+        return Ok(None);
+    };
+    let path_text = path.display().to_string();
+    let Some(raw) = value.as_object() else {
+        return Err(config_error(
+            "type_mismatch",
+            Some(&path_text),
+            Some("$.harness"),
+            Some(json!("object")),
+            Some(json!(json_type_name(value))),
+            "AgentConfig.harness must be a JSON object".to_string(),
+        ));
+    };
+    reject_unknown(raw, path, "$.harness", &HARNESS_KEYS, &[])?;
+    let kind_raw = required_string(raw, "kind", path, "$.harness.kind")?;
+    let Some(kind) = HarnessKind::from_name(&kind_raw) else {
+        return Err(config_error(
+            "harness_kind_unsupported",
+            Some(&path_text),
+            Some("$.harness.kind"),
+            Some(json!(["builtin", "subprocess"])),
+            Some(json!(kind_raw)),
+            format!("unsupported harness kind '{kind_raw}'"),
+        ));
+    };
+    let command = optional_string(raw, "command", path, "$.harness.command")?;
+    let args = parse_harness_args(raw, path)?;
+    let env = parse_harness_env(raw, path)?;
+    let timeout_ms = parse_harness_timeout(raw, path)?;
+    let protocol = optional_string(raw, "protocol", path, "$.harness.protocol")?;
+    match kind {
+        HarnessKind::Builtin => {
+            if command.is_some()
+                || !args.is_empty()
+                || !env.is_empty()
+                || timeout_ms.is_some()
+                || protocol.is_some()
+            {
+                return Err(config_error(
+                    "harness_builtin_options_not_allowed",
+                    Some(&path_text),
+                    Some("$.harness"),
+                    Some(json!({"kind": "builtin"})),
+                    Some(value.clone()),
+                    "builtin harness does not accept command/args/env/timeout_ms/protocol"
+                        .to_string(),
+                ));
+            }
+            Ok(Some(HarnessConfig {
+                kind,
+                command: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                protocol: None,
+            }))
+        }
+        HarnessKind::Subprocess => {
+            let command = command
+                .filter(|command| !command.trim().is_empty())
+                .ok_or_else(|| {
+                    config_error(
+                        "harness_command_missing",
+                        Some(&path_text),
+                        Some("$.harness.command"),
+                        Some(json!("non-empty command")),
+                        Some(Value::Null),
+                        "subprocess harness requires a non-empty command".to_string(),
+                    )
+                })?;
+            let protocol = protocol.ok_or_else(|| {
+                config_error(
+                    "harness_protocol_missing",
+                    Some(&path_text),
+                    Some("$.harness.protocol"),
+                    Some(json!(HARNESS_PLUGIN_PROTOCOL)),
+                    Some(Value::Null),
+                    "subprocess harness requires a protocol".to_string(),
+                )
+            })?;
+            if protocol != HARNESS_PLUGIN_PROTOCOL {
+                return Err(config_error(
+                    "harness_protocol_unsupported",
+                    Some(&path_text),
+                    Some("$.harness.protocol"),
+                    Some(json!(HARNESS_PLUGIN_PROTOCOL)),
+                    Some(json!(protocol)),
+                    format!("unsupported harness protocol '{protocol}'"),
+                ));
+            }
+            Ok(Some(HarnessConfig {
+                kind,
+                command: Some(command),
+                args,
+                env,
+                timeout_ms,
+                protocol: Some(protocol),
+            }))
+        }
+    }
+}
+
+/// `harness.args`：可选字符串数组（按序传入，不经 shell）。
+fn parse_harness_args(raw: &Map<String, Value>, path: &Path) -> Result<Vec<String>, HarnessError> {
+    let Some(value) = raw.get("args") else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(type_error(
+            path,
+            "$.harness.args",
+            "array",
+            json_type_name(value),
+            "AgentConfig.harness.args must be a JSON array of strings".to_string(),
+        ));
+    };
+    let mut args = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(text) = item.as_str() else {
+            return Err(type_error(
+                path,
+                &format!("$.harness.args[{index}]"),
+                "string",
+                json_type_name(item),
+                "AgentConfig.harness.args entries must be strings".to_string(),
+            ));
+        };
+        args.push(text.to_string());
+    }
+    Ok(args)
+}
+
+/// `harness.env`：可选 `{name: value}` 字符串映射（覆盖继承环境同名项）。
+fn parse_harness_env(
+    raw: &Map<String, Value>,
+    path: &Path,
+) -> Result<BTreeMap<String, String>, HarnessError> {
+    let Some(value) = raw.get("env") else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(items) = value.as_object() else {
+        return Err(type_error(
+            path,
+            "$.harness.env",
+            "object",
+            json_type_name(value),
+            "AgentConfig.harness.env must be a JSON object".to_string(),
+        ));
+    };
+    let mut env = BTreeMap::new();
+    for (key, item) in items {
+        if key.is_empty() {
+            return Err(config_error(
+                "unsupported_value",
+                Some(&path.display().to_string()),
+                Some("$.harness.env"),
+                Some(json!("non-empty variable names")),
+                Some(json!(key)),
+                "harness env variable names must be non-empty".to_string(),
+            ));
+        }
+        let Some(text) = item.as_str() else {
+            return Err(type_error(
+                path,
+                &format!("$.harness.env.{key}"),
+                "string",
+                json_type_name(item),
+                "AgentConfig.harness.env values must be strings".to_string(),
+            ));
+        };
+        env.insert(key.clone(), text.to_string());
+    }
+    Ok(env)
+}
+
+/// `harness.timeout_ms`：可选外部 harness 默认超时（1s..=1h，同节点超时区间）。
+fn parse_harness_timeout(
+    raw: &Map<String, Value>,
+    path: &Path,
+) -> Result<Option<u64>, HarnessError> {
+    let timeout_ms = optional_u64(raw, "timeout_ms", path, "$.harness.timeout_ms")?;
+    if let Some(timeout) = timeout_ms {
+        if !(NODE_TIMEOUT_MIN_MS..=NODE_TIMEOUT_MAX_MS).contains(&timeout) {
+            return Err(range_error(
+                path,
+                "$.harness.timeout_ms",
+                &timeout,
+                NODE_TIMEOUT_MIN_MS,
+                NODE_TIMEOUT_MAX_MS,
+            ));
+        }
+    }
+    Ok(timeout_ms)
+}
+
+/// 外部 harness 能力面冲突（DR-011 §1）：不传 `tools`/`skills`/`mcp`/`max_iterations`。
+///
+/// `max_iterations` 的节点级覆盖在 executor 侧检查（AgentConfig 缺省值不可区分
+/// 「作者是否显式写了」）；本函数检查 AgentConfig 的静态声明面。
+fn check_subprocess_capabilities(config: &AgentConfig, path: &Path) -> Result<(), HarnessError> {
+    if config.tools.is_empty() && config.skills.is_empty() && config.mcp.is_none() {
+        return Ok(());
+    }
+    Err(config_error(
+        "provider_capability_conflict",
+        Some(&path.display().to_string()),
+        Some("$.harness"),
+        Some(json!({"tools": [], "skills": [], "mcp": null})),
+        Some(json!({
+            "tools": config.tools,
+            "skills": config.skills,
+            "mcp": config.mcp.is_some(),
+        })),
+        "subprocess harness owns its loop: tools/skills/mcp/max_iterations must be empty"
+            .to_string(),
+    ))
 }
 
 fn parse_mcp_name_list(
@@ -620,6 +931,7 @@ fn parse_agent_config(
     let tools = parse_tools(object, path)?;
     let skills = parse_skills(object, path)?;
     let mcp = parse_mcp(object, path)?;
+    let harness = parse_harness(object, path)?;
     let input_mapping = parse_input_mapping(object, path)?;
     let max_iterations = parse_max_iterations(object, path)?;
     let (llm_timeout_ms, llm_max_retries, node_timeout_ms) = parse_timeouts(object, path)?;
@@ -634,6 +946,7 @@ fn parse_agent_config(
         tools,
         skills,
         mcp,
+        harness,
         input_mapping,
         max_iterations,
         llm_timeout_ms,
@@ -2560,5 +2873,162 @@ mod tests {
         )
         .expect_err("too many skill references");
         assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
+    }
+    // ------------------------------------------------------------------
+    // v0.3/V4 harness 配置解析矩阵（DR-011 §1；AC-20 a/b）
+    // ------------------------------------------------------------------
+
+    fn subprocess_harness() -> Value {
+        json!({
+            "kind": "subprocess",
+            "command": "fake-harness",
+            "args": ["--profile", "test"],
+            "env": {"FAKE_MODE": "echo"},
+            "timeout_ms": 120000,
+            "protocol": "zgraph-harness/1"
+        })
+    }
+
+    fn load_harness_agent(harness: Value) -> Result<LoadedAgent, HarnessError> {
+        let mut agent = valid_agent();
+        if harness.get("kind").and_then(Value::as_str) == Some("subprocess") {
+            // 外部 harness 能力面必须为空（tools/skills/mcp），否则能力冲突。
+            agent["tools"] = json!([]);
+        }
+        agent["harness"] = harness;
+        let dir = asset_dir(&agent, "role", None);
+        load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+    }
+
+    #[test]
+    fn harness_config_parses_builtin_and_subprocess() {
+        let loaded = load_harness_agent(json!({"kind": "builtin"})).expect("builtin harness");
+        let harness = loaded.config.harness.expect("harness parsed");
+        assert_eq!(harness.kind, HarnessKind::Builtin);
+        assert!(!harness.is_subprocess());
+        assert!(harness.command.is_none());
+
+        let loaded = load_harness_agent(subprocess_harness()).expect("subprocess harness");
+        let harness = loaded.config.harness.expect("harness parsed");
+        assert_eq!(harness.kind, HarnessKind::Subprocess);
+        assert!(harness.is_subprocess());
+        assert_eq!(harness.command.as_deref(), Some("fake-harness"));
+        assert_eq!(harness.args, vec!["--profile", "test"]);
+        assert_eq!(
+            harness.env.get("FAKE_MODE").map(String::as_str),
+            Some("echo")
+        );
+        assert_eq!(harness.timeout_ms, Some(120_000));
+        assert_eq!(
+            harness.protocol.as_deref(),
+            Some(crate::constants::HARNESS_PLUGIN_PROTOCOL)
+        );
+    }
+
+    #[test]
+    fn absent_harness_means_builtin_and_is_additive() {
+        let dir = asset_dir(&valid_agent(), "role", None);
+        let loaded = load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+            .expect("no harness field");
+        assert!(loaded.config.harness.is_none());
+    }
+
+    #[test]
+    fn harness_config_failures_are_config_load_with_reason() {
+        let cases = [
+            (json!({"kind": "codex"}), "harness_kind_unsupported"),
+            (
+                json!({"kind": "subprocess", "protocol": "zgraph-harness/1"}),
+                "harness_command_missing",
+            ),
+            (
+                json!({"kind": "subprocess", "command": "  ", "protocol": "zgraph-harness/1"}),
+                "harness_command_missing",
+            ),
+            (
+                json!({"kind": "subprocess", "command": "fake"}),
+                "harness_protocol_missing",
+            ),
+            (
+                json!({"kind": "subprocess", "command": "fake", "protocol": "zgraph-harness/2"}),
+                "harness_protocol_unsupported",
+            ),
+            (
+                json!({"kind": "builtin", "command": "fake"}),
+                "harness_builtin_options_not_allowed",
+            ),
+            (
+                json!({"kind": "subprocess", "command": "fake", "protocol": "zgraph-harness/1", "timeout_ms": 0}),
+                "out_of_range",
+            ),
+            (
+                json!({"kind": "subprocess", "command": "fake", "protocol": "zgraph-harness/1", "env": {"A": 1}}),
+                "type_mismatch",
+            ),
+            (
+                json!({"kind": "subprocess", "command": "fake", "protocol": "zgraph-harness/1", "mode": "x"}),
+                "unknown_field",
+            ),
+        ];
+        for (harness, reason) in cases {
+            let error = load_harness_agent(harness.clone()).expect_err("invalid harness config");
+            assert_eq!(
+                error.kind,
+                zgraph_kernel::HarnessErrorKind::ConfigLoad,
+                "{harness}: {error:?}"
+            );
+            assert_eq!(error.detail["reason"], reason, "{harness}: {error:?}");
+            assert_eq!(error.code, "HARNESS_CONFIG_LOAD", "{harness}");
+        }
+        // 非 object。
+        let error = load_harness_agent(json!("subprocess")).expect_err("non-object harness");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
+        assert_eq!(error.detail["reason"], "type_mismatch");
+    }
+
+    #[test]
+    fn subprocess_harness_rejects_capability_conflicts() {
+        // tools 非空 / skills 非空 / mcp 配置 → provider_capability_conflict（fail-closed）。
+        let mut cases = Vec::new();
+        let mut with_tools = valid_agent();
+        with_tools["harness"] = subprocess_harness();
+        cases.push((with_tools, "tools"));
+
+        let mut with_skills = valid_agent();
+        with_skills["tools"] = json!([]);
+        with_skills["skills"] = json!(["code-review"]);
+        with_skills["harness"] = subprocess_harness();
+        cases.push((with_skills, "skills"));
+
+        let mut with_mcp = valid_agent();
+        with_mcp["tools"] = json!([]);
+        with_mcp["mcp"] = json!({"servers": ["github"]});
+        with_mcp["harness"] = subprocess_harness();
+        cases.push((with_mcp, "mcp"));
+
+        for (agent, field) in cases {
+            let dir = asset_dir(&agent, "role", None);
+            let error = load_agent(dir.path(), "parser", &registry(&["echo", "add"]), true)
+                .expect_err("capability conflict");
+            assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
+            assert_eq!(
+                error.detail["reason"], "provider_capability_conflict",
+                "{field}: {error:?}"
+            );
+        }
+
+        // tools 为空 + 无 skills/mcp → 外部 harness 可用，且不要求 api_key_env。
+        let mut clean = valid_agent();
+        clean["tools"] = json!([]);
+        clean["harness"] = subprocess_harness();
+        clean["model"]["api_key_env"] = json!("HARNESS_MISSING_KEY_FOR_TEST");
+        let dir = asset_dir(&clean, "role", None);
+        let loaded = load_agent(dir.path(), "parser", &ToolRegistry::default(), false)
+            .expect("subprocess harness does not require api_key_env");
+        assert!(loaded
+            .config
+            .harness
+            .is_some_and(|harness| harness.is_subprocess()));
+        assert!(loaded.api_key.is_empty());
     }
 }

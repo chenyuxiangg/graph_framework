@@ -2823,6 +2823,7 @@ dependencies = [
  "futures-util",
  "genai",
  "http",
+ "nix 0.29.0",
  "process-wrap",
  "rmcp",
  "serde",

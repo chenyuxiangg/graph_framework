@@ -197,3 +197,46 @@ pub const MCP_CONTROL_REQUEST_TIMEOUT_MS: u64 = 5_000;
 
 /// MCP 崩溃后同 run 最多重启次数（DR-010 §4）。
 pub const MCP_MAX_RESTARTS_PER_RUN: u32 = 1;
+
+// ---------------------------------------------------------------------------
+// v0.3/V4 外部 harness / 子进程协议（DR-011 §2/§6/§9；00 §0.5 append-only）
+// ---------------------------------------------------------------------------
+
+/// 子进程 harness 协议名（`hello`/`hello_ok` 双写；DR-011 §2）。
+pub const HARNESS_PLUGIN_PROTOCOL: &str = "zgraph-harness/1";
+
+/// 协议 `v` 字段（当前恒 1；与 `HARNESS_PLUGIN_PROTOCOL` 双写）。
+pub const HARNESS_PLUGIN_PROTOCOL_VERSION: u32 = 1;
+
+/// 外部 harness 单行 NDJSON 上限（`HARNESS_PLUGIN_LINE_MAX_BYTES` = 1 MiB）。
+pub const HARNESS_PLUGIN_LINE_MAX_BYTES: usize = 1_048_576;
+
+/// 外部 harness final `content` 上限（`HARNESS_PLUGIN_FINAL_MAX_BYTES` = 1 MiB）。
+pub const HARNESS_PLUGIN_FINAL_MAX_BYTES: usize = 1_048_576;
+
+/// 外部 harness 总输出上限（`HARNESS_PLUGIN_TOTAL_OUTPUT_MAX_BYTES` = 8 MiB）。
+pub const HARNESS_PLUGIN_TOTAL_OUTPUT_MAX_BYTES: usize = 8_388_608;
+
+/// 外部 harness 事件数上限（`HARNESS_PLUGIN_MAX_EVENTS` = 20000）。
+pub const HARNESS_PLUGIN_MAX_EVENTS: usize = 20_000;
+
+/// 外部 harness stderr 捕获上限（`HARNESS_PLUGIN_STDERR_MAX_BYTES` = 8 KiB）。
+pub const HARNESS_PLUGIN_STDERR_MAX_BYTES: usize = 8_192;
+
+/// 外部 harness 默认超时（`HARNESS_PLUGIN_DEFAULT_TIMEOUT_MS` = 300000）。
+pub const HARNESS_PLUGIN_DEFAULT_TIMEOUT_MS: u64 = 300_000;
+
+/// 握手（`hello` → `hello_ok`）超时（`HARNESS_PLUGIN_HANDSHAKE_TIMEOUT_MS` = 5000）。
+pub const HARNESS_PLUGIN_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
+
+/// 取消升级宽限：`SIGTERM` 后等待多久再 `SIGKILL` 进程组
+/// （`HARNESS_PLUGIN_CANCEL_GRACE_MS` = 2000；DR-011 §9 Lead 裁决 5）。
+pub const HARNESS_PLUGIN_CANCEL_GRACE_MS: u64 = 2_000;
+
+/// 连续非法行阈值：超过即终止（`HARNESS_PLUGIN_ERROR{reason:"protocol"}`）。
+///
+/// DR-011 §2.1：“非法行 warn 计数、超阈值终止”；阈值取 3（= 允许 2 行抖动）。
+pub const HARNESS_PLUGIN_MAX_INVALID_LINES: u32 = 3;
+
+/// 读取协议帧的轮询粒度（毫秒；用于在阻塞读中响应取消/节点 deadline）。
+pub const HARNESS_PLUGIN_READ_POLL_MS: u64 = 50;

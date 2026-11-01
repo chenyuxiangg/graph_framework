@@ -157,6 +157,13 @@ pub const CODE_HARNESS_SKILL_INVALID: &str = "HARNESS_SKILL_INVALID";
 /// 记忆检索/写入失败（降级告警，不终止）。
 pub const CODE_HARNESS_MEMORY_DEGRADED: &str = "HARNESS_MEMORY_DEGRADED";
 
+/// 外部 harness（子进程 adapter）spawn/握手/协议/崩溃/超时（v0.3/V4 追加，DR-011 §6）。
+///
+/// `detail.reason` 为闭集（`spawn_failed`/`handshake`/`version`/`protocol`/`result_invalid`/
+/// `line_too_large`/`output_limit`/`event_limit`/`exit_nonzero`/`timeout`）；**无独立
+/// `HARNESS_PLUGIN_TIMEOUT` 码**（节点超时仍 `NODE_TIMEOUT`，协议级超时归本码）。
+pub const CODE_HARNESS_PLUGIN_ERROR: &str = "HARNESS_PLUGIN_ERROR";
+
 /// 人工决策值（W3a0；`builtin.human` 节点 output 的 `decision` 字段 /
 /// `human_decisions.decision` 列；DR-006 §4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -432,6 +439,9 @@ pub enum HarnessErrorKind {
     SkillInvalid,
     /// MCP 配置/开关/生命周期错误（v0.3/V3 追加，DR-010 §8；单一 `HARNESS_MCP_ERROR`）。
     Mcp,
+    /// 外部 harness（子进程 adapter）错误（v0.3/V4 追加，DR-011 §6；单一
+    /// `HARNESS_PLUGIN_ERROR`，`detail.reason` 闭集）。
+    Plugin,
 }
 
 impl HarnessErrorKind {
@@ -448,6 +458,7 @@ impl HarnessErrorKind {
             Self::ContextOverflow => CODE_HARNESS_CONTEXT_OVERFLOW,
             Self::SkillInvalid => CODE_HARNESS_SKILL_INVALID,
             Self::Mcp => CODE_HARNESS_MCP_ERROR,
+            Self::Plugin => CODE_HARNESS_PLUGIN_ERROR,
         }
     }
 }
@@ -737,5 +748,27 @@ mod tests {
         assert_eq!(HumanDecision::ALL.len(), 2);
         assert_eq!(HumanDecision::Approved.as_str(), "approved");
         assert_eq!(HumanDecision::Rejected.as_str(), "rejected");
+    }
+    /// v0.3/V4（DR-011 §6）：外部 harness 只追加第 9 个 `HarnessErrorKind::Plugin`，
+    /// 错误码 `HARNESS_PLUGIN_ERROR`；既有 kind 码不变（append-only）。
+    #[test]
+    fn plugin_harness_kind_uses_plugin_error_code() {
+        assert_eq!(
+            HarnessErrorKind::Plugin.code(),
+            CODE_HARNESS_PLUGIN_ERROR,
+            "HARNESS_PLUGIN_ERROR"
+        );
+        let error = NodeError::Harness {
+            kind: HarnessErrorKind::Plugin,
+            detail: serde_json::json!({"reason": "protocol"}),
+        };
+        assert_eq!(error.code(), "HARNESS_PLUGIN_ERROR");
+        // 既有码不变（示例：MCP / SkillInvalid / ConfigLoad）。
+        assert_eq!(HarnessErrorKind::Mcp.code(), "HARNESS_MCP_ERROR");
+        assert_eq!(
+            HarnessErrorKind::SkillInvalid.code(),
+            "HARNESS_SKILL_INVALID"
+        );
+        assert_eq!(HarnessErrorKind::ConfigLoad.code(), "HARNESS_CONFIG_LOAD");
     }
 }
