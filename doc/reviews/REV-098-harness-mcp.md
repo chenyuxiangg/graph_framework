@@ -176,3 +176,15 @@ bash scripts/dev/check.sh                       # CHECK PASSED
 - **P3/测试小项**：见 §6.3（脱敏/schema 上限/重复 notice/`run_cmd` doc 注释等）；V5-docs as-built 需补：常量（含 `MCP_TOOLS_LIST_MAX_BYTES`）、函数名/allow 口径、TOOL_ERROR reason taxonomy、`truncated` 口径到 00/05/06/DR-010。
 - 跨模块（cli/kernel/Cargo）已按 Lead 批准声明；本轮收口仅 harness 6 文件；kernel 仅首轮 append-only 码/枚举，无既有语义变更；V3 未改 docs（V5 回写）。
 - 未发现 P0；未发现既有行为回归；C1/C2 关闭后本记录结论为 `通过`。
+
+## 7. 第二评审 · 跨模块（cli/kernel/Cargo）（Lead 追加，2026-11-02）
+
+- **评审人**：`lead`（**≠ 作者** `kernel-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`69aeb87..a09b54f`）：
+  1. `crates/zgraph-cli/src/run_cmd.rs`：`--allow-mcp` 解析/usage；`--allow-mcp` 预检（run 启动前 exit 3、不产生 run、不启 server）；run 结束（成功/失败/取消/错误出口）调用 `HarnessExecutor::close_mcp()`。
+  2. `crates/zgraph-kernel/src/types.rs`：append-only —— `CODE_HARNESS_MCP_ERROR`、`HarnessErrorKind::Mcp` variant、`code()` arm；既有码/枚举/行为未改。
+  3. `crates/zgraph-harness/Cargo.toml` + `crates/zgraph-cli/Cargo.toml` + `Cargo.lock`：`rmcp =3.8.0`（exact）+ `process-wrap 10.0.1`/`http 1.5.0` 作为 optional `mcp`；CLI 默认 feature 启用；`--no-default-features` 构建不引入依赖（评审已验 `cargo tree` 0 依赖）。
+- **核对结论（通过）**：cli 为机械接线（无默认路径/退出码变化，除新增显式 `--allow-mcp` 语义）；kernel append-only；Cargo 锁定精确、feature-gated、默认构建包含（release 口径正确）；无其它跨模块文件。
+- **Lead 亲自验证**：`git diff 69aeb87..a09b54f --stat` 仅 harness + cli 1 + kernel 1 + 2×Cargo.toml + Cargo.lock（+ REV 记录）；`cargo test --workspace --offline` = 976 passed / 0 failed / 3 ignored；`cargo check -p zgraph-cli --no-default-features` 通过。
+- **裁决**：P2⑥（server 段函数名归一化不全）在 **V4 首个 commit** 修复（kernel-dev 已记）；真实 stdio/HTTP/CLI exit3 e2e 留 V5 AC-19；P3 留 V5/docs。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
