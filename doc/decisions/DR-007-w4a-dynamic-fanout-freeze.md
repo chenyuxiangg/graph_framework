@@ -23,7 +23,7 @@
 | F9 | **trace schema v6**：`instances` 增 `item_index`/`item_key` + 唯一键重建；新表 `foreach_expansions`；`trace` 追加 ForeachExpansion 行；v5→v6 迁移/备份/只读拒绝；v1..v5→v6 链；`recorded_outputs` 结构不改、L2 查找键扩展 | 06 §6.2.2/§6.2.5/§6.2.15/§6.7/§6.10.4 |
 | F10 | **CLI**：`run` 无新参数；`trace`/`replay` 只扩输出；退出码沿用既有 0/1/2/3/4/5/70（run 级 FOREACH 错误走既有 run 失败路径 exit 1）；`on_item_error` v0.2 闭集仅 `fail` | 06 §6.10.4/§6.10.7；本 DR §9 |
 | F11 | **SOP 设计稿升 v1.2**：新增 dynamic-N profile（foreach 替代按 N codegen；per-item W/R/P 链 + join；静态 v1/v1.1 profile 兼容）；§9 移除「动态 N」延期项 | `design/software-team-sop-v1.md` v1.2；本 DR §10 |
-| F12 | **AC-17 a–i 设计**（W4b 实测；W4a 只冻结断言口径） | 07 AC-17；本 DR §11 |
+| F12 | **AC-17 a–j 设计**（W4b 实测；W4a 只冻结断言口径） | 07 AC-17；本 DR §11 |
 | F13 | W4b 实施顺序：dsl → kernel+trace → cli（如需）→ e2e；影响文件清单与非目标见 §14/§15 | 本 DR §14 |
 
 **一句话**：把「列表 → 固定图」扩展为「列表 → 运行期展开的 per-item 子图」：作者在节点上声明 `foreach`（消费一个列表端口），框架把该节点与其下游 per-item 链路按列表元素**各执行一次**，再把每个 item 的出口结果按索引聚成**有序数组**交给 join 节点；DSL 校验保证区域边界可判定，trace 记录展开事实，回放按 item 重放。
@@ -142,11 +142,11 @@
 | 1 | `J` 存在 | `join_not_found` | join 指向不存在 node_id |
 | 2 | `J != F` 且 `J ∉ R` | `join_in_region` | join 不得在 region 内（等价 J==F） |
 | 3 | `J.type ∈ {python_node, agent_call, end}` | `join_type_unsupported` | 禁止 start/subgraph 等 |
-| 4 | R 内节点类型 ∈ {python_node, agent_call}（含 `builtin.human`）；不得含 start/end/subgraph/**其它 foreach 节点** | `forbidden_node_type` / `nested_foreach` | 禁止嵌套（含间接：R 内任一节点带 `foreach`） |
+| 4 | R 内节点类型 ∈ {python_node, agent_call}（含 `builtin.human`）；不得含 start/end/subgraph/**其它 foreach 节点** | `forbidden_node_type` / `nested_foreach` | **row4 内顺序冻结**：先判类型（start/end/subgraph → `forbidden_node_type`），再判 `foreach`（→ `nested_foreach`）；R 内任一节点带 `foreach` 即禁止（含间接嵌套） |
 | 5 | R 有且仅有 1 个出口 E（R 内节点中「存在出边指向 R 外」的节点数恰为 1） | `no_exit` / `multiple_exits` | 无 → no_exit；>1 → multiple_exits |
 | 6 | E 恰有 1 条出边且目标=J；该边**不得有 gate** | `external_edge` / `join_edge_gated` | E 的其它出边/目标非 J → external_edge；E→J 有 gate → join_edge_gated |
 | 7 | R 内节点（除 E）的全部出边目标 ∈ R | `external_edge` | region 不得泄漏 |
-| 8 | R 内节点（除 F）的全部入边来源 ∈ R 或 = F | `external_edge` | 外部节点不得直接投递进 region（跨 item 语义未定义） |
+| 8 | R 内节点（除 F）的全部入边来源 ∈ R 或 = F；**F 的全部入边来源 ∉ R**（F 入边来自 R 外） | `external_edge` | 外部节点不得直接投递进 region（跨 item 语义未定义）；**controller buffer 只接收 R 外投递**，R 内（含回边）→F 会破坏单次展开/跨 item 语义 → 拒绝（C1） |
 | 9 | F 的 `items_port` 由 F 的入边提供（R12 不变） | `items_port_missing` | 端口已声明但无任何入边供源 |
 | 10 | R 与其它 foreach 的 region **不相交** | `region_overlap` | 一个节点只能属于一个 region（F 可为另一 foreach 的 J，见串行） |
 
@@ -176,6 +176,7 @@
 | N-10 | 两个 foreach 的 region 共用节点 | `region_overlap` |
 | N-11 | `start` 节点带 `foreach` | R17 `DSL_PARSE_ERROR` |
 | N-12 | `foreach.on_item_error="skip"` | R17 `DSL_PARSE_ERROR` |
+| **N-13（C1）** | region 内节点（含 region 回边）有入边指向 F | `external_edge`（F 的入边必须来自 R 外） |
 
 ---
 
@@ -198,6 +199,7 @@ for F in nodes (nodes order):
     for v in R:
         if v != E and any(out_edge.to_node not in R): error(external_edge)
         if v != F and any(in_edge.from not in R and in_edge.from != F): error(external_edge)
+        if v == F and any(in_edge.from in R): error(external_edge)   # C1：F 的入边必须来自 R 外
     if F.foreach.items_port not provided by any in-edge: error(items_port_missing)
     if R intersects previous region: error(region_overlap)
 ```
@@ -222,9 +224,11 @@ for F in nodes (nodes order):
 
 ### 6.1 无 controller 实例（F5）
 
-- F 的入边投递**照常求值 gate 并记 `GateResult`**（`to_node=F`），但**不创建 F 的单实例**、不进入普通 Ready/Running。
-- 内核维护 **F controller buffer**：按 F 的 `trigger`（all/any）与声明端口判定就绪；就绪后读取 `items_port` 的值（§6.2）→ 触发展开。
-- 展开事实：`expansion_id`（UUIDv7）+ `item_count` + `keys`（item_key 数组，NULL 键以 `#index` 表示）；落 trace `foreach_expansions`（§8）。
+- F 的入边投递**照常求值 gate 并记 `GateResult`**（`to_node=F`），但**不创建 F 的单实例**、不进入普通 Ready/Running；**只接收 R 外投递**（R18 row8/C1 保证）。
+- 内核维护 **F controller buffer**（01 §1.2.5 `ControllerBuffer`）：按 F 的 `trigger`（all/any）与声明端口判定就绪；就绪后读取 `items_port` 的值（§6.2）→ 触发展开。
+- **controller 状态机（C3 冻结）**：`Collecting`（已收到部分/全部入边但未就绪）→ `Ready`（trigger 满足且 `items_port` 已到）→ `Expanded`（item 实例已创建）或 `Skipped`。**只有 `Ready` 才展开**；`Expanded` 后任何到 F 的投递 → `RUN_DELIVERY_TO_TERMINAL`（复用；controller 单次展开）；`Skipped` 后投递同样拒绝。
+- **items_port 未到**：即使其它端口满足 trigger，也**不得进入 Ready/展开**；若 F 的入边已全部结算且 items_port 始终无数据 → controller → `Skipped`（region 不展开，按 §6.6/§6.7 正常 skip 级联）；若仍有在飞/未结算入边，静默时按 §6.7 判 `RUN_DEADLOCK`。
+- 展开事实：`expansion_id`（UUIDv7）+ `item_count` + `keys`（item_key 数组，NULL 键以结构化 `{"$index": i}` 表示（避免与真实 string key 撞表示））；落 trace `foreach_expansions`（§8）。
 - **controller buffer 不产生实例/不派发**；`instances` 中不出现 F 的「非 item」实例（F 的 item 实例仍按 §6.3 创建，item_index 0..N-1）。
 - 若 F 的 `trigger=any`：controller buffer 在至少一个 required 端口到达时可展开；展开时其它端口取当前 buffer（未到为 null）——与普通节点 `trigger=any` 的就绪口径一致（04 §4.4.2 / 01 §1.3）。
 
@@ -237,8 +241,7 @@ for F in nodes (nodes order):
 | `key_field` 派生键重复（N>1） | `RUN_FOREACH_ITEM_KEY_DUPLICATE` | `foreach node '{F}' item key '{key}' is duplicated at indexes {i},{j}` |
 | N=0 | **合法**（不报错） | —（立即投递 `[]` 给 J） |
 
-- **item_key 派生（冻结）**：`key_field` 缺省或元素非 object → `item_key=NULL`（trace 以 `#index` 表示）；元素为 object 且含 `key_field`：
-  - string → 原值；number/bool → **canonical JSON 字符串**（如 `1`、`1.5`、`true`）；null/object/array → **非法** → `RUN_FOREACH_ITEM_KEY_DUPLICATE`？**不**：缺键/null/复合值 → 视为 `NULL`（按索引派生）还是报错？**冻结**：`key_field` 存在但值缺失/null/object/array → item_key=NULL（按索引派生；不报错）；只有**派生出非 NULL 且重复**才 `RUN_FOREACH_ITEM_KEY_DUPLICATE`（例如两个对象都 `id=1`）。
+- **item_key 派生（冻结，单一陈述；C4/N17）**：`key_field` 缺省、元素非 object、或 `key_field` 值缺失/null/object/array → `item_key=NULL`（按索引派生，trace 以 `{"$index": i}` 表示；**不报错**）；元素为 object 且 `key_field` 为 string → 原值；number/bool → canonical JSON 字符串（`1`/`1.5`/`true`）。只有**派生出非 NULL 且重复**才 `RUN_FOREACH_ITEM_KEY_DUPLICATE`（例如两个对象都 `id=1`）。
 - 展开校验失败 → 冷峻 `fail_run`（run Failed；不创建任何 item 实例；controller buffer 清空）；trace 写 `RunFinished.error`（与既有 run 级错误同路径）。
 - **N 上限**：`max_items` 只约束 N；W2b `max_fanout` 不限制 N（§3.2）。`max_items` 缺省 = 无上限（由内存/运行期风险文档声明，§13）。
 
@@ -258,14 +261,15 @@ for F in nodes (nodes order):
 - 展开与取消/暂停：取消优先（展开前 cancel → 不展开，run Cancelled）；Pause 时 controller buffer 可继续接收投递，但**不展开**（展开属派发语义，Pause 冻结；见 §6.7）。
 - 展开失败（§6.2）→ fail_run；若同批还有其它事件，按既有终态短路丢弃。
 
-### 6.5 join（F7）
+### 6.5 join（F7；来源/GateResult 冻结 C2）
 
 - R 唯一出口 E 的每个 item 实例 Completed 后，内核记录该 item 的 output（按 item_index）。
 - **全部 N 个 item 的 E 都 Completed** 后，按 item_index 升序构造数组 `[E.output_0 .. E.output_{N-1}]`，作为**一次投递**发给 J：
   - 目标端口 = `E→J` 边的 `to_input_port`；
-  - 正常 GateResult/结算/触发 J 就绪（J 为普通节点 item_index=0；J 为 `end` 时走 end 聚合，`run_output` 的对应端口为数组）。
-- **空列表 N=0**：只记 expansion(count=0)，**不创建任何 item 实例**，立即向 J 投递 `[]`（沿 E→J 边语义；E 不存在实体时仍使用该边的端口/目标）。
-- join 投递是**普通 Delivery**（不是新事件类型）；`events.kind` 不变。
+  - **N>0 的 source（冻结）**：`Delivery.from_instance` = **最后完成使 join_buffer 达到 N 的那个 E item 实例**；`GateResultRecord.instance_id`/`attempt` = 该 E item 实例的 id/attempt；`to_node=J`、`edge=E→J`；该实例由计数触发，顺序确定（事件循环串行处理完成事件，最后一条唯一）。
+  - **N=0 的 source（冻结）**：无 E item 实例 → **不产生 `GateResult`、不产生 `Delivery`**；controller 直接把 `[]` 写入 J 的输入 buffer（`instances.input` 快照可见 `[]`），J 按普通就绪/结算继续。trace 证据 = `foreach_expansions(count=0)` + J 的 input/transition（**无** GateResult 行）。
+  - J 为普通节点 item_index=0；J 为 `end` 时走 end 聚合（`run_output` 对应端口为数组）。
+- join 投递（N>0）是**普通 Delivery**（不是新事件类型）；`events.kind` 不变。
 - J 的 `trigger=all` 时需等其它入边到齐（正常语义）；J 可使用 `check_output` 等 gate 处理数组（整包广播）。
 
 ### 6.6 失败/取消/上限（F8）
@@ -282,19 +286,26 @@ for F in nodes (nodes order):
 | item_key 重复 | `RUN_FOREACH_ITEM_KEY_DUPLICATE` |
 | W2b max_fanout | 只限制每个 item 实例一次激活的放行出边数；**不限制 N** |
 | W3a human | region 内 human 节点每 item 独立实例/等待/decide；`human_decisions` 按 instance_id 唯一（不需改表） |
+| **controller：入边全部 settle=false（无数据）** | controller → `Skipped`（不展开、不创建 item 实例）；region 节点不创建；F 的出边按普通 skip 级联（E→J 无数据 → J 按普通规则 skip/等其它入边） |
+| **controller：部分入边到达、required 未满足且无在飞** | 静默后 `RUN_DEADLOCK`（message 含 F；03 §3.10） |
+| **controller：items_port 无数据（settle=false）** | controller → `Skipped`（不展开）；若 items_port 仍有在飞投递，静默时按 `RUN_DEADLOCK` |
+| **defer 边以 F 为目标** | gate=true → 正常进入 controller buffer（展开前）；gate=false → 挂 `DeferredReceipt`，静默时 F 无实例 → 既有确定性 `RUN_DEADLOCK`；F 已 `Expanded`/`Skipped` 后任何投递（含 defer gate=true）→ `RUN_DELIVERY_TO_TERMINAL` |
 
 ### 6.7 终止判定（03 §3.10 扩展）
 
 ```text
 is_quiescent(run) =
    no instance with status ∈ {Pending, Ready, Running, WaitingHuman}
-   AND no controller buffer ready-but-not-expanded（Pause 除外，按 §3.8）
+   AND no live controller with state ∈ {Collecting, Ready}   # Expanded/Skipped 不算活跃（C3）
    AND ready_queue.is_empty()
    AND no pending deliveries in flight
 ```
 
-- item 实例存在即非静默；controller buffer 有未展开就绪（未 Pause）也应视为非静默（防止提前完成）；展开完成后消灭。
-- run 静默后若存在「部分 item 未完成」——按 §6.6 已失败或 E skipped 检测；正常 N 完成才 join。
+- **controller 活跃性（C3 冻结）**：`Collecting`/`Ready`（未展开、未 skip）视为非静默；`Expanded`/`Skipped` 不算活跃。静默后：
+  1. 若存在 controller ∈ {Collecting, Ready}（未 Pause）→ `RUN_DEADLOCK`（message 含 F 与控制器状态）；
+  2. 若存在 defer receipt 目标 F 无任何实例 → 既有确定性 `RUN_DEADLOCK`（§6.6 defer 行）；
+  3. 否则正常完成/聚合（部分 item 未完成按 §6.6 失败或 E skipped 检测；正常 N 完成才 join）。
+- Pause 下 controller 不展开、不判死锁（等 Resume/Cancel）。
 
 ---
 
@@ -364,9 +375,9 @@ CREATE TABLE IF NOT EXISTS foreach_expansions (
   run_id            TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
   expansion_id      TEXT PRIMARY KEY,              -- UUIDv7
   node_id           TEXT NOT NULL,                 -- F
-  source_instance_id TEXT,                          -- 触发展开的投递实例（item 实例/上游实例）
+  source_instance_id TEXT,                          -- 触发展开的投递实例（选最后一条使 controller 进入 Ready 的投递来源；entry 注入/无实例时 NULL——N18 冻结）
   item_count        INTEGER NOT NULL CHECK (item_count >= 0),
-  keys_json         TEXT,                           -- JSON array；NULL 键表示为 "#<index>" 字符串
+  keys_json         TEXT,                           -- JSON array；NULL 键表示为 {"$index": <i>} 对象（真实 string key 保持字符串）
   at                TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_id);
@@ -422,7 +433,10 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 | f | max_items 超限 / items 非数组 | `.../exceeded.json`、`.../not_array.json` | `RUN_FOREACH_ITEMS_EXCEEDED` / `RUN_FOREACH_ITEMS_NOT_ARRAY` Failed |
 | g | 取消传播 | 运行中取消 | 全部 item 实例 Cancelled；run Cancelled；`RunFinished{Cancelled}` |
 | h | region 内 human（2 items） | `.../human_items2.json`：region 内 `builtin.human` | 2 个 WaitingHuman item 实例；分别 decide；join 有序结果；`human_decisions` 2 行（不同 instance_id） |
-| i | trace v6/回放/golden | v5 seed + 新库；v0.1.0 图 | v5→v6 迁移（备份/只读拒绝/v3→v6 链 golden）；L1 events 回放；L2 per-item outputs 回放；graph_hash 只随图 JSON；无 foreach 图 golden 不变 |
+| i | trace v6/回放/golden | v5 seed + 新库；v0.1.0 图 | v5→v6 迁移（备份/只读拒绝/v3→v6 链 golden）；L1 events 回放；L2 per-item outputs 回放；graph_hash 只随图 JSON；无 foreach 图 golden 不变；N=0 expansion 行 + J input `[]`、**无 GateResult**（C2） |
+| **j** | **ITEM_INCOMPLETE + key canonical（C5）** | `.../exit_skipped.json`、`.../keys_canonical.json` | 某 item 的 E 因门控 false 全部 Skipped → `RUN_FOREACH_ITEM_INCOMPLETE` Failed、无 Crashed、其余 item Cancelled、无 join 投递；key canonical：number→`"1"`、bool→`"true"`、null/object/array→`{"$index": i}`、string 原值、非 NULL 重复→`RUN_FOREACH_ITEM_KEY_DUPLICATE` |
+
+> **AC-17 覆盖（C5/N19）**：4 个 `RUN_FOREACH_*`（c/f/j + d 节点失败）与 5 类边界（controller 未就绪/全部 settle=false/items_port 未到/defer→F/F 入边来自 R）均需至少一条负例或断言；W4b 实现时补齐测试名。
 
 > W4b 实现后由 W4b-docs 回写实测测试名/计数；本批不写 as-built。
 
@@ -465,7 +479,7 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 | 1 | dsl | `feat/dsl-foreach` | 本批 | `GraphNode.foreach`/白名单/serde/hash；R17（R4）/R18（新码 19）；顺序 R1→R13→R15→R18→R16→R14；fixtures（valid_foreach/bad_foreach_*）与 fixtures 表 |
 | 2 | kernel + trace | `feat/kernel-dynamic-fanout`、`feat/trace-dynamic` | dsl | controller buffer/展开/item 实例/join/错误码/取消/Pause；trace v6（instances 列/唯一键重建、foreach_expansions、迁移、trace 输出） |
 | 3 | cli | （如需，最小） | kernel/trace | trace/replay 输出扩展；run 无新参数；退出码不变 |
-| 4 | e2e | `test/e2e-dynamic-fanout` | 全部 | AC-17 a–i 真链路 + v5 seed 迁移 + golden |
+| 4 | e2e | `test/e2e-dynamic-fanout` | 全部 | AC-17 a–j 真链路 + v5 seed 迁移 + golden |
 | 5 | docs | `docs/docs-dynamic-spec`（W4b-docs） | 实现合并 | as-built 回写/AC-17 实测/08 注记/PROVENANCE 第 2 条 |
 
 **影响文件（W4b，非本批）**：`crates/zgraph-dsl/**`（types/nodes/edges/hash/lib/tests/fixtures）、`crates/zgraph-kernel/**`（types/graph/run/trace/tests）、`crates/zgraph-trace/**`（schema/model/reader/expansions/tests）、`crates/zgraph-cli/**`（trace/replay/run 输出）、`tests/e2e/**` + `tests/fixtures/graphs/foreach_dynamic/**` + trace seeds。
@@ -495,7 +509,7 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 | E-1 | F 自身是否也执行 N 次 | **是**（per-item handler；items_port=item[i]；其它 F 输入沿用 controller buffer） |
 | E-2 | R={F} 单节点 region | 合法；E=F；F 的 item 输出即 join 元素 |
 | E-3 | F trigger=any | controller buffer 按 any 就绪；未到端口取 null；与普通节点口径一致 |
-| E-4 | item_key 派生 | `key_field` 缺省/元素非 object/缺键/null/复合值 → item_key=NULL（trace `#index`）；仅**非 NULL 重复**报错 |
+| E-4 | item_key 派生 | `key_field` 缺省/元素非 object/缺键/null/复合值 → item_key=NULL（trace `{"$index": i}`）；仅**非 NULL 重复**报错 |
 | E-5 | 空列表 | 合法：expansion(count=0) + 立即投递 `[]` 给 J；无 item 实例 |
 | E-6 | join 目标为 end | 数组走 end 的 to_input_port 聚合（`run_output` 对应端口为数组） |
 | E-7 | region 内 defer/环 | 沿用 R13/R15 与 W2a attempt-per-activation（按 item 作用域） |
@@ -503,14 +517,18 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 | E-9 | 展开后 F 再收到投递 | 不再接受（F 不可重入/单次展开）；多展开用多个 F |
 | E-10 | `max_items` 缺省无上限 | 显式契约 + 风险文档警示；不隐含默认值 |
 
-### 15.3 需用户/Lead 确认（不阻塞 W4a 冻结，W4b 实现前定稿）
+### 15.3 Lead 裁决（2026-11-01，已确认；C4）
 
-1. **item_key 的 canonical 字符串**：number 用 JSON canonical 文本（`1`/`1.5`）、bool `true`/`false`；如需业务格式（如 `"item-1"`）建议作者在数据里提供 string 键。
-2. **`max_items` 缺省无上限**：是否接受「缺省无上限」还是改为默认上限（如 1000）？本 DR 冻结无上限。
-3. **J 为 `end` 的 join 数组**：直接进入 end 的输入端口聚合（不再是 `end` 的输出）；是否满足 SOP 需要？
-4. **region 内 `trigger=any` 的 item 实例**：沿用普通 any 语义（未到端口 null）；确认无特殊要求。
+**已确认（Lead 2026-11-01 裁决，与 §6.2/§6.5/§6.6 冻结值一致）**：
 
-> 以上 4 条请在 REV-086 评审中逐条确认；不同意见由 Lead/用户裁决并在本 DR 追加修订段（不改历史决策）。
+| # | 事项 | 裁决（采纳） |
+|---|---|---|
+| ① | item_key canonical | string 原值；number → JSON canonical 文本（`1`/`1.5`）；bool → `true`/`false`；缺键/null/object/array → `NULL`（按索引派生，trace `{"$index": i}`）；仅非 NULL 重复报错 |
+| ② | `max_items` 缺省 | **无上限**（由作者显式 `max_items` 约束；风险登记 ISSUE-141，§13） |
+| ③ | J 为 `end` | **允许**：join 数组按普通端口值进入 end 输入聚合（`run_output` 对应端口为数组），不再作为 end 输出 |
+| ④ | region 内 `trigger=any` | 沿用普通 `any` 语义（未到端口为 null；items_port 必须已到才展开，§6.1） |
+
+> 本表取代原「需确认」状态（历史决策不改；如后续需变更，追加修订段）。
 
 ---
 
@@ -539,7 +557,7 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 | `doc/spec-v1.2/01-领域模型与状态机.md` | banner；`CompiledNode.foreach`；item 实例/定位键 `(node,item)`/attempt；`InstanceRecord.item_index/item_key`；RunState controller buffers |
 | `doc/spec-v1.2/03-调度器与生命周期.md` | banner；新增 §3.4.6 展开/join；dispatch/失败/取消/上限；终止判定；§3.15 矩阵 |
 | `doc/spec-v1.2/06-存储与可观测.md` | banner；schema v6 DDL/迁移；`foreach_expansions`；trace/replay 输出；只读拒绝 |
-| `doc/spec-v1.2/07-验收用例.md` | banner；AC-17 a–i 设计；§7.1/§7.2；通过标准 AC-01..AC-17 |
+| `doc/spec-v1.2/07-验收用例.md` | banner；AC-17 a–j 设计；§7.1/§7.2；通过标准 AC-01..AC-17 |
 | `doc/spec-v1.2/00-总纲.md` | banner；`DSL_FOREACH_INVALID`（19 码）+ 4 个 `RUN_FOREACH_*`；`ItemIndex`/`ExpansionId` 别名 |
 | `doc/spec-v1.2/04-节点接口与扩展点.md` | 最小注记：region 内 human per-item |
 | `doc/design/software-team-sop-v1.md` | v1.2（dynamic-N profile；§9 移除动态 N；§7/§11 更新） |

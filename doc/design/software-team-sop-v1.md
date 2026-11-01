@@ -261,7 +261,7 @@ sto ─approved─▶ qa ─approved─▶ release ─approved─▶ end
 
 图是静态 JSON；按 §4.1 的**依赖矩阵**在生成图时展开。codegen 增 `--mode approved|rework`（缺省 `approved`，W1 产物字节级不变）；**dynamic-N profile 不再按 N codegen**（同一张图用 `foreach` 跑任意 N，见 §7.3）。
 
-### 7.1 通用规则（两 profile 共用）
+### 7.1 通用规则（静态两 profile 共用；dynamic-N 见 §7.3）
 
 ```text
 roles = [planer, archer, mde, te, mte, ste, fo, mto, sto, qa, release]
@@ -379,7 +379,7 @@ E -> D_next.<port>                                     # region 唯一出口、�
 
 > **已移出延期项**：图级有限返工 —— v1.1 rework profile 落地（框架 W2a；语义冻结见 DR-005，验收见 §11.2 / spec 07 AC-14）；**动态 N** —— v1.2 dynamic-N profile（框架 W4a 设计冻结，DR-007；验收见 §11.3 / spec 07 AC-17），W4b 实现。
 >
-> 以上四项仍属执行模型扩展，不在本设计稿的 approved-only v1 落地范围内；落地前需另立 DR。
+> 以上三项仍属执行模型扩展，不在本设计稿的 approved-only v1 落地范围内；落地前需另立 DR。
 
 ---
 
