@@ -7,32 +7,35 @@
 - **评审人**：`reviewer-b`（独立评审，≠ 作者）
 - **变更范围**：`948d677..211c2be`（9 files，+2194/−93）：kernel `context/graph/lib/run/trace/types` + `tests/{compile,foreach}.rs`；cli `bridge.rs`；无其它模块
 - **评审时间**：2026-11-01
+- **复审**：2026-11-01，HEAD **`f6e8ed9`**（C1+N1–N3 修复提交，parent `4c6c96b`；仅 kernel 3 文件，+451/−3）；C1+N1–N3（及 N4/N5 对应项）已关闭，结论升级为 **通过**（首轮「有条件通过」历史段保留，见 §7）
 - **关联**：task-35（W4b 合同）/ task-38（作者任务）、DR-007 §6/§7/§8/§12、spec 01 §1.2.5、03 §3.4.6/§3.10/§3.15
 
 ## 1. 结论
 
-**结论：有条件通过**（P0=0；**P1=1（C1）**；P2=5；P3=4）
+**结论：通过**
 
-运行期主链路（controller buffer/state、无 controller 实例、展开校验/4 个 RUN_FOREACH_*、空列表、item 定位/attempt/defer/human、join 有序数组+last source/空列表无 GateResult、取消/终止/controller skip/deadlock、展开后再投递）与 DR-007 §6 大部分一致；测试 15 例覆盖广、既有 kernel/workspace 全绿。但发现一个**Pause/Resume 契约级缺陷**：controller 在 Paused 期间变为 `Ready` 后，Resume 不会展开，随后 `check_termination` 直接 `RUN_DEADLOCK`。已在临时测试中复现（不提交；worktree 已恢复干净）。修复 C1 + 补回归测试后复审。
+**复审（2026-11-01，HEAD `f6e8ed9`）：C1 + N1–N3（及对应 N4/N5）全部关闭，证据见 §7；下方首轮「有条件通过」记录保留为历史。** 复审无 P0/P1；残余 P3（测试/文档边界）不影响合并。
+
+> **首轮结论（2026-11-01，HEAD `211c2be`）：有条件通过**（P0=0；P1=1（C1）；P2=5；P3=4；已被上方复审取代，保留为历史）。首轮发现：Pause 期间 controller 变 `Ready` 后 Resume 不展开 → `RUN_DEADLOCK`；主链路其余部分与 DR-007 §6 一致，测试 15 例覆盖广。
 
 ## 2. 四维评审
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️ 有条件 | 展开/校验/join/失败/取消/controller skip/deadlock/展开后投递均符合 DR-007 §6；但 C1 使「Pause 期间 controller Ready → Resume」必然 RUN_DEADLOCK，违反 DR-007 §6.4 E-8 / 03 §3.8 Resume 语义 |
+| 功能正确性 | ✅（复审通过） | C1 已修复（§7），Pause/Resume Ready controller 正常展开；首轮主链路语义均保留；无 P0/P1 |
 | 代码结构合理性 | ✅（P2 备注） | controller/item/join 集中在 `run.rs`；`CompiledForeach` 编译期生成 region/exit/join；`NodeKey=(node,item)` 贯穿寻址；空列表/join 来源/controller 状态有独立函数；cli bridge 仅映射；无其它模块改动 |
-| 逻辑性 | ⚠️ 部分（C1） | 展开校验顺序、item attempt/defer 作用域、join last source、skip/死锁规则清晰；缺 `Resume` 对 `Ready` controller 的展开；另有 source_instance_id/后置 defer 等 P2/P3 边界 |
+| 逻辑性 | ✅（复审通过） | C1 `expand_ready_controllers` 循环/串行链已补；N1 source、N2 后置 defer、N3 serial join/incomplete_join 防御已补；残余仅 P3 测试/文档边界 |
 | 可读性 | ✅（P3 备注） | 注释解释 controller/join/空列表/失败顺序；测试命名清晰；P3 为测试缺口与少量文档/边界注释 |
 
-## 3. 发现清单
+## 3. 发现清单（首轮：P0=0/P1=1/P2=5/P3=4；C1/N1–N3 已由 `f6e8ed9` 关闭，证据见 §7）
 
-### P1 · 条件（必须修复后复审）
+### P1 · 首轮条件（已关闭）
 
 | # | 位置 | 问题 | 修复建议 |
 |---|---|---|---|
 | **C1** | `crates/zgraph-kernel/src/run.rs:795`（`resume_pending` 只扫描 Pending 实例）、`:1562`（`controller_try_expand` 在 `status != Running` 时直接 return）、`:938`（`check_termination` 见到 `active_controller` 即 `RUN_DEADLOCK`）；测试 `tests/foreach.rs:762`（`pause_freezes_item_dispatch` 只在 item 已 Running 后 pause） | **Pause 期间 controller 变为 Ready 后 Resume 不展开，run 误判 RUN_DEADLOCK**：① Pause 发生在 F 上游仍在飞（如 `prep` Running）时；② `prep` 完成后 `apply_publish` 投递到 F → `controller_apply_delivery` 把 controller 置 `Ready`；③ 因 run Paused，`controller_try_expand` 的 `status != Running` 早退，controller 停在 Ready；④ Resume 只调用 `resume_pending`（仅 Pending 实例），不展开 controller；⑤ `check_termination` 的 `instances_idle` 为 true 且 `active_controller()` 返回 Ready → 立即 `RUN_DEADLOCK`（message `foreach controller of node 'F' is Ready while run is silent`）。**已用临时测试复现**（`Pause` after `prep` Running → 等 700ms → Resume → outcome Failed/RUN_DEADLOCK；临时测试已删除，worktree 干净） | 在 `handle_control(Resume)` / `resume_pending` 于 status 已恢复 Running 后，按 `node_order` 扫描 `controllers` 中 `Ready` 的 F 并调用 `controller_try_expand`（串行 F 链需循环/重扫，直至无新 Ready）；或把 controller 展开统一放到 `dispatch_ready`/drive 循环的 Running 路径。补回归测试：Pause 在上游 Running 时，prep 完成后仍 Paused、F controller Ready、Resume 后正常展开/join/Completed；串行 case 也覆盖 |
 
-### P2 · 建议（不阻断主审，但建议同修/补测）
+### P2 · 首轮建议（N1–N5 已按复审口径关闭；残余 P3 见 §7.3）
 
 | # | 位置 | 问题 | 建议 |
 |---|---|---|---|
@@ -87,12 +90,55 @@ git log -1 --format=%B 53b42ca/211c2be      # 均含 Review: REV-090 / Agent: ke
 
 ## 6. 遗留问题
 
-- **C1（P1）修复后**：在 `resume_pending`/Resume 路径展开 `Ready` controller（按 node_order、支持串行链），补 Pause-during-upstream 回归；关闭后复审。**修复前不合并。**
-- **P2/P3**：N1 source_instance_id、N2 defer gate=false after Expanded/Skipped、N3 serial join晚到、N4 join buffer 静默、N5 编译防御、N6 测试缺口、N7 number canonical、N8 item 投影注释；建议与 C1 同批或 W4b 补测。
-- **无 P0**；kernel 主链路其余部分经测试/代码审查未发现第二 P1；cli 第二评审待 Lead。
+- **C1 已关闭（2026-11-01，`f6e8ed9`）**：`expand_ready_controllers` 在 `resume_pending` 开头按 node_order 循环重扫 Ready controller；Pause-during-upstream/串行 F2 回归均通过（§7.1）。
+- **N1–N3 已关闭（Lead 口径）**：source 只在 Collecting 记录、F Expanded/Skipped 后任何投递（含 defer false）→ RUN_DELIVERY_TO_TERMINAL、serial join F2 state 检查 + incomplete_join + wire_foreach 防御；见 §7.2。残余 P3：N5 完整 region 类型/gate/F 入边防御、N6 entry F/F human/item timeout、N7 number canonical 1.0、N8 item 投影注释/W4b-docs。
+- **无 P0/P1**；C1+N1–N3 已关闭，最终**通过**；cli 第二评审由 Lead 追加后 merge。
 
-## 7. 条件关闭记录（待关闭）
+## 7. 条件关闭复审（2026-11-01，HEAD `f6e8ed9`）
 
-| 条件 | 状态 | 关闭证据 |
+**复审对象**：`4c6c96b..f6e8ed9`（修复提交 f6e8ed9，parent 评审提交 4c6c96b）；**仅 `crates/zgraph-kernel/**` 3 files**，+451/−3；worktree 干净；无新增跨模块改动。首轮条件表见 §3（历史），以下为关闭证据。
+
+### 7.1 C1 关闭证据（Pause/Resume Ready controller）
+
+| 项 | 证据 |
+|---|---|
+| 实现 | `run.rs:795 resume_pending` 开头调用 `self.expand_ready_controllers()`；`expand_ready_controllers`（`:820+`）在 status Running 下按 `node_order` 循环查找 `state==Ready` 的 controller 并 `controller_try_expand`，串行 F1→F2 的新 Ready 可继续重扫；若展开后仍 Ready（防御异常）停止避免空转；run 终态返回。 |
+| 回归 1 | `pause_during_upstream_expands_after_resume`：prep 在飞时 Pause；prep 完成（Paused 期间 controller Ready，>deadlock_grace 仍 Paused、无 expansion）→ Resume → Completed、expansion=1(item_count=2)、end Completed。 |
+| 回归 2 | `serial_foreach_pause_resume_expands_second_controller`：Pause 时 F1 item 完成、join 投递使 F2 controller Ready；Resume 后 F2 展开、expansions=2、end Completed。 |
+| 反证 | 临时注释掉 `self.expand_ready_controllers()` 调用后，`pause_during_upstream...` 与 `serial_foreach_pause...` 两例均 FAILED（作者自报 3 例；本次抽查 2 例即失败）；恢复调用后均通过；临时改动已还原，worktree clean。 |
+
+### 7.2 N1–N3（Lead 口径）关闭证据
+
+| # | 内容 | 证据 |
 |---|---|---|
-| C1 Pause 期间 controller Ready → Resume 展开 | **open** | `resume_pending`/Resume 扫描 Ready controller 并展开；补 Pause-during-upstream + 串行 case 回归；重跑 kernel/features/workspace |
+| N1 source_instance_id | 只在 Collecting 记录 | `run.rs:1511` `if controller.state == Collecting { source_instance_id = Some(from_instance) }`；Ready 后 passed 不覆盖；`expansion_source_is_the_ready_causing_delivery`（source=X 非 prep）与 `expansion_source_not_overwritten_while_paused`（Pause 窗口内 extra 不覆盖 items source）通过。 |
+| N2 defer false after Expanded/Skipped | 已 terminal | `apply_publish` 目标 F 分支先取 controller state，`Expanded/Skipped` 立即 `fail_delivery_to_terminal`（在 GateResult/receipt 之前），任何投递（含 defer gate=false）不再只挂 receipt；`defer_false_delivery_after_expansion_is_terminal` 通过（run Failed/RUN_DELIVERY_TERMINAL，expansion=1）。 |
+| N3 serial join F2 state + incomplete_join + wire 防御 | 已补 | `inject_join_value` 目标 F2 先检查 `Expanded/Skipped` → `fail_delivery_to_terminal`；`check_termination` 增 `incomplete_join()`（join buffer 非空且 len<expected → 防御性 `RUN_FOREACH_ITEM_INCOMPLETE`）；`graph.rs wire_foreach` 增 `items_port` 声明 `CompileError` + `debug_assert!(region contains F)`。serial pause/resume 回归与全量测试通过。残余：完整 region 类型/E→J no-gate/F 入边防御仍依赖 DSL（P3）。 |
+
+> 首轮 P2 的 N4（join_buffers 静默）由 `incomplete_join()` 防御关闭；N5 的完整防御仍为 P3（上表 N3 仅覆盖 Lead 指定范围）。
+
+### 7.3 复审验证（新 HEAD/重算计数）
+
+worktree `/Users/zyzs/lczyzs/code/zgraph/.worktrees/kernel-kernel-dev`，HEAD **`f6e8ed9`**，base `main` `948d677`，工作区干净：
+
+```bash
+cargo test -p zgraph-kernel                 # 24 targets：144 passed / 0 failed / 0 ignored
+cargo test -p zgraph-kernel --features test-hooks   # 26 targets：154 passed / 0 failed
+cargo test -p zgraph-cli                    # 9 targets：207 passed / 0 failed
+cargo test --workspace                      # 70 targets：874 passed / 0 failed / 3 ignored
+cargo clippy --workspace --all-targets --locked -- -D warnings  # exit 0
+cargo fmt --all -- --check                  # exit 0
+bash scripts/dev/check.sh                   # PASSED
+
+git diff --stat 4c6c96b..f6e8ed9             # 3 files, +451/−3（仅 kernel）
+git status --porcelain                      # 空
+git merge-base HEAD main                    # 948d677
+```
+
+- 作者自报与实测一致：kernel **144/0**、features **154/0**、cli **207/0**、workspace **874/0/3**；`tests/foreach.rs` 由 15→**20** 例（新增 C1×2、N1×2、N2×1）；clippy/fmt/check 全绿；本次无可复现 ISSUE-091 flake。
+- `4c6c96b..f6e8ed9` **仅 kernel 3 files**（run/graph/tests/foreach），无 kernel 外改动；首轮 cli bridge 跨模块改动仍在，第二评审待 Lead。
+- 残余 P3（不阻断）：①N5 完整 wire_foreach 防御（region 节点类型/E→J no gate/F 入边）仍依赖 DSL；②N6 测试仍缺 entry F、F 本身 human、item timeout、serial late join 等边界；③N7 number canonical `1.0`/`-0.0`；④N8 Transition item 投影/08 source-breaking 由 W4b-docs 回写；⑤cli bridge 第二评审待 Lead。
+
+### 7.4 复审结论
+
+**C1 + N1–N3（及 N4/N5 对应项）关闭；复审无 P0/P1；最终结论：通过。** 建议 Lead 追加 cli 第二评审后 merge（HEAD `f6e8ed9` + 本记录提交）。
