@@ -122,3 +122,11 @@ bad_foreach_subgraph.json（R6 收敛）
 ## 6. 条件关闭记录（仅"有条件通过"填写）
 
 不适用（结论为 `通过`，无附加条件）。
+
+## 7. 第二评审 · 跨模块 fixture 新增（Lead 追加，2026-11-01）
+
+- **评审人**：`lead`（**≠ 作者** `dsl-dev`；Lead 已批准该跨模块改动）
+- **范围**：新增 22 个 `tests/fixtures/graphs/{valid_foreach,bad_foreach_*}.json`（e2e 模块路径；dsl 测试必需资产，w2b 同类先例）。无其它跨模块改动。
+- **核对**：仅新增 fixture（不改既有 fixture 内容）；`crates/zgraph-dsl/tests/fixtures.rs` 表同步（BAD 35→56、VALID 7→8）；既有 42 fixture 的 validate 输出与 hash 经评审人独立 A/B 84/84 逐字节一致；e2e 只读消费。
+- **Lead 亲自验证**：`git diff 42f93d7..9efc41c --stat` 仅 dsl 源/测试 + 新增 graphs fixture；`cargo test -p zgraph-dsl --offline` 118 passed。
+- **结论**：**通过（第二评审）**。该 fixture 新增与主审结论合并生效。
