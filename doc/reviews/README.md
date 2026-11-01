@@ -92,7 +92,7 @@
 | [REV-091](REV-091-cli-dynamic.md) | 2026-11-01 | cli | `feat/cli-dynamic` | 通过（trace ForeachExpansion/L2 per-item/预检；cli 222/0；P3 → ISSUE-146） | reviewer-a |
 | [REV-092](REV-092-kernel-foreach-items-unwrap.md) | 2026-11-01 | kernel fix | `fix/kernel-foreach-items-unwrap` | 通过（items_port 整包 object 同名键 unwrap 规则 A；kernel 149/159、cli 222、workspace 894/0/3） | reviewer-b |
 | [REV-093](REV-093-e2e-dynamic-fanout.md) | 2026-11-01 | e2e | `test/e2e-dynamic-fanout` | 通过（AC-17 a–j 真链路 21 用例；e2e 106/0/2、workspace 915/0/3、6 连跑；P2/P3 → ISSUE-143/148） | reviewer-b |
-| [REV-094](REV-094-docs-dynamic-spec.md) | 2026-11-01 | docs | `docs/docs-dynamic-spec` | 待评审（W4b as-built 回写：spec 00/01/02/03/04/06/07/08 + DR-007 §14.1 + AC-17 实测 + PROVENANCE；本分支） | —（待定） |
+| [REV-094](REV-094-docs-dynamic-spec.md) | 2026-11-01 | docs | `docs/docs-dynamic-spec` | 通过（W4b as-built 回写：spec 00/01/02/03/04/06/07/08 + DR-007 §14.1 + AC-17 实测 21 用例 + PROVENANCE 第 25 条；e2e 106/0/2、workspace 915/0/3、PROVENANCE §3 9/9 SHA/行数实测一致；P2/P3 建议见记录 §3） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
