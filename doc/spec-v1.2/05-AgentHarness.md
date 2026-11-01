@@ -99,6 +99,7 @@ Memory 检索/写入（stub 返回空）、KB 检索（stub 返回空）、多�
 > **与 00 的重叠点**：`DSL_AGENT_NOT_FOUND`（图期）与 `HARNESS_CONFIG_LOAD`（运行期）都能表达"资产缺失/非法"。v1 裁定**按阶段分工**：图加载期只判索引命中（`DSL_AGENT_NOT_FOUND`），运行期判合法性与内容（`HARNESS_CONFIG_LOAD`）。两码不互斥，见 §5.11。
 >
 > **与 04 的边界**：04 §4.7 的 R1 ③ 曾在图加载期收集 `agent_call` 的 skill 符号；按 02 §2.6.3/§2.11 P-02-07 的裁定与 00 §0.8 的分工，**tools/skills 归 Harness Loading**（`HARNESS_CONFIG_LOAD`/`HARNESS_UNKNOWN_TOOL`），图加载期不解析。本分册按此执行。
+> **v0.3（M8）V1 设计冻结草案（2026-11-01，REV-096）**：新增 **skills**（Agent Skills 索引/按需加载，DR-009）、**MCP 工具**（stdio + Streamable HTTP，DR-010）、**可插拔 harness**（`AgentProvider` + 子进程协议，DR-011）；均 additive、默认路径（无配置）逐字节不变；实现 V2–V4，as-built 由 V5 回写。
 
 ### 5.2.2 Schema（字段级，v1 最终版）
 
@@ -1427,3 +1428,32 @@ pub trait AgentProvider: Send + Sync {
 > **M5 状态（REV-035）**：L1 已修（REV-026/033/030 + e2e REV-032）；L4 已修（REV-027）；L8 的 5 个目标函数已拆（REV-027），剩余清单随 M6；L10 的 seam（REV-027）与 `llm_calls` 落库/L2 replay（REV-030/032）已交付，版本列仍 NULL（ISSUE-082 部分修）；L2/L3/L5/L6/L7/L9 与 ISSUE-075/077/079/080 留 M6。M6 排除项与依据见 `doc/decisions/DR-002-m5-cli-replay-recording.md` §7。
 >
 > **M6 状态（REV-057）**：L2 已修（REV-042/ISSUE-077 fixed）；L5 已修（REV-042/ISSUE-075 fixed）；L7 已修（REV-052/ISSUE-079 fixed，e2e 适配 REV-060）；L9 已修（REV-057/ISSUE-080 fixed，闭集冻结）；**L10 已修（REV-049 `global_vars` + REV-048 `worker_versions`/`model_params` 落库，ISSUE-082 fixed）**；**L3/L6/L8 与 ISSUE-081/090 仍开放**（不在本批范围）。
+
+---
+
+## 5.11 v0.3 冻结草案：skills / MCP / harness 插件（2026-11-01，REV-096；待实现回写）
+
+> 本节是 **V1 设计冻结草案**（docs-only）；实现波次见 DR-008 V2–V4。默认（不配置）行为不变；三能力均属 Harness Loading/AgentConfig，**不参与 `graph_hash`**。
+
+### 5.11.1 skills（DR-009）
+
+- 发现：`<skills_dir>/<name>/SKILL.md`（`--skills-dir` > `ZGRAPH_SKILLS_DIR` > `.zgraph/skills`）；frontmatter 必填 `name`/`description`，未知键拒绝；`SKILL.md` ≤256KiB。
+- 注入：system **仅索引**（`name: description`）；`skill_view(name)` 工具按需返回正文（≤32KiB，`truncated` 标记）；单 run ≤5 次（`MAX_SKILL_VIEWS`）。
+- 配置：`AgentConfig.skills?: string[]`（缺省 `[]`；`"*"` 显式全量）；不执行 skill 脚本；错误 `HARNESS_SKILL_*`（00 §0.4）。
+- 无 skills：不发现/不注入/不注册工具 → 既有输出不变。
+
+### 5.11.2 MCP（DR-010）
+
+- client：Rust（rmcp 首选；stdio + Streamable HTTP；协议目标 `2026-07-28`）；registry `<assets_dir>/mcp_servers.json`；`AgentConfig.mcp?: {servers, allow?}`。
+- 工具：`mcp:<server>:<tool>` → `ToolDef`（inputSchema/description/截断 ≤32KiB）；allowlist/名称冲突 fail-closed；单响应多 tool_call 仍串行。
+- 生命周期：initialize → tools/list（run 级缓存）→ tools/call；超时/取消/进程组 kill（03 §3.9.4）；不重试。
+- trace：**默认不新增 schema**（沿用 `StreamingEvent::ToolCall*`/`llm_calls`）；v7 仅候选（逐次审计），另立 DR。
+- 无 mcp：不读 registry/不启进程/不注册工具 → 既有输出不变。
+
+### 5.11.3 harness 插件（DR-011）
+
+- seam：`AgentProvider`（Rust trait）实际选择；`AgentConfig.harness?: {kind:"builtin"| "subprocess", command,args?,protocol:"zgraph-harness/1",env?,timeout_ms?}`；缺省 builtin（现有 `HarnessExecutor` 路径不变）。
+- 子进程协议：NDJSON over stdio；`hello/hello_ok` → `run` → `event`（token/reasoning/tool_call/progress 子集）→ `final`（四字段 output）；版本/schema 校验、行 ≤1MiB。
+- 取消/超时：关闭 stdin → SIGTERM 3s → SIGKILL 进程组；超时走 `NODE_TIMEOUT` 语义；`HARNESS_PLUGIN_*` 错误闭集。
+- L2：外部 harness **不重跑**（`--mode=outputs` 用 `recorded_outputs`；events 重放不启动进程）。
+- Codex/DSH：薄 adapter（外部进程；不嵌入 Codex crate/不引入 DSH loop）；capabilities 协商（无 streaming 则降级）；真实适配器可 ext。

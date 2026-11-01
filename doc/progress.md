@@ -2,14 +2,14 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.2.0 **已发布**（tag `v0.2.0`；`dist/RELEASE_NOTES-v0.2.0.md`；性能基线 [`doc/perf-baseline-v0.2.txt`](perf-baseline-v0.2.txt)）。M0–M7 全部完成：DSL 1.0/R1–R18、内核、trace v6、Harness、CLI、SOP v1/v1.1、W2b 扇出上限、W3a human decide、W4b foreach 动态 N；workspace 915/0/3、e2e 106/0/2。
+**当前阶段**：v0.3（M8）**V1 设计冻结进行中**（分支 `docs/docs-v03-design`，REV-096）：skills + MCP + harness 可插拔三项设计（DR-008..011）+ spec 00/02/05/06/07 草案 + AC-18/19/20 设计；v0.2.0 已发布（tag `v0.2.0`）。
 
 **进行中任务**
-- 无（v0.2.0 发布收口完成；worktree/分支清理由合并流程处理）。
+- docs `docs/docs-v03-design`（REV-096，作者 docs-dev）：待 arch-researcher 调研结论转发后锁定 research/MCP client/Codex·DSH 细节，再提交设计冻结。
 
 **下一步**
-- **v0.3 规划**：W5 共享评审队列（v0.3 候选）+ 清理 ISSUE-112（full-60 运行期基线）/ISSUE-143–150（P3）。
+- V1 评审通过后：**V2 skills** → **V3 MCP** → **V4 harness 插件** → **V5 集成/兼容/性能/发布 v0.3.0**（DR-008 §3）。
 
 **阻塞**
-- 无硬阻塞；已知限制：ISSUE-112（SOP full-60 运行期 fake-LLM 不稳定，发布例外）；**W3b durable resume 不做**（用户 2026-11-01 决定）；W5 延至 v0.3。
-- 台账：ISSUE-142 fixed；ISSUE-105–141 + 143–150 open（P3 为主）；100/101/104 fixed；ISSUE-062 保持 open（见 `doc/issues.md`）。
+- arch-researcher spike 结论待 Lead 转发（MCP rmcp 版本/Streamable HTTP 支持、Codex exec/ACP/DSH headless 可行性、Agent Skills 规范细节）——不阻塞骨架起草，阻塞最终设计数字/选型锁定。
+- 已知限制：W5 共享评审队列延至 v0.4（推荐，Lead 裁决项）；ISSUE-112/143–150 仍 open（v0.3 发布前清理）。
