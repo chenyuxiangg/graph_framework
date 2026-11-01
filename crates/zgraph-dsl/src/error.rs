@@ -1,8 +1,8 @@
 //! DSL 错误码、错误对象与错误容器。
 //!
 //! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4/§2.7；错误码全集见
-//! `doc/spec-v1.2/00-总纲.md` §0.4（DSL 域 18 个码；`DSL_DEFER_NOT_REENTRANT`
-//! 为 W2a 新增，W2a0 回写 00 §0.4）。
+//! `doc/spec-v1.2/00-总纲.md` §0.4（DSL 域 19 个码；`DSL_DEFER_NOT_REENTRANT`
+//! 为 W2a 新增、`DSL_FOREACH_INVALID` 为 W4a 新增第 19 码）。
 //!
 //! 失败策略（02 §2.1.3）：跨规则 fail-fast，同规则内聚合，最多返回
 //! [`MAX_DSL_ERRORS`] 条；`truncated` 标记是否发生截断。
@@ -54,6 +54,8 @@ pub enum DslErrorCode {
     UnsupportedField,
     /// `on_gate_false="defer"` 的边源节点不在含 defer 边的可重入环上（R15）。
     DeferNotReentrant,
+    /// `foreach` 区域/边界/join/嵌套/类型/items_port 非法（R18；W4a 第 19 码）。
+    ForeachInvalid,
 }
 
 impl DslErrorCode {
@@ -78,11 +80,12 @@ impl DslErrorCode {
             Self::UnsupportedNodeType => "DSL_UNSUPPORTED_NODE_TYPE",
             Self::UnsupportedField => "DSL_UNSUPPORTED_FIELD",
             Self::DeferNotReentrant => "DSL_DEFER_NOT_REENTRANT",
+            Self::ForeachInvalid => "DSL_FOREACH_INVALID",
         }
     }
 
-    /// 全部 18 个 DSL 错误码（文档与测试用）。
-    pub const ALL: [Self; 18] = [
+    /// 全部 19 个 DSL 错误码（文档与测试用）。
+    pub const ALL: [Self; 19] = [
         Self::ParseError,
         Self::MissingField,
         Self::DuplicateNodeId,
@@ -101,6 +104,7 @@ impl DslErrorCode {
         Self::UnsupportedNodeType,
         Self::UnsupportedField,
         Self::DeferNotReentrant,
+        Self::ForeachInvalid,
     ];
 }
 
@@ -356,7 +360,11 @@ mod tests {
         let mut names: Vec<&str> = DslErrorCode::ALL.iter().map(|code| code.as_str()).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 18, "00 §0.4 有 18 个 DSL 错误码（W2a 增 R15）");
+        assert_eq!(
+            names.len(),
+            19,
+            "00 §0.4 有 19 个 DSL 错误码（W2a 增 R15；W4a 增 R18 DSL_FOREACH_INVALID）"
+        );
         assert!(names.iter().all(|name| name.starts_with("DSL_")));
     }
 }

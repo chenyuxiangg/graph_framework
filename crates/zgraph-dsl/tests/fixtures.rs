@@ -1,7 +1,8 @@
 //! Fixtures 全覆盖测试：每个文件都被引用，坏图命中期望错误码**与定位**。
 //!
 //! 对应 02 §2.4 / §2.7.1 / §2.7.3 与 07 AC-04（M1 口径）：18 个 DSL 码反例、
-//! R3 版本/时间戳反例、REV-005 回归反例、W2b `max_fanout`（R4 取值 / R16 静态上限）。
+//! R3 版本/时间戳反例、REV-005 回归反例、W2b `max_fanout`（R4 取值 / R16 静态上限）、
+//! W4a `foreach`（R17 形状 / R18 区域 reason 闭集）。
 //! fixture 目录为 `tests/fixtures/graphs/`，资产目录为 `tests/fixtures/assets/`。
 
 use std::collections::BTreeSet;
@@ -66,7 +67,7 @@ const fn edge(index: usize) -> Loc {
 }
 
 /// 坏图 fixture → 期望错误码 + 期望定位（REV-005 后为强断言）。
-const BAD_CASES: [(&str, DslErrorCode, Loc); 35] = [
+const BAD_CASES: [(&str, DslErrorCode, Loc); 56] = [
     // R1/R2/R3 文档级
     ("bad_parse_error.json", DslErrorCode::ParseError, DOC_LEVEL),
     (
@@ -251,10 +252,114 @@ const BAD_CASES: [(&str, DslErrorCode, Loc); 35] = [
         DslErrorCode::ParseError,
         node("start"),
     ),
+    // W4a：foreach 形状（R17，复用 DSL_PARSE_ERROR；location = F）
+    (
+        "bad_foreach_not_object.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    (
+        "bad_foreach_unknown_key.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    (
+        "bad_foreach_missing_items_port.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    (
+        "bad_foreach_missing_join.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    (
+        "bad_foreach_items_port_undeclared.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    (
+        "bad_foreach_key_field.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    ("bad_foreach_join.json", DslErrorCode::ParseError, node("F")),
+    (
+        "bad_foreach_max_items.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    (
+        "bad_foreach_on_item_error.json",
+        DslErrorCode::ParseError,
+        node("F"),
+    ),
+    (
+        "bad_foreach_node_type.json",
+        DslErrorCode::ParseError,
+        node("start"),
+    ),
+    // W4a：foreach 区域（R18 -> DSL_FOREACH_INVALID；location = F）
+    (
+        "bad_foreach_join_not_found.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_join_in_region.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_join_type.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_forbidden_node_type.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_nested.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_no_exit.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_multiple_exits.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_external_edge.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_join_edge_gated.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    (
+        "bad_foreach_items_port_missing.json",
+        DslErrorCode::ForeachInvalid,
+        node("F"),
+    ),
+    // W4a：子图内 foreach -> R6 收敛 DSL_SUBGRAPH_INVALID（保留内部 node_id）
+    (
+        "bad_foreach_subgraph.json",
+        DslErrorCode::SubgraphInvalid,
+        node("pin"),
+    ),
 ];
 
-/// 合法 fixture 名单（全部必须通过 R1–R16）。
-const VALID_CASES: [&str; 7] = [
+/// 合法 fixture 名单（全部必须通过 R1–R18）。
+const VALID_CASES: [&str; 8] = [
     "customer_ticket.json",
     "valid_parallel.json",
     "valid_cycle.json",
@@ -262,6 +367,7 @@ const VALID_CASES: [&str; 7] = [
     "valid_created_at_offset.json",
     "valid_gate_defer.json",
     "valid_max_fanout.json",
+    "valid_foreach.json",
 ];
 
 fn fixture_needs_assets(name: &str) -> bool {
@@ -419,4 +525,27 @@ fn valid_max_fanout_fixture_declares_limit_equal_to_out_degree() {
         out_degree, 2,
         "fixture start out-degree must equal the limit"
     );
+}
+
+#[test]
+fn valid_foreach_fixture_defines_single_exit_region() {
+    let loaded = load("valid_foreach.json", false).expect("valid foreach graph");
+    let fanout = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "F")
+        .expect("F node");
+    let spec = fanout.foreach.as_ref().expect("F declares foreach");
+    assert_eq!(spec.join, "J");
+    assert_eq!(spec.items_port, "items");
+    // region = {F, W, E}：F 的静态出边链，E→J 为唯一出口。
+    let edge_targets: Vec<&str> = loaded
+        .definition
+        .edges
+        .iter()
+        .filter(|edge| edge.from == "F" || edge.from == "W" || edge.from == "E")
+        .map(|edge| edge.to_node.as_str())
+        .collect();
+    assert_eq!(edge_targets, vec!["W", "E", "J"]);
 }

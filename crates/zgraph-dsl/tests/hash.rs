@@ -227,3 +227,57 @@ fn golden_hash_for_valid_max_fanout_fixture() {
         loaded.canonical_json()
     );
 }
+
+#[test]
+fn omitted_foreach_is_not_backfilled_by_projection() {
+    // 无 foreach 的图（v0.1.0/W1/W2a/W2b/W3a）投影不变：canonical 无该键。
+    let plain = load_value(fixture("valid_foreach.json"));
+    assert!(plain.canonical_json().contains("\"foreach\":"));
+
+    let mut without = fixture("valid_foreach.json");
+    without["nodes"][1]
+        .as_object_mut()
+        .expect("node object")
+        .remove("foreach");
+    let without = load_value(without);
+    assert!(!without.canonical_json().contains("\"foreach\":"));
+    assert_ne!(plain.graph_hash, without.graph_hash);
+
+    // 缺失与显式两份图：显式才进投影（不补齐默认值）。
+    let mut explicit_again = fixture("valid_foreach.json");
+    explicit_again["nodes"][1]["foreach"] = json!({"items_port": "items", "join": "J"});
+    let explicit_again = load_value(explicit_again);
+    assert!(explicit_again
+        .canonical_json()
+        .contains("\"foreach\":{\"items_port\":\"items\",\"join\":\"J\"}"));
+    assert_ne!(plain.graph_hash, explicit_again.graph_hash);
+}
+
+#[test]
+fn explicit_foreach_defaults_change_hash_when_written() {
+    // 语义等价的显式 `on_item_error:"fail"` 与缺省写法 → hash 不同（沿用不归一化口径）。
+    let omitted = load_value(fixture("valid_foreach.json"));
+    let mut explicit = fixture("valid_foreach.json");
+    explicit["nodes"][1]["foreach"] = json!({
+        "items_port": "items",
+        "key_field": "id",
+        "join": "J",
+        "max_items": 3
+    });
+    let explicit = load_value(explicit);
+    assert_ne!(omitted.graph_hash, explicit.graph_hash);
+}
+
+#[test]
+fn golden_hash_for_valid_foreach_fixture() {
+    // golden：锁定含 `foreach` 的 canonical 投影（W4a）。
+    let loaded = load_value(fixture("valid_foreach.json"));
+    assert_eq!(loaded.graph_hash, "10cd8fff9c8f85fb");
+    assert!(
+        loaded
+            .canonical_json()
+            .contains("\"foreach\":{\"items_port\":\"items\""),
+        "{}",
+        loaded.canonical_json()
+    );
+}

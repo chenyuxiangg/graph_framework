@@ -3,12 +3,13 @@
 //! 通过公开 API（`load_graph_value` / `load_graph_with_options`）驱动，
 //! 断言错误码、定位与 expected/actual；fixtures 在 `fixtures.rs` 中逐文件覆盖。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use zgraph_dsl::{
-    load_graph, load_graph_value, load_graph_with_options, DslErrorCode, DslErrors, LoadOptions,
-    LoadedGraph, OnGateFalse,
+    load_graph, load_graph_text, load_graph_value, load_graph_with_options, DslErrorCode,
+    DslErrors, LoadOptions, LoadedGraph, OnGateFalse, OnItemError,
 };
 
 fn repo_root() -> PathBuf {
@@ -2061,4 +2062,648 @@ fn r16_max_fanout_is_allowed_on_every_node_type() {
         inner[0].max_fanout, None,
         "subgraph node without max_fanout"
     );
+}
+
+// ---------------------------------------------------------------- R17/R18（W4a）
+
+/// 给节点加 `foreach`（R17/R18 测试图构造用）。
+fn with_foreach(mut node: Value, spec: Value) -> Value {
+    node["foreach"] = spec;
+    node
+}
+
+/// 合法 `foreach` 形状（含可选字段；region = {F, W, E}，exit = E，join = J）。
+fn valid_foreach_spec() -> Value {
+    json!({
+        "items_port": "items",
+        "key_field": "id",
+        "join": "J",
+        "max_items": 3,
+        "on_item_error": "fail"
+    })
+}
+
+/// `start -> F(foreach) -> W -> E -> J -> end` 的合法 foreach 图（P-1）。
+fn foreach_graph(spec: Value) -> Value {
+    graph_with(
+        json!([
+            start_node("start"),
+            with_foreach(python_node("F", json!([input_port("items", true)])), spec),
+            python_node("W", json!([input_port("task", true)])),
+            python_node("E", json!([input_port("work", true)])),
+            python_node("J", json!([input_port("results", true)])),
+            end_node("end", "result")
+        ]),
+        json!([
+            edge("start", "F", "items"),
+            edge("F", "W", "task"),
+            edge("W", "E", "work"),
+            edge("E", "J", "results"),
+            edge("J", "end", "result")
+        ]),
+    )
+}
+
+/// 断言 R18 首错载荷（W4a 冻结模板）。
+fn expect_foreach_reason(graph: Value, f_node: &str, reason: &str) {
+    let errors = expect_code(graph, DslErrorCode::ForeachInvalid);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    let first = errors.first();
+    assert_eq!(
+        first.message,
+        format!("foreach region of node '{f_node}' is invalid: {reason}")
+    );
+    assert_eq!(first.location.node_id.as_deref(), Some(f_node));
+    assert_eq!(first.location.edge_index, None);
+    assert_eq!(
+        first.expected,
+        Some(json!("valid foreach region")),
+        "{errors}"
+    );
+    assert_eq!(
+        first.actual,
+        Some(json!({"node_id": f_node, "reason": reason})),
+        "{errors}"
+    );
+}
+
+#[test]
+fn r17_foreach_is_parsed_and_optional() {
+    let loaded = load_fixture("valid_foreach.json").expect("valid foreach fixture");
+    let fanout = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "F")
+        .expect("F node");
+    let spec = fanout.foreach.as_ref().expect("foreach parsed");
+    assert_eq!(spec.items_port, "items");
+    assert_eq!(spec.key_field.as_deref(), Some("id"));
+    assert_eq!(spec.join, "J");
+    assert_eq!(spec.max_items, Some(3));
+    assert_eq!(spec.on_item_error, Some(OnItemError::Fail));
+    assert!(loaded
+        .definition
+        .nodes
+        .iter()
+        .filter(|node| node.id != "F")
+        .all(|node| node.foreach.is_none()));
+
+    // 作者未写 → None；serde 不输出 null（"是否写了"可判定）。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][1]
+        .as_object_mut()
+        .expect("node object")
+        .remove("foreach");
+    let loaded = load(graph).expect("without foreach the node is a plain node");
+    let fanout = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "F")
+        .expect("F node");
+    assert_eq!(fanout.foreach, None);
+    let value = serde_json::to_value(fanout).expect("serialize node");
+    assert!(
+        value.get("foreach").is_none(),
+        "None must be skipped by serde: {value}"
+    );
+
+    let loaded = load(foreach_graph(valid_foreach_spec())).expect("valid graph");
+    let fanout = loaded
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "F")
+        .expect("F node");
+    let value = serde_json::to_value(fanout).expect("serialize node");
+    assert_eq!(value.get("foreach"), Some(&valid_foreach_spec()), "{value}");
+}
+
+#[test]
+fn r17_foreach_is_allowed_only_on_executable_node_types() {
+    // python_node / agent_call（含 builtin.human）允许。
+    load(foreach_graph(valid_foreach_spec())).expect("python_node allows foreach");
+    let mut agent = foreach_graph(valid_foreach_spec());
+    agent["nodes"][1]["type"] = json!("agent_call");
+    agent["nodes"][1]["config"] = json!({"agent_id": "agent-1"});
+    load(agent).expect("agent_call allows foreach");
+    let mut human = foreach_graph(valid_foreach_spec());
+    human["nodes"][1]["config"] = json!({"module": "builtin", "function": "human"});
+    load(human).expect("builtin.human is a python_node and allows foreach");
+
+    // start / end / subgraph：R17 DSL_PARSE_ERROR（R4 阶段先于 R5/R6/R7）。
+    for (id, node_type, config) in [
+        ("S", "start", json!({})),
+        ("done_end", "end", json!({})),
+        ("sub", "subgraph", json!({"subgraph_id": "inner"})),
+    ] {
+        let graph = graph_with(
+            json!([with_foreach(
+                node(id, node_type, json!([input_port("items", true)]), config),
+                json!({"items_port": "items", "join": "done"})
+            )]),
+            json!([]),
+        );
+        let errors = expect_code(graph, DslErrorCode::ParseError);
+        assert_eq!(errors.error_count, 1, "{errors}");
+        assert_eq!(
+            errors.first().message,
+            format!("node '{id}' of type '{node_type}' does not support foreach"),
+            "{errors}"
+        );
+        assert_eq!(
+            errors.first().expected,
+            Some(json!("python_node|agent_call"))
+        );
+        assert_eq!(errors.first().actual, Some(json!(node_type)));
+        assert_eq!(errors.first().location.node_id.as_deref(), Some(id));
+    }
+}
+
+#[test]
+fn r17_field_value_boundaries_are_validated() {
+    let cases: [(Value, &str, Value, Value); 8] = [
+        (
+            json!({"items_port": "missing", "join": "J"}),
+            "'foreach.items_port' of node 'F' must be a declared input port, got \"missing\"",
+            json!(["items"]),
+            json!("missing"),
+        ),
+        (
+            json!({"items_port": 1, "join": "J"}),
+            "'foreach.items_port' of node 'F' must be a declared input port, got 1",
+            json!(["items"]),
+            json!(1),
+        ),
+        (
+            json!({"items_port": "items", "join": "J", "key_field": ""}),
+            "'foreach.key_field' must be a non-empty string, got \"\"",
+            json!("non-empty string"),
+            json!(""),
+        ),
+        (
+            json!({"items_port": "items", "join": "J", "key_field": 7}),
+            "'foreach.key_field' must be a non-empty string, got 7",
+            json!("non-empty string"),
+            json!(7),
+        ),
+        (
+            json!({"items_port": "items", "join": ""}),
+            "'foreach.join' must be a node id, got \"\"",
+            json!("node id"),
+            json!(""),
+        ),
+        (
+            json!({"items_port": "items", "join": "J", "max_items": 0}),
+            "'foreach.max_items' must be an integer >= 1, got 0",
+            json!(">= 1"),
+            json!(0),
+        ),
+        (
+            json!({"items_port": "items", "join": "J", "max_items": 1.5}),
+            "'foreach.max_items' must be an integer >= 1, got 1.5",
+            json!(">= 1"),
+            json!(1.5),
+        ),
+        (
+            json!({"items_port": "items", "join": "J", "on_item_error": "skip"}),
+            "'foreach.on_item_error' must be one of ['fail'], got \"skip\"",
+            json!(["fail"]),
+            json!("skip"),
+        ),
+    ];
+    for (foreach, message, expected, actual) in cases {
+        let errors = expect_code(foreach_graph(foreach), DslErrorCode::ParseError);
+        assert_eq!(errors.error_count, 1, "{errors}");
+        let first = errors.first();
+        assert_eq!(first.message, message, "{errors}");
+        assert_eq!(first.expected, Some(expected.clone()), "{errors}");
+        assert_eq!(first.actual, Some(actual.clone()), "{errors}");
+        assert_eq!(first.location.node_id.as_deref(), Some("F"));
+    }
+
+    // on_item_error 非字符串 → R17。
+    let errors = expect_code(
+        foreach_graph(json!({"items_port": "items", "join": "J", "on_item_error": 1})),
+        DslErrorCode::ParseError,
+    );
+    assert_eq!(
+        errors.first().message,
+        "'foreach.on_item_error' must be one of ['fail'], got 1"
+    );
+}
+
+#[test]
+fn r17_foreach_aggregates_field_errors_in_frozen_order() {
+    // items_port 未声明 + on_item_error 非法 → 同节点聚合，按表顺序 items_port 先报。
+    let errors = expect_code(
+        foreach_graph(json!({"items_port": "missing", "join": "J", "on_item_error": "skip"})),
+        DslErrorCode::ParseError,
+    );
+    assert_eq!(errors.error_count, 2, "{errors}");
+    assert!(
+        errors.first().message.starts_with("'foreach.items_port'"),
+        "{errors}"
+    );
+    assert!(
+        errors.errors[1]
+            .message
+            .starts_with("'foreach.on_item_error'"),
+        "{errors}"
+    );
+
+    // 未知键聚合 + 缺必填 items_port/join。未知键之间的先后取决于 `serde_json`
+    // 的 Map 实现（`preserve_order` feature 由工作区统一开启，单 crate 测试关闭），
+    // 因此只强断言集合与「未知键先于缺必填」的阶段顺序。
+    let errors = expect_code(
+        foreach_graph(json!({"mode": "x", "extra": 1})),
+        DslErrorCode::ParseError,
+    );
+    assert_eq!(errors.error_count, 4, "{errors}");
+    let messages: BTreeSet<&str> = errors.errors.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        BTreeSet::from([
+            "unknown field 'extra' in foreach of node 'F'",
+            "unknown field 'mode' in foreach of node 'F'",
+            "foreach of node 'F' missing required field 'items_port'",
+            "foreach of node 'F' missing required field 'join'",
+        ])
+    );
+    assert!(
+        errors.errors[..2]
+            .iter()
+            .all(|error| error.message.starts_with("unknown field")),
+        "{errors}"
+    );
+    assert_eq!(
+        errors.first().expected,
+        Some(json!([
+            "items_port",
+            "key_field",
+            "join",
+            "max_items",
+            "on_item_error"
+        ]))
+    );
+
+    // 非 object → 单错（`{actual_type}` 模板）。
+    let errors = expect_code(foreach_graph(json!(["items"])), DslErrorCode::ParseError);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(
+        errors.first().message,
+        "field 'foreach' expects object, got array"
+    );
+    assert_eq!(errors.first().expected, Some(json!("object")));
+    assert_eq!(errors.first().actual, Some(json!(["items"])));
+}
+
+#[test]
+fn r18_valid_regions_pass() {
+    // P-1：`start -> F -> W -> E -> J -> end`（region={F,W,E}）。
+    load(foreach_graph(valid_foreach_spec())).expect("P-1 valid region");
+    // P-2：单节点 region（E = F），F 直接投递 J。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            with_foreach(
+                python_node("F", json!([input_port("items", true)])),
+                json!({"items_port": "items", "join": "J"})
+            ),
+            python_node("J", json!([input_port("results", true)])),
+            end_node("end", "result")
+        ]),
+        json!([
+            edge("start", "F", "items"),
+            edge("F", "J", "results"),
+            edge("J", "end", "result")
+        ]),
+    );
+    load(graph).expect("P-2 single-node region");
+
+    // P-3：串行 foreach（J 是另一个 foreach 的 F）。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            with_foreach(
+                python_node("F1", json!([input_port("items", true)])),
+                json!({"items_port": "items", "join": "F2"})
+            ),
+            python_node("W1", json!([input_port("task", true)])),
+            python_node("E1", json!([input_port("work", true)])),
+            with_foreach(
+                python_node("F2", json!([input_port("results", true)])),
+                json!({"items_port": "results", "join": "J2"})
+            ),
+            python_node("E2", json!([input_port("done", true)])),
+            python_node("J2", json!([input_port("out", true)])),
+            end_node("end", "result")
+        ]),
+        json!([
+            edge("start", "F1", "items"),
+            edge("F1", "W1", "task"),
+            edge("W1", "E1", "work"),
+            edge("E1", "F2", "results"),
+            edge("F2", "E2", "done"),
+            edge("E2", "J2", "out"),
+            edge("J2", "end", "result")
+        ]),
+    );
+    load(graph).expect("P-3 serial foreach");
+
+    // join 可以是 end（数组按普通端口值进入 end 聚合）。
+    let graph = graph_with(
+        json!([
+            start_node("start"),
+            with_foreach(
+                python_node("F", json!([input_port("items", true)])),
+                json!({"items_port": "items", "join": "done"})
+            ),
+            python_node("E", json!([input_port("work", true)])),
+            end_node("done", "results")
+        ]),
+        json!([
+            edge("start", "F", "items"),
+            edge("F", "E", "work"),
+            edge("E", "done", "results")
+        ]),
+    );
+    load(graph).expect("join may be an end node");
+}
+
+#[test]
+fn r18_reason_closed_set_is_reported_by_fixtures() {
+    let cases = [
+        ("bad_foreach_join_not_found.json", "join_not_found"),
+        ("bad_foreach_join_in_region.json", "join_in_region"),
+        ("bad_foreach_join_type.json", "join_type_unsupported"),
+        (
+            "bad_foreach_forbidden_node_type.json",
+            "forbidden_node_type",
+        ),
+        ("bad_foreach_nested.json", "nested_foreach"),
+        ("bad_foreach_no_exit.json", "no_exit"),
+        ("bad_foreach_multiple_exits.json", "multiple_exits"),
+        ("bad_foreach_external_edge.json", "external_edge"),
+        ("bad_foreach_join_edge_gated.json", "join_edge_gated"),
+        ("bad_foreach_items_port_missing.json", "items_port_missing"),
+    ];
+    for (fixture, reason) in cases {
+        let errors = load_fixture(fixture).expect_err(fixture);
+        assert_eq!(
+            errors.first().code,
+            DslErrorCode::ForeachInvalid,
+            "{fixture}: {errors}"
+        );
+        assert_eq!(
+            errors.first().message,
+            format!("foreach region of node 'F' is invalid: {reason}"),
+            "{fixture}: {errors}"
+        );
+        assert_eq!(
+            errors.first().actual,
+            Some(json!({"node_id": "F", "reason": reason})),
+            "{fixture}: {errors}"
+        );
+    }
+}
+
+#[test]
+fn r18_region_reasons_are_reported_inline() {
+    // join 不存在 / join = F / join 类型不支持。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][1]["foreach"]["join"] = json!("ghost");
+    expect_foreach_reason(graph, "F", "join_not_found");
+
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][1]["foreach"]["join"] = json!("F");
+    expect_foreach_reason(graph, "F", "join_in_region");
+
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][1]["foreach"]["join"] = json!("start");
+    expect_foreach_reason(graph, "F", "join_type_unsupported");
+
+    // region 内含 end（forbidden）/ 其它 foreach（nested）。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"].as_array_mut().expect("nodes").push(json!({
+        "id": "side",
+        "type": "end",
+        "inputs": [{"name": "s", "type": "any", "required": true}],
+        "config": {}
+    }));
+    graph["edges"].as_array_mut().expect("edges").push(json!({
+        "from": "F", "to_node": "side", "to_input_port": "s"
+    }));
+    expect_foreach_reason(graph, "F", "forbidden_node_type");
+
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"].as_array_mut().expect("nodes").push(json!({
+        "id": "N",
+        "type": "python_node",
+        "inputs": [{"name": "y", "type": "any", "required": true}],
+        "config": {"module": "m", "function": "nested"},
+        "foreach": {"items_port": "y", "join": "J"}
+    }));
+    graph["edges"].as_array_mut().expect("edges").push(json!({
+        "from": "F", "to_node": "N", "to_input_port": "y"
+    }));
+    expect_foreach_reason(graph, "F", "nested_foreach");
+
+    // 无出口 / 多出口 / join 边带 gate / items_port 无来源。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["edges"] = json!([
+        {"from": "start", "to_node": "F", "to_input_port": "items"},
+        {"from": "F", "to_node": "W", "to_input_port": "task"},
+        {"from": "W", "to_node": "E", "to_input_port": "work"},
+        {"from": "start", "to_node": "J", "to_input_port": "results"},
+        {"from": "J", "to_node": "end", "to_input_port": "result"}
+    ]);
+    expect_foreach_reason(graph, "F", "no_exit");
+
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][4]["inputs"]
+        .as_array_mut()
+        .expect("J inputs")
+        .push(json!({"name": "results2", "type": "any", "required": true}));
+    graph["edges"].as_array_mut().expect("edges").push(json!({
+        "from": "W", "to_node": "J", "to_input_port": "results2"
+    }));
+    expect_foreach_reason(graph, "F", "multiple_exits");
+
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["edges"][3]["gate"] = review_gate("ok", json!(true));
+    expect_foreach_reason(graph, "F", "join_edge_gated");
+
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][1]["inputs"] = json!([
+        {"name": "items", "type": "any", "required": false},
+        {"name": "task_seed", "type": "any", "required": true}
+    ]);
+    graph["edges"][0]["to_input_port"] = json!("task_seed");
+    expect_foreach_reason(graph, "F", "items_port_missing");
+}
+
+#[test]
+fn r18_first_invalid_foreach_in_nodes_order_is_reported() {
+    // 两个非法 foreach：F 在前 → 报 F 的 join_edge_gated；F2 移到最前 → 报 join_not_found。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["edges"][3]["gate"] = review_gate("ok", json!(true));
+    graph["nodes"].as_array_mut().expect("nodes").push(json!({
+        "id": "F2",
+        "type": "python_node",
+        "inputs": [{"name": "items2", "type": "any", "required": false}],
+        "config": {"module": "m", "function": "f2"},
+        "foreach": {"items_port": "items2", "join": "ghost"}
+    }));
+    graph["entry_points"] = json!(["start", "F2"]);
+    let errors = expect_code(graph.clone(), DslErrorCode::ForeachInvalid);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("F"));
+    assert_eq!(
+        errors.first().actual,
+        Some(json!({"node_id": "F", "reason": "join_edge_gated"}))
+    );
+
+    let f2 = graph["nodes"].as_array_mut().expect("nodes").remove(6);
+    graph["nodes"].as_array_mut().expect("nodes").insert(0, f2);
+    let errors = expect_code(graph, DslErrorCode::ForeachInvalid);
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("F2"));
+    assert_eq!(
+        errors.first().actual,
+        Some(json!({"node_id": "F2", "reason": "join_not_found"}))
+    );
+}
+
+#[test]
+fn r18_region_algorithm_is_deterministic() {
+    let graph = foreach_graph(valid_foreach_spec());
+    let compact = serde_json::to_string(&graph).expect("compact");
+    let pretty = serde_json::to_string_pretty(&graph).expect("pretty");
+    let first = load_graph_text(&compact).expect("compact valid");
+    let second = load_graph_text(&pretty).expect("pretty valid");
+    assert_eq!(first.graph_hash, second.graph_hash);
+
+    // 同一非法图重复加载 → 同一 reason / message（BFS 按 nodes+edges 序确定）。
+    let mut invalid = graph;
+    invalid["nodes"][1]["foreach"]["join"] = json!("start");
+    let mut messages = BTreeSet::new();
+    for _ in 0..5 {
+        let errors = load(invalid.clone()).expect_err("invalid region");
+        messages.insert(errors.first().message.clone());
+    }
+    assert_eq!(messages.len(), 1, "{messages:?}");
+}
+
+#[test]
+fn r18_region_overlap_is_checked_after_boundary_rows() {
+    // DR-007 §3.2 row 顺序下，「本应 overlap」的图会先被 row8（external_edge）拦截：
+    // F2 从 region 外向 W 投递，使 F 的 region 边界不闭合。这里锁定该冻结优先级。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"].as_array_mut().expect("nodes").push(json!({
+        "id": "F2",
+        "type": "python_node",
+        "inputs": [{"name": "seed", "type": "any", "required": true}],
+        "config": {"module": "m", "function": "f2"},
+        "foreach": {"items_port": "seed", "join": "J2"}
+    }));
+    graph["nodes"].as_array_mut().expect("nodes").push(json!({
+        "id": "J2",
+        "type": "python_node",
+        "inputs": [{"name": "q", "type": "any", "required": true}],
+        "config": {"module": "m", "function": "j2"}
+    }));
+    graph["nodes"][2]["inputs"]
+        .as_array_mut()
+        .expect("W inputs")
+        .push(json!({"name": "extra", "type": "any", "required": true}));
+    graph["nodes"][5]["inputs"]
+        .as_array_mut()
+        .expect("end inputs")
+        .push(json!({"name": "result2", "type": "any", "required": true}));
+    graph["entry_points"] = json!(["start", "F2", "J2"]);
+    graph["edges"].as_array_mut().expect("edges").extend([
+        json!({"from": "F2", "to_node": "W", "to_input_port": "extra"}),
+        json!({"from": "J2", "to_node": "end", "to_input_port": "result2"}),
+    ]);
+    let errors = expect_code(graph, DslErrorCode::ForeachInvalid);
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("F"));
+    assert_eq!(
+        errors.first().actual,
+        Some(json!({"node_id": "F", "reason": "external_edge"})),
+        "{errors}"
+    );
+}
+
+#[test]
+fn r18_runs_after_r15() {
+    // defer 边源不可重入（R15）与非法 region 并存 → R15 先报。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][1]["foreach"]["join"] = json!("F");
+    graph["edges"][3]["on_gate_false"] = json!("defer");
+    graph["edges"][3]["gate"] = review_gate("ok", json!(true));
+    let errors = expect_code(graph, DslErrorCode::DeferNotReentrant);
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("E"));
+}
+
+#[test]
+fn r18_runs_before_r16_and_r14() {
+    // R18（join_in_region）先于 R16（F 出度 2 > max_fanout=1）。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"].as_array_mut().expect("nodes").push(json!({
+        "id": "W2",
+        "type": "python_node",
+        "inputs": [{"name": "task", "type": "any", "required": true}],
+        "config": {"module": "m", "function": "w2"}
+    }));
+    graph["edges"].as_array_mut().expect("edges").push(json!({
+        "from": "F", "to_node": "W2", "to_input_port": "task"
+    }));
+    graph["nodes"][1]["foreach"]["join"] = json!("F");
+    graph["nodes"][1]["max_fanout"] = json!(1);
+    expect_foreach_reason(graph, "F", "join_in_region");
+
+    // R18 先于 R14：非法 region + 未知 gate op。
+    let mut graph = foreach_graph(valid_foreach_spec());
+    graph["nodes"][1]["foreach"]["join"] = json!("F");
+    graph["edges"][0]["gate"] = json!({"function": "gates.hr.need_human"});
+    expect_foreach_reason(graph, "F", "join_in_region");
+}
+
+#[test]
+fn r18_subgraph_foreach_maps_to_subgraph_invalid() {
+    let mut graph = graph_with(
+        json!([
+            start_node("start"),
+            node(
+                "sub",
+                "subgraph",
+                json!([input_port("q", true)]),
+                json!({"subgraph_id": "inner"})
+            ),
+            end_node("done", "r")
+        ]),
+        json!([edge("start", "sub", "q"), edge("sub", "done", "r")]),
+    );
+    graph["subgraphs"] = json!([{
+        "id": "inner",
+        "nodes": [
+            with_foreach(
+                python_node("pin", json!([input_port("p", true)])),
+                json!({"items_port": "p", "join": "pin"})
+            ),
+            end_node("inner_end", "o")
+        ],
+        "edges": [edge("pin", "inner_end", "o")],
+        "input_mapping": {"q": "pin.p"},
+        "output_mapping": {"r": "inner_end.o"}
+    }]);
+    let errors = expect_code(graph, DslErrorCode::SubgraphInvalid);
+    assert_eq!(errors.error_count, 1, "{errors}");
+    assert_eq!(
+        errors.first().message,
+        "subgraph 'inner': node 'pin' declares foreach, which is not supported inside subgraphs"
+    );
+    assert_eq!(errors.first().location.node_id.as_deref(), Some("pin"));
+    assert_eq!(errors.first().location.edge_index, None);
 }

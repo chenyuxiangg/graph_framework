@@ -2,22 +2,23 @@
 //!
 //! 契约来源：`doc/spec-v1.2/02-DSL与校验.md` §2.4.1 R4–R7 与 §2.2.4 键白名单；
 //! W2b 增节点级 `max_fanout`（R16 静态扇出上限，实现在 `edges::check_max_fanout`，
-//! 子图侧在 `validate_subgraph_rules` 调用并按 R6 口径收敛）。
+//! 子图侧在 `validate_subgraph_rules` 调用并按 R6 口径收敛）；W4a 增节点级
+//! `foreach`（R17 形状在本文件、R18 区域在 `foreach` 模块；子图内出现即 R6 收敛）。
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde_json::{Map, Value};
 
 use crate::edges;
-use crate::error::{msg, DslError, DslErrorCode};
+use crate::error::{msg, type_name, DslError, DslErrorCode};
 use crate::shape::{
     check_keys, invalid_port, invalid_value, is_node_id, is_rfc3339_utc, optional_str,
     required_array, required_nonempty_str, required_str, subgraph_invalid, wrap_subgraph_errors,
 };
 use crate::types::{
-    AgentCallConfig, ExecClass, GraphEdge, GraphMetadata, GraphNode, InputPort, NodeConfig,
-    NodeType, OutputPort, PortType, PythonNodeConfig, RetryConfig, SubgraphConfig,
-    SubgraphDefinition, Trigger, DSL_SCHEMA_VERSION,
+    AgentCallConfig, ExecClass, ForeachConfig, GraphEdge, GraphMetadata, GraphNode, InputPort,
+    NodeConfig, NodeType, OnItemError, OutputPort, PortType, PythonNodeConfig, RetryConfig,
+    SubgraphConfig, SubgraphDefinition, Trigger, DSL_SCHEMA_VERSION,
 };
 
 const TOP_LEVEL_KEYS: [&str; 6] = [
@@ -30,7 +31,7 @@ const TOP_LEVEL_KEYS: [&str; 6] = [
 ];
 const TOP_LEVEL_REQUIRED: [&str; 5] = ["version", "metadata", "entry_points", "nodes", "edges"];
 const METADATA_KEYS: [&str; 4] = ["name", "description", "author", "created_at"];
-const NODE_KEYS: [&str; 7] = [
+const NODE_KEYS: [&str; 8] = [
     "id",
     "type",
     "inputs",
@@ -38,6 +39,14 @@ const NODE_KEYS: [&str; 7] = [
     "config",
     "outputs",
     "max_fanout",
+    "foreach",
+];
+const FOREACH_KEYS: [&str; 5] = [
+    "items_port",
+    "key_field",
+    "join",
+    "max_items",
+    "on_item_error",
 ];
 const INPUT_PORT_KEYS: [&str; 4] = ["name", "type", "required", "description"];
 const OUTPUT_PORT_KEYS: [&str; 3] = ["name", "type", "description"];
@@ -267,6 +276,7 @@ fn parse_node(value: &Value, index: usize, errors: &mut Vec<DslError>) -> Option
     let inputs = parse_inputs(map, node_id.as_deref(), &scope, errors);
     let trigger = parse_trigger(map, node_type, &scope, errors);
     let max_fanout = parse_max_fanout(map, errors);
+    let foreach = parse_foreach(map, node_type, inputs.as_deref(), &scope, errors);
     check_end_constraints(
         node_type,
         inputs.as_deref(),
@@ -288,6 +298,7 @@ fn parse_node(value: &Value, index: usize, errors: &mut Vec<DslError>) -> Option
         config: config?,
         outputs: outputs.unwrap_or_default(),
         max_fanout,
+        foreach,
     })
 }
 
@@ -800,6 +811,212 @@ fn parse_max_fanout(map: &Map<String, Value>, errors: &mut Vec<DslError>) -> Opt
     None
 }
 
+/// R17：`foreach` 形状校验（W4a / DR-007 §3.1；R4 阶段，复用 `DSL_PARSE_ERROR`）。
+///
+/// 检查顺序与冻结模板顺序一致：非 object → 未知键 → 必填 `items_port`/`join` →
+/// `items_port`（已声明端口）→ `key_field` → `join` → `max_items` → `on_item_error`
+/// → 节点类型限制（仅 `python_node`/`agent_call`，含 `builtin.human`）。
+/// 同节点内多项错误聚合；`node_id` 由调用方 `attach_node_location` 统一补全。
+fn parse_foreach(
+    map: &Map<String, Value>,
+    node_type: NodeType,
+    inputs: Option<&[InputPort]>,
+    scope: &str,
+    errors: &mut Vec<DslError>,
+) -> Option<ForeachConfig> {
+    let value = map.get("foreach")?;
+    let start = errors.len();
+    let Some(raw) = value.as_object() else {
+        errors.push(
+            DslError::new(
+                DslErrorCode::ParseError,
+                format!("field 'foreach' expects object, got {}", type_name(value)),
+            )
+            .expected("object")
+            .actual(value.clone()),
+        );
+        return None;
+    };
+    check_foreach_keys(raw, scope, errors);
+    check_foreach_required(raw, scope, errors);
+    let items_port = parse_foreach_items_port(raw, inputs, scope, errors);
+    let key_field = parse_foreach_key_field(raw, errors);
+    let join = parse_foreach_join(raw, errors);
+    let max_items = parse_foreach_max_items(raw, errors);
+    let on_item_error = parse_foreach_on_item_error(raw, errors);
+    check_foreach_node_type(node_type, scope, errors);
+    if errors.len() > start {
+        return None;
+    }
+    Some(ForeachConfig {
+        items_port: items_port?,
+        key_field,
+        join: join?,
+        max_items,
+        on_item_error,
+    })
+}
+
+fn check_foreach_keys(raw: &Map<String, Value>, scope: &str, errors: &mut Vec<DslError>) {
+    for key in raw.keys() {
+        if !FOREACH_KEYS.contains(&key.as_str()) {
+            errors.push(
+                DslError::new(
+                    DslErrorCode::ParseError,
+                    format!("unknown field '{key}' in foreach of {scope}"),
+                )
+                .expected(serde_json::json!(FOREACH_KEYS))
+                .actual(serde_json::json!(key)),
+            );
+        }
+    }
+}
+
+fn check_foreach_required(raw: &Map<String, Value>, scope: &str, errors: &mut Vec<DslError>) {
+    for field in ["items_port", "join"] {
+        if !raw.contains_key(field) {
+            errors.push(
+                DslError::new(
+                    DslErrorCode::ParseError,
+                    format!("foreach of {scope} missing required field '{field}'"),
+                )
+                .expected("present")
+                .actual(Value::Null),
+            );
+        }
+    }
+}
+
+fn parse_foreach_items_port(
+    raw: &Map<String, Value>,
+    inputs: Option<&[InputPort]>,
+    scope: &str,
+    errors: &mut Vec<DslError>,
+) -> Option<String> {
+    let value = raw.get("items_port")?;
+    let declared: Vec<Value> = inputs
+        .unwrap_or_default()
+        .iter()
+        .map(|port| Value::String(port.name.clone()))
+        .collect();
+    if let Some(name) = value.as_str() {
+        if inputs.is_some_and(|ports| ports.iter().any(|port| port.name == name)) {
+            return Some(name.to_string());
+        }
+    }
+    errors.push(
+        DslError::new(
+            DslErrorCode::ParseError,
+            format!("'foreach.items_port' of {scope} must be a declared input port, got {value}"),
+        )
+        .expected(Value::Array(declared))
+        .actual(value.clone()),
+    );
+    None
+}
+
+fn parse_foreach_key_field(raw: &Map<String, Value>, errors: &mut Vec<DslError>) -> Option<String> {
+    let value = raw.get("key_field")?;
+    match value {
+        Value::String(name) if !name.is_empty() => Some(name.clone()),
+        other => {
+            errors.push(
+                DslError::new(
+                    DslErrorCode::ParseError,
+                    format!("'foreach.key_field' must be a non-empty string, got {other}"),
+                )
+                .expected("non-empty string")
+                .actual(other.clone()),
+            );
+            None
+        }
+    }
+}
+
+fn parse_foreach_join(raw: &Map<String, Value>, errors: &mut Vec<DslError>) -> Option<String> {
+    let value = raw.get("join")?;
+    match value {
+        Value::String(node_id) if !node_id.is_empty() => Some(node_id.clone()),
+        other => {
+            errors.push(
+                DslError::new(
+                    DslErrorCode::ParseError,
+                    format!("'foreach.join' must be a node id, got {other}"),
+                )
+                .expected("node id")
+                .actual(other.clone()),
+            );
+            None
+        }
+    }
+}
+
+fn parse_foreach_max_items(raw: &Map<String, Value>, errors: &mut Vec<DslError>) -> Option<u32> {
+    let value = raw.get("max_items")?;
+    if let Some(number) = value
+        .as_u64()
+        .and_then(|number| u32::try_from(number).ok())
+        .filter(|number| *number >= 1)
+    {
+        return Some(number);
+    }
+    errors.push(
+        DslError::new(
+            DslErrorCode::ParseError,
+            format!("'foreach.max_items' must be an integer >= 1, got {value}"),
+        )
+        .expected(">= 1")
+        .actual(value.clone()),
+    );
+    None
+}
+
+fn parse_foreach_on_item_error(
+    raw: &Map<String, Value>,
+    errors: &mut Vec<DslError>,
+) -> Option<OnItemError> {
+    let value = raw.get("on_item_error")?;
+    if let Some(policy) = value.as_str().and_then(OnItemError::from_name) {
+        return Some(policy);
+    }
+    errors.push(
+        DslError::new(
+            DslErrorCode::ParseError,
+            format!("'foreach.on_item_error' must be one of ['fail'], got {value}"),
+        )
+        .expected(serde_json::json!(["fail"]))
+        .actual(value.clone()),
+    );
+    None
+}
+
+/// R17：`foreach` 仅允许 `python_node` / `agent_call`（`builtin.human` 是前者保留符号）。
+fn check_foreach_node_type(node_type: NodeType, scope: &str, errors: &mut Vec<DslError>) {
+    if matches!(node_type, NodeType::PythonNode | NodeType::AgentCall) {
+        return;
+    }
+    errors.push(
+        DslError::new(
+            DslErrorCode::ParseError,
+            format!(
+                "node '{}' of type '{}' does not support foreach",
+                node_label(scope),
+                node_type.as_str()
+            ),
+        )
+        .expected("python_node|agent_call")
+        .actual(node_type.as_str()),
+    );
+}
+
+/// 从节点作用域串（`node 'F'` 或 `nodes[i]`）取节点标签。
+fn node_label(scope: &str) -> &str {
+    scope
+        .strip_prefix("node '")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .unwrap_or(scope)
+}
+
 fn parse_retry(
     value: Option<&Value>,
     scope: &str,
@@ -938,7 +1155,8 @@ fn invalid_entry(value: &str, reason: &str) -> DslError {
 
 /// R6：子图定义与引用。
 ///
-/// 子图内部的 R4/R5/R8–R13/R15/R16 违规统一收敛为 `DSL_SUBGRAPH_INVALID`（message
+/// 子图内部的 R4/R5/R8–R13/R15/R16 违规、以及任意节点带 `foreach`（W4a：子图内
+/// 不允许 foreach，无论形状是否合法）统一收敛为 `DSL_SUBGRAPH_INVALID`（message
 /// 前缀 `subgraph '<id>'`，定位保留内部节点/边信息）；定义非法同时使子图引用校验失败。
 pub(crate) fn check_subgraphs(
     raw: &Value,
@@ -1080,7 +1298,8 @@ fn parse_subgraph(
 }
 
 /// 子图语义校验：形状、节点 ID 唯一、mapping 引用、R8–R13/R15/R16（全部收敛为
-/// `DSL_SUBGRAPH_INVALID`）。返回 `false` 表示本子图不可用。
+/// `DSL_SUBGRAPH_INVALID`）；子图内 `foreach` 直接拒绝（W4a，R17/R18 不适用于子图）。
+/// 返回 `false` 表示本子图不可用。
 fn validate_subgraph_rules(
     subgraph_id: &str,
     body: &SubgraphBody,
@@ -1090,6 +1309,7 @@ fn validate_subgraph_rules(
 ) -> bool {
     let start = errors.len();
     check_subgraph_shape(subgraph_id, &body.nodes, errors);
+    reject_subgraph_foreach(subgraph_id, &body.nodes, errors);
     errors.extend(wrap_subgraph_errors(
         subgraph_id,
         check_node_id_unique(&body.nodes),
@@ -1157,6 +1377,24 @@ fn build_subgraph_body(
         nodes: parsed_nodes,
         edges: parsed_edges,
     })
+}
+
+/// R6（W4a）：子图内任意节点带 `foreach` → `DSL_SUBGRAPH_INVALID`（无论形状是否合法）。
+///
+/// 定位保留内部节点 `node_id`（与 R6 其它收敛口径一致）；按 `nodes` 序取首个节点报一条。
+fn reject_subgraph_foreach(subgraph_id: &str, nodes: &[GraphNode], errors: &mut Vec<DslError>) {
+    let Some(node) = nodes.iter().find(|node| node.foreach.is_some()) else {
+        return;
+    };
+    let mut error = subgraph_invalid(
+        subgraph_id,
+        &format!(
+            "node '{}' declares foreach, which is not supported inside subgraphs",
+            node.id
+        ),
+    );
+    error.location.node_id = Some(node.id.clone());
+    errors.push(error);
 }
 
 fn check_subgraph_shape(subgraph_id: &str, nodes: &[GraphNode], errors: &mut Vec<DslError>) {

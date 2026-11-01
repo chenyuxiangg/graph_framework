@@ -238,6 +238,55 @@ pub struct SubgraphConfig {
     pub subgraph_id: String,
 }
 
+/// `foreach` 的 item 错误策略（02 §2.2.2；W4a / DR-007 §2）。
+///
+/// v0.2 闭集仅 [`Self::Fail`]（缺省等价 `fail`）：region 内任一 item 实例
+/// Crashed/TimedOut → 既有冷峻 `fail_run`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnItemError {
+    /// item 失败即整个 run 失败（v0.2 唯一值）。
+    Fail,
+}
+
+impl OnItemError {
+    /// 全部合法取值（文档/测试用）。
+    pub const ALL: [Self; 1] = [Self::Fail];
+
+    /// JSON 中的 snake_case 名称。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+        }
+    }
+
+    /// 从 JSON 字符串解析（未知返回 `None`）。
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|policy| policy.as_str() == name)
+    }
+}
+
+/// 节点级 `foreach` 配置（02 §2.2.2 `ForeachConfig`；W4a / DR-007 §2）。
+///
+/// 仅 `python_node` / `agent_call`（含 `builtin.human`）允许；子图内禁止。
+/// 缺省字段不写回 DSL、不参与 `graph_hash`（§2.8.3 "不补齐默认值"）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ForeachConfig {
+    /// 列表输入端口名（必填；必须是本节点已声明 input 端口）。
+    pub items_port: String,
+    /// item 为 object 时的键字段（可选；缺省 item_key 按索引派生）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_field: Option<String>,
+    /// join 节点 ID（必填；region 唯一出口指向的节点）。
+    pub join: String,
+    /// 展开元素数上限（可选；整数 ≥1，缺省无上限）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u32>,
+    /// item 错误策略（可选；缺省等价 `fail`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_item_error: Option<OnItemError>,
+}
+
 /// 节点配置联合体（按 `type` 区分）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -285,6 +334,12 @@ pub struct GraphNode {
     /// （v0.1.0 行为；不补齐默认值、不参与 `graph_hash`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_fanout: Option<u32>,
+    /// 动态 N 展开（W4a / DR-007；仅 `python_node`/`agent_call`，含 `builtin.human`）。
+    ///
+    /// `None` = 作者未写 = 普通节点（v0.1.0 行为）；显式值参与 `graph_hash`
+    /// （§2.8.3 "不补齐默认值"）。形状 R17、区域 R18。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub foreach: Option<ForeachConfig>,
 }
 
 /// 门控定义（02 §2.2.2 `GateDefinition`）。

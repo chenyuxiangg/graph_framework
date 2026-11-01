@@ -15,7 +15,7 @@ pub const GRAPH_HASH_LEN: usize = 16;
 
 /// 计算 `graph_hash`。
 ///
-/// 调用前置：图已通过 R1–R13、R15、R16（loader 内部保证）；本函数不会失败。
+/// 调用前置：图已通过 R1–R13、R15、R18、R16（loader 内部保证）；本函数不会失败。
 pub fn graph_hash(raw: &Value) -> String {
     let canonical = canonical_projection(raw);
     let digest = blake3::hash(canonical_json(&canonical).as_bytes())
@@ -115,6 +115,10 @@ fn project_node(node: &Value, node_type: Option<NodeType>) -> Value {
     // （02 §2.8.3 "不补齐默认值"，保证 v0.1.0 既有图 hash 不变）。
     if let Some(max_fanout) = node.get("max_fanout") {
         out.insert("max_fanout".to_string(), max_fanout.clone());
+    }
+    // W4a：仅当作者**显式写了** `foreach` 才进投影（对象原样；缺省不补齐默认值）。
+    if let Some(foreach) = node.get("foreach") {
+        out.insert("foreach".to_string(), foreach.clone());
     }
     out.insert("config".to_string(), project_config(node, node_type));
     if let Some(outputs) = node.get("outputs").and_then(Value::as_array) {
