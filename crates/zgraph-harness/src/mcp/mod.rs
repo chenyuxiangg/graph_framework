@@ -1143,7 +1143,31 @@ fn normalized_function_name(
     original_full: &str,
     taken: &mut BTreeSet<String>,
 ) -> String {
-    let mut tool_part: String = tool
+    // REV-098 P2⑥：server 段同样归一化（server name 允许 `-`，不能直接进函数名）。
+    let norm_server = normalize_component(server, "server");
+    let mut norm_tool = normalize_component(tool, "tool");
+    let budget = 64usize.saturating_sub("mcp__".len() + "__".len());
+    let prefix = |server: &str| format!("mcp__{server}__");
+    let mut candidate = format!("{}{}", prefix(&norm_server), norm_tool);
+    if candidate.chars().count() > 64 || taken.contains(&candidate) {
+        let hash = short_hash(original_full);
+        let server_keep = norm_server.chars().count().min(budget / 2);
+        let server_part: String = norm_server.chars().take(server_keep).collect();
+        let remaining = budget.saturating_sub(server_keep + 9).max(1);
+        norm_tool = norm_tool.chars().take(remaining).collect();
+        candidate = format!("{}{}_{}", prefix(&server_part), norm_tool, hash);
+        while candidate.chars().count() > 64 && !norm_tool.is_empty() {
+            norm_tool.pop();
+            candidate = format!("{}{}_{}", prefix(&server_part), norm_tool, hash);
+        }
+    }
+    taken.insert(candidate.clone());
+    candidate
+}
+
+/// 归一化单个函数名段：小写/保留 `_`，其余→`_`，空→fallback。
+fn normalize_component(value: &str, fallback: &str) -> String {
+    let normalized: String = value
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || ch == '_' {
@@ -1153,23 +1177,11 @@ fn normalized_function_name(
             }
         })
         .collect();
-    if tool_part.is_empty() {
-        tool_part = "tool".to_string();
+    if normalized.is_empty() {
+        fallback.to_string()
+    } else {
+        normalized
     }
-    let prefix = format!("mcp__{server}__");
-    let mut candidate = format!("{prefix}{tool_part}");
-    if candidate.chars().count() > 64 || taken.contains(&candidate) {
-        let hash = short_hash(original_full);
-        let keep = 64usize.saturating_sub(prefix.chars().count() + 9).max(1);
-        tool_part = tool_part.chars().take(keep).collect();
-        candidate = format!("{prefix}{tool_part}_{hash}");
-        while candidate.chars().count() > 64 && !tool_part.is_empty() {
-            tool_part.pop();
-            candidate = format!("{prefix}{tool_part}_{hash}");
-        }
-    }
-    taken.insert(candidate.clone());
-    candidate
 }
 
 /// FNV-1a 短 hash（函数名冲突/截断后缀；无需密码学强度）。
@@ -1549,6 +1561,30 @@ mod tests {
         }
         assert_eq!(bound[0].def.name, "mcp__alpha__my_tool_name");
         assert!(bound[1].def.name.len() <= 64 && bound[1].def.name.contains('_'));
+    }
+
+    #[test]
+    fn normalized_function_name_normalizes_server_segment() {
+        let mut taken = BTreeSet::new();
+        assert_eq!(
+            normalized_function_name("a-b", "echo", "mcp__a-b__echo", &mut taken),
+            "mcp__a_b__echo"
+        );
+        let long_server = "s".repeat(80);
+        let long_tool = "t".repeat(80);
+        let name = normalized_function_name(
+            &long_server,
+            &long_tool,
+            &format!("mcp__{long_server}__{long_tool}"),
+            &mut taken,
+        );
+        assert!(name.chars().count() <= 64, "name too long: {name}");
+        assert!(name.starts_with("mcp__"));
+        assert!(
+            name.chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'),
+            "contract violation: {name}"
+        );
     }
 
     #[tokio::test]
