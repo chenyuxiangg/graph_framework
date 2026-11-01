@@ -10,7 +10,10 @@
   的 `agent_message` 文本；
 - `iterations` 无对应物，固定 **1**；usage 映射 input/output/reasoning，
   `cached_input_tokens`/`cache_write_input_tokens` 丢弃；
-- `StopReason` 不新增枚举：`turn.completed`→`EndTurn`、`turn.failed`→`Other:turn_failed`。
+- `StopReason` 不新增枚举：`turn.completed`→`EndTurn`、`turn.failed`→error；
+- REV-099 C3：安装 SIGTERM/SIGINT handler，父进程取消时先 `killpg` Codex
+  进程组再退出（`start_new_session=True` 的 Codex 子进程不残留）；
+- REV-099 N5：Codex `stderr` 由后台线程持续排空（head/tail 各 4 KiB，防管道写满死锁）。
 
 用法（由 AgentConfig.harness 配置）：
 
@@ -31,6 +34,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Dict, IO, List, Optional, Tuple
 
@@ -40,6 +44,46 @@ PROVIDER = "codex_exec"
 CANCEL_GRACE_SECONDS = 2.0
 READ_POLL_SECONDS = 0.05
 MAX_PREVIEW_CHARS = 512
+STDERR_CAPTURE_BYTES = 4096
+
+ACTIVE_PROCESS: Optional[subprocess.Popen[str]] = None
+STOP_REQUESTED = False
+
+
+class StderrCapture:
+    """Codex stderr 的有界捕获（head/tail 各 4 KiB，避免管道写满与泄漏全文）。"""
+
+    def __init__(self) -> None:
+        self.head: List[str] = []
+        self.tail: List[str] = []
+        self.head_chars = 0
+        self.tail_chars = 0
+        self.total = 0
+        self.lock = threading.Lock()
+
+    def push(self, chunk: str) -> None:
+        """追加一块 stderr 文本（维护 head/tail 上限）。"""
+        with self.lock:
+            self.total += len(chunk)
+            if self.head_chars < STDERR_CAPTURE_BYTES:
+                room = STDERR_CAPTURE_BYTES - self.head_chars
+                piece = chunk[:room]
+                self.head.append(piece)
+                self.head_chars += len(piece)
+            piece = chunk[-STDERR_CAPTURE_BYTES:]
+            self.tail.append(piece)
+            self.tail_chars += len(piece)
+            while self.tail_chars > STDERR_CAPTURE_BYTES and self.tail:
+                removed = self.tail.pop(0)
+                self.tail_chars -= len(removed)
+
+    def head_text(self) -> str:
+        """head 文本（≤4 KiB）。"""
+        return "".join(self.head)
+
+    def tail_text(self) -> str:
+        """tail 文本（≤4 KiB）。"""
+        return "".join(self.tail)[-STDERR_CAPTURE_BYTES:]
 
 
 def send(payload: Dict[str, Any]) -> None:
@@ -85,6 +129,34 @@ def build_command(binary: str, prompt: str, output_file: str) -> List[str]:
     ]
 
 
+def validate_hello(hello: Optional[Dict[str, Any]]) -> bool:
+    """校验父进程 `hello` 帧（协议/v；`limits` 若存在必须是对象）。"""
+    if hello is None or hello.get("type") != "hello":
+        return False
+    if hello.get("protocol") != PROTOCOL or hello.get("v") != PROTOCOL_VERSION:
+        return False
+    limits = hello.get("limits")
+    return limits is None or isinstance(limits, dict)
+
+
+def _handle_signal(_signum: int, _frame: Any) -> None:
+    """SIGTERM/SIGINT：置停止标志并立即向 Codex 进程组发 SIGTERM（REV-099 C3）。"""
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+    process = ACTIVE_PROCESS
+    if process is not None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def install_signal_handlers() -> None:
+    """安装 SIGTERM/SIGINT handler（父进程取消时先回收 Codex 子进程组）。"""
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+
 def terminate(process: subprocess.Popen[str]) -> None:
     """取消升级：SIGTERM 进程组 → 宽限 → SIGKILL（无孤儿）。"""
     try:
@@ -102,6 +174,17 @@ def terminate(process: subprocess.Popen[str]) -> None:
         return
 
 
+def drain_stderr(stream: IO[str], capture: StderrCapture) -> None:
+    """后台线程持续排空 Codex stderr（防管道写满；head/tail 有界）。"""
+    try:
+        for chunk in iter(lambda: stream.read(STDERR_CAPTURE_BYTES), ""):
+            if not chunk:
+                return
+            capture.push(chunk)
+    except (OSError, ValueError):
+        return
+
+
 def parse_usage(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Codex usage → 协议 usage（cached 字段丢弃；缺省全 0）。"""
     usage = raw if isinstance(raw, dict) else {}
@@ -114,6 +197,16 @@ def parse_usage(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "total_tokens": prompt + completion,
         "reasoning_output_tokens": reasoning,
     }
+
+
+def _error_message(event: Dict[str, Any]) -> str:
+    """从 `turn.failed`/`error` 事件提取错误文本。"""
+    error = event.get("error")
+    if isinstance(error, dict) and isinstance(error.get("message"), str):
+        return error["message"]
+    if isinstance(event.get("message"), str):
+        return event["message"]
+    return "codex reported a failed turn"
 
 
 def parse_thread_events(lines: List[str]) -> Dict[str, Any]:
@@ -142,10 +235,7 @@ def parse_thread_events(lines: List[str]) -> Dict[str, Any]:
         if kind == "turn.completed":
             outcome["completed"] = True
             outcome["usage"] = event.get("usage")
-        elif kind == "turn.failed":
-            outcome["failed"] = True
-            outcome["error"] = _error_message(event)
-        elif kind == "error":
+        elif kind in ("turn.failed", "error"):
             outcome["failed"] = True
             outcome["error"] = _error_message(event)
         elif kind == "item.completed":
@@ -155,15 +245,6 @@ def parse_thread_events(lines: List[str]) -> Dict[str, Any]:
                 if isinstance(text, str):
                     outcome["content"] = text
     return outcome
-
-
-def _error_message(event: Dict[str, Any]) -> str:
-    error = event.get("error")
-    if isinstance(error, dict) and isinstance(error.get("message"), str):
-        return error["message"]
-    if isinstance(event.get("message"), str):
-        return event["message"]
-    return "codex reported a failed turn"
 
 
 def read_output_file(path: str) -> str:
@@ -178,21 +259,33 @@ def read_output_file(path: str) -> str:
 def collect_events_with_cancel(
     process: subprocess.Popen[str], stdin: IO[str]
 ) -> Tuple[List[str], bool]:
-    """读取 Codex stdout，同时监听 stdin 的 `cancel` 帧（返回 lines, cancelled）。"""
+    """读取 Codex stdout，同时监听 stdin `cancel` 帧 / SIGTERM 标志（返回 lines, cancelled）。"""
     lines: List[str] = []
     cancelled = False
+    stdin_open = True
     assert process.stdout is not None
     stream = process.stdout
     while True:
-        readable, _, _ = select.select([stream, stdin], [], [], READ_POLL_SECONDS)
+        if STOP_REQUESTED:
+            cancelled = True
+            terminate(process)
+            break
+        watched = [stream, stdin] if stdin_open else [stream]
+        try:
+            readable, _, _ = select.select(watched, [], [], READ_POLL_SECONDS)
+        except InterruptedError:
+            continue
         if stream in readable:
             line = stream.readline()
             if not line:
                 break
             lines.append(line)
-        if stdin in readable:
+        if stdin_open and stdin in readable:
             frame = read_frame(stdin)
-            if frame is not None and frame.get("type") == "cancel":
+            if frame is None:
+                stdin_open = False
+                continue
+            if frame.get("type") == "cancel":
                 cancelled = True
                 terminate(process)
                 break
@@ -204,71 +297,70 @@ def collect_events_with_cancel(
     return lines, cancelled
 
 
+def _send_error(reason: str, message: str) -> None:
+    """发送结构化 error 帧（`HARNESS_PLUGIN_ERROR{reason}`）。"""
+    send(
+        {
+            "v": PROTOCOL_VERSION,
+            "type": "error",
+            "code": "HARNESS_PLUGIN_ERROR",
+            "reason": reason,
+            "message": message[:MAX_PREVIEW_CHARS],
+        }
+    )
+
+
+def _start_codex(
+    binary: str, prompt: str, output_file: str, capture: StderrCapture
+) -> subprocess.Popen[str]:
+    """spawn Codex（独立 session/进程组；stderr 后台排空）。`OSError` 由调用方处理。"""
+    process = subprocess.Popen(
+        build_command(binary, prompt, output_file),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    if process.stderr is not None:
+        threading.Thread(
+            target=drain_stderr, args=(process.stderr, capture), daemon=True
+        ).start()
+    return process
+
+
 def execute_run(run_frame: Dict[str, Any]) -> None:
     """执行一次 Codex run 并回写 `result` / `error`（协议帧）。"""
+    global ACTIVE_PROCESS
     inputs = run_frame.get("inputs")
     if not isinstance(inputs, dict):
         inputs = {}
     binary = codex_binary()
     if shutil.which(binary) is None:
-        send(
-            {
-                "v": PROTOCOL_VERSION,
-                "type": "error",
-                "code": "HARNESS_PLUGIN_ERROR",
-                "reason": "spawn_failed",
-                "message": "codex binary not found (user-provided; set CODEX_BIN or PATH)",
-            }
-        )
+        _send_error("spawn_failed", "codex binary not found (user-provided; set CODEX_BIN or PATH)")
         return
+    capture = StderrCapture()
     with tempfile.NamedTemporaryFile(prefix="zgraph-codex-", suffix=".txt") as output:
-        command = build_command(binary, build_prompt(inputs), output.name)
         try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
+            process = _start_codex(binary, build_prompt(inputs), output.name, capture)
         except OSError as error:
-            send(
-                {
-                    "v": PROTOCOL_VERSION,
-                    "type": "error",
-                    "code": "HARNESS_PLUGIN_ERROR",
-                    "reason": "spawn_failed",
-                    "message": f"failed to spawn codex: {error}",
-                }
-            )
+            _send_error("spawn_failed", f"failed to spawn codex: {error}")
             return
-        lines, _cancelled = collect_events_with_cancel(process, sys.stdin)
+        ACTIVE_PROCESS = process
+        try:
+            lines, cancelled = collect_events_with_cancel(process, sys.stdin)
+        finally:
+            ACTIVE_PROCESS = None
+        if cancelled or STOP_REQUESTED:
+            # 父进程正在取消：静默退出（父侧已按 Cancelled 收口），不再写 error 帧。
+            return
         outcome = parse_thread_events(lines)
         if outcome["failed"]:
-            send(
-                {
-                    "v": PROTOCOL_VERSION,
-                    "type": "error",
-                    "code": "HARNESS_PLUGIN_ERROR",
-                    "reason": "protocol",
-                    "message": outcome["error"],
-                }
-            )
+            _send_error("protocol", outcome["error"])
             return
         if not outcome["completed"]:
-            stderr = ""
-            if process.stderr is not None:
-                stderr = process.stderr.read()[:MAX_PREVIEW_CHARS]
-            send(
-                {
-                    "v": PROTOCOL_VERSION,
-                    "type": "error",
-                    "code": "HARNESS_PLUGIN_ERROR",
-                    "reason": "exit_nonzero",
-                    "message": stderr or "codex exited without turn.completed",
-                }
-            )
+            detail = capture.tail_text() or "codex exited without turn.completed"
+            _send_error("exit_nonzero", detail)
             return
         content = read_output_file(output.name) or outcome["content"]
         send(
@@ -285,11 +377,9 @@ def execute_run(run_frame: Dict[str, Any]) -> None:
 
 
 def handshake() -> bool:
-    """握手：读 `hello`、校验协议，回 `hello_ok`（失败返回 False）。"""
+    """握手：读 `hello`、校验协议与 limits，回 `hello_ok`（失败返回 False）。"""
     hello = read_frame(sys.stdin)
-    if hello is None or hello.get("type") != "hello":
-        return False
-    if hello.get("protocol") != PROTOCOL or hello.get("v") != PROTOCOL_VERSION:
+    if not validate_hello(hello):
         return False
     send(
         {
@@ -305,6 +395,7 @@ def handshake() -> bool:
 
 def main() -> int:
     """协议主循环：握手 → 逐 `run` 执行（`cancel` 帧在 run 中处理）。"""
+    install_signal_handlers()
     if not handshake():
         return 0
     while True:

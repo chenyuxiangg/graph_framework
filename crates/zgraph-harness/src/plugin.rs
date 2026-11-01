@@ -12,7 +12,7 @@
 //! - 节点超时 → `NODE_TIMEOUT` 语义（[`RunFailure::InstanceTimeout`]）；
 //!   协议级超时/握手/版本/协议错误 → `HARNESS_PLUGIN_ERROR{reason}`（无独立超时码）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -38,6 +38,7 @@ use crate::constants::{
 use crate::error::{HarnessError, Stage};
 use crate::llm::{StopReason, Usage};
 use crate::provider::{AgentProvider, AgentProviderKind, ProviderRequest};
+use crate::record::{record_safely, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
 
 /// 每 run 的 adapter 池（run_id → provider key → adapter）。
 type AdapterPool = HashMap<String, HashMap<String, Arc<Mutex<Adapter>>>>;
@@ -128,7 +129,9 @@ impl SubprocessProvider {
             }
         }
         let mut adapter = Adapter::spawn(config, request.cwd)?;
-        adapter.handshake(&run_id, &request.trace.node_id).await?;
+        adapter
+            .handshake(&run_id, &request.trace.node_id, request.node_timeout_ms)
+            .await?;
         let adapter = Arc::new(Mutex::new(adapter));
         sessions.insert(key, Arc::clone(&adapter));
         Ok(adapter)
@@ -157,12 +160,18 @@ impl AgentProvider for SubprocessProvider {
                 "SubprocessProvider requires AgentConfig.harness.kind = 'subprocess'".to_string(),
             )));
         };
-        let adapter = self
-            .adapter_for(config, &request)
-            .await
-            .map_err(RunFailure::Harness)?;
+        // REV-099 C1：外部 harness 每节点执行记录 1 条 `llm_calls`（框架侧写入口径）。
+        let request_record = external_request_record(&request);
+        let adapter = match self.adapter_for(config, &request).await {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                let outcome: Result<AgentOutput, RunFailure> = Err(RunFailure::Harness(error));
+                record_external_call(&request, &request_record, &outcome, 0);
+                return outcome;
+            }
+        };
         // 注意锁序：adapter 锁内不获取 pool 锁（避免与 adapter_for 的 pool→adapter 死锁）。
-        let (closed, outcome) = {
+        let (closed, outcome, event_count) = {
             let mut guard = adapter.lock().await;
             if guard.closed {
                 (
@@ -172,12 +181,14 @@ impl AgentProvider for SubprocessProvider {
                         "external harness process is not available",
                         None,
                     ))),
+                    0,
                 )
             } else {
                 let outcome = guard.exchange(config, &request).await;
-                (guard.closed, outcome)
+                (guard.closed, outcome, guard.last_event_count)
             }
         };
+        record_external_call(&request, &request_record, &outcome, event_count);
         if closed {
             // 终结性失败已杀进程：从池中移除，下一次调用重新拉起。
             let key = provider_key(config);
@@ -217,17 +228,62 @@ enum ReadError {
     InvalidJson,
 }
 
+/// stderr 捕获（head 4 KiB + tail 4 KiB；总上限 8 KiB，不写 trace 全文/密钥）。
+#[derive(Debug, Default)]
+struct StderrCapture {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    total: u64,
+}
+
+impl StderrCapture {
+    fn push(&mut self, chunk: &[u8]) {
+        self.total = self.total.saturating_add(chunk.len() as u64);
+        if self.head.len() < HARNESS_PLUGIN_STDERR_MAX_BYTES / 2 {
+            let room = HARNESS_PLUGIN_STDERR_MAX_BYTES / 2 - self.head.len();
+            let take = room.min(chunk.len());
+            self.head.extend_from_slice(&chunk[..take]);
+        }
+        for byte in chunk {
+            self.tail.push_back(*byte);
+            if self.tail.len() > HARNESS_PLUGIN_STDERR_MAX_BYTES / 2 {
+                self.tail.pop_front();
+            }
+        }
+    }
+
+    /// 结构化 stderr 证据：`{stderr_head, stderr_tail, stderr_truncated}`（≤8 KiB）。
+    fn evidence(&self) -> serde_json::Map<String, Value> {
+        let mut extra = serde_json::Map::new();
+        let head = String::from_utf8_lossy(&self.head).to_string();
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        let tail = String::from_utf8_lossy(&tail).to_string();
+        if !head.is_empty() {
+            extra.insert("stderr_head".to_string(), Value::from(head));
+        }
+        if !tail.is_empty() {
+            extra.insert("stderr_tail".to_string(), Value::from(tail));
+        }
+        if self.total > u64::try_from(HARNESS_PLUGIN_STDERR_MAX_BYTES).unwrap_or(u64::MAX) {
+            extra.insert("stderr_truncated".to_string(), Value::from(true));
+        }
+        extra
+    }
+}
+
 /// 单个外部 harness adapter 进程与其协议状态。
 struct Adapter {
     child: Child,
     stdin: Option<ChildStdin>,
     frames: mpsc::Receiver<Result<Value, ReadError>>,
-    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<StderrCapture>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     reader_task: Option<tokio::task::JoinHandle<()>>,
     pgid: Option<i32>,
     streaming: bool,
     session_key: Option<String>,
+    /// 最近一次 `exchange` 的事件数（C1 `llm_calls.response_json.event_count`）。
+    last_event_count: usize,
     closed: bool,
 }
 
@@ -307,7 +363,7 @@ impl Adapter {
                 None,
             ));
         };
-        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let stderr = Arc::new(Mutex::new(StderrCapture::default()));
         let stderr_task = child.stderr.take().map(|pipe| {
             let buffer = Arc::clone(&stderr);
             tokio::spawn(drain_stderr(pipe, buffer))
@@ -324,11 +380,17 @@ impl Adapter {
             pgid,
             streaming: false,
             session_key: None,
+            last_event_count: 0,
             closed: false,
         })
     }
 
-    async fn handshake(&mut self, run_id: &str, node_id: &str) -> Result<(), HarnessError> {
+    async fn handshake(
+        &mut self,
+        run_id: &str,
+        node_id: &str,
+        node_timeout_ms: u64,
+    ) -> Result<(), HarnessError> {
         let hello = json!({
             "v": HARNESS_PLUGIN_PROTOCOL_VERSION,
             "type": "hello",
@@ -336,9 +398,11 @@ impl Adapter {
             "run_id": run_id,
             "node_id": node_id,
             "provider": "external",
+            // REV-099 N3：limits 用真实口径（总输出 8 MiB / 单行 1 MiB / 本次节点超时）。
             "limits": {
-                "node_timeout_ms": HARNESS_PLUGIN_DEFAULT_TIMEOUT_MS,
-                "max_output_bytes": HARNESS_PLUGIN_LINE_MAX_BYTES,
+                "node_timeout_ms": node_timeout_ms,
+                "max_output_bytes": HARNESS_PLUGIN_TOTAL_OUTPUT_MAX_BYTES,
+                "max_line_bytes": HARNESS_PLUGIN_LINE_MAX_BYTES,
                 "max_events": HARNESS_PLUGIN_MAX_EVENTS
             }
         });
@@ -372,11 +436,43 @@ impl Adapter {
                 None,
             ));
         }
-        self.streaming = frame
-            .get("capabilities")
+        // hello_ok 形状校验：`capabilities` 若存在必须是对象（P2 N3/N9 最小严格化）。
+        let capabilities = match frame.get("capabilities") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(object)) => Some(object),
+            Some(_) => {
+                return Err(plugin_error(
+                    "protocol",
+                    "external harness hello_ok.capabilities must be an object",
+                    None,
+                ));
+            }
+        };
+        self.streaming = capabilities
             .and_then(|capabilities| capabilities.get("streaming"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        if capabilities
+            .and_then(|capabilities| capabilities.get("streaming"))
+            .is_some_and(|value| !value.is_boolean())
+        {
+            return Err(plugin_error(
+                "protocol",
+                "external harness hello_ok.capabilities.streaming must be a boolean",
+                None,
+            ));
+        }
+        // 可选 `limits` 回显（若 adapter 回显则必须是对象）。
+        if frame
+            .get("limits")
+            .is_some_and(|limits| !limits.is_object() && !limits.is_null())
+        {
+            return Err(plugin_error(
+                "protocol",
+                "external harness hello_ok.limits must be an object",
+                None,
+            ));
+        }
         Ok(())
     }
 
@@ -429,6 +525,10 @@ impl Adapter {
         let mut events = 0usize;
         let mut invalid_lines = 0u32;
         let mut tool_names: HashMap<String, String> = HashMap::new();
+        // REV-099 N1：`usage_update` 折入最终 usage（不进新 kind）。
+        let mut usage_updates = Usage::zero();
+        let mut has_usage_update = false;
+        self.last_event_count = 0;
         loop {
             if request.ctx.cancel_requested() {
                 self.shutdown().await;
@@ -501,11 +601,41 @@ impl Adapter {
                             None,
                         )));
                     }
-                    self.handle_event(&frame, request, &mut tool_names);
+                    self.last_event_count = events;
+                    // REV-099 N1（DR-011 §2.1）：`plan`→`Progress`；`usage_update`→最终
+                    // usage；其余交给 5 种既有 kind 的映射（未知 kind 忽略+warn）。
+                    match frame
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                    {
+                        "usage_update" => {
+                            usage_updates.accumulate(&parse_usage(frame.get("usage")));
+                            has_usage_update = true;
+                        }
+                        "plan" => {
+                            let percent = frame
+                                .get("percent")
+                                .and_then(Value::as_u64)
+                                .and_then(|percent| u8::try_from(percent).ok())
+                                .unwrap_or(0)
+                                .min(100);
+                            request.ctx.emit(StreamingEvent::Progress {
+                                percent,
+                                message: plan_message(&frame),
+                            });
+                        }
+                        _ => self.handle_event(&frame, request, &mut tool_names),
+                    }
                 }
                 Some("result") => {
                     return match parse_result(&frame) {
-                        Ok(output) => Ok(output),
+                        Ok(mut output) => {
+                            if has_usage_update && output.usage.total_tokens == 0 {
+                                output.usage = usage_updates;
+                            }
+                            Ok(output)
+                        }
                         Err(error) => {
                             // result 非法：adapter 状态不可信，杀进程并让下次调用重拉。
                             self.shutdown().await;
@@ -694,9 +824,11 @@ impl Adapter {
         if let Ok(Some(status)) = self.child.try_wait() {
             extra.insert("exit_code".to_string(), Value::from(status.code()));
         }
-        let stderr = stderr_tail(&self.stderr).await;
-        if !stderr.is_empty() {
-            extra.insert("stderr_tail".to_string(), Value::from(stderr));
+        {
+            let guard = self.stderr.lock().await;
+            for (key, value) in guard.evidence() {
+                extra.insert(key, value);
+            }
         }
         let error = plugin_error(
             "exit_nonzero",
@@ -708,24 +840,57 @@ impl Adapter {
     }
 
     /// 取消/终结：关 stdin → `SIGTERM` → 宽限 2s → `SIGKILL` 进程组 → reap。
+    /// 取消/终结（REV-099 C3/N4）：`cancel` 帧（≤500ms 写超时）→ 关 stdin →
+    /// **给 adapter 转发窗口**（grace 内自行清理子进程并退出）→ SIGTERM → SIGKILL。
+    ///
+    /// 转发窗口保证 adapter 有机会在收到 SIGTERM 前 kill 自己的 Codex/ACP 子进程组
+    /// （否则 SIGTERM 直接杀 adapter 会留下独立 session 的孤儿）。
     async fn shutdown(&mut self) {
+        const CANCEL_FRAME_WRITE_TIMEOUT_MS: u64 = 500;
+        const TERM_REAP_TIMEOUT_MS: u64 = 1_000;
         if self.closed {
             return;
         }
         self.closed = true;
-        // 1) `cancel` 控制帧（best-effort）+ 关闭 stdin。
+        // 1) `cancel` 控制帧（写超时兜底：stdin 满/子进程不读不得永久挂起）+ 关 stdin。
         if self.stdin.is_some() {
             let cancel = json!({"v": HARNESS_PLUGIN_PROTOCOL_VERSION, "type": "cancel"});
-            let _ = self.write_frame(&cancel, "protocol").await;
+            let _ = tokio::time::timeout(
+                Duration::from_millis(CANCEL_FRAME_WRITE_TIMEOUT_MS),
+                self.write_frame(&cancel, "protocol"),
+            )
+            .await;
         }
         self.stdin = None;
-        // 2) SIGTERM 进程组 → 宽限 → SIGKILL。
-        if let Some(pgid) = self.pgid.take() {
-            send_group_signal(pgid, GroupSignal::Term);
-            tokio::time::sleep(Duration::from_millis(HARNESS_PLUGIN_CANCEL_GRACE_MS)).await;
+        // 2) 转发窗口：等待 adapter 自行退出（其间它应 kill 自己的子进程组）。
+        let graceful = tokio::time::timeout(
+            Duration::from_millis(HARNESS_PLUGIN_CANCEL_GRACE_MS),
+            self.child.wait(),
+        )
+        .await;
+        let mut reaped = matches!(graceful, Ok(Ok(_)));
+        if reaped {
+            self.pgid = None;
         }
-        let _ = self.child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await;
+        // 3) 仍未退出 → SIGTERM 进程组 → 短等待 → SIGKILL 进程组 → reap。
+        if !reaped {
+            if let Some(pgid) = self.pgid.take() {
+                send_group_signal(pgid, GroupSignal::Term);
+            }
+            let term = tokio::time::timeout(
+                Duration::from_millis(TERM_REAP_TIMEOUT_MS),
+                self.child.wait(),
+            )
+            .await;
+            reaped = matches!(term, Ok(Ok(_)));
+        }
+        if !reaped {
+            if let Some(pgid) = self.pgid.take() {
+                send_group_signal(pgid, GroupSignal::Kill);
+            }
+            let _ = self.child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(1), self.child.wait()).await;
+        }
         if let Some(task) = self.reader_task.take() {
             task.abort();
         }
@@ -735,7 +900,10 @@ impl Adapter {
     }
 }
 
-/// stdout reader：按行读取、大小上限校验、JSON 解析（cancel-safe 的 channel 模型）。
+/// stdout reader：**有界**按行读取（单行 1 MiB 硬上限）、总输出上限、JSON 解析。
+///
+/// REV-099 C2：用 `fill_buf`/`consume` 分块读取，超过 1 MiB 立即报 `LineTooLarge`
+/// 且**不缓存整行**（无换行巨行也不会无限增长内存）。
 async fn read_frames(
     mut stdout: BufReader<ChildStdout>,
     tx: mpsc::Sender<Result<Value, ReadError>>,
@@ -744,44 +912,63 @@ async fn read_frames(
     let mut total = 0usize;
     loop {
         line.clear();
-        match stdout.read_until(b'\n', &mut line).await {
-            Ok(0) => {
-                let _ = tx.send(Err(ReadError::Eof)).await;
-                return;
+        loop {
+            let available = match stdout.fill_buf().await {
+                Ok(available) => available,
+                Err(_) => {
+                    let _ = tx.send(Err(ReadError::Eof)).await;
+                    return;
+                }
+            };
+            if available.is_empty() {
+                if line.is_empty() {
+                    let _ = tx.send(Err(ReadError::Eof)).await;
+                    return;
+                }
+                break;
             }
-            Ok(read) => {
-                if read > HARNESS_PLUGIN_LINE_MAX_BYTES {
+            if let Some(position) = available.iter().position(|byte| *byte == b'\n') {
+                if line.len().saturating_add(position).saturating_add(1)
+                    > HARNESS_PLUGIN_LINE_MAX_BYTES
+                {
                     let _ = tx.send(Err(ReadError::LineTooLarge)).await;
                     return;
                 }
-                total = total.saturating_add(read);
-                if total > HARNESS_PLUGIN_TOTAL_OUTPUT_MAX_BYTES {
-                    let _ = tx.send(Err(ReadError::OutputLimit)).await;
+                line.extend_from_slice(&available[..=position]);
+                stdout.consume(position + 1);
+                break;
+            }
+            if line.len().saturating_add(available.len()) > HARNESS_PLUGIN_LINE_MAX_BYTES {
+                // 硬上限：丢弃已读分片并终止（不继续缓存巨行）。
+                let _ = tx.send(Err(ReadError::LineTooLarge)).await;
+                return;
+            }
+            let consumed = available.len();
+            line.extend_from_slice(available);
+            stdout.consume(consumed);
+        }
+        total = total.saturating_add(line.len());
+        if total > HARNESS_PLUGIN_TOTAL_OUTPUT_MAX_BYTES {
+            let _ = tx.send(Err(ReadError::OutputLimit)).await;
+            return;
+        }
+        match serde_json::from_slice::<Value>(&line) {
+            Ok(frame) => {
+                if tx.send(Ok(frame)).await.is_err() {
                     return;
-                }
-                match serde_json::from_slice::<Value>(&line) {
-                    Ok(frame) => {
-                        if tx.send(Ok(frame)).await.is_err() {
-                            return;
-                        }
-                    }
-                    Err(_) => {
-                        if tx.send(Err(ReadError::InvalidJson)).await.is_err() {
-                            return;
-                        }
-                    }
                 }
             }
             Err(_) => {
-                let _ = tx.send(Err(ReadError::Eof)).await;
-                return;
+                if tx.send(Err(ReadError::InvalidJson)).await.is_err() {
+                    return;
+                }
             }
         }
     }
 }
 
-/// stderr 排空并按 8 KiB 截断（不写 trace 全文/密钥）。
-async fn drain_stderr(mut pipe: tokio::process::ChildStderr, buffer: Arc<Mutex<Vec<u8>>>) {
+/// stderr 排空（head + tail 各 4 KiB；不写 trace 全文/密钥）。
+async fn drain_stderr(mut pipe: tokio::process::ChildStderr, buffer: Arc<Mutex<StderrCapture>>) {
     use tokio::io::AsyncReadExt;
     let mut chunk = [0_u8; 1024];
     loop {
@@ -789,19 +976,83 @@ async fn drain_stderr(mut pipe: tokio::process::ChildStderr, buffer: Arc<Mutex<V
             Ok(0) | Err(_) => return,
             Ok(read) => {
                 let mut guard = buffer.lock().await;
-                if guard.len() < HARNESS_PLUGIN_STDERR_MAX_BYTES {
-                    let room = HARNESS_PLUGIN_STDERR_MAX_BYTES - guard.len();
-                    let take = room.min(read);
-                    guard.extend_from_slice(&chunk[..take]);
-                }
+                guard.push(&chunk[..read]);
             }
         }
     }
 }
 
-async fn stderr_tail(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
-    let guard = buffer.lock().await;
-    String::from_utf8_lossy(&guard).to_string()
+/// `plan` event → `Progress.message`（message/text 优先；否则 plan 对象 JSON）。
+fn plan_message(frame: &Value) -> String {
+    if let Some(message) = frame.get("message").and_then(Value::as_str) {
+        return message.to_string();
+    }
+    if let Some(text) = frame.get("text").and_then(Value::as_str) {
+        return text.to_string();
+    }
+    serde_json::to_string(frame.get("plan").unwrap_or(frame)).unwrap_or_else(|_| "plan".to_string())
+}
+
+/// `llm_calls.request_json`（DR-011 §4）：`{provider, agent_id, session_key, inputs_hash}`。
+///
+/// 不含原始 JSONL/事件全文；`inputs_hash` = 序列化映射输入的 BLAKE3 十六进制
+/// （`BTreeMap` 序列化按键排序，确定性）。
+fn external_request_record(request: &ProviderRequest<'_>) -> Value {
+    let inputs_bytes = serde_json::to_vec(&request.inputs).unwrap_or_default();
+    json!({
+        "provider": "subprocess",
+        "agent_id": request.agent.id,
+        "session_key": format!("{}:{}", request.trace.run_id, request.agent.id),
+        "inputs_hash": blake3::hash(&inputs_bytes).to_hex().to_string(),
+    })
+}
+
+/// 写框架侧 `llm_calls`（每节点恰 1 条；成功/失败都写，取消/超时不写）。
+///
+/// `response_json` 成功 = 四字段 + `event_count`；失败 = `{error{code,reason},event_count}`；
+/// 不写原始 JSONL / 事件全文。
+fn record_external_call(
+    request: &ProviderRequest<'_>,
+    request_record: &Value,
+    outcome: &Result<AgentOutput, RunFailure>,
+    event_count: usize,
+) {
+    let Some(recorder) = request.recorder else {
+        return;
+    };
+    let (response, status) = match outcome {
+        Ok(output) => {
+            let mut response = output.to_json();
+            if let Some(object) = response.as_object_mut() {
+                object.insert("event_count".to_string(), json!(event_count));
+            }
+            (response, LLM_CALL_STATUS_OK)
+        }
+        Err(RunFailure::Harness(error)) => (
+            json!({
+                "error": {
+                    "code": error.code,
+                    "reason": error
+                        .detail
+                        .get("reason")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                },
+                "event_count": event_count,
+            }),
+            LLM_CALL_STATUS_ERROR,
+        ),
+        // 取消/实例超时属于节点级语义（非 LLM 调用终态），不写 llm_calls。
+        Err(_) => return,
+    };
+    let snapshot = LlmCallSnapshot {
+        instance_id: &request.trace.instance_id,
+        call_index: 0,
+        request: request_record,
+        response: Some(&response),
+        status,
+    };
+    record_safely(recorder.as_ref(), &snapshot);
 }
 
 /// `result` 帧 → 四字段 output（content/stop_reason/iterations/usage）。
@@ -946,6 +1197,11 @@ if mode == "version_bad":
           "provider": "fake", "capabilities": {"streaming": False}})
     sys.exit(0)
 
+if mode == "bad_capabilities":
+    send({"v": 1, "type": "hello_ok", "protocol": "zgraph-harness/1",
+          "provider": "fake", "capabilities": {"streaming": "yes"}})
+    sys.exit(0)
+
 streaming = mode not in ("no_stream",)
 send({"v": 1, "type": "hello_ok", "protocol": "zgraph-harness/1",
       "provider": "fake", "capabilities": {"streaming": streaming}})
@@ -977,9 +1233,15 @@ while True:
     elif mode == "no_stream":
         send({"v": 1, "type": "event", "kind": "delta", "text": "ignored"})
         send_result()
-    elif mode == "unknown_event":
-        send({"v": 1, "type": "event", "kind": "plan", "text": "future"})
+    elif mode == "mystery_event":
+        send({"v": 1, "type": "event", "kind": "mystery", "text": "future"})
         send_result()
+    elif mode == "plan_and_usage":
+        send({"v": 1, "type": "event", "kind": "plan", "message": "step 1", "percent": 25})
+        send({"v": 1, "type": "event", "kind": "usage_update",
+              "usage": {"input_tokens": 3, "output_tokens": 4, "reasoning_output_tokens": 1}})
+        send({"v": 1, "type": "result", "content": "plan-done",
+              "stop_reason": "EndTurn", "iterations": 1})
     elif mode == "error":
         send({"v": 1, "type": "error", "code": "HARNESS_PLUGIN_ERROR",
               "message": "adapter boom", "reason": "protocol"})
@@ -1009,6 +1271,22 @@ while True:
         sys.exit(3)
     elif mode == "silent":
         time.sleep(60)
+    elif mode == "no_newline_big":
+        sys.stdout.write("x" * (2 * 1024 * 1024))
+        sys.stdout.flush()
+        time.sleep(1)
+        break
+    elif mode == "total_output":
+        chunk = "y" * 65536
+        for _ in range(129):
+            send({"v": 1, "type": "event", "kind": "progress", "percent": 1,
+                  "message": chunk})
+        time.sleep(1)
+        break
+    elif mode == "stderr_big":
+        sys.stderr.write("HEAD-" + ("z" * 6000) + "-MID-" + ("q" * 6000) + "-TAILEND")
+        sys.stderr.flush()
+        sys.exit(5)
     else:
         send_result()
 "#;
@@ -1022,6 +1300,15 @@ args = sys.argv[1:]
 output = None
 if "--output-last-message" in args:
     output = args[args.index("--output-last-message") + 1]
+import os
+import time
+if os.environ.get("ZGRAPH_FAKE_CODEX_MODE") == "sleep":
+    pid_file = os.environ.get("ZGRAPH_FAKE_CODEX_PID_FILE")
+    if pid_file:
+        with open(pid_file, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    time.sleep(60)
+    sys.exit(0)
 for event in [
     {"type": "thread.started", "thread_id": "t1"},
     {"type": "item.completed", "item": {"id": "i1", "type": "agent_message", "text": "codex-final"}},
@@ -1042,6 +1329,9 @@ if output:
 
     struct Fixture {
         _dir: TempDir,
+        /// fake Codex 长睡模式的 pid 文件（C3 in-flight cancel 测试用）。
+        pid_file: Option<std::path::PathBuf>,
+        recorder: Option<Arc<dyn crate::record::LlmCallRecorder>>,
         agent: AgentConfig,
         loaded: LoadedAgent,
         llm: Arc<dyn LlmProvider>,
@@ -1062,7 +1352,8 @@ if output:
         let script = dir.path().join("fake_adapter.py");
         std::fs::write(&script, FAKE_ADAPTER).expect("adapter script");
         std::fs::create_dir_all(dir.path().join("agents")).expect("agents dir");
-        let (args, env) = if mode == "codex" {
+        let mut pid_file = None;
+        let (args, env) = if mode == "codex" || mode == "codex_sleep" {
             let bin_dir = dir.path().join("bin");
             std::fs::create_dir_all(&bin_dir).expect("fake codex dir");
             let codex = bin_dir.join("codex");
@@ -1075,10 +1366,17 @@ if output:
             }
             let existing = std::env::var("PATH").unwrap_or_default();
             let path = format!("{}:{existing}", bin_dir.display());
-            (
-                vec![codex_adapter_path().display().to_string()],
-                BTreeMap::from([("PATH".to_string(), path)]),
-            )
+            let mut env = BTreeMap::from([("PATH".to_string(), path)]);
+            if mode == "codex_sleep" {
+                let pid = dir.path().join("codex.pid");
+                env.insert("ZGRAPH_FAKE_CODEX_MODE".to_string(), "sleep".to_string());
+                env.insert(
+                    "ZGRAPH_FAKE_CODEX_PID_FILE".to_string(),
+                    pid.display().to_string(),
+                );
+                pid_file = Some(pid);
+            }
+            (vec![codex_adapter_path().display().to_string()], env)
         } else {
             (
                 vec![script.display().to_string(), mode.to_string()],
@@ -1141,6 +1439,8 @@ if output:
         }];
         Fixture {
             _dir: dir,
+            pid_file,
+            recorder: None,
             agent,
             loaded,
             llm,
@@ -1154,6 +1454,11 @@ if output:
     }
 
     impl Fixture {
+        fn with_recorder(mut self, recorder: Arc<crate::test_support::CapturingRecorder>) -> Self {
+            self.recorder = Some(recorder);
+            self
+        }
+
         fn assets(&self) -> &Path {
             self._dir.path()
         }
@@ -1184,7 +1489,7 @@ if output:
                 max_iterations: 10,
                 declared_ports: &self.declared_ports,
                 node_mapping: &self.node_mapping,
-                recorder: None,
+                recorder: self.recorder.as_ref(),
                 skill_view_budget: &self.budget,
                 mcp: None,
             }
@@ -1253,7 +1558,7 @@ if output:
         assert_eq!(output.content, "final-text");
         assert_eq!(ctx.event_count(), 0, "streaming=false must drop deltas");
 
-        let unknown = fixture("unknown_event");
+        let unknown = fixture("mystery_event");
         let ctx = TestCtx::new();
         let output = AgentProvider::run(&provider, unknown.request(ctx.clone(), 5_000))
             .await
@@ -1424,5 +1729,187 @@ if output:
             provider_error(AgentProvider::run(&provider, fixture2.request(ctx, 10_000)).await);
         assert_eq!(error.detail["reason"], "spawn_failed", "{error:?}");
         assert_eq!(provider.live_adapter_count().await, 0);
+    }
+    /// REV-099 N1（DR-011 §2.1）：`plan` → `Progress`；`usage_update` 折入最终 usage。
+    #[tokio::test]
+    async fn plan_maps_to_progress_and_usage_update_folds_into_result() {
+        let fixture = fixture("plan_and_usage");
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        let output = AgentProvider::run(&provider, fixture.request(ctx.clone(), 5_000))
+            .await
+            .expect("run");
+        assert_eq!(output.content, "plan-done");
+        // usage_update → 最终 usage（result 未带 usage）。
+        assert_eq!(output.usage.prompt_tokens, 3);
+        assert_eq!(output.usage.completion_tokens, 4);
+        assert_eq!(output.usage.total_tokens, 7);
+        assert_eq!(output.usage.reasoning_tokens, Some(1));
+        let events = ctx.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(matches!(
+            &events[0],
+            StreamingEvent::Progress { percent, message } if *percent == 25 && message == "step 1"
+        ));
+        provider.close_provider().await;
+    }
+
+    /// REV-099 C2：无换行巨行（2 MiB）必须被**有界读取**立即拦截（不缓存整行）。
+    #[tokio::test]
+    async fn no_newline_giant_line_is_bounded_and_rejected() {
+        let fixture = fixture("no_newline_big");
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        let started = std::time::Instant::now();
+        let error =
+            provider_error(AgentProvider::run(&provider, fixture.request(ctx, 5_000)).await);
+        assert_eq!(error.detail["reason"], "line_too_large", "{error:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "bounded read must reject promptly: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(provider.live_adapter_count().await, 0);
+    }
+
+    /// 8 MiB 总输出上限（REV-099 N8 顺带补）。
+    #[tokio::test]
+    async fn total_output_limit_is_enforced() {
+        let fixture = fixture("total_output");
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        let error =
+            provider_error(AgentProvider::run(&provider, fixture.request(ctx, 10_000)).await);
+        assert_eq!(error.detail["reason"], "output_limit", "{error:?}");
+        assert_eq!(provider.live_adapter_count().await, 0);
+    }
+
+    /// REV-099 N2：stderr 同时保留 head/tail（各 4 KiB），失败证据不超 8 KiB。
+    #[tokio::test]
+    async fn stderr_head_and_tail_are_recorded_within_limit() {
+        let fixture = fixture("stderr_big");
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        let error =
+            provider_error(AgentProvider::run(&provider, fixture.request(ctx, 5_000)).await);
+        assert_eq!(error.detail["reason"], "exit_nonzero", "{error:?}");
+        assert_eq!(error.detail["exit_code"], 5, "{error:?}");
+        let head = error.detail["stderr_head"].as_str().expect("stderr_head");
+        let tail = error.detail["stderr_tail"].as_str().expect("stderr_tail");
+        assert!(head.starts_with("HEAD-"), "{head}");
+        assert!(tail.ends_with("TAILEND"), "{tail}");
+        assert!(
+            head.len() + tail.len() <= 8 * 1024,
+            "stderr evidence bounded"
+        );
+        assert_eq!(error.detail["stderr_truncated"], json!(true));
+    }
+
+    /// REV-099 C1：外部 harness 每节点恰 1 条框架侧 `llm_calls`；无原始 JSONL/事件全文。
+    #[tokio::test]
+    async fn external_call_records_exactly_one_llm_call_row() {
+        let recorder = crate::test_support::CapturingRecorder::new();
+        let success_fixture = fixture("echo").with_recorder(recorder.clone());
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        let output = AgentProvider::run(&provider, success_fixture.request(ctx, 5_000))
+            .await
+            .expect("run");
+        assert_eq!(output.content, "final-text");
+        let calls = recorder.calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "exactly one llm_calls row per node: {calls:?}"
+        );
+        assert_eq!(calls[0].status, "ok");
+        assert_eq!(calls[0].request["provider"], json!("subprocess"));
+        assert_eq!(calls[0].request["agent_id"], json!("agent"));
+        assert_eq!(
+            calls[0].request["session_key"],
+            json!(format!("run-1:{}", "agent"))
+        );
+        assert_eq!(
+            calls[0].request["inputs_hash"].as_str().map(str::len),
+            Some(64)
+        );
+        assert_eq!(
+            calls[0].response.as_ref().expect("response")["content"],
+            json!("final-text")
+        );
+        assert_eq!(
+            calls[0].response.as_ref().expect("response")["event_count"],
+            json!(6)
+        );
+        // 不写原始 JSONL / 事件全文（response 只有四字段 + event_count）。
+        let request_text = calls[0].request_text();
+        assert!(!request_text.contains("hel"), "{request_text}");
+        let response_text = calls[0].response_text();
+        assert!(!response_text.contains("\"events\""), "{response_text}");
+
+        // 失败（plugin error）同样记录 1 条，status=error。
+        let recorder = crate::test_support::CapturingRecorder::new();
+        let failure_fixture = fixture("error").with_recorder(recorder.clone());
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        provider_error(AgentProvider::run(&provider, failure_fixture.request(ctx, 5_000)).await);
+        let calls = recorder.calls();
+        assert_eq!(calls.len(), 1, "failure still records one row: {calls:?}");
+        assert_eq!(calls[0].status, "error");
+        assert_eq!(
+            calls[0].response.as_ref().expect("response")["error"]["reason"],
+            json!("protocol")
+        );
+    }
+
+    /// REV-099 N3/P3：hello_ok `capabilities.streaming` 非布尔 → `protocol` 失败。
+    #[tokio::test]
+    async fn invalid_hello_capabilities_fail_closed() {
+        let fixture = fixture("bad_capabilities");
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        let error =
+            provider_error(AgentProvider::run(&provider, fixture.request(ctx, 5_000)).await);
+        assert_eq!(error.detail["reason"], "protocol", "{error:?}");
+    }
+
+    /// REV-099 C3 / AC-20 d：Codex 长睡 + 父取消 → Codex 进程组不残留（无孤儿）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_in_flight_cancel_leaves_no_orphan_process_group() {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        let fixture = fixture("codex_sleep");
+        let pid_file = fixture.pid_file.clone().expect("pid file");
+        let ctx = TestCtx::new();
+        let cancel_ctx = ctx.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            cancel_ctx.request_cancel();
+        });
+        let provider = SubprocessProvider::new();
+        let result = AgentProvider::run(&provider, fixture.request(ctx, 10_000)).await;
+        canceller.join().expect("canceller thread");
+        assert!(matches!(result, Err(RunFailure::Cancelled)), "{result:?}");
+        assert_eq!(provider.live_adapter_count().await, 0);
+        // fake Codex 会把自身 pid 写入文件；取消后应已被 adapter/父进程回收。
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    break pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        let mut alive = true;
+        for _ in 0..40 {
+            if kill(Pid::from_raw(pid), None).is_err() {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(!alive, "fake Codex child {pid} leaked as orphan");
     }
 }

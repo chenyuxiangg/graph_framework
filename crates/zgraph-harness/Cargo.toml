@@ -17,6 +17,8 @@ zgraph-dsl = { path = "../zgraph-dsl" }
 zgraph-worker = { path = "../zgraph-worker" }
 serde.workspace = true
 serde_json.workspace = true
+# v0.3/V4（REV-099 C1）：外部 harness `llm_calls` 的 `inputs_hash`（与图 hash 同算法）。
+blake3.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

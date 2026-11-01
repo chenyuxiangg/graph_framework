@@ -1968,10 +1968,58 @@ mod tests {
 
         assert_eq!(default_outcome.status, zgraph_kernel::RunStatus::Completed);
         assert_eq!(builtin_outcome.status, zgraph_kernel::RunStatus::Completed);
+        // AC-20 a（REV-099 N7 加强）：输出 / 事件 / 迁移 / 实例逐字段对照（忽略 UUID/时间戳）。
         assert_eq!(
-            builtin_sink.snapshots().len(),
-            default_sink.snapshots().len(),
-            "explicit builtin must keep the same instance lifecycle"
+            default_outcome.output, builtin_outcome.output,
+            "run_output must be identical"
+        );
+        let project_snapshots = |sink: &MemoryTraceSink| {
+            sink.snapshots()
+                .into_iter()
+                .map(|snapshot| {
+                    (
+                        snapshot.node_id,
+                        snapshot.attempt,
+                        snapshot.status,
+                        snapshot.input,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            project_snapshots(&default_sink),
+            project_snapshots(&builtin_sink),
+            "instance lifecycle must be identical"
+        );
+        let project_transitions = |sink: &MemoryTraceSink| {
+            sink.transitions()
+                .into_iter()
+                .map(|record| {
+                    (
+                        record.node_id,
+                        record.attempt,
+                        record.from,
+                        record.to,
+                        record.reason,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            project_transitions(&default_sink),
+            project_transitions(&builtin_sink),
+            "transition sequence must be identical"
+        );
+        let project_events = |sink: &MemoryTraceSink| {
+            sink.streaming_calls()
+                .into_iter()
+                .map(|call| (call.node_id, call.event))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            project_events(&default_sink),
+            project_events(&builtin_sink),
+            "streaming event sequence must be identical"
         );
         builtin_executor.close_provider().await;
     }

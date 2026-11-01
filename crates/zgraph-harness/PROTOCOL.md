@@ -56,8 +56,9 @@
 ```
 
 - 只允许映射既有 5 种 `StreamingEvent`（`delta`/`reasoning`/`tool_start`/`tool_end`/
-  `progress`）；未知 `event.kind` 由框架**忽略 + warn**（向前兼容）。`streaming=false`
-  时 `delta`/`reasoning` 被丢弃。
+  `progress`）；`plan` 映射为 `Progress`（message/percent，DR-011 §2.1）；
+  `usage_update` 折入最终 `result.usage`（不新增 kind）；其它未知 `event.kind` 由框架
+  **忽略 + warn**（向前兼容）。`streaming=false` 时 `delta`/`reasoning` 被丢弃。
 - `result.content` 上限 1 MiB；`iterations` 必须为整数（Codex/DSH 降级固定 **1**）；
   `stop_reason` 用既有字面量（`EndTurn`/`MaxTokens`/`Other:<raw>` 等，**不新增枚举**）。
 - `usage`：`input_tokens`→prompt、`output_tokens`→completion、`reasoning_output_tokens`
@@ -84,7 +85,19 @@
   （`HARNESS_PLUGIN_ERROR{reason:"timeout"}` 仅用于协议级超时）。
 - 外部进程**禁止**写 trace/状态机/`llm_calls`；可观测性只经上述事件帧（框架记录）。
 
-## 4. 内置适配器
+## 4. 审计与 `llm_calls`（框架侧写入口径）
+
+- 外部 harness **不得**写 trace/状态机/`llm_calls`；框架在 provider 层**每节点执行
+  恰写 1 条** `llm_calls`：
+  - `request_json = {provider:"subprocess", agent_id, session_key, inputs_hash}`
+    （`inputs_hash` = 映射输入的 BLAKE3 十六进制；不含原始 JSONL/事件全文）；
+  - `response_json` 成功 = 四字段（content/stop_reason/iterations/usage）+ `event_count`；
+    失败 = `{error:{code,reason}, event_count}`（取消/节点超时不写，属节点级语义）。
+- `hello.limits` 口径（框架→adapter）：`node_timeout_ms` = 本次生效实例超时；
+  `max_output_bytes` = 总输出 8 MiB；`max_line_bytes` = 单行 1 MiB；
+  `max_events` = 20000。adapter 可忽略；若回显 `hello_ok.limits` 必须是对象。
+
+## 5. 内置适配器
 
 | adapter | 入口 | 状态 |
 |---|---|---|

@@ -50,12 +50,20 @@ def read_frame(stream: IO[str]) -> Optional[Dict[str, Any]]:
     return frame if isinstance(frame, dict) else None
 
 
-def handshake() -> bool:
-    """握手：读 `hello`、校验协议，回 `hello_ok`（committed 消息粒度）。"""
-    hello = read_frame(sys.stdin)
+def validate_hello(hello: Optional[Dict[str, Any]]) -> bool:
+    """校验父进程 `hello` 帧（协议/v；`limits` 若存在必须是对象）。"""
     if hello is None or hello.get("type") != "hello":
         return False
     if hello.get("protocol") != PROTOCOL or hello.get("v") != PROTOCOL_VERSION:
+        return False
+    limits = hello.get("limits")
+    return limits is None or isinstance(limits, dict)
+
+
+def handshake() -> bool:
+    """握手：读 `hello`、校验协议与 limits，回 `hello_ok`（committed 消息粒度）。"""
+    hello = read_frame(sys.stdin)
+    if not validate_hello(hello):
         return False
     send(
         {

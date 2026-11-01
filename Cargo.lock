@@ -2820,6 +2820,7 @@ name = "zgraph-harness"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "futures-util",
  "genai",
  "http",

@@ -132,3 +132,43 @@ def test_adapter_missing_codex_returns_structured_error(tmp_path: Path) -> None:
     out = _run_adapter(env, frames)
     assert out[1]["type"] == "error"
     assert out[1]["reason"] == "spawn_failed"
+
+
+def test_validate_hello_checks_protocol_and_limits() -> None:
+    assert codex.validate_hello({"type": "hello", "protocol": "zgraph-harness/1", "v": 1})
+    assert codex.validate_hello(
+        {"type": "hello", "protocol": "zgraph-harness/1", "v": 1, "limits": {"max_events": 1}}
+    )
+    assert not codex.validate_hello(
+        {"type": "hello", "protocol": "zgraph-harness/1", "v": 1, "limits": "bad"}
+    )
+    assert not codex.validate_hello({"type": "hello", "protocol": "zgraph-harness/2", "v": 1})
+    assert not codex.validate_hello(None)
+
+
+def test_stderr_capture_keeps_head_and_tail_bounded() -> None:
+    capture = codex.StderrCapture()
+    capture.push("HEAD-" + ("a" * 6000) + "-MID-" + ("b" * 6000) + "-TAILEND")
+    assert capture.head_text().startswith("HEAD-")
+    assert capture.tail_text().endswith("TAILEND")
+    assert len(capture.head_text()) <= codex.STDERR_CAPTURE_BYTES
+    assert len(capture.tail_text()) <= codex.STDERR_CAPTURE_BYTES
+
+
+def test_adapter_turn_failed_returns_structured_error(tmp_path: Path) -> None:
+    failed_codex = """#!/usr/bin/env python3
+import json
+import sys
+print(json.dumps({"type": "turn.failed", "error": {"message": "boom"}}), flush=True)
+"""
+    fake = _fake_codex(tmp_path, failed_codex)
+    env = dict(os.environ)
+    env["CODEX_BIN"] = str(fake)
+    frames = [
+        {"v": 1, "type": "hello", "protocol": "zgraph-harness/1"},
+        {"v": 1, "type": "run", "inputs": {}},
+    ]
+    out = _run_adapter(env, frames)
+    assert out[1]["type"] == "error"
+    assert out[1]["reason"] == "protocol"
+    assert "boom" in out[1]["message"]
