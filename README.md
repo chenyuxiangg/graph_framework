@@ -16,10 +16,10 @@
 
 - **内核与执行**：Rust 内核 + Python 子进程 worker；DSL 1.0 / R1–R18（19 个 DSL 码）；事件循环 + gate/内存通道 + SQLite trace v6。
 - **SOP 与能力**：software_team SOP v1/v1.1（approved/rework）+ **动态 N `foreach`**（W4b，AC-17 a–j）；**人工评审 human decide**（W3a，AC-16）；每节点扇出上限（W2b，AC-15）；L1/L2 回放。
-- **测试**：`cargo test --workspace` **915 passed / 0 failed / 3 ignored**；e2e **106/0/2**（`dynamic_fanout` **21/0**，6 连跑稳定）；pytest **170 passed**（`python -m pytest -q`；collect-only 170 tests）。
+- **测试**：`cargo test --workspace` **915 passed / 0 failed / 3 ignored**；e2e **106/0/2**（`dynamic_fanout` **21/0**，6 连跑稳定）；pytest **170 passed**（`pytest -q` 实跑；collect-only 170 tests）。
 - **性能基线**：[`doc/perf-baseline-v0.2.txt`](doc/perf-baseline-v0.2.txt)（customer_ticket +17.3%、10 并发 +16.0%、SOP smoke -14.8%，均 ≤20% 门禁内）。
-- **已知限制**：ISSUE-112（SOP full-60 运行期无确定性 fake-LLM 基线，发布例外）；**W3b durable resume 不做**（用户 2026-11-01 决定）；W5 共享评审队列延至 v0.3；P3 清理项见 [issues](doc/issues.md) ISSUE-143–149。
-- **下一步**：v0.3 规划（W5 共享评审队列）+ 清理 ISSUE-112/143–149；详见 [DR-004](doc/decisions/DR-004-v02-scope-and-waves.md) §4/§10 与 [progress](doc/progress.md)。
+- **已知限制**：ISSUE-112（SOP full-60 运行期无确定性 fake-LLM 基线，发布例外）；**W3b durable resume 不做**（用户 2026-11-01 决定）；W5 共享评审队列延至 v0.3；P3 清理项见 [issues](doc/issues.md) ISSUE-143–150。
+- **下一步**：v0.3 规划（W5 共享评审队列）+ 清理 ISSUE-112/143–150；详见 [DR-004](doc/decisions/DR-004-v02-scope-and-waves.md) §4/§10 与 [progress](doc/progress.md)。
 
 ## 快速开始
 

@@ -8,8 +8,8 @@
 - 无（v0.2.0 发布收口完成；worktree/分支清理由合并流程处理）。
 
 **下一步**
-- **v0.3 规划**：W5 共享评审队列（v0.3 候选）+ 清理 ISSUE-112（full-60 运行期基线）/ISSUE-143–149（P3）。
+- **v0.3 规划**：W5 共享评审队列（v0.3 候选）+ 清理 ISSUE-112（full-60 运行期基线）/ISSUE-143–150（P3）。
 
 **阻塞**
 - 无硬阻塞；已知限制：ISSUE-112（SOP full-60 运行期 fake-LLM 不稳定，发布例外）；**W3b durable resume 不做**（用户 2026-11-01 决定）；W5 延至 v0.3。
-- 台账：ISSUE-142 fixed；ISSUE-105–141 + 143–149 open（P3 为主）；100/101/104 fixed；ISSUE-062 保持 open（见 `doc/issues.md`）。
+- 台账：ISSUE-142 fixed；ISSUE-105–141 + 143–150 open（P3 为主）；100/101/104 fixed；ISSUE-062 保持 open（见 `doc/issues.md`）。
