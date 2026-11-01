@@ -443,8 +443,10 @@ fn compile_subgraph(
 /// W4a：编译 `foreach` 区域并回填 `CompiledNode.foreach` 与 `foreach_owner`。
 ///
 /// DSL R18 已在加载期保证区域合法（唯一出口 E、`E→J` 恰一条无 gate 边、边界闭合、
-/// 禁止嵌套/相交）；这里按 DR-007 §4 的确定性算法**重建**同一边界（`nodes` 数组序 +
-/// 边数组序），对程序化构图/加载器不变量破坏做防御性 `CompileError`。
+/// 禁止嵌套/相交、F 的入边来自 region 外）；这里按 DR-007 §4 的确定性算法**重建**
+/// 同一边界（`nodes` 数组序 + 边数组序），并只保留轻量防御校验（items_port 声明、
+/// region 含 F、唯一出口/单出边/目标=join；`debug_assert!` 标注「依赖 DSL」）。
+/// 程序化构图若绕过 DSL 校验，这些防御会返回 `CompileError` 而非 panic。
 fn wire_foreach(
     dsl_nodes: &[GraphNode],
     edges: &[CompiledEdge],
@@ -463,7 +465,23 @@ fn wire_foreach(
             continue;
         };
         let f = dsl_node.id.clone();
+        // 防御（REV-090）：DSL R17 已校验 `items_port ∈ F.inputs`；程序化构图兜底。
+        let declared = table.get(&f).is_some_and(|node| {
+            node.inputs
+                .iter()
+                .any(|port| port.name == config.items_port)
+        });
+        if !declared {
+            return Err(CompileError::new(format!(
+                "foreach node '{f}': items_port '{}' is not a declared input port",
+                config.items_port
+            )));
+        }
         let region_set = foreach_region(&f, &config.join, &outgoing, edges);
+        debug_assert!(
+            region_set.contains(&f),
+            "foreach region must contain its F (DSL R18 guarantees)"
+        );
         if config.join == f || region_set.contains(&config.join) {
             return Err(CompileError::new(format!(
                 "foreach region of node '{f}': join '{}' is inside the region",

@@ -942,3 +942,328 @@ async fn delivery_after_expansion_is_terminal() {
     );
     assert_eq!(sink.foreach_expansions().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// REV-090 修复回归（C1 Pause→Resume 展开 / N1 source / N2 展开后 defer 投递）
+// ---------------------------------------------------------------------------
+
+/// 串行 foreach 链：`F1(foreach join=F2) -> F2(foreach join=end)`（region 不相交）。
+const SERIAL_TEMPLATE: &str = r#"{
+  "version": "1.0",
+  "metadata": {"name": "foreach-serial"},
+  "entry_points": ["start"],
+  "nodes": [
+    {"id": "start", "type": "start", "inputs": [], "config": {}},
+    {"id": "prep", "type": "python_node",
+     "inputs": [{"name": "seed", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "prep"}},
+    {"id": "F1", "type": "python_node",
+     "inputs": [{"name": "items", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "f1"},
+     "foreach": {"items_port": "items", "join": "F2"}},
+    {"id": "F2", "type": "python_node",
+     "inputs": [{"name": "items", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "f2"},
+     "foreach": {"items_port": "items", "join": "end"}},
+    {"id": "end", "type": "end",
+     "inputs": [{"name": "results", "type": "any", "required": true}],
+     "config": {}}
+  ],
+  "edges": [
+    {"from": "start", "to_node": "prep", "to_input_port": "seed"},
+    {"from": "prep", "to_node": "F1", "to_input_port": "items"},
+    {"from": "F1", "to_node": "F2", "to_input_port": "items"},
+    {"from": "F2", "to_node": "end", "to_input_port": "results"}
+  ]
+}"#;
+
+/// N1：F 的两条入边（items 先到、other 后到）——source 必须是使 Ready 的 other 投递。
+const SOURCE_TEMPLATE: &str = r#"{
+  "version": "1.0",
+  "metadata": {"name": "foreach-source"},
+  "entry_points": ["start"],
+  "nodes": [
+    {"id": "start", "type": "start", "inputs": [], "config": {}},
+    {"id": "prep", "type": "python_node",
+     "inputs": [{"name": "seed", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "prep"}},
+    {"id": "X", "type": "python_node",
+     "inputs": [{"name": "seed", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "x"}},
+    {"id": "F", "type": "python_node", "trigger": "all",
+     "inputs": [{"name": "items", "type": "any", "required": true},
+                {"name": "other", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "fanout"},
+     "foreach": {"items_port": "items", "join": "end"}},
+    {"id": "end", "type": "end",
+     "inputs": [{"name": "results", "type": "any", "required": true}],
+     "config": {}}
+  ],
+  "edges": [
+    {"from": "start", "to_node": "prep", "to_input_port": "seed"},
+    {"from": "start", "to_node": "X", "to_input_port": "seed"},
+    {"from": "prep", "to_node": "F", "to_input_port": "items"},
+    {"from": "X", "to_node": "F", "to_input_port": "other"},
+    {"from": "F", "to_node": "end", "to_input_port": "results"}
+  ]
+}"#;
+
+/// N1 变体：`trigger=any`，items 使 controller Ready（Pause 中），extra 在 Ready 之后
+/// 到达——source 必须是 items 的投递，不得被更晚的 extra 投递覆盖。
+const SOURCE_PAUSE_TEMPLATE: &str = r#"{
+  "version": "1.0",
+  "metadata": {"name": "foreach-source-pause"},
+  "entry_points": ["start"],
+  "nodes": [
+    {"id": "start", "type": "start", "inputs": [], "config": {}},
+    {"id": "prep", "type": "python_node",
+     "inputs": [{"name": "seed", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "prep"}},
+    {"id": "X", "type": "python_node",
+     "inputs": [{"name": "seed", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "x"}},
+    {"id": "F", "type": "python_node", "trigger": "any",
+     "inputs": [{"name": "items", "type": "any", "required": true},
+                {"name": "extra", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "fanout"},
+     "foreach": {"items_port": "items", "join": "end"}},
+    {"id": "end", "type": "end",
+     "inputs": [{"name": "results", "type": "any", "required": true}],
+     "config": {}}
+  ],
+  "edges": [
+    {"from": "start", "to_node": "prep", "to_input_port": "seed"},
+    {"from": "start", "to_node": "X", "to_input_port": "seed"},
+    {"from": "prep", "to_node": "F", "to_input_port": "items"},
+    {"from": "X", "to_node": "F", "to_input_port": "extra"},
+    {"from": "F", "to_node": "end", "to_input_port": "results"}
+  ]
+}"#;
+
+/// N2：F 已展开后仍有 defer 边 gate=false 投递到 F → RUN_DELIVERY_TO_TERMINAL。
+///
+/// `X -> X` 是 defer 自环（满足 R15 可重入），`X -> F` 为 defer 且 gate=false。
+const LATE_DEFER_TEMPLATE: &str = r#"{
+  "version": "1.0",
+  "metadata": {"name": "foreach-late-defer"},
+  "entry_points": ["start"],
+  "nodes": [
+    {"id": "start", "type": "start", "inputs": [], "config": {}},
+    {"id": "prep", "type": "python_node",
+     "inputs": [{"name": "seed", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "prep"}},
+    {"id": "X", "type": "python_node", "trigger": "any",
+     "inputs": [{"name": "seed", "type": "any", "required": true},
+                {"name": "loop", "type": "any", "required": false}],
+     "config": {"module": "workers.f", "function": "x"}},
+    {"id": "F", "type": "python_node", "trigger": "any",
+     "inputs": [{"name": "items", "type": "any", "required": true},
+                {"name": "extra", "type": "any", "required": true}],
+     "config": {"module": "workers.f", "function": "fanout"},
+     "foreach": {"items_port": "items", "join": "end"}},
+    {"id": "end", "type": "end",
+     "inputs": [{"name": "results", "type": "any", "required": true}],
+     "config": {}}
+  ],
+  "edges": [
+    {"from": "start", "to_node": "prep", "to_input_port": "seed"},
+    {"from": "start", "to_node": "X", "to_input_port": "seed"},
+    {"from": "prep", "to_node": "F", "to_input_port": "items"},
+    {"from": "X", "to_node": "X", "to_input_port": "loop",
+     "gate": {"function": "check_output", "params": {"path": "loop", "equals": true}},
+     "on_gate_false": "defer"},
+    {"from": "X", "to_node": "F", "to_input_port": "extra",
+     "gate": {"function": "check_output", "params": {"path": "ok", "equals": true}},
+     "on_gate_false": "defer"},
+    {"from": "F", "to_node": "end", "to_input_port": "results"}
+  ]
+}"#;
+
+/// C1 回归 1：Pause 时 F 的上游仍在飞；上游完成把 controller 置 Ready 后 Resume
+/// 必须展开（不得误判 RUN_DEADLOCK）。
+#[tokio::test]
+async fn pause_during_upstream_expands_after_resume() {
+    let executor =
+        Arc::new(FakeExecutor::new().delay("prep", Duration::from_millis(120), json!(["a", "b"])));
+    let sink = Arc::new(MemoryTraceSink::new());
+    let spec = spec_for(&pipeline_json("", ""), foreach_options());
+    let handle = start_run(None, spec, executor, sink.clone()).expect("started");
+    wait_for_status(&sink, "prep", InstanceStatus::Running).await;
+    assert!(handle.pause());
+    // 上游在 Pause 期间完成：controller 变 Ready 但展开被冻结；不得死锁/结束。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(handle.status(), RunStatus::Paused);
+    assert!(
+        sink.foreach_expansions().is_empty(),
+        "Pause 冻结 controller 展开"
+    );
+    assert!(handle.resume());
+    let outcome = handle.wait().await;
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "Resume 后必须展开 Ready controller（不得 RUN_DEADLOCK）：{:?}",
+        outcome.error
+    );
+    assert_eq!(sink.foreach_expansions().len(), 1);
+    assert_eq!(sink.foreach_expansions()[0].item_count, 2);
+    assert_eq!(
+        common::last_status(&sink, "end"),
+        Some(InstanceStatus::Completed)
+    );
+    common::assert_lifecycle_once(&sink);
+}
+
+/// C1 回归 2：串行 F1→F2；Pause 时 F1 item 完成并把 join 投递给 F2（F2 controller
+/// 变 Ready），Resume 后按 `node_order` 重扫展开 F2。
+#[tokio::test]
+async fn serial_foreach_pause_resume_expands_second_controller() {
+    let executor = Arc::new(
+        FakeExecutor::new()
+            .respond("prep", json!(["a", "b"]))
+            .delay("F1", Duration::from_millis(120), json!({"item": true})),
+    );
+    let sink = Arc::new(MemoryTraceSink::new());
+    let spec = spec_for(SERIAL_TEMPLATE, foreach_options());
+    let handle = start_run(None, spec, executor, sink.clone()).expect("started");
+    wait_for_status(&sink, "F1", InstanceStatus::Running).await;
+    assert!(handle.pause());
+    // F1 item 完成（在飞照常）→ join 投递给 F2 controller（Ready，Pause 冻结展开）。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(handle.status(), RunStatus::Paused);
+    assert_eq!(
+        sink.foreach_expansions().len(),
+        1,
+        "Pause 期间只有 F1 已展开"
+    );
+    assert!(
+        common::snapshots_of(&sink, "F2").is_empty(),
+        "Pause 期间 F2 不得展开"
+    );
+    assert!(handle.resume());
+    let outcome = handle.wait().await;
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "串行链 Resume 后应级联展开 F2：{:?}",
+        outcome.error
+    );
+    let expansions = sink.foreach_expansions();
+    assert_eq!(expansions.len(), 2);
+    assert_eq!(expansions[1].node_id, "F2");
+    assert_eq!(expansions[1].item_count, 2);
+    assert_eq!(
+        common::last_status(&sink, "end"),
+        Some(InstanceStatus::Completed)
+    );
+    common::assert_lifecycle_once(&sink);
+}
+
+/// N1：`source_instance_id` 只记录使 controller 变 `Ready` 的那条投递（本例 X），
+/// 不被后续/更早的其它 passed 投递覆盖。
+#[tokio::test]
+async fn expansion_source_is_the_ready_causing_delivery() {
+    let executor = Arc::new(
+        FakeExecutor::new()
+            .respond("prep", json!(["a", "b"]))
+            .delay("X", Duration::from_millis(60), json!({"x": 1})),
+    );
+    let (outcome, sink) =
+        common::run_with_sink(spec_for(SOURCE_TEMPLATE, foreach_options()), executor).await;
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "error: {:?}",
+        outcome.error
+    );
+    let expansions = sink.foreach_expansions();
+    assert_eq!(expansions.len(), 1);
+
+    let instance_of = |node: &str| {
+        sink.snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.node_id == node)
+            .map(|snapshot| snapshot.instance_id)
+            .expect("instance")
+    };
+    let x_instance = instance_of("X");
+    let prep_instance = instance_of("prep");
+    assert_eq!(
+        expansions[0].source_instance_id.as_deref(),
+        Some(x_instance.as_str()),
+        "source 必须是使 controller Ready 的 X 投递"
+    );
+    assert_ne!(
+        expansions[0].source_instance_id.as_deref(),
+        Some(prep_instance.as_str()),
+        "更早的 items 投递不得成为 source"
+    );
+}
+
+/// N2：F 已 `Expanded` 后，defer 边 gate=false 的投递不再只挂 receipt，
+/// 而按 DR-007 §6.6/§6.7 → `RUN_DELIVERY_TO_TERMINAL`。
+#[tokio::test]
+async fn defer_false_delivery_after_expansion_is_terminal() {
+    let executor = Arc::new(
+        FakeExecutor::new()
+            .respond("prep", json!(["a", "b"]))
+            .delay("F", Duration::from_millis(300), json!({"item": true}))
+            .delay("X", Duration::from_millis(40), json!({"x": 1})),
+    );
+    let (outcome, sink) =
+        common::run_with_sink(spec_for(LATE_DEFER_TEMPLATE, foreach_options()), executor).await;
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(
+        outcome.error.expect("run error").code,
+        "RUN_DELIVERY_TO_TERMINAL",
+        "展开后 defer gate=false 投递同样按单次展开口径拒绝"
+    );
+    assert_eq!(sink.foreach_expansions().len(), 1);
+}
+
+/// N1 回归（Pause 窗口）：controller 在 Pause 中变 Ready 后、Resume 前又有 passed
+/// 投递到达；`source_instance_id` 必须保持为「使 Ready 的 items 投递」，不被覆盖。
+#[tokio::test]
+async fn expansion_source_not_overwritten_while_paused() {
+    let executor = Arc::new(
+        FakeExecutor::new()
+            .delay("prep", Duration::from_millis(100), json!(["a", "b"]))
+            .delay("X", Duration::from_millis(250), json!({"x": 1})),
+    );
+    let sink = Arc::new(MemoryTraceSink::new());
+    let spec = spec_for(SOURCE_PAUSE_TEMPLATE, foreach_options());
+    let handle = start_run(None, spec, executor, sink.clone()).expect("started");
+    wait_for_status(&sink, "prep", InstanceStatus::Running).await;
+    assert!(handle.pause());
+    // prep 100ms 完成 → controller Ready（items）；X 250ms 完成 → Ready 后的 passed 投递。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(handle.status(), RunStatus::Paused);
+    assert!(sink.foreach_expansions().is_empty());
+    assert!(handle.resume());
+    let outcome = handle.wait().await;
+    assert_eq!(
+        outcome.status,
+        RunStatus::Completed,
+        "error: {:?}",
+        outcome.error
+    );
+
+    let instance_of = |node: &str| {
+        sink.snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.node_id == node)
+            .map(|snapshot| snapshot.instance_id)
+            .expect("instance")
+    };
+    let expansions = sink.foreach_expansions();
+    assert_eq!(expansions.len(), 1);
+    assert_eq!(
+        expansions[0].source_instance_id.as_deref(),
+        Some(instance_of("prep").as_str()),
+        "source 必须是使 Ready 的 items 投递，不被 Pause 窗口内更晚的 extra 覆盖"
+    );
+    assert_ne!(
+        expansions[0].source_instance_id.as_deref(),
+        Some(instance_of("X").as_str())
+    );
+}

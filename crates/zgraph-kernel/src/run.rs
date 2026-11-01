@@ -793,6 +793,10 @@ impl RunLoop {
     /// 确定性：只扫描节点的**当前**实例（`node_current`），并按 `node_order`
     /// 排序后入队 —— 避免 HashMap 迭代顺序导致 Resume 后的派发顺序抖动。
     fn resume_pending(&mut self) {
+        // W4b（REV-090 C1）：Pause 期间上游投递仍会应用（controller 可能已变 `Ready`），
+        // 但展开被冻结；Resume 后必须按 `node_order` 展开所有 Ready controller，
+        // 否则静默判定会把「Ready 但未展开」误判为 `RUN_DEADLOCK`。
+        self.expand_ready_controllers();
         let mut pending: Vec<(usize, InstanceId)> = self
             .instances
             .values()
@@ -815,6 +819,44 @@ impl RunLoop {
         pending.sort_by_key(|(order, _)| *order);
         for (_, instance_id) in pending {
             self.maybe_make_ready(&instance_id);
+        }
+    }
+
+    /// W4b（REV-090 C1）：展开所有 `Ready` controller（按 `node_order` 确定性重扫）。
+    ///
+    /// 串行 `F -> J(F2)` 链：展开 F 的 join 可能把 F2 的 controller 置为 `Ready`，
+    /// 因此需要循环重扫直到没有新的可展开 controller。若某 controller 未被展开
+    /// （防御：`Ready` 但缺少 items 等异常），立即停止以避免空转。
+    fn expand_ready_controllers(&mut self) {
+        loop {
+            if self.status != RunStatus::Running {
+                return;
+            }
+            let Some(node_id) = self
+                .graph
+                .node_order
+                .iter()
+                .find(|node_id| {
+                    self.controllers
+                        .get(*node_id)
+                        .is_some_and(|controller| controller.state == ControllerState::Ready)
+                })
+                .cloned()
+            else {
+                return;
+            };
+            self.controller_try_expand(&node_id);
+            if self.status.is_terminal() {
+                return;
+            }
+            let still_ready = self
+                .controllers
+                .get(&node_id)
+                .is_some_and(|controller| controller.state == ControllerState::Ready);
+            if still_ready {
+                // 防御：Ready 但未展开（理论不可达：Ready 蕴含 items_port 已到）→ 停止重扫。
+                return;
+            }
         }
     }
 
@@ -945,6 +987,18 @@ impl RunLoop {
             ));
             return self.final_outcome.take();
         }
+        // W4b（REV-090 N3）：静默时仍有部分完成的 join buffer → join 永远无法完成
+        // （正常路径不可达：E 的其它 item 只会 Completed/Cancelled，Skipped/Crashed/
+        // TimedOut 均先终结 run）→ 防御性确定性 `RUN_FOREACH_ITEM_INCOMPLETE`。
+        if let Some((foreach_node, completed, expected)) = self.incomplete_join() {
+            self.fail_run(RunError::new(
+                CODE_RUN_FOREACH_ITEM_INCOMPLETE,
+                format!(
+                    "foreach node '{foreach_node}' join incomplete: {completed}/{expected} items completed while run is silent"
+                ),
+            ));
+            return self.final_outcome.take();
+        }
         if !self.is_quiescent() {
             return None;
         }
@@ -1015,6 +1069,29 @@ impl RunLoop {
                 ) {
                     return Some((node_id.clone(), controller.state));
                 }
+            }
+        }
+        None
+    }
+
+    /// W4b（REV-090 N3）：静默时仍存在**不完整** join buffer 的 F（防御性终止判据）。
+    ///
+    /// 返回 `(F, 已完成 item 数, 期望 item 数)`，按 `node_order` 取首个。
+    fn incomplete_join(&self) -> Option<(NodeId, usize, usize)> {
+        for node_id in &self.graph.node_order {
+            let Some(buffer) = self.join_buffers.get(node_id) else {
+                continue;
+            };
+            if buffer.is_empty() {
+                continue;
+            }
+            let expected = self
+                .controllers
+                .get(node_id)
+                .map(|controller| controller.keys.len())
+                .unwrap_or(0);
+            if buffer.len() < expected {
+                return Some((node_id.clone(), buffer.len(), expected));
             }
         }
         None
@@ -1436,7 +1513,11 @@ impl RunLoop {
                     .values
                     .insert(edge.to_port.clone(), output.clone());
                 controller.arrived.insert(edge.to_port.clone());
-                controller.source_instance_id = Some(from_instance.to_string());
+                // W4b（REV-090 N1）：source 只记录**使 controller 变 Ready 的那条投递**
+                // （Collecting 阶段最后一条 passed 投递；Ready 之后不覆盖）。
+                if controller.state == ControllerState::Collecting {
+                    controller.source_instance_id = Some(from_instance.to_string());
+                }
             }
         }
         self.last_event_at = Instant::now();
@@ -1686,6 +1767,19 @@ impl RunLoop {
             .get(&target)
             .is_some_and(|node| node.foreach.is_some())
         {
+            // W4b（REV-090 N3）：串行 join 到 F2 时同样校验 controller 状态
+            //（F2 已展开/跳过 → 单次展开语义被破坏 → RUN_DELIVERY_TO_TERMINAL）。
+            let state = self
+                .controllers
+                .get(&target)
+                .map(|controller| controller.state);
+            if matches!(
+                state,
+                Some(ControllerState::Expanded) | Some(ControllerState::Skipped)
+            ) {
+                self.fail_delivery_to_terminal(&target, foreach.exit_edge);
+                return;
+            }
             if let Some(controller) = self.controllers.get_mut(&target) {
                 controller.values.insert(foreach.join_port.clone(), value);
                 controller.arrived.insert(foreach.join_port.clone());
@@ -1860,6 +1954,17 @@ impl RunLoop {
                 .get(&edge.to_node)
                 .is_some_and(|node| node.foreach.is_some())
             {
+                // W4b（REV-090 N2）：F 已 `Expanded`/`Skipped` 后**任何**到 F 的投递
+                // （含 defer 边 gate=false）都按 DR-007 §6.6/§6.7 冻结口径 →
+                // `RUN_DELIVERY_TO_TERMINAL`（不再只挂 receipt；单次展开不可重入）。
+                let state = self.controllers.get(&edge.to_node).map(|c| c.state);
+                if matches!(
+                    state,
+                    Some(ControllerState::Expanded) | Some(ControllerState::Skipped)
+                ) {
+                    self.fail_delivery_to_terminal(&edge.to_node, edge.index);
+                    return;
+                }
                 self.emit_gate_result(from_instance, from_node, &edge, evaluation);
                 // DR-007 §6.6：defer 边 gate=false 以 F 为目标 → 挂 receipt（不结算）。
                 if !evaluation.passed && defer_edge {
