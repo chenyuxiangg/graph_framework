@@ -83,3 +83,13 @@ bash scripts/dev/check.sh                 # PASSED
 ## 7. 条件关闭记录（仅「有条件通过」填写）
 
 不适用（结论为 `通过`，无附加条件）。
+
+## 7. 第二评审 · 跨模块机械改动（Lead 追加，2026-11-01）
+
+- **评审人**：`lead`（**≠ 作者** `docs-dev`；跨模块改动 Lead 已批准，按 AGENTS §2 追加第二评审）
+- **范围**：
+  1. `crates/zgraph-cli/tests/validate.rs` **1 行**版本期望：`contains("zgraph 0.1.0")` → `contains(&format!("zgraph {}", env!("CARGO_PKG_VERSION")))`（DSL `1.0` 断言保留）。
+  2. 本分支主体为 `process`（Cargo.toml/Cargo.lock/README.md）+ `docs`（doc/**），跨模块在同一分支交付，已声明。
+- **核对结论（通过）**：仅版本期望机械同步，零逻辑/断言强度变化；Cargo.lock 仅 7 个本地 crate version 更新（无第三方依赖漂移）；未改 dist/、未改既有评审记录、未写 token/密钥；P2/P3 收口（85a2945）仅文字（143–150、perf 措辞、index 状态、pytest 证据），数字与结论未变。
+- **Lead 亲自验证**：`cargo build --release -p zgraph-cli --bin zgraph --locked` 成功；`target/release/zgraph --version` = `zgraph 0.2.0 (DSL 1.0)`；`bash scripts/dev/check.sh` PASSED；`git diff 2340f4d..HEAD --stat` 仅 process/docs + cli 测试 1 行。
+- **结论**：**通过（第二评审）**。跨模块机械改动与主审结论合并生效；分支满足合并前置。
