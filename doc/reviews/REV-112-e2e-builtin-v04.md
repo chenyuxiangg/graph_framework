@@ -9,11 +9,13 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（首轮有条件通过 → C1 由 `7530bec` 关闭；P2 修复 2/3，read cap 残余见 §7）
 
-P0=0；**P1=1**；P2=6；P3=4。真 CLI 链路（fake LLM → 真 harness/工具 → 真 SQLite v7）整体成立，AC-21 文件/jail、AC-22 搜索、AC-23 嵌套 fail-closed、AC-24 trace/migration/replay 主体覆盖到位；e2e **23 target / 165 passed / 0 failed / 2 ignored（连跑 2 次）**、workspace **1215/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。真 CLI 链路成立，AC-21 文件/jail、AC-22 搜索、AC-23 嵌套 fail-closed、AC-24 trace/migration/replay 主体覆盖到位；最终 e2e **23 target / 166 passed / 0 failed / 2 ignored（连跑 2 次）**、workspace **1216/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
-一项测试真实性需关闭：
+> **首轮历史（保留）**：`598ccff` 首轮为有条件通过——C1 `ac21g` 预检失败 DB 断言对象错误（恒真）。`7530bec` 已关闭 C1，并补多文件 apply_patch side_effect NULL / write/edit 失败不变；read cap 补强未真正断言（P2 残余）。
+
+首轮条件：
 
 - **C1 「预检失败不建 DB」断言对象错误**：`builtin_files_v04.rs::ac21g_invalid_workspace_and_allow_path_preflight_exit3` 构造 `db = dir.join("ws-invalid.db")` / `allow-invalid.db`，随后 `assert!(!db.exists())`；但 `run_scenario` 实际使用的 DB 是 `dir/trace.db`（`RunOutcome.db`）。这两个自定义路径从未被执行，断言恒真，无法证明预检失败未建 DB。任意“先建 DB 再预检失败”的产品回归都能通过该测试。
 
@@ -21,7 +23,7 @@ P0=0；**P1=1**；P2=6；P3=4。真 CLI 链路（fake LLM → 真 harness/工具
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C1） | 真 CLI/真 DB/真工具主链路；AC-21–24 主体断言成立；一处 DB 断言恒真 |
+| 功能正确性 | ✅ | 真 CLI/真 DB/真工具主链路；C1 DB 断言已修正并有正向对照；P2 残余见 §7 |
 | 结构合理性 | ✅ | v04_support 复用 v03，CLI/DB/workspace 快照/环境探测分层清晰；5 target 独立；未改 golden |
 | 逻辑性 | ✅（P2） | AC 映射基本逐条；环境感知分支 fail-closed；P2 为覆盖缺口 |
 | 可读性 | ✅（P3） | AC 注释/环境限制/基线说明清楚；P3 为补强 |
@@ -88,3 +90,33 @@ bash scripts/dev/check.sh           # PASSED
 - **P2 N1–N6**：AC-24 f/D4 分工、AC-23 非嵌套边界、write/edit 原子补强、多文件 side_effect NULL、source 覆盖、read result cap。
 - **P3 N7–N10**：默认探测探针、真实终端证据、既有 kernel flake、baseline。
 - 无 P0；C1 未关闭前不可 merge。
+
+## 7. 条件关闭复核（2026-11-02，`7530bec`，parent `97f68b7`）
+
+**复核结论：通过**。`7530bec` 3 files（`builtin_files_v04.rs` +138/−5、`trace_tools_v04.rs` +44/−2、baseline 计数），+183/−8；工作区干净；仅 e2e/baseline。
+
+### C1（DB 断言有效性）
+- 两段改用真实 `assert!(!outcome.db.exists())`（workspace_invalid / allow_path_invalid）。
+- **正向对照**：独立 TempDir 用同一 `run_scenario`/`builtin_flags` 合法 run，断言 `control.db.exists()` 且 exit 0，证明 `!outcome.db.exists()` 不是恒真。已实测通过。
+- **C1 关闭**。
+
+### P2 复核
+- **多文件 apply_patch**：`ac24e` 新增 `s5` 两文件 patch；trace 行恰 1，`side_effect_path/before/after/bytes_before/bytes_after` 全 NULL；result.files[] 2 条且每文件 sha256_before/after 64 hex；文件内容 `one\nTWO!\n`/`B1\n`。**已关闭**。
+- **write/edit 失败不变**：`ac21b_atomic_failures_leave_files_untouched` 覆盖 file_exists/no_match/multiple_matches，断言 bytes/mode/mtime/mtime_nsec 不变 + workspace 树快照不变。但**未覆盖 temp/rename 失败**，也未记录/断言 inode（与提交说明“inode 不变”不符）；文件系统原子写失败仍由 D2 单测覆盖。**部分关闭（P2 残余）**。
+- **read 40k → truncated/≤32768**：`ac21a` 只增加了 `r11` 调用与 `rows.len()==11`，**没有对 r11 的 `result.truncated`、`raw_result_json.len()<=32768` 做任何断言**；即使 read 返回完整 40k，测试仍通过。**未关闭（P2 残余）**。
+
+### 最终门禁（`7530bec`）
+```bash
+cargo test -p zgraph-e2e            # 第 1 次：23 target / 166 passed / 0 failed / 2 ignored
+cargo test -p zgraph-e2e            # 第 2 次：23 target / 166 passed / 0 failed / 2 ignored
+cargo test --workspace              # 89 targets / 1216 passed / 0 failed / 3 ignored
+pytest -q                           # exit 0；183 passed
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check          # clean
+bash scripts/dev/check.sh           # PASSED
+```
+- baseline 已更新为 **23 target / 166 passed**，与实际一致；新增 `builtin_files_v04` 10 用例。
+- 稳定性：e2e 2 次 + workspace 1 次全绿；`kernel_cancel_kills_worker_process_group` 未复现（分支无 kernel 改动）。
+- 范围：仅 e2e/baseline；无产品代码/golden 篡改；无 mock 被测对象。
+- **P2 残余**：read cap 未断言（上）；write 原子失败未覆盖 temp/rename 且 inode 未记录；AC-24 f/AC-23 非嵌套边界/多 source/多文件 etc. 仍按首轮 P2 留 D6。
+- **环境限制**：仍为嵌套 Seatbelt；AC-23 非嵌套分支不可执行、真实隔离证据归用户普通终端 `verify-sandbox.sh`（D6），本轮未伪造。
