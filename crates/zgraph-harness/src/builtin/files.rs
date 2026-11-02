@@ -296,6 +296,12 @@ impl BuiltinToolSet {
         for patch in patches {
             let target = strip_path(&patch.new_path, strip)?;
             let resolved = self.jail.resolve(&target, Access::Write)?;
+            if !resolved.existed {
+                return Err(ToolFailure::new(
+                    "not_found",
+                    format!("patch target '{target}' does not exist"),
+                ));
+            }
             if staged.iter().any(|item| item.target == resolved.path) {
                 return Err(ToolFailure::new(
                     "unsupported_patch",
@@ -310,6 +316,9 @@ impl BuiltinToolSet {
                 )
             })?;
             let (updated, stats) = apply_file(patch, &original)?;
+            let permissions = std::fs::metadata(&resolved.path)
+                .ok()
+                .map(|meta| meta.permissions());
             staged.push(StagedFile {
                 target: resolved.path,
                 display_path: target,
@@ -318,6 +327,7 @@ impl BuiltinToolSet {
                 added: stats.added,
                 removed: stats.removed,
                 temp: None,
+                permissions,
             });
         }
         Ok(staged)
@@ -338,6 +348,13 @@ impl BuiltinToolSet {
             return Err(ToolFailure::new(
                 "invalid_args",
                 format!("context_lines must be <= {BUILTIN_DIFF_CONTEXT_MAX_LINES}"),
+            ));
+        }
+        // REV-106 N6：diff 输入与 write 同级 cap（防 similar 大参数内存放大）。
+        if old_string.len() + new_string.len() > BUILTIN_WRITE_MAX_BYTES {
+            return Err(ToolFailure::new(
+                "too_large",
+                format!("diff input exceeds {BUILTIN_WRITE_MAX_BYTES} bytes"),
             ));
         }
         let resolved = self.jail.resolve(path, Access::Read)?;
@@ -380,17 +397,30 @@ struct StagedFile {
     added: usize,
     removed: usize,
     temp: Option<PathBuf>,
+    /// 原文件权限（回滚时恢复；best-effort）。
+    permissions: Option<std::fs::Permissions>,
 }
 
 /// 阶段 2/3：写临时文件 → CAS 校验 → 依次 rename；失败清理/回滚（不落盘部分改动）。
 fn write_staged_atomically(staged: &mut [StagedFile]) -> Result<(), ToolFailure> {
-    for file in staged.iter_mut() {
-        let permissions = std::fs::metadata(&file.target)
-            .ok()
-            .map(|meta| meta.permissions());
-        let temp = write_temp(&file.target, file.updated.as_bytes(), permissions.as_ref())
-            .map_err(|error| io_failure("write", &file.display_path, &error))?;
-        file.temp = Some(temp);
+    for index in 0..staged.len() {
+        let (target, display_path, updated, permissions) = {
+            let file = &staged[index];
+            (
+                file.target.clone(),
+                file.display_path.clone(),
+                file.updated.clone(),
+                file.permissions.clone(),
+            )
+        };
+        match write_temp(&target, updated.as_bytes(), permissions.as_ref()) {
+            Ok(temp) => staged[index].temp = Some(temp),
+            Err(error) => {
+                // N2：前序已创建的 temp 全部清理，返回零改动。
+                cleanup_temps(staged);
+                return Err(io_failure("write", &display_path, &error));
+            }
+        }
     }
     let mut renamed: Vec<usize> = Vec::new();
     for index in 0..staged.len() {
@@ -434,11 +464,18 @@ fn write_staged_atomically(staged: &mut [StagedFile]) -> Result<(), ToolFailure>
     Ok(())
 }
 
-/// 失败回滚：把已 rename 的文件写回原文（best-effort，缩小窗口）。
+/// 失败回滚：把已 rename 的文件写回原文并恢复原权限（best-effort，缩小窗口）。
+///
+/// 残余风险（REV-106 N3，文档化）：rename 级窗口内进程崩溃/二次写失败时，目标可能
+/// 停留在新内容；回滚本身失败为 clean-up 残余（不宣称跨文件事务级原子）。
 fn rollback_renamed(staged: &[StagedFile], renamed: &[usize]) {
     for index in renamed {
         let file = &staged[*index];
-        let _ = atomic_write(&file.target, file.original.as_bytes(), None);
+        let _ = atomic_write(
+            &file.target,
+            file.original.as_bytes(),
+            file.permissions.as_ref(),
+        );
     }
 }
 
@@ -592,17 +629,30 @@ fn optional_bool(args: &Value, key: &str, default: bool) -> Result<bool, ToolFai
     }
 }
 
-/// 有界读取（超限 → `too_large`；不存在/目录由 jail 先行拦截）。
+/// 有界读取（必须有界；stat 后按 `take(max+1)` 读取并二次校验，防 stat 后增长）。
+///
+/// REV-106：不存在 → `not_found`（若 resolve 后被删除，也不退化为 io_error）。
 fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ToolFailure> {
-    let metadata = std::fs::metadata(path)
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ToolFailure::new("not_found", format!("'{}' does not exist", path.display()))
+        } else {
+            io_failure("read", &path.display().to_string(), &error)
+        }
+    })?;
+    let mut bytes = Vec::new();
+    let read = file
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| io_failure("read", &path.display().to_string(), &error))?;
-    if metadata.len() > max_bytes {
+    if read as u64 > max_bytes {
         return Err(ToolFailure::new(
             "too_large",
-            format!("file is {} bytes (limit {max_bytes})", metadata.len()),
+            format!("file exceeds {max_bytes} bytes"),
         ));
     }
-    std::fs::read(path).map_err(|error| io_failure("read", &path.display().to_string(), &error))
+    Ok(bytes)
 }
 
 fn is_binary(bytes: &[u8]) -> bool {
@@ -628,7 +678,11 @@ fn atomic_write(
     permissions: Option<&std::fs::Permissions>,
 ) -> std::io::Result<()> {
     let temp = write_temp(target, bytes, permissions)?;
-    std::fs::rename(&temp, target)?;
+    if let Err(error) = std::fs::rename(&temp, target) {
+        // N2：rename 失败不得残留 temp。
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -1112,5 +1166,157 @@ mod tests {
             .as_str()
             .expect("diff")
             .ends_with("…[truncated]"));
+    }
+    #[test]
+    fn edit_and_apply_patch_report_not_found_for_missing_targets() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("a.txt"), "a1\n").expect("a");
+        assert_eq!(
+            call_err(
+                &set,
+                TOOL_EDIT,
+                json!({"path": "missing.txt", "old_string": "x", "new_string": "y"})
+            )
+            .reason,
+            "not_found"
+        );
+        let patch = "--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-a\n+b\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a1\n+A1\n";
+        let error = call_err(&set, TOOL_APPLY_PATCH, json!({"patch": patch}));
+        assert_eq!(error.reason, "not_found", "{error:?}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
+            "a1\n"
+        );
+    }
+
+    #[test]
+    fn diff_rejects_oversized_inputs() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("d.txt"), "x").expect("write");
+        let huge = "y".repeat(BUILTIN_WRITE_MAX_BYTES + 1);
+        assert_eq!(
+            call_err(
+                &set,
+                TOOL_DIFF,
+                json!({"path": "d.txt", "old_string": "x", "new_string": huge})
+            )
+            .reason,
+            "too_large"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_patch_second_temp_failure_cleans_first_temp_and_keeps_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (workspace, set) = set();
+        std::fs::create_dir_all(workspace.path().join("locked")).expect("locked");
+        std::fs::write(workspace.path().join("a.txt"), "a1\n").expect("a");
+        std::fs::write(workspace.path().join("locked/b.txt"), "b1\n").expect("b");
+        let mut permissions = std::fs::metadata(workspace.path().join("locked"))
+            .expect("meta")
+            .permissions();
+        permissions.set_mode(0o555);
+        std::fs::set_permissions(workspace.path().join("locked"), permissions).expect("chmod");
+        let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a1\n+A1\n--- a/locked/b.txt\n+++ b/locked/b.txt\n@@ -1 +1 @@\n-b1\n+B1\n";
+        let error = call_err(&set, TOOL_APPLY_PATCH, json!({"patch": patch}));
+        assert_eq!(error.reason, "io_error", "{error:?}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
+            "a1\n"
+        );
+        // 首个文件已创建的 temp 必须清理（workspace 根与 locked/ 均无残留）。
+        for dir in [
+            workspace.path().to_path_buf(),
+            workspace.path().join("locked"),
+        ] {
+            let leftovers: Vec<String> = std::fs::read_dir(&dir)
+                .expect("read dir")
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.contains(".zgraph-tmp-"))
+                .collect();
+            assert!(leftovers.is_empty(), "{dir:?}: {leftovers:?}");
+        }
+        let mut permissions = std::fs::metadata(workspace.path().join("locked"))
+            .expect("meta")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(workspace.path().join("locked"), permissions).expect("chmod");
+    }
+
+    #[test]
+    fn atomic_write_removes_temp_when_rename_fails() {
+        let (workspace, _set) = set();
+        // 目标路径是目录 → rename 失败；temp 必须被删除。
+        std::fs::create_dir_all(workspace.path().join("target")).expect("dir");
+        let error = atomic_write(&workspace.path().join("target"), b"x", None)
+            .expect_err("rename onto directory fails");
+        assert!(!error.to_string().is_empty());
+        let leftovers: Vec<String> = std::fs::read_dir(workspace.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".zgraph-tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_restores_original_content_and_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (workspace, _set) = set();
+        let first = workspace.path().join("f1.txt");
+        let second = workspace.path().join("f2.txt");
+        std::fs::write(&first, "orig1\n").expect("f1");
+        std::fs::write(&second, "orig2\n").expect("f2");
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        let permissions = std::fs::metadata(&first)
+            .ok()
+            .map(|meta| meta.permissions());
+        let staged = vec![
+            StagedFile {
+                target: first.clone(),
+                display_path: "f1.txt".to_string(),
+                original: "orig1\n".to_string(),
+                updated: "new1\n".to_string(),
+                added: 1,
+                removed: 1,
+                temp: None,
+                permissions: permissions.clone(),
+            },
+            StagedFile {
+                target: second.clone(),
+                display_path: "f2.txt".to_string(),
+                original: "orig2\n".to_string(),
+                updated: "new2\n".to_string(),
+                added: 1,
+                removed: 1,
+                temp: Some(workspace.path().join(".f2.txt.zgraph-tmp-test")),
+                permissions: None,
+            },
+        ];
+        // 模拟 f1 已 rename 为新内容，f2 仍有 temp。
+        std::fs::write(&first, "new1\n").expect("simulate rename");
+        let temp = staged[1].temp.clone().expect("temp");
+        std::fs::write(&temp, "new2\n").expect("temp file");
+        rollback_renamed(&staged, &[0]);
+        let mut staged_mut = staged;
+        cleanup_temps(&mut staged_mut);
+        assert_eq!(
+            std::fs::read_to_string(&first).expect("f1"),
+            "orig1\n",
+            "rollback restores original content"
+        );
+        assert!(!temp.exists(), "cleanup_temps removes pending temp files");
+        let mode = std::fs::metadata(&first)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "rollback restores original permissions");
     }
 }

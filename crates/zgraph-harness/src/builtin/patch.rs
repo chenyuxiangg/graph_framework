@@ -362,7 +362,12 @@ fn parse_header_path(line: &str, prefix: &str) -> Result<String, ToolFailure> {
 }
 
 fn is_ignorable_header(line: &str) -> bool {
-    line.starts_with("index ") || line.starts_with("old mode ") || line.starts_with("new mode ")
+    // C1（REV-106）：标准 git diff 的 `diff --git a/... b/...` 头必须识别（后续
+    // `index`/mode 行同样跳过；真正内容由后续 `---/+++` 决定）。
+    line.starts_with("diff --git ")
+        || line.starts_with("index ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
 }
 
 fn is_unsupported_header(line: &str) -> bool {
@@ -477,5 +482,84 @@ mod tests {
             split_lines("a\nb"),
             (vec!["a".to_string(), "b".to_string()], false)
         );
+    }
+}
+
+#[cfg(test)]
+mod git_diff_tests {
+    use super::*;
+
+    #[test]
+    fn parses_real_git_diff_single_file() {
+        // 真实 `git diff` 输出（单文件修改）。
+        let git_diff = "diff --git a/hello.txt b/hello.txt\n\
+index 83db48f..bf269f4 100644\n\
+--- a/hello.txt\n\
++++ b/hello.txt\n\
+@@ -1,2 +1,2 @@\n \
+hello\n\
+-world\n\
++world!\n";
+        let patches = parse_patch(git_diff).expect("parse git diff");
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].old_path, "a/hello.txt");
+        assert_eq!(patches[0].new_path, "b/hello.txt");
+        let (updated, stats) = apply_file(&patches[0], "hello\nworld\n").expect("apply");
+        assert_eq!(updated, "hello\nworld!\n");
+        assert_eq!(
+            stats,
+            ApplyStats {
+                added: 1,
+                removed: 1
+            }
+        );
+    }
+
+    #[test]
+    fn parses_real_git_diff_multiple_files() {
+        let git_diff = "diff --git a/a.txt b/a.txt\n\
+index 1111111..2222222 100644\n\
+--- a/a.txt\n\
++++ b/a.txt\n\
+@@ -1,2 +1,2 @@\n a1\n-a2\n+A2\n\
+diff --git a/b.txt b/b.txt\n\
+index 3333333..4444444 100644\n\
+--- a/b.txt\n\
++++ b/b.txt\n\
+@@ -1,2 +1,2 @@\n b1\n-b2\n+B2\n";
+        let patches = parse_patch(git_diff).expect("parse multi-file git diff");
+        assert_eq!(patches.len(), 2);
+        let (first, _) = apply_file(&patches[0], "a1\na2\n").expect("apply first");
+        assert_eq!(first, "a1\nA2\n");
+        let (second, _) = apply_file(&patches[1], "b1\nb2\n").expect("apply second");
+        assert_eq!(second, "b1\nB2\n");
+    }
+
+    #[test]
+    fn git_diff_rename_copy_and_binary_stay_unsupported() {
+        for text in [
+            "diff --git a/a b/b\nsimilarity index 90%\nrename from a\nrename to b\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n",
+            "diff --git a/a b/b\ncopy from a\ncopy to b\n--- a/a\n+++ b/b\n@@ -1 +1 @@\n-a\n+b\n",
+            "diff --git a/f b/f\nBinary files a/f and b/f differ\n",
+            "diff --git a/f b/f\nGIT binary patch\n",
+        ] {
+            let error = parse_patch(text).expect_err(text);
+            assert_eq!(error.reason, "unsupported_patch", "{text}");
+        }
+    }
+
+    #[test]
+    fn git_diff_no_newline_marker_is_applied() {
+        let git_diff = "diff --git a/f b/f\n\
+index 1111111..2222222 100644\n\
+--- a/f\n\
++++ b/f\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n\
+\\ No newline at end of file\n";
+        let patches = parse_patch(git_diff).expect("parse");
+        let (updated, _) = apply_file(&patches[0], "old").expect("apply");
+        assert_eq!(updated, "new");
     }
 }

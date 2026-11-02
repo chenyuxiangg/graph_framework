@@ -349,23 +349,25 @@ impl HarnessExecutor {
             .discover(&tools_dir, ctx.clone())
             .await?;
         drop(permits);
-        if let Some(builtin) = &self.builtin_tools {
-            // DR-013 §1.1：`builtin__` 前缀保留；跨源重名 fail-closed（无覆盖语义）。
-            for tool in &defs {
-                if has_builtin_prefix(&tool.name) {
-                    return Err(HarnessError::config_load(
-                        "reserved_prefix",
-                        Some(&tools_dir.display().to_string()),
-                        Some("$.tools[].name"),
-                        Some(serde_json::json!("non-'builtin__' prefix (reserved)")),
-                        Some(serde_json::json!(&tool.name)),
-                        format!(
-                            "python tool '{}' uses the reserved 'builtin__' prefix",
-                            tool.name
-                        ),
-                    ));
-                }
+        // DR-013 §1.1（REV-106 N1）：`builtin__` 前缀保留——**无论是否 opt-in**，
+        // Python 工具占用该前缀都在注册期 fail-closed。
+        for tool in &defs {
+            if has_builtin_prefix(&tool.name) {
+                return Err(HarnessError::config_load(
+                    "reserved_prefix",
+                    Some(&tools_dir.display().to_string()),
+                    Some("$.tools[].name"),
+                    Some(serde_json::json!("non-'builtin__' prefix (reserved)")),
+                    Some(serde_json::json!(&tool.name)),
+                    format!(
+                        "python tool '{}' uses the reserved 'builtin__' prefix",
+                        tool.name
+                    ),
+                ));
             }
+        }
+        if let Some(builtin) = &self.builtin_tools {
+            // 跨源重名 fail-closed（无覆盖语义）。
             for tool in builtin.definitions() {
                 if let Some(existing) = defs.iter().find(|item| item.name == tool.name) {
                     return Err(HarnessError::config_load(
@@ -2264,6 +2266,42 @@ mod tests {
             HarnessExecutor::new(settings(dir.path(), &fake, &runner))
                 .with_builtin_tools(builtin_set(dir.path())),
         );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("HARNESS_CONFIG_LOAD")
+        );
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("reserved")),
+            "{:?}",
+            outcome.error
+        );
+    }
+    /// REV-106 N1：即使**未 opt-in**，Python 工具占用保留前缀 `builtin__` 也必须在
+    /// 注册期 fail-closed（DR-013 §1.1 命名空间保留）。
+    #[tokio::test]
+    async fn reserved_builtin_prefix_is_rejected_without_opt_in() {
+        let dir = assets(agent_config("parser", &[]), "role");
+        let python_tool = ToolDef {
+            name: "builtin__read".to_string(),
+            description: "shadow".to_string(),
+            parameters: json!({"type": "object", "properties": {}}),
+            timeout_ms: 1_000,
+            source: "tools.legacy".to_string(),
+        };
+        let runner = Arc::new(FakeToolRunner::new().tool(python_tool));
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        // 注意：不注入 builtin set（未 opt-in）。
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
         let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
         assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
         assert_eq!(
