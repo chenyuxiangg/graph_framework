@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1 条件 C1**（`--replay-tools` 在 events/outputs 未按 Lead 预裁决忽略）；P2=0；P3 若干建议。桥接落库/脱敏/上下文、trace 人类+NDJSON additive、`--stats` 仅 >0、replay `--mode=tools` recorded-only/校验/无副作用/events 一致性主体全部成立；C1 为 CLI 参数语义与预裁决偏差，需关闭后再 merge D5b2。
+> **结论历史**：首轮（基准 `e197584`）为「**有条件通过**」——P1 C1：`--replay-tools` 在 events/outputs 未被忽略（parse 无条件校验 reexec）。作者 `d4da442` 关闭 C1/P3 后，评审人复核 cli 249/0（tool_replay 16）、workspace 1187/0/3、clippy/fmt/check/no-default 全绿（§8），C1 关闭，结论改**通过**；P3 剩余 docs 项留 D6。
+>
+> 首轮意见（历史保留）：P0=0；P2=0；桥接落库/脱敏/上下文、trace additive、replay tools 主体成立；C1 为 CLI 参数语义偏差。
 
 ### 1.1 已核对成立
 
@@ -84,10 +86,35 @@ bash scripts/dev/check.sh                   # CHECK PASSED
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 `--replay-tools` 在 events/outputs 忽略 | **open** | parse 保存值/按 mode 校验；events/outputs reexec 不报错；补测试 |
+| C1 `--replay-tools` 在 events/outputs 忽略 | **closed（d4da442）** | `parse` 保存 `Option<ReplayTools>`、解析完 mode 后：tools+reexec → exit2；events/outputs 的 recorded/reexec 忽略；bogus 任意 mode exit2；补 `replay_tools_option_is_ignored_for_events_mode`/`...outputs_mode`/`unknown_replay_tools_value_is_usage_error_in_any_mode` 测试；cli 249/0、tool_replay 16/0 |
 
 ## 7. 遗留问题
 
-- C1 关闭前不 merge；P3-1/P3-2 建议同批或 D5c 补强；P3-3–P3-8 文档/格式留 D6。
-- 跨模块（harness 小扩展 + e2e allowed kind + Cargo.lock）由 Lead 追加第二评审；无 kernel 改动。
+- C1 已关闭；P3-1（sink 先映射后预算）/P3-2（10000 行全路径测试）已在 `d4da442` 修复；P3-3–P3-8 文档/格式留 D6。
+- 跨模块（harness 小扩展 + e2e allowed kind + Cargo.lock）由 Lead 追加第二评审；可 merge D5b2 → D5c e2e。
 - 无 P0/P1 之外问题；无工具默认输出/events.kind/replay events 语义回归（workspace 全绿）。
+
+## 8. 条件关闭复核（2026-11-02）
+
+复核提交：`d4da442`（父 `602865b`；仅 cli 3 文件 `+262/−32`，无新增跨模块）。评审人执行：
+
+```bash
+git status --porcelain                       # 空
+git diff --stat 602865b..d4da442             # 3 files +262/−32（bridge/replay_cmd/tool_replay）
+cargo test -p zgraph-cli                     # 249 passed / 0 failed
+cargo test -p zgraph-cli --test tool_replay  # 16 passed / 0 failed
+cargo test --workspace                       # 1187 passed / 0 failed / 3 ignored
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                   # exit 0
+cargo check -p zgraph-cli --no-default-features --locked        # 通过
+bash scripts/dev/check.sh                    # CHECK PASSED
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C1 events/outputs 忽略 | ✅ `--replay-tools=recorded/reexec` 在 `--mode=events` 输出与不带参数逐字节一致；在 `--mode=outputs` 仍走既有 L2 校验（exit3 `REPLAY_RECORD_MISSING`，非 usage error）；`--mode=tools --replay-tools=reexec` exit2；bogus 任意 mode exit2 |
+| P3-1 sink 预算/告警 | ✅ 先 `map_tool_call_record`、失败告警每 run 一次且不消耗预算；达标后仍只告警一次；告警字符串单空格 |
+| P3-2 10000 全路径 | ✅ `record_tool_call` 写满 10000 后 overflow-1/2 丢弃、DB 恰 10000、warned 集合 1；未知枚举告警簿记 1 |
+| 门禁 | ✅ cli 249/0、tool_replay 16/0、workspace 1187/0/3、clippy/fmt/check/no-default 全绿；`602865b..d4da442` 仅 cli 3 文件 |
+
+**最终状态**：C1 closed；P3-1/P3-2 closed；P3-3–P3-8 留 D6 文档/格式。建议 Lead merge D5b2 → D5c e2e。
