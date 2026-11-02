@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "v03-agent-timeout", "description": "v0.3 e2e：agent_call 节点 timeout_ms=1200（外部 harness 超时无孤儿）" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [{ "name": "message", "type": "string", "required": true }], "config": {} },
+    { "id": "agent", "type": "agent_call",
+      "inputs": [{ "name": "message", "type": "any", "required": true }],
+      "config": { "agent_id": "parser", "timeout_ms": 1200, "input_mapping": { "message": "message" } } },
+    { "id": "end", "type": "end", "inputs": [{ "name": "result", "type": "any", "required": true }], "config": {} }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "agent", "to_input_port": "message" },
+    { "from": "agent", "to_node": "end", "to_input_port": "result" }
+  ]
+}

@@ -88,3 +88,19 @@ path = "human_decide.rs"
 [[test]]
 name = "dynamic_fanout"
 path = "dynamic_fanout.rs"
+
+[[test]]
+name = "skills_v03"
+path = "skills_v03.rs"
+
+[[test]]
+name = "mcp_v03"
+path = "mcp_v03.rs"
+
+[[test]]
+name = "harness_v03"
+path = "harness_v03.rs"
+
+[[test]]
+name = "v03_regression"
+path = "v03_regression.rs"

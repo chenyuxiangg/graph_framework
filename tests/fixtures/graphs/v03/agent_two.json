@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "metadata": { "name": "v03-agent-two", "description": "v0.3 e2e：start → agent_call → agent_call → end（run 级 skill_view 预算/双实例）" },
+  "entry_points": ["start"],
+  "nodes": [
+    { "id": "start", "type": "start", "inputs": [{ "name": "message", "type": "string", "required": true }], "config": {} },
+    { "id": "first", "type": "agent_call",
+      "inputs": [{ "name": "message", "type": "any", "required": true }],
+      "config": { "agent_id": "parser", "input_mapping": { "message": "message" } } },
+    { "id": "second", "type": "agent_call",
+      "inputs": [{ "name": "message", "type": "any", "required": true }],
+      "config": { "agent_id": "parser", "input_mapping": { "message": "message" } } },
+    { "id": "end", "type": "end", "inputs": [{ "name": "result", "type": "any", "required": true }], "config": {} }
+  ],
+  "edges": [
+    { "from": "start", "to_node": "first", "to_input_port": "message" },
+    { "from": "first", "to_node": "second", "to_input_port": "message" },
+    { "from": "second", "to_node": "end", "to_input_port": "result" }
+  ]
+}
