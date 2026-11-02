@@ -9,11 +9,13 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（首轮有条件通过 → C1/C2 + P2 关键项由 `c035637` 关闭；见 §7）
 
-P0=0；**P1=2**；P2=6；P3=5。字段/枚举与 trace v7 对齐、侧效/多文件/bash/MCP/Python/技能不记录、成功/error/timeout/cancelled 发射、默认 sink no-op、不写 trace DB、RFC3339ms Z 无新依赖均通过；harness **334/0/1 默认与 features**、workspace **1158/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。字段/枚举与 trace v7 对齐、各工具 side_effect/bash/MCP/Python/技能、成功/error/timeout/cancelled 发射、默认 sink no-op、不写 trace DB、RFC3339ms Z 无新依赖均通过；最终 harness **339/0/1 默认与 features**、workspace **1163/0/3**、pytest **183**、cli **226**、clippy/fmt/check/no-default 全绿。
 
-两项需关闭：
+> **首轮历史（保留）**：`443ca3d` 首轮为有条件通过——C1 record 敏感值未脱敏、C2 节点 deadline 超时零记录。`c035637` 已关闭 C1/C2 + P2 关键项（见 §7）。
+
+首轮两项条件：
 
 - **C1 敏感数据未脱敏即进入 ToolCallRecord**：`build_tool_call_record` 直接 `call.args.clone()`，`result`/`error` 也保留完整 Value；bash 的显式 `env` 值、MCP/Python 参数中的 token/header 等会原样进入 D5b2 trace 的 `args_json/result_json/error_json`。DR-014 §1 明确「env/headers/token 不写；既有 `SENSITIVE_KEY_TOKENS` 脱敏复用」，当前只有 `ToolCallStart/End` 摘要脱敏，record 路径没有。
 - **C2 节点 deadline 超时路径零记录**：`ToolCallStart` 已发射后，`execute_tool` 若 `ctx.node_deadline_remaining_ms()==0` 返回 `Err(RunFailure::InstanceTimeout)`；外层 `Err(other) => return Err(other)` 直接退出，没有构造 timeout `ToolCallRecord`。AC-24d「每次工具调用恰 1 行」在工具已经开始（Start 已发）时被违反；现有 timeout 测试只覆盖工具自身超时/假 bash timeout。
@@ -22,7 +24,7 @@ P0=0；**P1=2**；P2=6；P3=5。字段/枚举与 trace v7 对齐、侧效/多文
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C1/C2） | 各工具字段/侧效/bash/source、成功/error/timeout/cancelled 路径主语义通过；敏感值与节点 deadline 边界未覆盖 |
+| 功能正确性 | ✅ | 各工具字段/侧效/bash/source、各终态路径通过；C1/C2 已由 `c035637` 关闭并加测试 |
 | 结构合理性 | ✅ | record 类型/trace 映射/工具元数据分层；Recording sink 可测；无 DB/新表；additive executor API |
 | 逻辑性 | ✅（P2） | 单次发射、取消先回收再记录、失败不阻塞；P2 见 §3 |
 | 可读性 | ✅（P3） | 字段注释/trace 对齐说明/开放项清楚；P3 为测试补齐 |
@@ -94,3 +96,37 @@ bash scripts/dev/check.sh                    # PASSED
 - **P2 N1–N6**：bash 取消/超时 metadata、默认 no-sink/panic、文件工具取消、MCP/Python error/timeout、bash truncated 口径、大 Value 内存。
 - **P3 N7–N11**：D5b2 映射/回放/D6 path/clock。
 - 无 P0；C1/C2 未关闭前不可 merge。
+
+## 7. 条件关闭复核（2026-11-02，`c035637`，parent `18b5886`）
+
+**复核结论：通过**。`c035637` 仅 5 harness 文件（`agent_loop.rs`/`tools.rs`/`builtin/files.rs`/`executor.rs`/`test_support.rs`，+507/−16）；无 Cargo；工作区干净。
+
+### C1（敏感数据脱敏）
+- 新增 `redact_sensitive_value` 递归（任意深度/数组/归一化键）与 `redact_sensitive_record`：`args`/`result`/`error` 全面脱敏；`RECORD_EXTRA_SENSITIVE_TOKENS=["header"]` 使 `headers` 整体屏蔽；`builtin__bash` 的 `args.env` **所有值**打码、键名保留。
+- **所有发射路径落 sink 前调用**：成功、cancelled、InstanceTimeout、TOOL_ERROR；`skill_view` 仍不记录。
+- 测试：`redacts_sensitive_keys_at_any_depth_case_and_separator_insensitive`（`api_key`/`X-Api-Key`/`Authorization`/`private_key`/`headers`）、`redacts_record_args_result_and_error_before_sink`（args/result/error 无明文）、`redacts_all_bash_env_values...`（CUSTOM_FLAG/API_KEY 值无明文）；集成 MCP `token`、Python `password` 与 bash env 用例。
+- 无 debug 输出；sink 前 redacted。
+
+### C2（节点 deadline 超时记录）
+- `Err(RunFailure::InstanceTimeout)` 分支在返回前构造 `timeout_tool_call_record`（status=Timeout、error reason=timeout/message/elapsed_ms、duration、bash fallback）并 `redact_sensitive_record` 后落 sink，再传播原 `InstanceTimeout`。
+- 测试 `node_deadline_after_tool_start_records_timeout`：动态 deadline（第一工具执行中置 0）断言 **1 Ok + 1 Timeout、ToolCallStart=2、RunFailure::InstanceTimeout{10_000} → NodeError::Timeout{10_000}**；不重复/不丢。
+- `bash_record_stub` 在执行前捕获 command/cwd/profile_sha，取消/超时记录保留 bash 元数据（`bash_cancel...`/`tool_call_records_mark_error...` 已断言 command/cwd/profile 长度、exit=None、stdout/stderr 空）。
+
+### P2 关闭确认
+- N1 bash cancel/timeout 保留 command/cwd/profile_sha：测试通过。
+- N2 默认无 sink / `PanickingToolCallSink` 均不改变 run：`no_sink_and_panicking_sink_do_not_affect_run` 通过。
+- 残余 P2（不阻断）：脱敏为键名驱动，非敏感键下的裸字符串 secret、bash command/stdout/stderr 仍可能含敏感内容（DR 已对 command 文档警示）；节点 deadline 在 worker 已启动后耗尽仍表现为工具 timeout（非 InstanceTimeout）——按现有工具超时语义保留，D5b2 e2e 再验证；MCP/Python cancel 测试仍留 D5b2（预裁决）。
+
+### 最终门禁（`c035637`）
+```bash
+cargo test -p zgraph-harness                  # 340 tests：339 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp   # 340 tests：339 passed / 0 failed / 1 ignored
+cargo test -p zgraph-cli                      # 226 passed / 0 failed
+cargo test --workspace                        # 76 targets：1163 passed / 0 failed / 3 ignored
+pytest -q                                     # exit 0；183 passed
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                    # clean
+cargo check -p zgraph-harness --no-default-features  # clean
+bash scripts/dev/check.sh                     # PASSED
+```
+- 范围：5 harness files；无 Cargo 变更；`git status` 空；默认路径/CLI 无回归。
