@@ -9,17 +9,17 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1=1**；P2=7；P3=5。jail（workspace/allow-path/`..`/symlink/组件前缀/特殊文件）、5 工具主语义、opt-in/白名单/默认零注册、CLI 机械接线、ToolCallStart/End + sink no-op、`sha2`/`similar` 依赖均通过；harness **269/0/1**、workspace **1072/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。首轮 **有条件通过** 的 C1（标准 git diff 头）+ P2 已于 `4b093fc` 关闭；jail、5 工具、opt-in/白名单、CLI、trace 骨架、依赖均通过；最终 harness **279/0/1**（默认与 features mcp）、workspace **1082/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
-但 **`builtin__apply_patch` 不识别标准 git diff 的 `diff --git` 头**：`patch.rs::parse_patch` 顶层只接受 `--- ` / `index/old mode/new mode`，遇到 `diff --git` 直接 `unsupported_patch`；现有测试均手写 `---/+++`，未覆盖真实 `git diff`。DR-013 §3.4 明确「unified diff（git 风格）」，需修 C1 后合并。
+> **首轮历史（保留）**：`b8ab337` 首轮为**有条件通过**——C1 `apply_patch` 顶层不识别标准 `diff --git`；P2 为 reserved prefix/reason/原子清理等。`4b093fc` 已关闭 C1 + N1/N2/N3/N4/N6，见 §7。
 
 ## 2. 四维评审
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C1） | jail/5 工具主路径测试通过；`apply_patch` 拒绝标准 git diff 头；P2 为原子/TOCTOU/输入上限加固 |
+| 功能正确性 | ✅ | jail/5 工具主路径；C1 git diff 头 + N1/N4/N6 已修并测试；P2 残余见 §7 |
 | 结构合理性 | ✅ | `builtin` 模块分层 jail/files/patch；工具定义固定；executor 仅 additive 注入；CLI 机械 3 flag；工具源冲突集中 registry |
 | 逻辑性 | ✅（P2） | jail 解析顺序（词法→canonicalize→组件前缀）、allow-path 只读、write 原子/编辑 CAS/apply 两阶段均按 DR；P2 见 §3 |
 | 可读性 | ✅（P3） | DR 注释/错误闭集/结果 sha 清晰；P3 为测试/文档补齐 |
@@ -87,3 +87,37 @@ bash scripts/dev/check.sh                    # PASSED
 - **P2 N1–N7**：建议在 C1 或发布前处理（尤其 N1 保留前缀、N2/N3 原子清理/回滚、N4 reason）。
 - **P3 N8–N12**：测试/耐久性/待办记录；D3/D4/D5 属后续波次。
 - 无 P0；无附加阻断条件除 C1。
+
+## 7. 条件关闭复核（2026-11-02，`4b093fc`，parent `edb4831`）
+
+**复核结论：通过**。`4b093fc` 仅 3 files（`builtin/files.rs`、`builtin/patch.rs`、`executor.rs`，+360/−32）；工作区干净。
+
+### C1（标准 git diff）
+- `parse_patch::is_ignorable_header` 识别 `diff --git `；`index/mode` 继续跳过；`parse_file` 仍以 `diff --git` 为文件边界。
+- 新增 `git_diff_tests`：真实单文件、真实多文件、`\ No newline`、rename/copy/binary 仍 `unsupported_patch`；**4/4 通过**（`builtin::patch::git_diff_tests`）。
+- 单/多文件路径/`old_path`/`new_path`/apply 结果断言通过。
+
+### 同批 P2 关闭确认
+- **N1**：`executor::registry` 现在**无论 opt-in 与否**都拒绝 Python `builtin__` 前缀；`reserved_builtin_prefix_is_rejected_without_opt_in` 通过。
+- **N2**：`write_staged_atomically` 的 `write_temp` 失败清理前序 temp；`atomic_write` rename 失败删除 temp；`apply_patch_second_temp_failure...`、`atomic_write_removes_temp_when_rename_fails` 通过。
+- **N3**：`rollback_renamed` 恢复内容+权限（测试 `rollback_restores_original_content_and_permissions`）；残余风险文档化（rename 级窗口/回滚失败 best-effort）。
+- **N4**：`stage_patches` 缺失目标→`not_found`；`read_bounded` `File::open` 缺失→`not_found` 且有界 `take(max+1)`；`edit_and_apply_patch_report_not_found...` 通过。
+- **N6**：`diff` old/new 合计 >1MiB→`too_large`；`diff_rejects_oversized_inputs` 通过。
+- **N5/N7/N9/N11**：按 Lead 预裁决留 D5/D6（未在本批）；P2 残余：
+  - `write_staged_atomically` 的 **CAS 读取错误**路径（`std::fs::read?`）仍可能在已 rename 后直接返回，未 cleanup/rollback；建议 D5/D6 与 N3 一并补异常路径测试。
+  - `limit_result` apply files 超限 fallback、write fsync parent、apply old/new path 校验等仍按原 P2/P3。
+- **N8 测试**：C1/CAS/N2/N3 新增覆盖；N5/N7/N9/N11 后续。
+
+### 最终门禁（`4b093fc`）
+```bash
+cargo test -p zgraph-harness                  # 280 tests：279 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp   # 280 tests：279 passed / 0 failed / 1 ignored
+cargo test --workspace                        # 76 targets：1082 passed / 0 failed / 3 ignored
+pytest -q                                     # exit 0；183 passed
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                    # clean
+cargo check -p zgraph-harness --no-default-features  # clean
+bash scripts/dev/check.sh                     # PASSED
+```
+- **一次既有 codex 并行 flake**：首轮 features/pytest 出现 `codex_adapter_*`/`ac20h` 超时（非 D2 文件）；重跑 harness 默认/features 279/0/1、workspace 1082/0/3、pytest 183 全绿；隔离 `plugin::tests::codex` 串行 2/2、pytest codex 10/10 通过。属既有 Codex fake adapter 负载敏感，建议 D5 前加固（不阻断 D2）。
+- 范围：`4b093fc` 3 files；默认路径无回归；无既有评审/产品代码回退。
