@@ -253,8 +253,8 @@
     - **08 §8.12.1**：3 kind/码、`Subprocess` enum、py-worker adapters、`rmcp` feature-gated、trace 不 v7 的 source-breaking as-built 确认。
     - **DR 执行记录**：DR-004 §10 + DR-008 §9 + DR-009 §11 + DR-010 §12 + DR-011 §13（分支/提交/REV/合并点/偏差/已知限制，只追加）。
     - **测试证据（已实测）**：harness **235/0/1**（`--features mcp` **235/0/1**）、e2e **137/0/2**、workspace **1037/0/3**、pytest **183**；`--no-default-features` 构建通过；V5a AC 31 用例已回写。
-    - **台账/索引**：`doc/issues.md` 新增 **ISSUE-156–163**（V2/V3/V4 残余 P2/P3 + 真实环境验证）；`doc/index.md`/`README.md`/`doc/progress.md` 状态同步（v0.3.0 发布收口）；reviews README REV-097–101 由评审人补。
-    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **7409 行**；00–08 numstat **72/13（净 59）**；全 spec 目录 numstat **91/20（净 71）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7811 行））。
+    - **台账/索引**：`doc/issues.md` 新增 **ISSUE-156–163**（V2/V3/V4 残余 P2/P3 + 真实环境验证）；`doc/index.md`/`README.md`/`doc/progress.md` 状态同步（v0.3.0 发布收口）；reviews README REV-097–102 由评审人补。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **7419 行**；00–08 numstat **109/40（净 69）**；全 spec 目录 numstat **135/53（净 82）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7822 行））。
 
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
