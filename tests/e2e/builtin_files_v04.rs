@@ -76,6 +76,8 @@ fn ac21a_read_offset_limit_and_text_policies() {
     write_file(&ws.join("bad.txt"), b"bad\xffutf8\n");
     std::fs::create_dir_all(ws.join("sub")).expect("sub dir");
     write_file(&ws.join("huge.txt"), &vec![b'A'; 1_100_000]);
+    // 读结果超过 32 KiB → 工具层截断（truncated=true，结果 JSON ≤32 KiB）。
+    write_file(&ws.join("long.txt"), "L".repeat(40_000).as_bytes());
     write_text(&allow.join("ok.txt"), "allowed read\n");
     let abs_inside = ws
         .join("lines.txt")
@@ -113,6 +115,11 @@ fn ac21a_read_offset_limit_and_text_policies() {
             "builtin__read",
             json!({"path": abs_allow.to_string_lossy()}),
         ),
+        tool_call(
+            "r11",
+            "builtin__read",
+            json!({"path": "long.txt", "limit": 10000}),
+        ),
     ]);
     let flags = builtin_flags(&ws, std::slice::from_ref(&allow));
     let outcome = run_scenario(
@@ -125,7 +132,7 @@ fn ac21a_read_offset_limit_and_text_policies() {
     let db = &outcome.db;
 
     let rows = tool_rows(db, &run_id);
-    assert_eq!(rows.len(), 10, "10 次 read 各 1 行 tool_calls");
+    assert_eq!(rows.len(), 11, "11 次 read 各 1 行 tool_calls");
     let by_id = |id: &str| tool_row(db, &run_id, id);
     let r1 = by_id("r1");
     assert_eq!(
@@ -277,6 +284,106 @@ fn ac21b_write_atomic_overwrite_and_create_parents() {
         .is_some_and(|sha| sha.len() == 64));
     // 无 opt-in 之外的机器副作用：只多了 a.txt 内容与 nested/（文件快照用于 AC-24 g）。
     assert_ne!(before.get("a.txt"), tree_snapshot(&ws).get("a.txt"));
+}
+
+// ---------------------------------------------------------------------------
+// AC-21 b（补强）：write/edit 原子失败不改内容/权限/mtime，无临时文件残留
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ac21b_atomic_failures_leave_files_untouched() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ws = workspace(dir.path());
+    std::fs::create_dir_all(ws.join("atomic")).expect("atomic dir");
+    let existing = ws.join("atomic/keep.txt");
+    let editable = ws.join("atomic/edit.txt");
+    write_text(&existing, "keep me\n");
+    write_text(&editable, "alpha beta gamma\n");
+    let files = [existing.clone(), editable.clone()];
+    let snapshot = tree_snapshot(&ws);
+    let metadata_before: Vec<(Vec<u8>, u32, i64, i64)> = files
+        .iter()
+        .map(|path| {
+            let metadata = std::fs::metadata(path).expect("metadata before");
+            (
+                std::fs::read(path).expect("bytes before"),
+                metadata.permissions().mode() & 0o777,
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+            )
+        })
+        .collect();
+
+    let calls = calls_with_text(vec![
+        // 覆盖已存在文件未 overwrite → 失败，原文件零改动。
+        tool_call(
+            "w1",
+            "builtin__write",
+            json!({"path": "atomic/keep.txt", "content": "changed"}),
+        ),
+        // edit 0 匹配 → 失败，原文件零改动。
+        tool_call(
+            "e1",
+            "builtin__edit",
+            json!({"path": "atomic/edit.txt", "old_string": "zzz", "new_string": "y"}),
+        ),
+        // edit 多匹配 → 失败，原文件零改动。
+        tool_call(
+            "e2",
+            "builtin__edit",
+            json!({"path": "atomic/edit.txt", "old_string": "a", "new_string": "A"}),
+        ),
+    ]);
+    let flags = builtin_flags(&ws, &[]);
+    let outcome = run_scenario(
+        dir.path(),
+        &agent_with_tools(&["builtin__write", "builtin__edit"]),
+        calls,
+        &flags,
+    );
+    let run_id = completed_run_id(&outcome, "AC-21 b atomic failures");
+    let db = &outcome.db;
+    assert_eq!(
+        tool_row(db, &run_id, "w1").error.expect("w1")["error"]["reason"],
+        json!("file_exists")
+    );
+    assert_eq!(
+        tool_row(db, &run_id, "e1").error.expect("e1")["error"]["reason"],
+        json!("no_match")
+    );
+    assert_eq!(
+        tool_row(db, &run_id, "e2").error.expect("e2")["error"]["reason"],
+        json!("multiple_matches")
+    );
+    // 内容/权限/mtime 逐项不变；目录树快照不变（无 temp 残留）。
+    for (path, (bytes_before, mode_before, mtime_before, nsec_before)) in
+        files.iter().zip(metadata_before.iter())
+    {
+        let metadata = std::fs::metadata(path).expect("metadata after");
+        assert_eq!(
+            std::fs::read(path).expect("bytes after"),
+            *bytes_before,
+            "失败写不得改内容: {path:?}"
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            *mode_before,
+            "失败写不得改权限: {path:?}"
+        );
+        assert_eq!(
+            metadata.mtime(),
+            *mtime_before,
+            "失败写不得改 mtime: {path:?}"
+        );
+        assert_eq!(
+            metadata.mtime_nsec(),
+            *nsec_before,
+            "失败写不得改 mtime_nsec: {path:?}"
+        );
+    }
+    assert_eq!(tree_snapshot(&ws), snapshot, "失败写/edit 不得留下临时文件");
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +866,6 @@ fn ac21g_invalid_workspace_and_allow_path_preflight_exit3() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = workspace(dir.path());
     // workspace 不存在 → exit 3、不建 DB、reason workspace_invalid。
-    let db = dir.path().join("ws-invalid.db");
     let flags = vec![
         "--allow-builtin-tools".to_string(),
         "--workspace-dir".to_string(),
@@ -772,14 +878,19 @@ fn ac21g_invalid_workspace_and_allow_path_preflight_exit3() {
         &flags,
     );
     assert_exit(&outcome.output, 3, "workspace 非法 → exit 3");
-    assert!(!db.exists(), "预检失败不得建 DB");
+    // REV-112 C1：断言必须针对**实际 trace DB 路径**（run_scenario 的 db），
+    // 不得另造一个从未被使用的路径（否则恒真）。
+    assert!(
+        !outcome.db.exists(),
+        "预检失败不得建 DB（实际路径 {:?}）",
+        outcome.db
+    );
     let stderr = v03::err(&outcome.output);
     assert!(
         stderr.contains("HARNESS_CONFIG_LOAD") && stderr.contains("workspace_invalid"),
         "{stderr}"
     );
     // allow-path 不存在 → exit 3、不建 DB、reason allow_path_invalid。
-    let db = dir.path().join("allow-invalid.db");
     let mut flags = builtin_flags(&ws, &[]);
     flags.push("--allow-path".to_string());
     flags.push(cli_support::arg(&dir.path().join("no-such-allow")));
@@ -790,10 +901,32 @@ fn ac21g_invalid_workspace_and_allow_path_preflight_exit3() {
         &flags,
     );
     assert_exit(&outcome.output, 3, "allow-path 非法 → exit 3");
-    assert!(!db.exists(), "预检失败不得建 DB");
+    assert!(
+        !outcome.db.exists(),
+        "预检失败不得建 DB（实际路径 {:?}）",
+        outcome.db
+    );
     let stderr = v03::err(&outcome.output);
     assert!(
         stderr.contains("HARNESS_CONFIG_LOAD") && stderr.contains("allow_path_invalid"),
         "{stderr}"
+    );
+
+    // 正向自检：同一 `run_scenario`/`builtin_flags` 路径在**合法**配置下必须真正
+    // 创建 DB（证明上面两处 `!outcome.db.exists()` 不是恒真断言）；隔离在独立
+    // TempDir，不污染负例目录。
+    let control_dir = tempfile::tempdir().expect("control tempdir");
+    let control_ws = workspace(control_dir.path());
+    let control = run_scenario(
+        control_dir.path(),
+        &agent_with_tools(&["builtin__read"]),
+        support::text_reply("control"),
+        &builtin_flags(&control_ws, &[]),
+    );
+    assert_exit(&control.output, 0, "正向自检 run");
+    assert!(
+        control.db.exists(),
+        "正向自检：合法 run 必须创建 DB（实际路径 {:?}）",
+        control.db
     );
 }

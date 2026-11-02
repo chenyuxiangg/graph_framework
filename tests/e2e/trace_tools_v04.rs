@@ -349,6 +349,15 @@ fn ac24e_side_effect_metadata_is_recorded() {
             "builtin__apply_patch",
             json!({"patch": patch, "strip": 1}),
         ),
+        // 多文件 apply_patch：仍**一行** trace；side_effect_* 为 NULL（files[] 在 result）。
+        tool_call(
+            "s5",
+            "builtin__apply_patch",
+            json!({
+                "patch": "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-TWO\n+TWO!\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-b1\n+B1\n",
+                "strip": 1
+            }),
+        ),
     ]);
     let flags = builtin_flags(&ws, &[]);
     let outcome = run_scenario(
@@ -394,9 +403,42 @@ fn ac24e_side_effect_metadata_is_recorded() {
     assert_eq!(s4.side_effect_bytes_before, Some(8));
     assert_eq!(s4.side_effect_bytes_after, Some(8));
     assert_eq!(s4.result.expect("s4")["files"][0]["path"], json!("a.txt"));
+    // REV-112 P2：多文件 apply_patch 的 trace 副作用列必须为 NULL（避免误导单文件
+    // 回滚语义）；多文件结果仍在 result.files[] 中逐文件记录 sha。
+    let s5 = tool_row(db, &run_id, "s5");
     assert_eq!(
-        std::fs::read_to_string(ws.join("a.txt")).expect("a"),
-        "one\nTWO\n"
+        s5.side_effect_path, None,
+        "多文件 side_effect_path 必须 NULL"
+    );
+    assert_eq!(
+        s5.side_effect_before, None,
+        "多文件 side_effect_before NULL"
+    );
+    assert_eq!(s5.side_effect_after, None, "多文件 side_effect_after NULL");
+    assert_eq!(s5.side_effect_bytes_before, None);
+    assert_eq!(s5.side_effect_bytes_after, None);
+    let files = s5.result.expect("s5 result")["files"]
+        .as_array()
+        .expect("files[]")
+        .clone();
+    assert_eq!(files.len(), 2, "多文件 files[] 两条");
+    assert_eq!(files[0]["path"], json!("a.txt"));
+    assert_eq!(files[1]["path"], json!("b.txt"));
+    for file in &files {
+        assert!(file["sha256_before"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 64));
+        assert!(file["sha256_after"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 64));
+    }
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).expect("a after multi"),
+        "one\nTWO!\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("b.txt")).expect("b after multi"),
+        "B1\n"
     );
 }
 
