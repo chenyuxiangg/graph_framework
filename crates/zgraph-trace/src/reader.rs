@@ -243,6 +243,8 @@ pub struct ToolCallRow {
     pub args_sha256: Option<String>,
     /// 完整 result 的 sha256。
     pub result_sha256: Option<String>,
+    /// 完整 `TOOL_ERROR` JSON 的 sha256（REV-109 C2；截断时证明记录不完整）。
+    pub error_sha256: Option<String>,
     /// 开始时刻。
     pub started_at: String,
     /// 结束时刻。
@@ -557,18 +559,18 @@ impl TraceReader {
         Ok(expansions)
     }
 
-    /// 查询 run 的工具调用审计行（v7 / DR-014 §1；按 `(started_at, tool_call_id)` 升序）。
+    /// 查询 run 的工具调用审计行（v7 / DR-014 §1；按 `(started_at, call_id)` 升序）。
     ///
     /// 无工具调用的 run 返回空 `Vec`（默认输出与 v6 一致）。
     pub fn tool_calls(&self, run_id: &str) -> Result<Vec<ToolCallRow>, TraceError> {
         let sql = "SELECT tool_call_id, run_id, instance_id, node_id, attempt, call_id, \
                    tool_name, source, status, args_json, result_json, error_json, truncated, \
-                   args_sha256, result_sha256, started_at, finished_at, duration_ms, \
-                   bash_signal, side_effect_path, side_effect_before, side_effect_after, \
-                   side_effect_bytes_before, side_effect_bytes_after, bash_command, bash_cwd, \
-                   bash_exit_code, bash_stdout, bash_stderr, bash_truncated, \
-                   sandbox_profile_sha256 FROM tool_calls WHERE run_id = ?1 \
-                   ORDER BY started_at ASC, tool_call_id ASC";
+                   args_sha256, result_sha256, error_sha256, started_at, finished_at, \
+                   duration_ms, bash_signal, side_effect_path, side_effect_before, \
+                   side_effect_after, side_effect_bytes_before, side_effect_bytes_after, \
+                   bash_command, bash_cwd, bash_exit_code, bash_stdout, bash_stderr, \
+                   bash_truncated, sandbox_profile_sha256 FROM tool_calls WHERE run_id = ?1 \
+                   ORDER BY started_at ASC, call_id ASC";
         let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
         let mut rows = stmt.query([run_id]).map_err(db_err)?;
         let mut calls = Vec::new();
@@ -822,7 +824,7 @@ fn map_tool_call_row(row: &rusqlite::Row<'_>) -> Result<ToolCallRow, TraceError>
     let source: String = row.get(7).map_err(db_err)?;
     let status: String = row.get(8).map_err(db_err)?;
     let truncated: i64 = row.get(12).map_err(db_err)?;
-    let bash_truncated: i64 = row.get(29).map_err(db_err)?;
+    let bash_truncated: i64 = row.get(30).map_err(db_err)?;
     Ok(ToolCallRow {
         tool_call_id: row.get(0).map_err(db_err)?,
         run_id: row.get(1).map_err(db_err)?,
@@ -839,22 +841,23 @@ fn map_tool_call_row(row: &rusqlite::Row<'_>) -> Result<ToolCallRow, TraceError>
         truncated: truncated != 0,
         args_sha256: row.get(13).map_err(db_err)?,
         result_sha256: row.get(14).map_err(db_err)?,
-        started_at: row.get(15).map_err(db_err)?,
-        finished_at: row.get(16).map_err(db_err)?,
-        duration_ms: to_u64(row.get(17).map_err(db_err)?),
-        bash_signal: to_opt_i32(row.get(18).map_err(db_err)?),
-        side_effect_path: row.get(19).map_err(db_err)?,
-        side_effect_before: row.get(20).map_err(db_err)?,
-        side_effect_after: row.get(21).map_err(db_err)?,
-        side_effect_bytes_before: to_opt_u64(row.get(22).map_err(db_err)?),
-        side_effect_bytes_after: to_opt_u64(row.get(23).map_err(db_err)?),
-        bash_command: row.get(24).map_err(db_err)?,
-        bash_cwd: row.get(25).map_err(db_err)?,
-        bash_exit_code: to_opt_i32(row.get(26).map_err(db_err)?),
-        bash_stdout: row.get(27).map_err(db_err)?,
-        bash_stderr: row.get(28).map_err(db_err)?,
+        error_sha256: row.get(15).map_err(db_err)?,
+        started_at: row.get(16).map_err(db_err)?,
+        finished_at: row.get(17).map_err(db_err)?,
+        duration_ms: to_u64(row.get(18).map_err(db_err)?),
+        bash_signal: to_opt_i32(row.get(19).map_err(db_err)?),
+        side_effect_path: row.get(20).map_err(db_err)?,
+        side_effect_before: row.get(21).map_err(db_err)?,
+        side_effect_after: row.get(22).map_err(db_err)?,
+        side_effect_bytes_before: to_opt_u64(row.get(23).map_err(db_err)?),
+        side_effect_bytes_after: to_opt_u64(row.get(24).map_err(db_err)?),
+        bash_command: row.get(25).map_err(db_err)?,
+        bash_cwd: row.get(26).map_err(db_err)?,
+        bash_exit_code: to_opt_i32(row.get(27).map_err(db_err)?),
+        bash_stdout: row.get(28).map_err(db_err)?,
+        bash_stderr: row.get(29).map_err(db_err)?,
         bash_truncated: bash_truncated != 0,
-        sandbox_profile_sha256: row.get(30).map_err(db_err)?,
+        sandbox_profile_sha256: row.get(31).map_err(db_err)?,
     })
 }
 

@@ -783,6 +783,7 @@ fn fresh_database_migrates_to_current_version_with_all_tables_and_indexes() {
             "truncated",
             "args_sha256",
             "result_sha256",
+            "error_sha256",
             "started_at",
             "finished_at",
             "duration_ms",

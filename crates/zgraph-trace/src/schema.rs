@@ -472,9 +472,11 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
 ///
 /// **仅新增表/索引**（v6→v7 不重建既有表）。写入者：[`crate::TraceWriter`]（每次
 /// 工具调用一行；工具执行与写入解耦，写入硬错误按既有 fail-stop 口径）。
-/// `(run_id, instance_id, attempt, call_id)` 唯一；`call_id` 为 provider 原生 id
-/// （不伪造）。按 DR-014 冻结 DDL：单 `truncated` 标记（args/result/error）+
-/// `bash_truncated`；无 FK（DR 冻结原文）。
+/// `(run_id, instance_id, attempt, call_id)` 唯一（**不含 node_id**；Lead REV-109
+/// 裁决：DR-014 §1 优先）；`call_id` 为 provider 原生 id（不伪造）。按 DR-014
+/// 冻结 DDL：单 `truncated` 标记（args/result/error）+ `bash_truncated`；无 FK
+/// （DR 冻结原文）。`error_sha256` 为 REV-109 C2 补列（DR-014 §1 草案缺口，
+/// 「args/result/error 32 KiB + 全量 sha256」口径以加列为准；v7 未发布）。
 const DDL_TOOL_CALLS: &str = r#"
 CREATE TABLE IF NOT EXISTS tool_calls (
   tool_call_id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -492,6 +494,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   truncated        INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
   args_sha256      TEXT,
   result_sha256    TEXT,
+  error_sha256     TEXT,
   started_at       TEXT NOT NULL,
   finished_at      TEXT NOT NULL,
   duration_ms      INTEGER NOT NULL,

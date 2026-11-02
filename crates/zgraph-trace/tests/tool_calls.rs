@@ -78,6 +78,7 @@ fn tool_call_roundtrip_all_scalar_fields_without_events_rows() {
         Some(json_text(&call.result.clone().unwrap()).as_str())
     );
     assert_eq!(row.error_json, None);
+    assert_eq!(row.error_sha256, None);
     assert!(!row.truncated);
     assert_eq!(
         row.args_sha256.as_deref(),
@@ -140,7 +141,37 @@ fn args_result_error_are_capped_with_full_sha256_and_truncated_flag() {
         row.result_sha256.as_deref(),
         Some(sha256_hex(json_text(&call.result.clone().unwrap()).as_bytes()).as_str())
     );
+    assert_eq!(
+        row.error_sha256.as_deref(),
+        Some(sha256_hex(json_text(&call.error.clone().unwrap()).as_bytes()).as_str()),
+        "error 超限时 error_sha256 必须是全量 sha256（REV-109 C2）"
+    );
     assert_eq!(row.status, ToolCallStatus::Error);
+}
+
+#[test]
+fn error_sha256_roundtrips_for_error_results() {
+    let fx = common::Fixture::new();
+    fx.handle.send(common::started("run-error-hash"));
+    let mut call = record("run-error-hash", "inst", "call-error");
+    call.status = ToolCallStatus::Error;
+    call.result = None;
+    call.error = Some(json!({"code": "TOOL_ERROR", "reason": "jail_denied"}));
+    fx.handle.send(TraceInput::ToolCall(call.clone()));
+    fx.flush();
+
+    let reader = fx.reader();
+    let rows = reader.tool_calls("run-error-hash").expect("tool calls");
+    let row = &rows[0];
+    assert_eq!(
+        row.error_json.as_deref(),
+        Some(json_text(call.error.as_ref().unwrap()).as_str())
+    );
+    assert_eq!(
+        row.error_sha256.as_deref(),
+        Some(sha256_hex(json_text(call.error.as_ref().unwrap()).as_bytes()).as_str())
+    );
+    assert_eq!(row.result_sha256, None);
 }
 
 #[test]
@@ -304,7 +335,7 @@ fn duplicate_call_id_is_idempotent_and_attempt_changes_locator() {
 }
 
 #[test]
-fn tool_calls_are_ordered_by_started_at_then_row_id_and_isolated_per_run() {
+fn tool_calls_are_ordered_by_started_at_then_call_id_and_isolated_per_run() {
     let fx = common::Fixture::new();
     fx.handle.send(common::started("run-order"));
     // 插入顺序与 started_at 顺序相反。
@@ -312,11 +343,12 @@ fn tool_calls_are_ordered_by_started_at_then_row_id_and_isolated_per_run() {
     late.started_at = "2026-11-02T10:00:09.000Z".to_string();
     let mut early = record("run-order", "inst", "call-early");
     early.started_at = "2026-11-02T10:00:01.000Z".to_string();
+    // 同 started_at：插入顺序 z→a（与 call_id 升序相反），断言冻结排序 (started_at, call_id)。
+    let mut same_z = record("run-order", "inst", "call-same-z");
+    same_z.started_at = "2026-11-02T10:00:05.000Z".to_string();
     let mut same_a = record("run-order", "inst", "call-same-a");
     same_a.started_at = "2026-11-02T10:00:05.000Z".to_string();
-    let mut same_b = record("run-order", "inst", "call-same-b");
-    same_b.started_at = "2026-11-02T10:00:05.000Z".to_string();
-    for call in [late, early, same_a, same_b] {
+    for call in [late, early, same_z, same_a] {
         fx.handle.send(TraceInput::ToolCall(call));
     }
     fx.handle.send(common::started("run-order-2"));
@@ -333,8 +365,8 @@ fn tool_calls_are_ordered_by_started_at_then_row_id_and_isolated_per_run() {
         rows.iter()
             .map(|row| row.call_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["call-early", "call-same-a", "call-same-b", "call-late"],
-        "按 (started_at, tool_call_id) 升序"
+        vec!["call-early", "call-same-a", "call-same-z", "call-late"],
+        "按 (started_at, call_id) 升序（同 started_at 用 call_id 可判定）"
     );
     assert_eq!(
         reader.tool_calls("run-order-2").expect("tool calls").len(),
@@ -348,13 +380,18 @@ fn tool_calls_are_ordered_by_started_at_then_row_id_and_isolated_per_run() {
 }
 
 #[test]
-fn per_run_row_cap_stops_recording_at_10000_without_failing_run() {
+fn per_run_row_cap_stops_recording_at_10000_across_batches_without_failing_run() {
     let fx = common::Fixture::new();
     fx.handle.send(common::started("run-cap-rows"));
+    let chunk = TOOL_CALLS_MAX_PER_RUN / 2;
     for index in 0..=TOOL_CALLS_MAX_PER_RUN {
         let mut call = record("run-cap-rows", "inst-cap-rows", &format!("call-{index}"));
         call.args = json!({"i": index});
         fx.handle.send(TraceInput::ToolCall(call));
+        // 中途 flush 强制跨 batch：上限计数必须跨批延续（不是单批内存计数）。
+        if index + 1 == chunk {
+            fx.flush();
+        }
     }
     // 另一 run 的预算独立。
     fx.handle.send(TraceInput::ToolCall(record(

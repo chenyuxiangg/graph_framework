@@ -738,7 +738,8 @@ fn write_tool_call(
     record: &ToolCallRecord,
     tracker: &mut Tracker,
 ) -> Result<(), TxError> {
-    let normalized = normalize(record).map_err(TxError::Fatal)?;
+    // P3（REV-109）：行数上限判定前移到 normalize/序列化/hash 之前——达到上限后
+    // 直接跳过，不为不会落库的记录做大参数序列化与 sha256。
     let max_rows = i64::try_from(TOOL_CALLS_MAX_PER_RUN).unwrap_or(i64::MAX);
     let run_id = record.run_id.clone();
     if !tracker.tool_call_rows.contains_key(&run_id) {
@@ -759,6 +760,7 @@ fn write_tool_call(
         *used += 1;
     }
 
+    let normalized = normalize(record).map_err(TxError::Fatal)?;
     let duration_ms = u64_to_i64(record.duration_ms, "tool call duration_ms")?;
     let bash_signal = record
         .bash
@@ -803,14 +805,14 @@ fn write_tool_call(
             "INSERT INTO tool_calls \
          (run_id, instance_id, node_id, attempt, call_id, tool_name, source, status, \
           args_json, result_json, error_json, truncated, args_sha256, result_sha256, \
-          started_at, finished_at, duration_ms, bash_signal, \
+          error_sha256, started_at, finished_at, duration_ms, bash_signal, \
           side_effect_path, side_effect_before, side_effect_after, \
           side_effect_bytes_before, side_effect_bytes_after, \
           bash_command, bash_cwd, bash_exit_code, bash_stdout, bash_stderr, \
           bash_truncated, sandbox_profile_sha256) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
                  ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, \
-                 ?29, ?30) \
+                 ?29, ?30, ?31) \
          ON CONFLICT(run_id, instance_id, attempt, call_id) DO NOTHING",
             params![
                 record.run_id,
@@ -827,6 +829,7 @@ fn write_tool_call(
                 i64::from(normalized.truncated),
                 normalized.args_sha256,
                 normalized.result_sha256,
+                normalized.error_sha256,
                 record.started_at,
                 record.finished_at,
                 duration_ms,

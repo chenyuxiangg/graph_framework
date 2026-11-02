@@ -3,7 +3,8 @@
 //!
 //! 冻结口径（DR-014 §5 / 00 §0.5）：
 //! - `args_json`/`result_json`/`error_json`：≤32 KiB；超限存 **prefix** + `truncated=1`，
-//!   `args_sha256`/`result_sha256` 始终记录**完整**内容哈希（回放遇截断 fail-closed）；
+//!   `args_sha256`/`result_sha256`/`error_sha256` 始终记录**完整**内容哈希
+//!   （回放遇截断 fail-closed）；
 //! - `bash_stdout`/`bash_stderr`：各 ≤16 KiB，**head+tail** + 中间截断标记，
 //!   `bash_truncated=1`；
 //! - `bash_command` ≤8 KiB、`side_effect_path`/`bash_cwd` ≤4 KiB：工具层应已拒绝
@@ -39,6 +40,7 @@ pub(crate) struct NormalizedToolCall {
     pub(crate) result_json: Option<String>,
     pub(crate) result_sha256: Option<String>,
     pub(crate) error_json: Option<String>,
+    pub(crate) error_sha256: Option<String>,
     pub(crate) truncated: bool,
     pub(crate) side_effect_path: Option<String>,
     pub(crate) bash: Option<NormalizedBash>,
@@ -63,14 +65,15 @@ pub(crate) fn normalize(record: &ToolCallRecord) -> Result<NormalizedToolCall, T
         None => (None, None),
     };
 
-    let error_json = match &record.error {
+    let (error_json, error_sha256) = match &record.error {
         Some(value) => {
             let text = json_text(value)?;
+            let sha = sha256_hex(text.as_bytes());
             let (stored, cut) = truncate_prefix(&text, TOOL_CALL_RESULT_MAX_BYTES);
             truncated |= cut;
-            Some(stored)
+            (Some(stored), Some(sha))
         }
-        None => None,
+        None => (None, None),
     };
 
     let side_effect_path = match &record.side_effect {
@@ -112,6 +115,7 @@ pub(crate) fn normalize(record: &ToolCallRecord) -> Result<NormalizedToolCall, T
         result_json,
         result_sha256,
         error_json,
+        error_sha256,
         truncated,
         side_effect_path,
         bash,
@@ -265,6 +269,7 @@ mod tests {
             Some(sha256_hex(result_text.as_bytes()).as_str())
         );
         assert_eq!(normalized.error_json, None);
+        assert_eq!(normalized.error_sha256, None);
         assert_eq!(normalized.side_effect_path, None);
         assert!(normalized.bash.is_none());
     }
@@ -287,6 +292,12 @@ mod tests {
         assert_eq!(
             normalized.result_sha256.as_deref(),
             Some(sha256_hex(full_result.as_bytes()).as_str())
+        );
+        let full_error = serde_json::to_string(record.error.as_ref().unwrap()).expect("error");
+        assert_eq!(
+            normalized.error_sha256.as_deref(),
+            Some(sha256_hex(full_error.as_bytes()).as_str()),
+            "error 超限仍记录全量 sha256（REV-109 C2）"
         );
     }
 
