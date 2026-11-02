@@ -251,25 +251,23 @@ fn map_rmcp_tool(tool: RmcpTool) -> McpTool {
 }
 
 /// 按上限**流式累积**结果文本（不先拼全量再截断；REV-098 P2⑧）。
-fn call_result_text(result: &CallToolResult, limit_chars: usize) -> String {
+/// 拼接 `CallToolResult` 的全部文本内容（**不截断**）。
+///
+/// REV-100 #2：截断与 `truncated:true` 标记统一在 [`super::McpRun::execute_tool`]
+/// 的最终 ToolResult 上做（`MCP_TOOL_RESULT_MAX_CHARS` = 32768 chars），Fake/Real
+/// 两路一致；真实 client 若提前截断会让最终标记永不触发（v0.3 e2e 实测）。
+fn call_result_text(result: &CallToolResult) -> String {
     let mut text = String::new();
-    let mut count = 0usize;
     for block in &result.content {
         let chunk = match block {
             ContentBlock::Text(content) => content.text.clone(),
             other => serde_json::to_string(other).unwrap_or_default(),
         };
-        let remaining = limit_chars.saturating_sub(count);
-        if remaining == 0 {
-            break;
-        }
-        let take = chunk.chars().take(remaining).collect::<String>();
-        count += take.chars().count();
-        text.push_str(&take);
+        text.push_str(&chunk);
     }
     if text.is_empty() {
         if let Some(structured) = &result.structured_content {
-            text = structured.to_string().chars().take(limit_chars).collect();
+            text = structured.to_string();
         }
     }
     text
@@ -313,7 +311,7 @@ impl McpClient for RealMcpClient {
         .map_err(|_| McpClientError::new(McpClientErrorKind::Timeout, "MCP tools/call timed out"))?
         .map_err(|error| Self::map_service_error(&error))?;
         Ok(McpCallOutcome {
-            text: call_result_text(&result, crate::constants::MCP_TOOL_RESULT_MAX_CHARS),
+            text: call_result_text(&result),
             is_error: result.is_error.unwrap_or(false),
         })
     }
@@ -327,5 +325,28 @@ impl McpClient for RealMcpClient {
             // stderr 只保留诊断用；不写 trace（DR-010 §4/§7）。
             let _ = stderr.len();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REV-100 #2：真实 client 返回**未截断**文本，截断/`truncated:true` 标记统一由
+    /// 最终 ToolResult 层（`McpRun::execute_tool`）加，Fake/Real 一致。
+    #[test]
+    fn call_result_text_keeps_full_content_for_final_marker() {
+        let long = "x".repeat(40_000);
+        let result = CallToolResult::success(vec![ContentBlock::text(long)]);
+        let text = call_result_text(&result);
+        assert_eq!(
+            text.chars().count(),
+            40_000,
+            "real client must not pre-truncate (would defeat the final marker)"
+        );
+        let (truncated, flag) = super::super::truncate_result(&text);
+        assert!(flag);
+        assert!(truncated.ends_with("…[mcp result truncated]"));
+        assert!(truncated.chars().count() <= crate::constants::MCP_TOOL_RESULT_MAX_CHARS + 64);
     }
 }

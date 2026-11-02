@@ -638,8 +638,9 @@ fn parse_server(
             })?,
         };
         if http && !allow_insecure_http {
+            // DR-010 §8 / 00 §0.4：reason 闭集使用 `http_insecure`（非 config_invalid）。
             return Err(mcp_config_error(
-                "config_invalid",
+                "http_insecure",
                 Some(name),
                 "http:// MCP url requires allow_insecure_http: true",
             ));
@@ -915,7 +916,6 @@ impl McpPool {
         timeout: Duration,
     ) -> Result<McpCallOutcome, McpClientError> {
         let mut state = self.state.lock().await;
-        let mut attempt = 0u32;
         loop {
             let client = self
                 .ensure_client(&mut state, spec)
@@ -926,11 +926,17 @@ impl McpPool {
                 .await
             {
                 Ok(outcome) => return Ok(outcome),
-                Err(error)
-                    if matches!(error.kind, McpClientErrorKind::Closed)
-                        && attempt < MCP_MAX_RESTARTS_PER_RUN =>
-                {
-                    attempt += 1;
+                Err(error) if matches!(error.kind, McpClientErrorKind::Closed) => {
+                    // DR-010 §4：**同 run 每 server 最多重启 1 次**（run 级全局计数，
+                    // 不是 per-call）。额度用满后再 Closed → 不再 spawn，直接由调用方
+                    // 映射 `TOOL_ERROR{reason:"transport_closed"}`。
+                    let restarts = state
+                        .clients
+                        .get(&spec.name)
+                        .map_or(0, |slot| slot.restarts);
+                    if restarts >= MCP_MAX_RESTARTS_PER_RUN {
+                        return Err(error);
+                    }
                     if let Some(slot) = state.clients.get_mut(&spec.name) {
                         if let Some(client) = slot.client.take() {
                             client.shutdown().await;
@@ -1314,7 +1320,7 @@ mod tests {
             ),
             (
                 json!({"mcpServers": {"bad": {"url": "http://e/mcp"}}}),
-                "config_invalid",
+                "http_insecure",
             ),
             (
                 json!({"mcpServers": {"bad": {"url": "https://e", "allow_insecure_http": "yes"}}}),
@@ -1458,8 +1464,27 @@ mod tests {
         let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({"q": 1})).await;
         assert!(ok);
         // 超限结果 → 机器可读 JSON（truncated:true）；不把 4 万字符全文塞回上下文。
+        // REV-100 #2：截断标记统一在**最终 ToolResult** 上（Fake/Real 同一路径）。
         let payload: Value = serde_json::from_str(&text).expect("json");
         assert_eq!(payload["truncated"], true);
+        let keys: BTreeSet<&str> = payload
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["truncated", "is_error", "text"]),
+            "final ToolResult truncated shape"
+        );
+        assert_eq!(payload["is_error"], false);
+        let truncated_text = payload["text"].as_str().expect("text");
+        assert!(
+            truncated_text.chars().count() <= MCP_TOOL_RESULT_MAX_CHARS + 64,
+            "bounded head"
+        );
+        assert!(truncated_text.ends_with("…[mcp result truncated]"));
         assert!(text.len() < 40_000);
         assert_eq!(client.call_count(), 1);
     }
@@ -1499,6 +1524,58 @@ mod tests {
         assert_eq!(text, "recovered");
         assert_eq!(client.call_count(), 2, "one restart then retry");
         assert_eq!(client.connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// REV-100 #1：DR-010 §4「同 run 最多重启 1 次」是**每 run 每 server 全局**口径。
+    ///
+    /// 连续 crash 场景：首个 call 内 1 次重启（connect=2），后续 call 再 Closed 不再
+    /// spawn，直接返回 `TOOL_ERROR{reason:"transport_closed"}`。
+    #[tokio::test]
+    async fn same_run_restarts_at_most_once_across_calls() {
+        let client = FakeMcpClient::new()
+            .with_default_outcome("recovered", false)
+            .fail_closed_times(3);
+        let factory = FakeMcpFactory::new().with_client("alpha", client.clone());
+        let plan = McpPlan {
+            servers: vec![spec("alpha", 1000)],
+            allow: vec![],
+        };
+        let run = McpRun::new(Arc::new(plan), pool(factory));
+
+        // call#1：Closed → 重启 1 次（connect=2）→ 仍 Closed（额度用满）→ TOOL_ERROR。
+        let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({})).await;
+        assert!(!ok);
+        let payload: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(payload["error"]["reason"], json!("transport_closed"));
+        assert_eq!(client.connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // call#2：再 Closed → 不再 spawn（connect 仍 2），TOOL_ERROR transport_closed。
+        let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({})).await;
+        assert!(!ok);
+        let payload: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(payload["error"]["reason"], json!("transport_closed"));
+        assert_eq!(client.connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // call#3：transport 恢复（无 Closed）→ 正常成功。
+        let (ok, text) = run.execute_tool("mcp__alpha__echo", &json!({})).await;
+        assert!(ok);
+        assert_eq!(text, "recovered");
+        assert_eq!(client.connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(client.call_count(), 4, "2+1+1 call attempts");
+    }
+
+    /// REV-100 #3：`http://` 未显式 allow → `HARNESS_MCP_ERROR{reason:"http_insecure"}`。
+    #[test]
+    fn insecure_http_reason_is_http_insecure() {
+        let value = json!({
+            "mcpServers": {"bad": {"url": "http://localhost:8080/mcp"}}
+        });
+        let error = McpRegistry::from_value(&value, &|_| None)
+            .expect_err("insecure http must fail closed at registry parse");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::Mcp);
+        assert_eq!(error.code, "HARNESS_MCP_ERROR");
+        assert_eq!(error.detail["reason"], json!("http_insecure"));
+        assert_eq!(error.detail["server"], json!("bad"));
     }
 
     #[tokio::test]

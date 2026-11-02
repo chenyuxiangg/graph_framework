@@ -30,6 +30,8 @@ pub struct FakeMcpClient {
     delay: Duration,
     /// 首次 call 返回 Closed（触发同 run 重启一次）。
     fail_first_closed: AtomicBool,
+    /// 接下来 N 次 call 返回 Closed（REV-100 每 run 重启上限测试用）。
+    fail_closed_remaining: AtomicU32,
     /// 连接次数（重启证据）。
     pub connects: AtomicU32,
     /// shutdown 调用次数。
@@ -48,6 +50,7 @@ impl Default for FakeMcpClient {
             }),
             delay: Duration::ZERO,
             fail_first_closed: AtomicBool::new(false),
+            fail_closed_remaining: AtomicU32::new(0),
             connects: AtomicU32::new(0),
             shutdowns: AtomicU32::new(0),
         }
@@ -103,6 +106,12 @@ impl FakeMcpClient {
         self
     }
 
+    /// 接下来 `times` 次 call 返回 `Closed`（用于「同 run 最多重启 1 次」跨 call 断言）。
+    pub fn fail_closed_times(self: Arc<Self>, times: u32) -> Arc<Self> {
+        self.fail_closed_remaining.store(times, Ordering::SeqCst);
+        self
+    }
+
     /// 取已调用次数。
     pub fn call_count(&self) -> usize {
         self.calls.lock().map(|calls| calls.len()).unwrap_or(0)
@@ -133,6 +142,13 @@ impl McpClient for FakeMcpClient {
             return Err(McpClientError::new(
                 McpClientErrorKind::Timeout,
                 "fake MCP call timed out",
+            ));
+        }
+        if self.fail_closed_remaining.load(Ordering::SeqCst) > 0 {
+            self.fail_closed_remaining.fetch_sub(1, Ordering::SeqCst);
+            return Err(McpClientError::new(
+                McpClientErrorKind::Closed,
+                "fake transport closed (restart limit test)",
             ));
         }
         if self.fail_first_closed.swap(false, Ordering::SeqCst) {

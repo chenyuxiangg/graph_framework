@@ -1874,11 +1874,44 @@ if output:
     }
 
     /// REV-099 C3 / AC-20 d：Codex 长睡 + 父取消 → Codex 进程组不残留（无孤儿）。
+    ///
+    /// REV-100 #4：所有等待都有界（≤10s；另有 30s 场景总超时）——全量并行时不得挂起。
     #[cfg(unix)]
     #[tokio::test]
     async fn codex_in_flight_cancel_leaves_no_orphan_process_group() {
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
+
+        const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        const SCENARIO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        async fn wait_for_pid(pid_file: &std::path::Path) -> Option<i32> {
+            let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+            loop {
+                if let Ok(text) = std::fs::read_to_string(pid_file) {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        return Some(pid);
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+
+        async fn wait_until_reaped(pid: i32) -> bool {
+            let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+            loop {
+                if kill(Pid::from_raw(pid), None).is_err() {
+                    return true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
 
         let fixture = fixture("codex_sleep");
         let pid_file = fixture.pid_file.clone().expect("pid file");
@@ -1889,27 +1922,37 @@ if output:
             cancel_ctx.request_cancel();
         });
         let provider = SubprocessProvider::new();
-        let result = AgentProvider::run(&provider, fixture.request(ctx, 10_000)).await;
+        let outcome = tokio::time::timeout(
+            SCENARIO_TIMEOUT,
+            AgentProvider::run(&provider, fixture.request(ctx, 10_000)),
+        )
+        .await;
         canceller.join().expect("canceller thread");
+        let result = match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                provider.close_provider().await;
+                panic!(
+                    "codex cancel scenario exceeded {}s (adapter cleanup hang)",
+                    SCENARIO_TIMEOUT.as_secs()
+                );
+            }
+        };
         assert!(matches!(result, Err(RunFailure::Cancelled)), "{result:?}");
         assert_eq!(provider.live_adapter_count().await, 0);
-        // fake Codex 会把自身 pid 写入文件；取消后应已被 adapter/父进程回收。
-        let pid = loop {
-            if let Ok(text) = std::fs::read_to_string(&pid_file) {
-                if let Ok(pid) = text.trim().parse::<i32>() {
-                    break pid;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // 无论后续断言是否失败，先保证 provider 进程组被回收（测试 flake 时必须清理）。
+        provider.close_provider().await;
+        let Some(pid) = wait_for_pid(&pid_file).await else {
+            panic!(
+                "fake Codex pid file not written within {}s: {}",
+                WAIT_TIMEOUT.as_secs(),
+                pid_file.display()
+            );
         };
-        let mut alive = true;
-        for _ in 0..40 {
-            if kill(Pid::from_raw(pid), None).is_err() {
-                alive = false;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(!alive, "fake Codex child {pid} leaked as orphan");
+        assert!(
+            wait_until_reaped(pid).await,
+            "fake Codex child {pid} leaked as orphan (>{}s)",
+            WAIT_TIMEOUT.as_secs()
+        );
     }
 }
