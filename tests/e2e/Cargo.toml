@@ -104,3 +104,23 @@ path = "harness_v03.rs"
 [[test]]
 name = "v03_regression"
 path = "v03_regression.rs"
+
+[[test]]
+name = "builtin_files_v04"
+path = "builtin_files_v04.rs"
+
+[[test]]
+name = "builtin_search_v04"
+path = "builtin_search_v04.rs"
+
+[[test]]
+name = "builtin_bash_v04"
+path = "builtin_bash_v04.rs"
+
+[[test]]
+name = "trace_tools_v04"
+path = "trace_tools_v04.rs"
+
+[[test]]
+name = "v04_regression"
+path = "v04_regression.rs"
