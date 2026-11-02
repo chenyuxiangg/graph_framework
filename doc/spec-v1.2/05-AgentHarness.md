@@ -1490,39 +1490,43 @@ pub trait AgentProvider: Send + Sync {
 
 ---
 
-## 5.15 v0.4 冻结草案：内置工具 / workspace jail / OS 沙箱（2026-11-02，REV-105；待实现回写）
+## 5.15 v0.4（M9）实现回写：内置工具 / workspace jail / OS 沙箱（as-built，2026-11-03，REV-113）
 
-> **V1 设计冻结草案**；实现波次 D2–D5（DR-012）。默认（无 opt-in/无 workspace）不注册工具、无副作用、输出逐字节不变。工具属 Harness Loading，不进 DSL/hash（02 §2.5.7）。
+> **as-built**：D2–D5c 已合并 main（`8897053`）；默认（无 opt-in/无 workspace）不注册工具、无副作用、输出逐字节不变；工具属 Harness Loading，不进 DSL/hash（02 §2.5.7）。语义冻结见 DR-013，实测见 07 AC-21–23。
 
-### 5.15.1 工具集与工具源
+### 5.15.1 工具集与工具源（as-built）
 
-- 8 个：`builtin__read`/`write`/`edit`/`apply_patch`/`diff`/`grep`/`glob`/`bash`（语义/JSON Schema 见 DR-013 §3）。
-- 工具源并列：`builtin__*`（Rust）、`mcp__<server>__<tool>`（v0.3）、Python `tools/`（§5.6）；**同名即冲突**（`HARNESS_CONFIG_LOAD{reason:"tool_name_conflict"}`），无覆盖语义。
-- `AgentConfig.tools` 仍是唯一白名单；未列不可见/不可调用；`--allow-builtin-tools` 只注册文件/搜索 7 个，`--allow-bash` 额外注册 bash。
+- **8 个**：`builtin__read`/`write`/`edit`/`apply_patch`/`diff`/`grep`/`glob`/`bash`。
+- 工具源并列：`builtin__*`（Rust 内置）、`mcp__<server>__<tool>`（v0.3）、Python `tools/`（§5.6）；**无优先级/无覆盖**：同名 → `HARNESS_CONFIG_LOAD{reason:"tool_name_conflict"}`；`builtin__`/`mcp__` 前缀保留（`reserved_prefix`）。
+- `AgentConfig.tools` 是**唯一白名单**（所有源一致）；未列不可见/不可调用。
+- **opt-in**：`--allow-builtin-tools` 注册文件/搜索 7 个；`--allow-bash` 额外注册 bash；未开启引用 → `HARNESS_CONFIG_LOAD{reason:"builtin_tools_not_allowed"}` / `tool_not_registered`。`--workspace-dir`（缺省 `.` canonicalize）、`--allow-path`（只读、可重复）、`--allow-exec-path`（可执行目录、可重复）、`--allow-network`。
+- 工具调用串行（沿既有语义）；内置工具结果对 LLM/trace 统一 ≤32 KiB。
 
-### 5.15.2 workspace jail
+### 5.15.2 workspace jail（as-built）
 
-- `--workspace-dir <dir>`（缺省 `.`，canonicalize）+ `--allow-path <dir>`（可重复，**目录级只读** `file-read* only`；写目标仅 workspace，写 allow-path → `TOOL_ERROR{reason:"path_read_only"}`）。
-- 路径：词法归一化 → canonicalize → 真实路径前缀比较（组件边界）；拒绝 `..`/symlink 出根/绝对路径越界 → `TOOL_ERROR{reason:"path_escape"}`。
-- 文件工具 Rust 强制；`--allow-path` **只读（file-read* only）**；写目标仅 workspace（写 allow-path → `TOOL_ERROR{reason:"path_read_only"}`）；不做文件级/通配；外部可写请改 `--workspace-dir`（v0.4 无 `--allow-write-path`）。
+- `--workspace-dir <dir>`（缺省 `.`；canonicalize）+ `--allow-path <dir>`（**目录级只读** `file-read* only`，可重复）；写目标**仅 workspace**（写 allow-path → `TOOL_ERROR{reason:"path_read_only"}`）。
+- 路径：词法归一化（拒绝 `..`）→ canonicalize（解析 symlink/别名）→ 真实路径前缀（组件边界）校验；越界 → `TOOL_ERROR{reason:"path_escape"}`；绝对路径须在 jail 内。
+- **hardlink 到 jail 外 inode** 的残余风险接受并文档化（无法可靠识别）；TOCTOU 用 canonicalize + `O_NOFOLLOW`/目录 fd 尽量缩小（ISSUE-167）。
+- 预检：workspace 不存在/非目录、allow-path 非法 → `HARNESS_CONFIG_LOAD{reason:"workspace_invalid"|"allow_path_invalid"}`；**CLI run 启动前 exit 3、不产生 run/不建 DB**。
+- 文件工具为 Rust 进程内实现（不过 OS 沙箱）；bash 由 Seatbelt 覆盖。
 
-### 5.15.3 bash OS 沙箱
+### 5.15.3 bash OS 沙箱（as-built）
 
-- **必须**在 macOS `sandbox-exec` profile 内（按 spike 附录 A 79 行冻结）：workspace 读写、`--allow-path` **只读**、系统只读集合（含 `/private/var/select/sh`/CLT/`file-read-metadata`/`/dev/*`/mach 服务）、`TMPDIR=<workspace>/.tmp`；`process-exec` 按目录收窄（`--allow-exec-path` opt-in）；网络默认 **deny**（`--allow-network` 全开）。
-- 命令固定 `/bin/bash --noprofile --norc -c`；env 白名单重建（剔除 `BASH_ENV`/`LD_*`/`DYLD_*` 等）；stdin=null；setsid+killpg（SIGTERM 2s→SIGKILL）；drain 2 MiB、结果 16 KiB head+tail。
-- 无沙箱 fallback；**嵌套 Seatbelt（exit 71）→ `HARNESS_CONFIG_LOAD{reason:"sandbox_nested"}`，CLI run 预检失败 → exit 3、不产生 run**；profile 非法（exit 65）→ `sandbox_profile_invalid`；配置/启动前不可用 → `sandbox_unavailable`（Crashed）；运行期 → `TOOL_ERROR{reason:"sandbox_failure"}`；**零新码**。
-- 平台：macOS 26.6 实测；**Linux/Windows 不支持（fail-closed，文档化）**；sandbox-exec DEPRECATED（风险登记）；性能 profile ≈11 ms、每条 bash +22–40 ms（仅 bash）。
-- bash 超时/取消 → kill 进程组；stdout/stderr **各 16 KiB head+tail（drain 2 MiB）**；cwd 必须在 jail 内；环境白名单；command ≤8 KiB、timeout 120s（max 600s）。
+- **必须**在 macOS `sandbox-exec` profile 内（spike 附录 A 79 行；`/private` realpath、系统只读集合含 `/private/var/select/sh`/CLT/`file-read-metadata`/`/dev/*`/mach 服务、workspace 读写、allow-path 只读、`TMPDIR=<workspace>/.tmp`、`process-exec` 目录收窄）。
+- **执行**：`/bin/bash --noprofile --norc -c`；cwd 必须在 jail 内；env 白名单重建（HOME/TMPDIR/PATH/LANG/LC_ALL/SHELL/USER/LOGNAME/DEVELOPER_DIR/SDKROOT；剔除 `BASH_ENV`/`ENV`/`LD_*`/`DYLD_*`/`PYTHONPATH`/`NODE_OPTIONS`/`GIT_CONFIG_*` 等）；stdin=null；setsid + killpg（SIGTERM 2s→SIGKILL）；drain 2 MiB、**stdout/stderr 各 16 KiB head+tail**；command ≤8 KiB、timeout 默认 120s（max 600s）。
+- **预检/失败（fail-closed，零新码）**：`--allow-bash` 前探测 `sandbox-exec`；不可用 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`；**嵌套 Seatbelt（exit 71）→ `sandbox_nested`**；profile 非法（exit 65）→ `sandbox_profile_invalid`；**CLI run 预检失败 → exit 3、不产生 run**；运行期 → `TOOL_ERROR{reason:"sandbox_failure"}`；**无无沙箱 fallback / 无 `--unsafe-bash`**。
+- **网络**：默认 `(deny network*)`；`--allow-network` 全开（+ SSL/hosts/resolv/networkd mach）。
+- **平台**：macOS 26.6 实测（**仅 macOS**）；Linux/Windows 不支持（fail-closed，文档化）；sandbox-exec DEPRECATED（风险登记）。**性能**：profile ≈11 ms、每条 bash +22–40 ms（仅 bash，不计入默认路径）。
+- **环境限制**：构建工具（cargo/node/uv）默认不可执行（需 `--allow-exec-path`）；`cc` 需 `-isysroot`；真实隔离证据由用户普通终端 `crates/zgraph-harness/scripts/verify-sandbox.sh` 提供（嵌套环境只能实测 fail-closed 分支）。
 
-### 5.15.4 错误面
+### 5.15.4 错误面（as-built，零新码）
 
 | 场景 | 错误 |
 |---|---|
-| opt-in/配置/workspace 非法/名称冲突 | `HARNESS_CONFIG_LOAD{reason}`（Crashed） |
-| 运行期文件/搜索/bash 失败/越界 | `TOOL_ERROR{reason}`（喂回 LLM） |
-| bash 沙箱不可用/嵌套/profile 非法 | 配置/预检期 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"\|"sandbox_nested"\|"sandbox_profile_invalid"}`（Crashed；CLI run 预检 exit 3、不产生 run）／运行期 `TOOL_ERROR{reason:"sandbox_failure"}`（fail-closed，零新码） |
-| 既有错误码 | 不变；新码 append-only（00 §0.4） |
+| opt-in/配置/workspace/名称冲突/预检沙箱 | `HARNESS_CONFIG_LOAD{reason}`：`builtin_tools_not_allowed`/`tool_not_registered`/`tool_name_conflict`/`reserved_prefix`/`workspace_invalid`/`allow_path_invalid`/`sandbox_unavailable`/`sandbox_nested`/`sandbox_profile_invalid`（Crashed(Config)；preflight exit 3、不产生 run） |
+| 运行期工具失败/越界/参数/沙箱故障 | `TOOL_ERROR{reason}`：`path_escape`/`path_read_only`/`not_found`/`is_directory`/`invalid_utf8`/`binary_file`/`too_large`/`no_match`/`multiple_matches`/`invalid_regex`/`invalid_glob`/`invalid_args`/`sandbox_failure`/`timeout`/`cancelled` 等（喂回 LLM，不 fail run） |
+| 既有码 | 不变；新码/kind 不新增（reason 闭集只追加） |
 
-### 5.15.5 结果上限
+### 5.15.5 结果上限（as-built）
 
-read 1 MiB/10000 行（默认 2000）、结果 ≤32 KiB；write/edit/apply_patch 输入 ≤1 MiB、结果 ≤32 KiB；grep 1000 条/扫描 2 MiB、glob 默认1000/上限5000，结果均 ≤32 KiB；bash command ≤8 KiB、timeout 120s（max 600s）、stdout/stderr 各 **16 KiB head+tail**（drain 2 MiB）；`tool_calls` args/result 各 **32 KiB**（DR-014 §5）；所有内置工具结果对 LLM/trace ≤32 KiB；超限截断标记 + hash。
+read 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB；write/edit/apply_patch 输入 ≤1 MiB、结果 ≤32 KiB；grep 1000 条/扫描单文件 2 MiB/结果 ≤32 KiB；glob 默认 1000/上限 5000/结果 ≤32 KiB；bash command ≤8 KiB、timeout 120s（max 600s）、stdout/stderr 各 16 KiB head+tail（drain 2 MiB）；`tool_calls` args/result/error 各 32 KiB、command 8 KiB、path 4 KiB、单 run 10000 行；超限 `truncated` + 全量 sha256。

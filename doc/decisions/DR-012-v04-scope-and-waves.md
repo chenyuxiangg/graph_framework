@@ -120,3 +120,19 @@ D1 docs 设计冻结（本批，REV-105）
 | 6 | v7 字段上限 | **已裁决**：args/result **32 KiB**、bash stdout/stderr **16 KiB head+tail**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；超限 truncated + 全量 sha256；副作用回放遇截断 **fail-closed**；reexec v0.5 |
 | 7 | 只读工具 reexec 集合 | **已裁决**：`read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永不** reexec |
 | 8 | W5 | 顺延 v0.5（已裁决） |
+
+## 9. 实现执行记录（as-built，2026-11-03，REV-113；只追加）
+
+| 波次 | 分支/提交 | 评审 | 合并点（main） | 证据 |
+|---|---|---|---|---|
+| D1 | `docs/docs-v04-design`（`462f53d`+`0aa7165`+`5f15de9`+`923a89a`+`2132478`） | REV-105（有条件通过 → C1–C4/P3 关闭后通过） | `051bf11` | check.sh；spike 31/31 |
+| D2 files | `feat/harness-builtin-files`：`b8ab337`+`4b093fc` | REV-106（含跨模块第二评审） | `a9866e4` | harness 单测 + 真 CLI |
+| D3 search | `feat/harness-builtin-search`：`5b4e899` | REV-107（含 Cargo 第二评审） | `038b144` | grep/glob/上限/越界 |
+| D4 bash | `feat/harness-builtin-bash`：`60aff67`+`31a4593` | REV-108（含第二评审） | `4b2ef3d` | 嵌套 fail-closed/预检 exit3 |
+| D5a trace v7 | `feat/trace-v7-tools`：`ea6f657`+`90b6738` | REV-109（含第二评审） | `fe1111f` | v7 DDL/迁移/排序/error_sha256 |
+| D5b1 记录富化 | `feat/harness-tool-record`：`443ca3d`+`c035637` | REV-110 | `297d648` | tool_calls 字段/脱敏/超时 |
+| D5b2 CLI replay | `feat/cli-tool-replay`：`e197584`+`d4da442` | REV-111（含第二评审） | `b8a8fce` | `--mode=tools`/recorded/reexec exit2 |
+| D5c e2e | `test/e2e-v04`：`598ccff`+`7530bec`+`0a47295` | REV-112（条件关闭复核通过） | `8897053` | 29 用例/5 target；e2e 166/0/2 |
+
+- 默认路径（无 opt-in/无工具）兼容：`v04_regression` 3 用例逐字节不变；DSL 1.0/19 码不变。
+- 已知限制：bash 仅 macOS（嵌套 fail-closed；真实隔离需用户终端 `verify-sandbox.sh`）；cargo/node 默认不可执行；hardlink/TOCTOU 残余；reexec v0.5。详见 DR-013 §11、DR-014 §10、ISSUE-176+。

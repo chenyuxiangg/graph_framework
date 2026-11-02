@@ -2,14 +2,13 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.4（M9）**D1 设计冻结进行中**（分支 `docs/docs-v04-design`，REV-105）：内置工具（文件/搜索/bash）+ 严格 workspace jail + OS 沙箱 + trace v7/工具回放；W5→v0.5。v0.3.0 已发布（tag `v0.3.0`）。
+**当前阶段**：v0.4.0（M9）**发布收口（D6）**：内置工具/workspace 沙箱/trace v7 已合并 main（`8897053`，D2–D5c）；tag `v0.4.0`/`dist/RELEASE_NOTES-v0.4.0.md` 待发布流程与用户授权；性能 [`doc/perf-baseline-v0.4.txt`](perf-baseline-v0.4.txt)。
 
 **进行中任务**
-- docs `docs/docs-v04-design`（REV-105，作者 docs-dev）：DR-012/013/014 + spec 00/02/05/06/07/08 冻结草案 + AC-21–24；**沙箱 spike 已合入**（profile/嵌套/性能/平台/构建工具）。
+- 无。
 
 **下一步**
-- D1 评审通过 → D2 文件类+jail → D3 搜索类 → D4 bash+OS 沙箱 → D5 trace v7+回放+e2e → D6 兼容/性能/发布 v0.4.0（需用户授权）。
+- v0.5 规划：**W5 共享评审队列** + 真实 Codex/DSH 环境验证 + ISSUE 清理；REV-113 通过 → merge → dist/tag/GitHub Release（用户授权后）。
 
 **阻塞**
-- 无条件阻塞；spike 已合入，待 reviewer-a REV-105 评审。
-- 台账：v0.4 风险登记 ISSUE-165+（sandbox-exec 弃用/Linux/TOCTOU/网络/大输出/v7 迁移/reexec）。
+- 无硬阻塞；tag/GitHub Release 需用户发布前最终授权 + 新 token；bash 真实隔离证据需用户普通终端运行 `verify-sandbox.sh`（嵌套环境仅覆盖 fail-closed）。

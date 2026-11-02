@@ -10,18 +10,25 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：v0.3.0 已发布（M0–M8：skills + MCP + 可插拔 harness）
+## 当前状态：v0.4.0 已发布（M0–M9：内置工具 + workspace 沙箱 + trace v7）
 
-**v0.3.0（M8）**：能力扩展三件已实现并合并（V2 skills / V3 MCP / V4 harness 插件）：
+**v0.4.0（M9）**：内置工具、严格 workspace jail、macOS OS 沙箱与工具级 trace/replay 已实现并合并（D1–D5c）。
 
-- **skills**：`<assets-dir>/skills/<name>/SKILL.md`（frontmatter 校验）、system 仅注入 catalog、`skill_view(name)` 按需加载正文（32K chars、run 级 5 次预算）、`--skills-dir`/`ZGRAPH_SKILLS`；不执行 skill 脚本、正文按不可信数据。
-- **MCP**：rmcp 3.8.0 **双 era**（`2026-07-28` 无状态 + `2025-11-25` legacy）、stdio + Streamable HTTP、`mcp_servers.json`、`mcp__<server>__<tool>`（必须显式进 `AgentConfig.tools`）、`--allow-mcp`、静态 env Bearer、默认 https；trace **不 v7**。
-- **可插拔 harness**：`AgentProvider`（Builtin 默认 / Subprocess）、`zgraph-harness/1` NDJSON 协议、Codex adapter（`exec --json`/`--output-last-message`；无 token delta、iterations=1、cached tokens 丢弃）、DSH ACP 骨架；外部 harness 不写 trace/状态机、L2 不重跑。
-- **测试（已实测）**：`cargo test -p zgraph-e2e` **137/0/2**（V5a 四 target 连跑 3 次）；`cargo test --workspace` **1037/0/3**；pytest **183**；`cargo test -p zgraph-harness` **235/0/1**（`--features mcp` 235/0/1）；V5a AC-18/19/20 + 回归 **31 用例**。
-- **发布产物**：`dist/zgraph-v0.3.0-*.tar.gz` + sha256、`dist/RELEASE_NOTES-v0.3.0.md` 由 Lead/发布流程构建；性能基线 [`doc/perf-baseline-v0.3.txt`](doc/perf-baseline-v0.3.txt)（AC-01 +0.0%、AC-12 −4.0%、SOP smoke −7.3%，门禁通过；full-60 运行期 ISSUE-112 发布例外）。
-- **发布状态**：tag `v0.3.0`（**发布流程执行中**）；GitHub Release：`chenyuxiangg/graph_framework`（由发布流程创建）。
-- **已知限制**：真实 Codex/DSH 环境**未验证**（adapter 骨架，release notes 标注）；W5 共享评审队列延至 v0.4；P2/P3 台账见 [issues](doc/issues.md) ISSUE-156–163。
-- **下一步**：v0.4（M9）W5 共享评审队列 + ISSUE 清理；详见 [DR-008](doc/decisions/DR-008-v03-scope-and-waves.md) / [progress](doc/progress.md)。
+- **内置工具（opt-in）**：`builtin__read/write/edit/apply_patch/diff/grep/glob/bash`（Rust；工具名 `builtin__*`）。
+- **严格 jail**：`--workspace-dir`（缺省 `.`，canonicalize）内读写；`--allow-path` 为**只读**白名单；写目标仅 workspace；越界/symlink/`..` 拒绝。
+- **bash OS 沙箱**：macOS `sandbox-exec`（spike 79 行 profile）；网络默认 deny（`--allow-network` 全开）；`--allow-exec-path` 扩展可执行目录；嵌套 Seatbelt/沙箱不可用 **fail-closed**（预检 exit 3、不产生 run），不提供无沙箱 fallback。
+- **trace v7**：新增 `tool_calls` 表（`error_sha256`/bash 审计字段）；`--mode=tools` 默认 **recorded-only 回放**（绝不执行工具/副作用）；`reexec` v0.4 未实现（exit 2，v0.5）。
+- **CLI 示例**：
+  ```bash
+  zgraph run graph.json --fake-llm --allow-builtin-tools --workspace-dir ./ws
+  zgraph run graph.json --fake-llm --allow-builtin-tools --allow-bash --workspace-dir ./ws
+  zgraph replay --run <run_id> --mode=tools --replay-tools=recorded
+  ```
+- **测试（已实测）**：`cargo test -p zgraph-harness` **339/0/1**；`cargo test --workspace` **1216/0/3**；pytest **183**；e2e **23 target / 166/0/2**（v0.4 29 用例/5 target = D5c 28 + REV-112 补 1；v0.3 137 + v0.4 29 = 166）。
+- **性能**：[`doc/perf-baseline-v0.4.txt`](doc/perf-baseline-v0.4.txt)（5-trial：AC-01 +0.0%、AC-12 −0.7%、SOP smoke +0.0%，门禁通过；full-60 validate +6.7%、运行期 ISSUE-112 例外）。
+- **发布产物/状态**：`dist/zgraph-v0.4.0-*.tar.gz` + sha256、`dist/RELEASE_NOTES-v0.4.0.md` 由 Lead/发布流程构建；tag `v0.4.0`（**发布流程执行中**，用户授权后创建）；GitHub Release 由发布流程创建。
+- **已知限制**：bash 仅 macOS（嵌套/不可用 fail-closed；真实隔离证据需用户普通终端 `crates/zgraph-harness/scripts/verify-sandbox.sh`）；cargo/node 等构建工具默认不可执行；hardlink/TOCTOU 残余风险；trace 无 FK 删除清理；`reexec` v0.5；W5 共享评审队列延至 v0.5；ISSUE-176+ 台账见 [issues](doc/issues.md)。
+- **下一步**：v0.5（W5 + 真实 Codex/DSH 验证 + ISSUE 清理）；详见 [DR-012](doc/decisions/DR-012-v04-scope-and-waves.md) / [progress](doc/progress.md)。
 
 ## 快速开始
 

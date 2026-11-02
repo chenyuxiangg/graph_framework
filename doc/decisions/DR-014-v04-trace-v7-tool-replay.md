@@ -164,3 +164,10 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 | 回放 | 默认 **recorded-only**（绝不执行任何工具/副作用）；`reexec` 接口保留、v0.5 落地（仅只读 + pre_sha256 漂移检查） |
 | 迁移 | v6→v7 **仅新增表/索引**（无重建）；备份/单事务/失败恢复/只读拒绝沿用现有 `unsupported schema version` 语义；无工具调用输出与 v6 一致 |
 | 无副作用证明 | noop spawner/沙箱调用计数=0、workspace 快照 diff 不变、`tool_calls` 行数不变（AC-24 g） |
+
+## 11. 实现执行记录（as-built，2026-11-03，REV-113；只追加）
+
+- **分支/提交**：D5a `ea6f657`+`90b6738`（REV-109）；D5b1 `443ca3d`+`c035637`（REV-110）；D5b2 `e197584`+`d4da442`（REV-111）；D5c `598ccff`+`7530bec`+`0a47295`（REV-112）。合并点 `8897053`。
+- **as-built**：`TRACE_SCHEMA_VERSION=7`；`tool_calls` 表 final 含 `error_sha256`/`bash_signal`/`sandbox_profile_sha256`；排序 `(started_at, call_id)`；写入 `TraceInput::ToolCall`（不入 `events`）；trace 人类行/NDJSON `{"kind":"ToolCall"}` additive；`--stats` 仅 >0；`replay --mode=tools` recorded（无 spawn/无副作用；missing/truncated/mismatch exit3），reexec 用法错误 exit2（v0.5）；无工具调用输出与 v6 一致。
+- 迁移：v6→v7 只新增表/索引；备份/单事务/只读拒绝/链式；旧二进制只读拒绝。
+- 测试：e2e trace_tools_v04 9 用例 + v04_regression 3；e2e 166/0/2。
