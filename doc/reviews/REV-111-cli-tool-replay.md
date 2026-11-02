@@ -118,3 +118,15 @@ bash scripts/dev/check.sh                    # CHECK PASSED
 | 门禁 | ✅ cli 249/0、tool_replay 16/0、workspace 1187/0/3、clippy/fmt/check/no-default 全绿；`602865b..d4da442` 仅 cli 3 文件 |
 
 **最终状态**：C1 closed；P3-1/P3-2 closed；P3-3–P3-8 留 D6 文档/格式。建议 Lead merge D5b2 → D5c e2e。
+
+## 9. 第二评审 · 跨模块（harness/e2e/Cargo）（Lead 追加，2026-11-02）
+
+- **评审人**：`lead`（**≠ 作者** `cli-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`297d648..b8a8fce`）：
+  1. harness 小扩展：`tool.rs`/`agent_loop.rs`/`test_support.rs`（已批准）+ **`ctx.rs`（`HarnessCtx::node_id/attempt` 默认方法）**、`executor.rs`（`HarnessNodeCtx` 实现）、`lib.rs`（re-export redact）；
+  2. CLI：`bridge.rs`（ToolCallTraceSink）、`replay_cmd.rs`/`trace_cmd.rs`/`run_cmd.rs`、`Cargo.toml` + `Cargo.lock`（`sha2`）、`tests/tool_replay.rs`（新）等；
+  3. e2e 机械：`tests/e2e/mcp_v03.rs` AC-19f trace NDJSON allowed kind 集合加 additive `ToolCall`（`events.kind` 仍 7 类、其它断言不动）。
+- **核对结论（通过）**：harness 扩展仅为上下文传递/脱敏公开，工具行为与默认 no-op 路径不变；e2e 仅放宽 additive kind 集合（未放宽 events/输出断言）；Cargo 依赖 `sha2` 为 sha256 校验所需；无 kernel/其它模块改动。
+- **Lead 亲自验证**：`git diff 297d648..b8a8fce --stat` 仅 cli + harness 6 文件 + 1 e2e + 2×Cargo（+ REV 记录）；`cargo test --workspace --offline` = 1187/0/3；`cargo test -p zgraph-cli --offline` = 249/0；`cargo test -p zgraph-harness --offline` 全绿。
+- **裁决/后续**：`--stats` 仅 >0 输出（AC-24 c 兼容）；trace human/JSON 口径与 sink 注入说明 D6 文档；未知 source/status 告警一次已实现。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
