@@ -100,9 +100,11 @@
 | [REV-096](REV-096-docs-v03-design.md) | 2026-11-01 | docs | `docs/docs-v03-design` | 通过（首轮有条件通过 → C1–C5 + 6 项跨文档残留由 `80a42c1`/`7659ec8` 关闭后复审通过；v0.3 V1 设计冻结：DR-008..011 + spec 00/02/05/06/07 草案 + AC-18/19/20 设计；§5.14 编号保留；P2/P3 见记录 §6.4） | reviewer-a（主审）+ lead（裁决/第二评审） |
 | [REV-097](REV-097-harness-skills.md) | 2026-11-01 | harness（含 cli/kernel 机械） | `feat/harness-skills` | 通过（V2 skills：发现/校验/索引注入/`skill_view`/预算/安全；harness 182/0/1、workspace 951/0/3；P2/P3 见记录 §3） | reviewer-b |
 | [REV-098](REV-098-harness-mcp.md) | 2026-11-01 | harness（含 cli/kernel/Cargo 机械） | `feat/harness-mcp` | 通过（首轮有条件通过 → C1/C2 + P2 加固由 `15f3d18` 关闭后复审通过；V3 MCP：rmcp 3.8.0 feature-gated 双 era/registry/`--allow-mcp`/工具桥接/`close_mcp` 幂等；harness 207/206、workspace 976/0/3；P2⑥ 残余与 P3 见记录 §6.3） | reviewer-a（主审）+ lead（裁决/第二评审） |
+| [REV-099](REV-099-harness-plugin.md) | 2026-11-02 | harness（含 cli/kernel/py-worker/Cargo 机械） | `feat/harness-plugin` | 通过（首轮有条件通过 → C1–C3 由 `3bbe4b5` 关闭；harness 233/0/1、workspace 1003/0/3、pytest 183；Codex adapter/DSH 骨架、llm_calls 1/节点、有界读取/取消无孤儿） | reviewer-b（主审）+ lead（第二评审） |
+| [REV-100](REV-100-harness-v03-residual.md) | 2026-11-02 | harness | `fix/harness-v03-residual` | 通过（MCP 每 run/server 重启≤1/spawn=2/transport_closed；>32768 截断三键+后缀；http_insecure；Codex cancel 有界等待；harness 235、workspace ×2 1006/0/3、pytest 183） | reviewer-b |
 | [REV-101](REV-101-e2e-v03.md) | 2026-11-02 | e2e | `test/e2e-v03` | 通过（V5a 真链路：AC-18 a–f 10 用例、AC-19 a–g 11、AC-20 a–h 7、v0.2 回归 3；e2e 18 target/137/0/2 ignored、workspace 1037/0/3、pytest 183；新语义 spawn=2/transport_closed、truncated JSON、http_insecure 均实测；P3 见记录 §3） | reviewer-a |
+| [REV-102](REV-102-docs-v03-spec.md) | 2026-11-02 | docs | `docs/docs-v03-spec` | 有条件通过（AC-18 10/AC-19 11/AC-20 7/回归 3=31 与 07 逐名核对；PROVENANCE §3 7419/7822/9/9；C1 C3 test flake、C2 stale as-built 待关闭；见记录 §1/§3） | reviewer-b |
 | [REV-103](REV-103-harness-codex-cancel-race.md) | 2026-11-02 | harness（测试侧） | `fix/harness-codex-cancel-race` | 通过（REV-102 C1：删除固定 600ms，canceller 有界等待 pid 文件 ≤10s 后再 cancel；超时/无 pid 先 close_provider 清理；原断言全保留；仅 plugin.rs 测试 +25/−22；隔离 ×5、harness 235/0/1 双构建、workspace ×2 1037/0/3、pytest 183、clippy/fmt/check/no-default 全绿） | reviewer-a |
-
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
 - `merge.sh` 会查找包含 `分支: <branch>` 且 `结论：通过` 的记录，找不到则拒绝合并。
