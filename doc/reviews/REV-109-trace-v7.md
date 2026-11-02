@@ -130,3 +130,17 @@ bash scripts/dev/check.sh                    # CHECK PASSED
 | P3 writer 上限前置 | ✅ 10000 行判定在 normalize 前；跨 batch 上限测试（flush 后继续计数） |
 
 **最终状态**：C1–C3 closed；P3 主要项 closed/留下 D6 文档；无 P0/P1；建议 Lead merge D5a → D5b。
+
+## 9. 第二评审 · 跨模块（cli/e2e/Cargo 机械）（Lead 追加，2026-11-02）
+
+- **评审人**：`lead`（**≠ 作者** `trace-dev`；Lead 已批准跨模块机械改动，按 AGENTS §2 追加第二评审）
+- **范围**（`4f27d51..fe1111f`）：
+  1. `crates/zgraph-cli/src/bridge.rs`：`TraceInput::ToolCall` observer kind arm；
+  2. `crates/zgraph-cli/src/run_cmd.rs`：`lifecycle_detail` 新变体 → `None`（非 events 行）；
+  3. `crates/zgraph-cli/tests/decide.rs`：schema 版本期望 6→7、`newer_schema` 注入 7→8；
+  4. `tests/e2e/{dynamic_fanout,gate_defer,human_decide,mcp_v03,v03_regression}.rs`：schema 版本期望 v7 与备份份数机械同步；
+  5. `crates/zgraph-trace/Cargo.toml` + `Cargo.lock`：`sha2`（trace 侧 sha256）。
+- **核对结论（通过）**：仅编译/版本期望/测试适配，零行为变化、未放宽断言、未改 kernel；CLI 默认输出/退出码不变；e2e 期望仅随 schema v7 更新。
+- **Lead 亲自验证**：`git diff 4f27d51..fe1111f --stat` 仅 trace 源/测试 + cli 2 文件 + cli tests + 5 e2e + Cargo/lock（+ REV 记录）；`cargo test --workspace --offline` = 1151/0/3；`cargo test -p zgraph-trace --offline` = 113/0。
+- **裁决/后续**：唯一键按 DR-014 §1（不含 node_id）；无 FK 清理语义、截断 JSON 文档、trace 常量命名留 D5b/D6；D5b 使用同口径 sha256 序列化。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
