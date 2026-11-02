@@ -1509,7 +1509,7 @@ pub trait AgentProvider: Send + Sync {
 ### 5.15.3 bash OS 沙箱
 
 - **必须**在 macOS `sandbox-exec` profile 内：仅 workspace+allowlist 读写、系统只读路径（spike 定集合）、`TMPDIR=<workspace>/.tmp`；网络默认 **deny**（`--allow-network` 全开）。
-- 无沙箱 fallback；沙箱不可用/启动失败 → **fail-closed**（`HARNESS_SANDBOX_UNAVAILABLE` 或 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`，Lead 裁决）。
+- 无沙箱 fallback；沙箱不可用/启动失败 → **fail-closed**：配置/启动前 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（不 fail run）；**零新码**（Lead 裁决）。
 - bash 超时/取消 → kill 进程组；stdout/stderr 各 32 KiB cap；cwd 必须在 jail 内；环境白名单。
 
 ### 5.15.4 错误面
@@ -1518,7 +1518,7 @@ pub trait AgentProvider: Send + Sync {
 |---|---|
 | opt-in/配置/workspace 非法/名称冲突 | `HARNESS_CONFIG_LOAD{reason}`（Crashed） |
 | 运行期文件/搜索/bash 失败/越界 | `TOOL_ERROR{reason}`（喂回 LLM） |
-| bash 沙箱不可用 | `HARNESS_SANDBOX_UNAVAILABLE`（推荐；fail-closed） |
+| bash 沙箱不可用 | 配置期 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed）／运行期 `TOOL_ERROR{reason:"sandbox_unavailable"}`（fail-closed，零新码） |
 | 既有错误码 | 不变；新码 append-only（00 §0.4） |
 
 ### 5.15.5 结果上限

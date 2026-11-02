@@ -112,11 +112,11 @@ D1 docs 设计冻结（本批，REV-105）
 
 | # | 事项 | 推荐 |
 |---|---|---|
-| 1 | 错误码命名 | **不新增顶层码**：jail/工具失败走 `TOOL_ERROR{reason}`；opt-in/配置走 `HARNESS_CONFIG_LOAD{reason}`；沙箱不可用 → **`HARNESS_SANDBOX_UNAVAILABLE`**（新码，fail-closed bash；若要求零新码则用 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`） |
-| 2 | 网络默认 | **deny**；`--allow-network` 显式全开（不做域名白名单） |
-| 3 | bash 沙箱不可用错误面 | **fail-closed**：opt-in 校验期不可用 → `HARNESS_SANDBOX_UNAVAILABLE`（Crashed）；运行期探测失败 → 工具错误 fail-closed |
-| 4 | `--allow-path` 粒度 | **目录级**（canonicalize；读写全开），不接受文件级/通配；可重复 |
-| 5 | apply_patch 多文件原子性 | **严格原子**：全成功或全不改；跨文件事务用「暂存+回滚」；不做部分应用 |
-| 6 | v7 字段上限 | args/result **64 KiB**、stdout/stderr **32 KiB**、command **8 KiB**、path **4 KiB**；超限 truncated + hash；回放遇 truncation **fail-closed** |
-| 7 | 只读工具 reexec 集合 | `read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永不** reexec |
+| 1 | 错误码命名 | **零新码（Lead 裁决）**：不新增 `HARNESS_SANDBOX_UNAVAILABLE`/kind；配置/启动前 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（喂回 LLM） |
+| 2 | 网络默认 | **已裁决：deny**；`--allow-network` 显式全开（不做域名白名单） |
+| 3 | bash 沙箱不可用错误面 | **fail-closed**：配置/启动前不可用 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期探测/执行失败 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（不 fail run）；**无无沙箱 fallback** |
+| 4 | `--allow-path` 粒度 | **已裁决：目录级**（canonicalize；读写全开），不接受文件级/通配；可重复 |
+| 5 | apply_patch 多文件原子性 | **已裁决：严格原子**：全成功或全不改；跨文件事务用「暂存+回滚」；不做部分应用 |
+| 6 | v7 字段上限 | **已裁决**：args/result **64 KiB**、stdout/stderr **32 KiB**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；超限 truncated + 全量 sha256；副作用回放遇截断 **fail-closed**；只读 reexec 可重算 |
+| 7 | 只读工具 reexec 集合 | **已裁决**：`read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永不** reexec |
 | 8 | W5 | 顺延 v0.5（已裁决） |

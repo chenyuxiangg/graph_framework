@@ -14,7 +14,7 @@
 | jail | `--workspace-dir <dir>`（缺省 `.`，canonicalize）；`--allow-path <dir>` 可重复；词法 + canonicalize + symlink 逃逸拒绝 |
 | bash | macOS `sandbox-exec` profile：仅 workspace+allowlist 读写、系统只读、`TMPDIR=<workspace>/.tmp`；网络默认 deny；`--allow-network` 全开；沙箱不可用 → **fail-closed** |
 | 安全模型 | 文件工具 **Rust 强制** jail；bash **OS 沙箱强制**；不做应用层黑名单/无沙箱 fallback |
-| 错误 | 工具失败 `TOOL_ERROR{reason}`；opt-in/配置 `HARNESS_CONFIG_LOAD{reason}`；沙箱不可用 `HARNESS_SANDBOX_UNAVAILABLE`（推荐；见 §9） |
+| 错误 | **零新码**：工具失败 `TOOL_ERROR{reason}`；opt-in/配置/启动前沙箱探测失败 `HARNESS_CONFIG_LOAD{reason}`；运行期沙箱失败 `TOOL_ERROR{reason:"sandbox_unavailable"}`；无新 kind/码（§6） |
 | trace | 每次工具调用写 `tool_calls`（v7，DR-014）；默认 recorded 回放 |
 
 ## 1. 工具源与优先级
@@ -29,6 +29,14 @@
 - **冲突**：同一 LLM 工具名重复（跨源）→ `HARNESS_CONFIG_LOAD{reason:"tool_name_conflict", tool}`；builtin 名固定，MCP/Python 不得占用 `builtin__*`（注册期拒绝）。
 - **优先级**：无覆盖语义；同名即冲突（fail-closed）。`--allow-builtin-tools` 只注册文件/搜索；`--allow-bash` 额外注册 bash；未开启时请求 builtin 名 → 配置错误（加载期）。
 - 工具描述/参数 schema 内置固定（可审计）；`tools` 顺序 = `AgentConfig.tools`（请求字节可复现）。
+
+### 1.1 冲突检测与白名单（Lead 裁决 REV-105）
+
+- **无优先级/无覆盖**：三类工具源（builtin / mcp / python）**不按优先级覆盖**；同一 LLM 工具名出现 >1 次 → `HARNESS_CONFIG_LOAD{reason:"tool_name_conflict", tool, sources}`（fail-closed，加载期）。
+- **命名空间保留**：`builtin__` 前缀由 Rust 内置独占；MCP/Python 工具名不得以 `builtin__` 开头（注册期拒绝，reason `reserved_prefix`）。`mcp__` 同理由 MCP 占用（v0.3 已有）。
+- **`AgentConfig.tools` 白名单对所有源一致**：无论 builtin/mcp/python，只有列在 `tools` 中的工具才可见/可调用；未列 → 既有 `HARNESS_CONFIG_LOAD{reason:"tool_not_registered"}`（加载期）/`HARNESS_UNKNOWN_TOOL`（运行期幻觉）；`tools` 顺序决定 schema 顺序（字节可复现）。
+- **builtin 名固定集**：8 个名字不可被覆盖/重命名；`--allow-builtin-tools`/`--allow-bash` 只决定是否**注册**，不改变白名单语义。
+- **workspace 缺省**：`--workspace-dir` 缺省 `.`（canonicalize）；未 opt-in 时不解析/不触碰 workspace。
 
 ## 2. 工作区 jail（文件工具）
 
@@ -107,7 +115,7 @@
 },"required":["patch"],"additionalProperties":false}
 ```
 
-- 支持 `---/+++`、`@@`、多文件；**严格原子**：先解析全部 hunk → 校验全部目标文件与上下文 → 全部成功才写；任一失败**不改任何文件**（推荐，Lead 裁决项）。
+- 支持 `---/+++`、`@@`、多文件；**严格原子（Lead 裁决已确认）**：先解析全部 hunk → 校验全部目标文件与上下文 → 全部成功才写；任一失败**不改任何文件**。
 - 只允许 workspace/allow-path；`a/`/`b/` 前缀按 `strip` 去；不支持二进制/rename/copy（→ `TOOL_ERROR{reason:"unsupported_patch"}`）。
 - 结果：`{files:[{path, added, removed, sha256_before, sha256_after}], total_added, total_removed}`；每文件/总大小上限。
 
@@ -185,7 +193,7 @@
 
 - 未开启 `--allow-builtin-tools` 时，`AgentConfig.tools` 出现 `builtin__*` → `HARNESS_CONFIG_LOAD{reason:"builtin_tools_not_allowed"}`。
 - 开启文件工具但未开 bash：bash 不出现在注册表；引用 → 同上/`tool_not_registered`。
-- `--allow-bash` 但 OS 沙箱探测失败 → **加载期** `HARNESS_SANDBOX_UNAVAILABLE`（Crashed），不注册 bash（fail-closed；Lead 裁决项）。
+- `--allow-bash` 但 OS 沙箱启动前探测失败 → **加载期** `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)），不注册 bash（fail-closed；**零新码**，Lead 裁决）。
 - 运行时沙箱故障（探测后异常）→ 该次 bash 调用 `TOOL_ERROR{reason:"sandbox_failure"}`，不降级执行。
 
 ## 5. OS 沙箱（bash）
@@ -210,34 +218,33 @@
 - **写**：仅 `workspace_root` + `allow_paths` + `<workspace>/.tmp`；其余 deny。
 - **网络**：默认 `(deny network*)`；`--allow-network` 时 `(allow network*)`（全开，文档警示）。
 - 进程：允许 fork/exec（bash 需要），但继承同一 profile；限制资源由 timeout/输出 cap 兜底。
-- **可用性探测**：启动时 `sandbox-exec -p <profile> /usr/bin/true` 成功才注册 bash；失败 → `HARNESS_SANDBOX_UNAVAILABLE`。
+- **可用性探测**：启动时 `sandbox-exec -p <profile> /usr/bin/true` 成功才注册 bash；失败 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)，bash 不注册）。
 - profile 生成：字符串模板 + 路径转义（`"`/`\`）；不拼接用户命令（command 作为 `sandbox-exec` 的 argv 参数，固定 `bash -lc`）。
 - **待 spike**：系统只读路径最小集合、`sandbox-exec` 在 macOS 版本上的弃用行为、dyld/临时文件需求、性能开销、失败模式。
 
 ### 5.2 Linux（备选，不承诺）
 
-- bwrap（`--ro-bind` 系统、`--bind` workspace、`--unshare-net`）或 landlock；v0.4 只文档化，不实测/不承诺；`--allow-bash` 在无可用沙箱的 Linux → `HARNESS_SANDBOX_UNAVAILABLE`。
+- bwrap（`--ro-bind` 系统、`--bind` workspace、`--unshare-net`）或 landlock；v0.4 只文档化，不实测/不承诺；`--allow-bash` 在无可用沙箱的 Linux → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（fail-closed）。
 
 ### 5.3 失败面（fail-closed）
 
 | 场景 | 结果 |
 |---|---|
-| `sandbox-exec` 不存在/不可执行 | 加载期 `HARNESS_SANDBOX_UNAVAILABLE`（Crashed；bash 不注册） |
+| `sandbox-exec` 不存在/不可执行 | 加载期 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed；bash 不注册） |
 | profile 语法/启动失败 | 加载期同上；运行期 `TOOL_ERROR{reason:"sandbox_failure"}` |
 | 沙箱内命令越界写/联网 | 命令自身失败（OS deny）；exit≠0 作为工具结果；**不**降级到无沙箱 |
 | bash 未 opt-in | 不注册；引用 → 配置错误 |
 | OS 非 macOS 且无等价实现 | Linux 文档化；其他平台 bash 不可用（fail-closed） |
 
-## 6. 错误码/失败面（推荐，Lead 裁决）
+## 6. 错误码/失败面（Lead 裁决：零新码）
 
-| 码 | 触发 | 映射 |
+| 码/载体 | 触发 | 映射 |
 |---|---|---|
-| `HARNESS_CONFIG_LOAD{reason}` | `builtin_tools_not_allowed`/`tool_not_registered`/`tool_name_conflict`/`workspace_invalid`/`allow_path_invalid`/`sandbox_unavailable`（若零新码） | Crashed（Config） |
-| `TOOL_ERROR{reason}` | 运行期一切工具失败：`path_escape`/`not_found`/`is_directory`/`invalid_utf8`/`too_large`/`no_match`/`multiple_matches`/`unsupported_patch`/`sandbox_failure`/`timeout`/`cancelled`/`invalid_args` 等 | 喂回 LLM，不 fail run |
-| **`HARNESS_SANDBOX_UNAVAILABLE`**（推荐新增，append-only） | bash opt-in 但 OS 沙箱不可用（fail-closed） | Crashed（Config） |
+| `HARNESS_CONFIG_LOAD{reason}` | `builtin_tools_not_allowed`/`tool_not_registered`/`tool_name_conflict`/`reserved_prefix`/`workspace_invalid`/`allow_path_invalid`/**`sandbox_unavailable`**（配置/启动前探测失败） | Crashed（Config） |
+| `TOOL_ERROR{reason}` | 运行期一切工具失败：`path_escape`/`not_found`/`is_directory`/`invalid_utf8`/`too_large`/`no_match`/`multiple_matches`/`unsupported_patch`/**`sandbox_unavailable`**/`timeout`/`cancelled`/`invalid_args` 等 | 喂回 LLM，不 fail run |
 
-- 若 Lead 要求**零新码**：沙箱不可用 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`，不新增码。
-- 既有 `TOOL_ERROR`/`HARNESS_UNKNOWN_TOOL`/`HARNESS_CONFIG_LOAD` 语义不变；新码只追加 00 §0.4。
+- **不新增 `HARNESS_SANDBOX_UNAVAILABLE`、不新增 `HarnessErrorKind::Sandbox`**：配置/启动前 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`；均 fail-closed（拒绝执行，不降级）。
+- 既有 `TOOL_ERROR`/`HARNESS_UNKNOWN_TOOL`/`HARNESS_CONFIG_LOAD` 语义不变；reason 为闭集字符串（新增只追加，不新增顶层码）。
 
 ## 7. 安全信任模型
 
@@ -247,7 +254,7 @@
 - workspace 是普通目录（不自动 gitignore）；`.tmp` 建议 gitignore；文档警示。
 - 不做：容器/VM、完整 Linux/Windows、网络白名单、文件级 allow-path。
 
-## 8. 结果上限与截断（推荐；Lead 裁决）
+## 8. 结果上限与截断（Lead 裁决已确认）
 
 | 工具 | 单次上限 |
 |---|---|
@@ -279,3 +286,18 @@
 | AC-23 | c | 沙箱内越界写/网络默认 deny；`--allow-network` 生效 |
 | AC-23 | d | 沙箱不可用 fail-closed（不降级）；无沙箱 fallback |
 | AC-23 | e | 默认路径不变 |
+
+## 10. Lead 裁决（REV-105 已确认）
+
+| # | 事项 | 裁决 |
+|---|---|---|
+| 1 | 错误码 | **零新码**：配置/启动前沙箱不可用 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（喂回 LLM）；不新增码/kind |
+| 2 | 网络 | 默认 **deny**；`--allow-network` 显式全开（不做域名白名单） |
+| 3 | bash 沙箱不可用 | **fail-closed**：配置期 Crashed(Config)；运行期工具错误；**无无沙箱 fallback** |
+| 4 | `--allow-path` | **目录级**（canonicalize、读写全开、可重复）；不做文件级/通配 |
+| 5 | apply_patch | **严格原子**（全成功或全不改；暂存+回滚） |
+| 6 | v7 上限 | args/result **64 KiB**、stdout/stderr **32 KiB**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；截断带 `truncated` + 全量 `sha256`；副作用回放遇截断 fail-closed；只读 reexec 可重算 |
+| 7 | reexec | 仅 `read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永远 recorded-only** |
+| 8 | 工具源/白名单 | **无优先级/无覆盖**，重名 **fail-closed**（§1.1）；`AgentConfig.tools` 白名单对所有源一致；`builtin__` 前缀保留 |
+
+> 第 9 项（macOS sandbox-exec 系统只读路径/弃用行为/TMPDIR/dyld/性能/Linux 承诺）待 arch-researcher spike 结论，落 DR-013 §5/05 §5.15.3。

@@ -121,7 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 | `REPLAY_TOOL_RECORD_TRUNCATED`（CLI） | 记录 truncated=1，不能安全回放 |
 | `REPLAY_TOOL_MISMATCH`（CLI） | reexec 结果与记录不一致 |
 | `HARNESS_BUILTIN_TOOL_ERROR`（可选，不推荐） | 若 Lead 要求独立码；默认走 `TOOL_ERROR{reason}` |
-| `HARNESS_SANDBOX_UNAVAILABLE`（DR-013） | bash 沙箱不可用（fail-closed） |
+| `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}` / `TOOL_ERROR{reason:"sandbox_unavailable"}`（DR-013；不新增码） | bash 沙箱不可用（fail-closed） |
 
 - 默认不写 `runs.error_code`（CLI 命名空间）；退出码 3（记录类）/1（不一致）。
 
