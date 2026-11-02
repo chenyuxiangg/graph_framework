@@ -73,7 +73,7 @@ pub use budget::{
     check_and_trim, estimate_message_tokens, estimate_messages_tokens, estimate_tokens,
     prompt_budget, BudgetSegments,
 };
-pub use builtin::BuiltinToolSet;
+pub use builtin::{BashOptions, BuiltinToolSet};
 pub use config::{
     agent_index, agent_uses_mcp, load_agent, load_agent_with_load_options, AgentConfig,
     AgentLoadOptions, HarnessConfig, HarnessKind, LoadedAgent, ModelConfig,

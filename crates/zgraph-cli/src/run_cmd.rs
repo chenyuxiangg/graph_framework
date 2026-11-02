@@ -122,6 +122,12 @@ options:
                          default: off)
   --workspace-dir <dir>  workspace jail root for builtin file tools (default: .; canonicalized)
   --allow-path <dir>     extra read-only directory for builtin file tools; repeatable
+  --allow-bash           allow builtin__bash under the macOS OS sandbox (fail-closed when
+                         the sandbox is unavailable/nested)
+  --allow-exec-path <dir>
+                         extra executable directory for builtin__bash; repeatable
+                         (requires --allow-bash)
+  --allow-network        allow network from builtin__bash (default: deny; requires --allow-bash)
   --python <exe>         Python interpreter (default: $PYO3_PYTHON > $ZGRAPH_PYTHON > python3)
   --python-path <dir>    prepend a module search path; repeatable (PYTHONPATH)
   --fake-llm[=<script>]  scripted LLM provider (bare flag = built-in default script)
@@ -216,6 +222,12 @@ pub struct RunArgs {
     pub workspace_dir: Option<PathBuf>,
     /// `--allow-path`（可重复）：额外**只读**目录（canonicalize）。
     pub allow_paths: Vec<PathBuf>,
+    /// `--allow-bash`：注册 `builtin__bash`（需 macOS OS 沙箱可用；fail-closed）。
+    pub allow_bash: bool,
+    /// `--allow-exec-path`（可重复）：bash 额外可执行目录。
+    pub exec_paths: Vec<PathBuf>,
+    /// `--allow-network`：bash 网络（默认 deny）。
+    pub allow_network: bool,
     /// `--python` 显式解释器（`None` 时按 `$ZGRAPH_PYTHON` → `python3`）。
     pub python: Option<String>,
     /// `--python-path`（可重复；按序叠加到 `PYTHONPATH` 之前）。
@@ -273,6 +285,9 @@ struct ParseState {
     allow_builtin_tools: bool,
     workspace_dir: Option<PathBuf>,
     allow_paths: Vec<PathBuf>,
+    allow_bash: bool,
+    exec_paths: Vec<PathBuf>,
+    allow_network: bool,
     python: Option<String>,
     python_paths: Vec<PathBuf>,
     fake_llm: FakeLlmMode,
@@ -297,6 +312,9 @@ impl Default for ParseState {
             allow_builtin_tools: false,
             workspace_dir: None,
             allow_paths: Vec::new(),
+            allow_bash: false,
+            exec_paths: Vec::new(),
+            allow_network: false,
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,
@@ -350,6 +368,16 @@ impl ParseState {
                 self.allow_paths
                     .push(PathBuf::from(option_value(iter, "--allow-path")?));
             }
+            "--allow-bash" => {
+                self.allow_bash = true;
+            }
+            "--allow-exec-path" => {
+                self.exec_paths
+                    .push(PathBuf::from(option_value(iter, "--allow-exec-path")?));
+            }
+            "--allow-network" => {
+                self.allow_network = true;
+            }
             "--python" => self.python = Some(option_value(iter, "--python")?),
             "--python-path" => {
                 self.python_paths
@@ -381,6 +409,9 @@ impl ParseState {
         if self.real && self.fake_llm != FakeLlmMode::Off {
             return Err("--real conflicts with --fake-llm".to_string());
         }
+        if (self.allow_network || !self.exec_paths.is_empty()) && !self.allow_bash {
+            return Err("--allow-network/--allow-exec-path require --allow-bash".to_string());
+        }
         let graph = self
             .graph
             .ok_or_else(|| "run requires <graph.json>".to_string())?;
@@ -399,6 +430,9 @@ impl ParseState {
             allow_builtin_tools: self.allow_builtin_tools,
             workspace_dir: self.workspace_dir,
             allow_paths: self.allow_paths,
+            allow_bash: self.allow_bash,
+            exec_paths: self.exec_paths,
+            allow_network: self.allow_network,
             python: self.python,
             python_paths: self.python_paths,
             fake_llm: self.fake_llm,
@@ -888,14 +922,26 @@ pub fn run(args: &RunArgs) -> ExitCode {
 fn resolve_builtin_tools(
     args: &RunArgs,
 ) -> Result<Option<Arc<zgraph_harness::BuiltinToolSet>>, ExitCode> {
-    if !args.allow_builtin_tools {
+    if !args.allow_builtin_tools && !args.allow_bash {
         return Ok(None);
     }
     let workspace = args
         .workspace_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("."));
-    match zgraph_harness::BuiltinToolSet::new(&workspace, &args.allow_paths) {
+    // v0.4/D4：`--allow-bash` 构造期渲染 profile + preflight（嵌套/不可用/非法 →
+    // HARNESS_CONFIG_LOAD{reason}，exit 3、不产生 run）；文件/搜索工具仍需
+    // `--allow-builtin-tools`（bash 不隐含文件工具）。
+    let bash = args.allow_bash.then(|| zgraph_harness::BashOptions {
+        exec_paths: args.exec_paths.clone(),
+        allow_network: args.allow_network,
+    });
+    match zgraph_harness::BuiltinToolSet::new_with_options(
+        &workspace,
+        &args.allow_paths,
+        args.allow_builtin_tools,
+        bash,
+    ) {
         Ok(tools) => Ok(Some(tools)),
         Err(error) => {
             let reason = error
@@ -914,6 +960,13 @@ fn resolve_builtin_tools(
 
 /// 运行时内的主流程（启动顺序见模块文档）。
 async fn run_in_runtime(args: &RunArgs) -> ExitCode {
+    // v0.4/D2/D4：内置工具 opt-in 预检放在打开 trace/storage **之前**——`--allow-bash`
+    // 的 sandbox preflight 失败（嵌套/不可用/profile 非法）→ exit 3、不产生 run、
+    // 不创建 DB；未 opt-in 时不解析 workspace（零副作用）。
+    let builtin_tools = match resolve_builtin_tools(args) {
+        Ok(tools) => tools,
+        Err(code) => return code,
+    };
     let db_path = resolve_db_path(args.db.as_deref());
     let memory_db = is_memory_db(&db_path);
     if memory_db {
@@ -955,14 +1008,6 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
             return ExitCode::from(EXIT_ENTRY_INPUT);
         }
     }
-    // v0.4/D2：内置文件工具 opt-in（未开启时不解析 workspace；非法 → exit 3、不产生 run）。
-    let builtin_tools = match resolve_builtin_tools(args) {
-        Ok(tools) => tools,
-        Err(code) => {
-            close_quietly(writer);
-            return code;
-        }
-    };
     // W3a：human 图启动 decision consumer（非 memory；无 human 图的图不启动，行为不变）。
     let human_consumer = !memory_db && graph_has_human(&graph);
     let (decision_tx, decision_rx) = mpsc::channel::<HumanDecisionRecord>();
@@ -2199,6 +2244,9 @@ mod tests {
         assert!(!parsed.allow_builtin_tools);
         assert_eq!(parsed.workspace_dir, None);
         assert!(parsed.allow_paths.is_empty());
+        assert!(!parsed.allow_bash);
+        assert!(parsed.exec_paths.is_empty());
+        assert!(!parsed.allow_network);
         assert_eq!(parsed.python, None);
         assert!(parsed.python_paths.is_empty());
         assert_eq!(parsed.fake_llm, FakeLlmMode::Off);
@@ -2233,6 +2281,12 @@ mod tests {
             "ro1",
             "--allow-path",
             "ro2",
+            "--allow-bash",
+            "--allow-exec-path",
+            "exec1",
+            "--allow-exec-path",
+            "exec2",
+            "--allow-network",
             "--python",
             "/venv/bin/python",
             "--python-path",
@@ -2260,6 +2314,12 @@ mod tests {
             parsed.allow_paths,
             vec![PathBuf::from("ro1"), PathBuf::from("ro2")]
         );
+        assert!(parsed.allow_bash);
+        assert_eq!(
+            parsed.exec_paths,
+            vec![PathBuf::from("exec1"), PathBuf::from("exec2")]
+        );
+        assert!(parsed.allow_network);
         assert_eq!(parsed.python.as_deref(), Some("/venv/bin/python"));
         assert_eq!(
             parsed.python_paths,
@@ -2409,6 +2469,9 @@ mod tests {
             allow_builtin_tools: false,
             workspace_dir: None,
             allow_paths: Vec::new(),
+            allow_bash: false,
+            exec_paths: Vec::new(),
+            allow_network: false,
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,
@@ -2792,6 +2855,9 @@ mod tests {
             allow_builtin_tools: false,
             workspace_dir: None,
             allow_paths: Vec::new(),
+            allow_bash: false,
+            exec_paths: Vec::new(),
+            allow_network: false,
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,
@@ -2819,5 +2885,34 @@ mod tests {
         args.workspace_dir = Some(workspace.path().join("missing"));
         let error = resolve_builtin_tools(&args).expect_err("missing workspace");
         assert_eq!(error, ExitCode::from(EXIT_ENTRY_INPUT));
+    }
+    /// v0.4/D4：`--allow-network`/`--allow-exec-path` 必须与 `--allow-bash` 同时出现。
+    #[test]
+    fn bash_related_flags_require_allow_bash() {
+        let error = parse(&args(&["g.json", "--inputs", "{}", "--allow-network"]))
+            .expect_err("network without bash");
+        assert!(error.contains("--allow-bash"), "{error}");
+        let error = parse(&args(&[
+            "g.json",
+            "--inputs",
+            "{}",
+            "--allow-exec-path",
+            "bin",
+        ]))
+        .expect_err("exec path without bash");
+        assert!(error.contains("--allow-bash"), "{error}");
+        let parsed = parse(&args(&[
+            "g.json",
+            "--inputs",
+            "{}",
+            "--allow-bash",
+            "--allow-exec-path",
+            "bin",
+            "--allow-network",
+        ]))
+        .expect("parse")
+        .expect("not help");
+        assert!(parsed.allow_bash && parsed.allow_network);
+        assert_eq!(parsed.exec_paths, vec![PathBuf::from("bin")]);
     }
 }

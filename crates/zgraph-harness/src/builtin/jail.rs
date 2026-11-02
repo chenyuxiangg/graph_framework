@@ -92,6 +92,11 @@ impl WorkspaceJail {
         &self.root
     }
 
+    /// 只读 allow-path 根（canonicalize；搜索/沙箱 profile 用）。
+    pub fn allow_paths(&self) -> &[PathBuf] {
+        &self.allow_paths
+    }
+
     /// 解析工具参数 `path`（相对 workspace 或绝对）为真实路径并校验访问意图。
     ///
     /// 失败一律 [`ToolFailure`]（喂回 LLM，不终止 run）；reason 闭集：

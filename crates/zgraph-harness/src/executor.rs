@@ -2190,7 +2190,12 @@ mod tests {
                 .with_tool_call_record_sink(sink.clone()),
         );
         let (outcome, trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
-        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Completed);
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
         let calls = trace.streaming_calls();
         assert!(
             calls.iter().any(|call| matches!(
@@ -2353,7 +2358,12 @@ mod tests {
                 .with_tool_call_record_sink(sink.clone()),
         );
         let (outcome, trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
-        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Completed);
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
         let calls = trace.streaming_calls();
         for expected in ["builtin__grep", "builtin__glob"] {
             assert!(
@@ -2396,6 +2406,117 @@ mod tests {
         assert_eq!(
             outcome.error.as_ref().map(|error| error.code.as_str()),
             Some("HARNESS_UNKNOWN_TOOL")
+        );
+    }
+    // ------------------------------------------------------------------
+    // v0.4/D4：builtin__bash opt-in / whitelist / streaming+sink（Fake runner）
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn bash_tool_runs_through_agent_loop_with_fake_sandbox_runner() {
+        let dir = assets(agent_config("parser", &["builtin__bash"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "b1", "name": "builtin__bash",
+                     "args": {"command": "echo hi"}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let sandbox = crate::test_support::FakeSandboxRunner::new();
+        let set = crate::BuiltinToolSet::new_with_runner(
+            &std::fs::canonicalize(dir.path()).expect("canonical"),
+            &[],
+            false,
+            sandbox.clone(),
+        )
+        .expect("bash-only set");
+        let sink = crate::test_support::CapturingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(set)
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
+        let calls = trace.streaming_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                &call.event,
+                StreamingEvent::ToolCallEnd { tool_name, ok, .. }
+                    if tool_name == "builtin__bash" && *ok
+            )),
+            "{calls:?}"
+        );
+        let records = sink.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].1, "builtin__bash");
+        assert!(records[0].3);
+        let requests = sandbox.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].command, "echo hi");
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn bash_reference_requires_allow_bash_registration() {
+        // 文件/搜索工具已开启，但 bash 未开启 → registry 解析失败（tool_not_registered）。
+        let dir = assets(agent_config("parser", &["builtin__bash"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(builtin_set(dir.path())),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("HARNESS_CONFIG_LOAD")
+        );
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("tool_not_registered")),
+            "{:?}",
+            outcome.error
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_reference_without_any_opt_in_is_builtin_tools_not_allowed() {
+        let dir = assets(agent_config("parser", &["builtin__bash"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("builtin_tools_not_allowed")),
+            "{:?}",
+            outcome.error
         );
     }
 }

@@ -13,9 +13,11 @@ use serde_json::Value;
 use zgraph_kernel::StreamingEvent;
 use zgraph_worker::WorkerLimits;
 
+use crate::builtin::bash::{BashOutcome, BashRequest, SandboxRunner};
+use crate::builtin::sandbox::ProcessControl;
 use crate::ctx::HarnessCtx;
 use crate::record::{LlmCallRecorder, LlmCallSnapshot};
-use crate::tools::{ToolCallRecord, ToolCallRecordSink, ToolSource};
+use crate::tools::{ToolCallRecord, ToolCallRecordSink, ToolFailure, ToolSource};
 
 /// 捕获到的一次 LLM 调用记录（拥有所有权的快照副本）。
 #[derive(Debug, Clone, PartialEq)]
@@ -282,5 +284,74 @@ impl HarnessCtx for TestCtx {
 
     fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
         self.tool_limits.clone()
+    }
+}
+
+/// v0.4/D4：Fake 沙箱执行器（记录请求、返回脚本化结果；不启动真实 sandbox-exec）。
+#[derive(Debug, Default)]
+pub struct FakeSandboxRunner {
+    outcomes: Mutex<std::collections::VecDeque<Result<BashOutcome, ToolFailure>>>,
+    requests: Mutex<Vec<BashRequest>>,
+    profile_sha256: String,
+}
+
+impl FakeSandboxRunner {
+    /// 空 Fake（默认返回 exit 0、空输出）。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            profile_sha256: "f".repeat(64),
+            ..Self::default()
+        })
+    }
+
+    /// 追加一个脚本化结果（按调用顺序消费）。
+    pub fn push_outcome(&self, outcome: Result<BashOutcome, ToolFailure>) -> &Self {
+        if let Ok(mut guard) = self.outcomes.lock() {
+            guard.push_back(outcome);
+        }
+        self
+    }
+
+    /// 已记录的请求（按调用顺序）。
+    pub fn requests(&self) -> Vec<BashRequest> {
+        match self.requests.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+impl SandboxRunner for FakeSandboxRunner {
+    fn run(
+        &self,
+        request: &BashRequest,
+        _control: &ProcessControl,
+    ) -> Result<BashOutcome, ToolFailure> {
+        if let Ok(mut guard) = self.requests.lock() {
+            guard.push(request.clone());
+        }
+        match self.outcomes.lock() {
+            Ok(mut guard) => guard.pop_front().unwrap_or_else(|| {
+                Ok(BashOutcome {
+                    exit_code: Some(0),
+                    stdout: b"ok".to_vec(),
+                    ..BashOutcome::default()
+                })
+            }),
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                guard.pop_front().unwrap_or_else(|| {
+                    Ok(BashOutcome {
+                        exit_code: Some(0),
+                        stdout: b"ok".to_vec(),
+                        ..BashOutcome::default()
+                    })
+                })
+            }
+        }
+    }
+
+    fn profile_sha256(&self) -> &str {
+        &self.profile_sha256
     }
 }

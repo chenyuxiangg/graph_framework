@@ -383,7 +383,7 @@ impl LoopState {
                 )
             } else if tool.name.starts_with("builtin__") {
                 let outcome = match run.builtin {
-                    Some(builtin) => execute_builtin_tool(builtin, tool, call),
+                    Some(builtin) => execute_builtin_tool(run, builtin, tool, call).await?,
                     None => (
                         false,
                         tool_error_content(&ToolFailure::new(
@@ -778,17 +778,52 @@ fn map_invoke_error(
 /// 执行内置 `builtin__*` 文件工具（进程内 Rust；参数 schema 先行校验）。
 ///
 /// 返回 `(ok, 喂回 LLM 的 JSON 文本)`；工具级失败转 `TOOL_ERROR`，不终止 run。
-fn execute_builtin_tool(
-    builtin: &BuiltinToolSet,
+async fn execute_builtin_tool(
+    run: &AgentRun<'_>,
+    builtin: &Arc<BuiltinToolSet>,
     tool: &ToolDef,
     call: &ToolCall,
-) -> (bool, String) {
+) -> Result<(bool, String), RunFailure> {
     if let Err(failure) = validate_tool_arguments(tool, &call.args) {
-        return (false, tool_error_content(&failure));
+        return Ok((false, tool_error_content(&failure)));
+    }
+    // D4：bash 在 blocking 线程池执行（长命令不阻塞 tokio worker），取消时先回收
+    // 进程组再向上传播 `RunFailure::Cancelled`（与既有工具取消语义一致）。
+    if tool.name == crate::builtin::TOOL_BASH {
+        let control = crate::builtin::sandbox::ProcessControl::new();
+        let kill_control = control.clone();
+        let set = builtin.clone();
+        let args = call.args.clone();
+        let tool_name = tool.name.clone();
+        let mut handle = tokio::task::spawn_blocking(move || {
+            set.call_with_control(&tool_name, &args, &kill_control)
+        });
+        return tokio::select! {
+            result = &mut handle => match result {
+                Ok(Ok(content)) => Ok((true, content)),
+                Ok(Err(failure)) => Ok((false, tool_error_content(&failure))),
+                Err(error) => Ok((
+                    false,
+                    tool_error_content(&ToolFailure::new(
+                        "sandbox_failure",
+                        format!("bash task failed: {error}"),
+                    )),
+                )),
+            },
+            _ = wait_cancelled(&run.ctx) => {
+                control.request_kill();
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(6),
+                    &mut handle,
+                )
+                .await;
+                Err(RunFailure::Cancelled)
+            }
+        };
     }
     match builtin.call(&tool.name, &call.args) {
-        Ok(content) => (true, content),
-        Err(failure) => (false, tool_error_content(&failure)),
+        Ok(content) => Ok((true, content)),
+        Err(failure) => Ok((false, tool_error_content(&failure))),
     }
 }
 

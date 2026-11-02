@@ -31,20 +31,90 @@ pub(crate) const TOOL_DIFF: &str = "builtin__diff";
 /// 原子临时文件序号（进程内递增，避免并发同名）。
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// v0.4/D2 内置文件工具集合（jail + 固定 5 个工具定义）。
-#[derive(Debug)]
+/// 内置工具集合（jail + 按 opt-in 注册的工具定义；D2 文件/搜索 + D4 bash）。
 pub struct BuiltinToolSet {
     pub(crate) jail: WorkspaceJail,
+    /// 是否注册 D2/D3 文件与搜索工具（`--allow-builtin-tools`）。
+    file_tools: bool,
+    /// D4 bash 沙箱执行器（`--allow-bash`；`None` = 不注册）。
+    pub(crate) bash_runner: Option<Arc<dyn crate::builtin::bash::SandboxRunner>>,
     defs: Vec<ToolDef>,
 }
 
+impl std::fmt::Debug for BuiltinToolSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BuiltinToolSet")
+            .field("root", &self.jail.root())
+            .field("file_tools", &self.file_tools)
+            .field("bash", &self.bash_runner.is_some())
+            .field(
+                "tools",
+                &self.defs.iter().map(|tool| &tool.name).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 impl BuiltinToolSet {
-    /// 构造：canonicalize workspace/allow-paths（失败 → `HARNESS_CONFIG_LOAD`）。
+    /// 构造（D2/D3 语义）：注册文件 5 + 搜索 2，无 bash。
     pub fn new(workspace_dir: &Path, allow_paths: &[PathBuf]) -> Result<Arc<Self>, HarnessError> {
+        Self::new_with_options(workspace_dir, allow_paths, true, None)
+    }
+
+    /// v0.4/D4 构造：按 opt-in 注册（文件/搜索 + 可选 bash）。
+    ///
+    /// `enable_file_tools=false` 时仅注册 bash（`--allow-bash` 不隐含文件工具）；
+    /// `bash` 为 `Some` 时构造期渲染 profile 并 preflight（失败 → `HARNESS_CONFIG_LOAD`）。
+    pub fn new_with_options(
+        workspace_dir: &Path,
+        allow_paths: &[PathBuf],
+        enable_file_tools: bool,
+        bash: Option<crate::builtin::bash::BashOptions>,
+    ) -> Result<Arc<Self>, HarnessError> {
         let jail = WorkspaceJail::new(workspace_dir, allow_paths)?;
-        let mut defs = file_tool_defs();
-        defs.extend(crate::builtin::search::search_tool_defs());
-        Ok(Arc::new(Self { jail, defs }))
+        let runner = match bash {
+            Some(options) => Some(crate::builtin::bash::MacOsSandbox::new(
+                jail.root(),
+                jail.allow_paths(),
+                &options,
+            )?),
+            None => None,
+        };
+        Ok(Self::assemble(jail, enable_file_tools, runner))
+    }
+
+    /// 测试 seam：注入 Fake [`SandboxRunner`]（不渲染 profile/不 preflight）。
+    #[cfg(test)]
+    pub(crate) fn new_with_runner(
+        workspace_dir: &Path,
+        allow_paths: &[PathBuf],
+        enable_file_tools: bool,
+        runner: Arc<dyn crate::builtin::bash::SandboxRunner>,
+    ) -> Result<Arc<Self>, HarnessError> {
+        let jail = WorkspaceJail::new(workspace_dir, allow_paths)?;
+        Ok(Self::assemble(jail, enable_file_tools, Some(runner)))
+    }
+
+    fn assemble(
+        jail: WorkspaceJail,
+        enable_file_tools: bool,
+        bash_runner: Option<Arc<dyn crate::builtin::bash::SandboxRunner>>,
+    ) -> Arc<Self> {
+        let mut defs = Vec::new();
+        if enable_file_tools {
+            defs.extend(file_tool_defs());
+            defs.extend(crate::builtin::search::search_tool_defs());
+        }
+        if bash_runner.is_some() {
+            defs.push(crate::builtin::bash::bash_tool_def());
+        }
+        Arc::new(Self {
+            jail,
+            file_tools: enable_file_tools,
+            bash_runner,
+            defs,
+        })
     }
 
     /// 固定工具定义（顺序稳定；`AgentConfig.tools` 决定给 LLM 的顺序）。
@@ -61,6 +131,17 @@ impl BuiltinToolSet {
     ///
     /// 失败 → [`ToolFailure`]（`TOOL_ERROR` 喂回 LLM，不终止 run）。
     pub fn call(&self, tool_name: &str, args: &Value) -> Result<String, ToolFailure> {
+        let control = crate::builtin::sandbox::ProcessControl::new();
+        self.call_with_control(tool_name, args, &control)
+    }
+
+    /// 带进程控制的调用（bash 超时/取消时由调度层 `request_kill`）。
+    pub(crate) fn call_with_control(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        control: &crate::builtin::sandbox::ProcessControl,
+    ) -> Result<String, ToolFailure> {
         let payload = match tool_name {
             TOOL_READ => self.read(args)?,
             TOOL_WRITE => self.write(args)?,
@@ -69,6 +150,7 @@ impl BuiltinToolSet {
             TOOL_DIFF => self.diff(args)?,
             crate::builtin::search::TOOL_GREP => self.grep(args)?,
             crate::builtin::search::TOOL_GLOB => self.glob(args)?,
+            crate::builtin::bash::TOOL_BASH => self.bash(args, control)?,
             other => {
                 return Err(ToolFailure::new(
                     "unknown_builtin_tool",
@@ -81,6 +163,11 @@ impl BuiltinToolSet {
 
     /// 结果序列化 + 统一上限（`truncated:true` + 全量 sha256 由各工具提供）。
     pub(crate) fn limit_result(&self, payload: Value) -> String {
+        // D4：bash 结果按 stdout/stderr 各 16 KiB head+tail（DR-013 §8 例外），
+        // 不再套用 32 KiB 总上限（两路都满时可略超 32 KiB）。
+        if payload.get("sandbox").is_some() && payload.get("exit_code").is_some() {
+            return serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        }
         let compact = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
         if compact.len() <= BUILTIN_RESULT_MAX_BYTES {
             return compact;

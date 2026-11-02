@@ -300,3 +300,34 @@ pub const BUILTIN_GLOB_MAX_RESULTS: usize = 5_000;
 
 /// 单条 grep match `text` 的字节上限（防单行超长撑爆结果；含截断标记）。
 pub const BUILTIN_SEARCH_TEXT_MAX_BYTES: usize = 4_096;
+
+// ---------------------------------------------------------------------------
+// v0.4/D4 内置 bash + macOS OS 沙箱（DR-013 §3.8/§5/§8；00 §0.5 append-only）
+// ---------------------------------------------------------------------------
+
+/// bash `command` 上限（`BASH_COMMAND_MAX_BYTES` = 8 KiB）。
+pub const BASH_COMMAND_MAX_BYTES: usize = 8_192;
+
+/// bash 默认超时（`BASH_DEFAULT_TIMEOUT_MS` = 120s）。
+pub const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+/// bash 最大超时（`BASH_MAX_TIMEOUT_MS` = 600s）。
+pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// bash 每路输出 drain 上限（`BASH_DRAIN_MAX_BYTES` = 2 MiB；超出继续读并丢弃）。
+pub const BASH_DRAIN_MAX_BYTES: usize = 2_097_152;
+
+/// bash stdout 结果上限（`BASH_STDOUT_MAX_BYTES` = 16 KiB head+tail）。
+pub const BASH_STDOUT_MAX_BYTES: usize = 16_384;
+
+/// bash stderr 结果上限（`BASH_STDERR_MAX_BYTES` = 16 KiB head+tail）。
+pub const BASH_STDERR_MAX_BYTES: usize = 16_384;
+
+/// bash 进程组优雅终止宽限（SIGTERM → 2s → SIGKILL）。
+pub const BASH_TERMINATE_GRACE_MS: u64 = 2_000;
+
+/// 沙箱 preflight 超时（`sandbox-exec` 探测不应挂死）。
+pub const BASH_PREFLIGHT_TIMEOUT_MS: u64 = 10_000;
+
+/// `sandbox-exec` 固定路径（DR-013 §5.2：不依赖 PATH）。
+pub const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";

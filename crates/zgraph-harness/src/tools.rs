@@ -1020,7 +1020,7 @@ fn validate_schema_keyword(
         "properties" => validate_properties_keyword(tool_name, value, keyword_path, depth),
         "items" => validate_items_keyword(tool_name, value, keyword_path, depth),
         "additionalProperties" => {
-            validate_additional_properties_keyword(tool_name, value, keyword_path)
+            validate_additional_properties_keyword(tool_name, value, keyword_path, depth)
         }
         "type" => validate_type_keyword(tool_name, value, keyword_path),
         "required" | "enum" => validate_array_keyword(tool_name, value, keyword_path),
@@ -1075,15 +1075,20 @@ fn validate_additional_properties_keyword(
     tool_name: &str,
     value: &Value,
     keyword_path: &str,
+    depth: usize,
 ) -> Result<(), HarnessError> {
-    if !value.is_boolean() {
-        return Err(unsupported_schema_keyword(
-            tool_name,
-            keyword_path,
-            "additionalProperties (only bool allowed)",
-        ));
+    // bool（true/false）或 object schema（值类型约束；v0.4/D4 bash `env` 使用）。
+    if value.is_boolean() {
+        return Ok(());
     }
-    Ok(())
+    if value.is_object() {
+        return validate_schema_node(tool_name, value, keyword_path, depth + 1);
+    }
+    Err(unsupported_schema_keyword(
+        tool_name,
+        keyword_path,
+        "additionalProperties (bool or schema object only)",
+    ))
 }
 
 /// `type`：字符串且属于冻结的 JSON 类型子集。
