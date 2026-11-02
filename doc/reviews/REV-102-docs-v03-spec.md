@@ -10,9 +10,9 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：有条件通过**（C2 复审于 `adb687e`：**部分关闭**；C1 由 REV-103 `050f86f` 修复/待合并；见 §9）
 
-P0=0；**P1=2**；P2=6；P3=3。AC 实测与 PROVENANCE §3 的核心证据**真实、可复核**：AC-18 10 / AC-19 11 / AC-20 7 / 回归 3 = **31**，28 个 AC 用例名与 07 逐名一致；e2e **137/0/2**、workspace（一次通过）**1037/0/3**、pytest **183**、harness **235/0/1**；spec 00–08 **7419 行**、全目录 **7822 行**，§3 9/9 SHA 与实测完全一致；check.sh PASSED；无代码/测试改动。
+P0=0；**P1=2**（C1 由 REV-103、C2 仍有残留）；P2=6；P3=3。AC 实测与 PROVENANCE §3 的核心证据**真实、可复核**：AC-18 10 / AC-19 11 / AC-20 7 / 回归 3 = **31**，28 个 AC 用例名与 07 逐名一致；e2e **137/0/2**、workspace（一次通过）**1037/0/3**、pytest **183**、harness **235/0/1**；spec 00–08 **7419 行**、全目录 **7822 行**，§3 9/9 SHA 与实测完全一致；check.sh PASSED；无代码/测试改动。
 
 但两项需关闭后才能作为发布 as-built：
 
@@ -85,3 +85,39 @@ wc -l *.md                                        # 全目录 = 7822
 - **C2**：更新 00/05/06/08/PROVENANCE/DR 的旧计数与“待 V5a”，使 as-built 与 07/README 一致；保留“只追加”历史段。
 - P2/P3 N1–N10 随 C2 收口/发布前处理；reviews README 本评审补 REV-102 行（REV-099/100 缺行由对应评审人/本次一并补）。
 - 无 P0；C1/C2 关闭后复审转「通过」，再进入 REV-103 发布。
+
+## 9. C2 条件关闭复审（2026-11-02，`adb687e`，parent `b85d008`）
+
+**复审结论：C2 部分关闭，仍有 4 项残留；不转「通过」。** `adb687e` 为 docs-only（12 files +29/−29），check.sh PASSED；PROVENANCE §3 当前 9/9 SHA/行数一致（00–08 **7419**、spec **7822**）、AC 31 名/计数未变、无代码/测试改动。
+
+### 已关闭项（核对通过）
+- **00** banner：改为 V5a 实测 31/235/1037/137/183。
+- **05 §5.14.4**：表格 226/996/180 → 235/1037/183；偏差 #9 → `plan`→Progress/`usage_update` 折入 usage（REV-100）。
+- **06 §6.14.1**：996/待 V5a → 1037/实测 31 用例。
+- **08 §8.12.1**：待 V5a → 实测 31 用例（保留真实 Codex/DSH 未验证）。
+- **PROVENANCE §2 26**：07 待 V5a → V5a 实测 31；§3 SHA/行数重算。
+- **DR-008**：V2–V4 计数 235/1037/183；V5b 评审号改 **REV-102**。
+- **DR-009/010/011**：计数与 AC 实测数已对齐；**但 DR-011 实现偏差 bullet 仍 stale（见下）**。
+- **issues**：ISSUE-159/161/162 标 fixed（REV-100）；README `tests/e2e/` 补 V5a 四 target；reviews README 已补 REV-099/100/102 行。
+
+### 仍残留（C2 未完全关闭）
+| # | 位置 | 残留 | 修复建议 |
+|---|---|---|---|
+| R1 | `doc/spec-v1.2/PROVENANCE.md:257` | v0.3 §2 第 26 条末行仍「00–08 **7409 行** / 总 **7811**」；同文件 §3 已是 **7419/7822** | 改为 7419/7822，或明确标「实现主体时点；最终见 §3」；与 C2 原意「末尾 7419」一致 |
+| R2 | `doc/decisions/DR-011-v03-harness-plugin-design.md:169` | 仍写 `plan` 当未知 event 忽略+warn（REV-099 N1 待改）、`usage_update` 忽略、stderr head 8 KiB（N2 待改）；REV-100 已修 | 改「plan→Progress、usage_update 折入 usage、stderr head+tail 各4KiB（REV-100）」；ISSUE-161/162 fixed 已佐证 |
+| R3 | `doc/decisions/DR-004-v02-scope-and-waves.md:280` | 标题仍「docs REV-101」；末尾「下一步 V5a e2e → V5b 发布 v0.3.0」；实际 docs=REV-102、V5a 已完成 | 改 docs REV-102；下一步改「REV-102 复核 → REV-104 发布」 |
+| R4 | `doc/index.md:29` | REV-102 仍「本分支评审中」 | 复审/合并时改「通过」；属 C2 P3 台账项 |
+
+> 另 P3：PROVENANCE 26 的「reviews README REV-097–101」未随 REV-099/100/102 三行补全；可改「REV-097–102」。
+
+### C1 说明
+- C1 由独立 `fix/harness-codex-cancel-race`（REV-103，`050f86f`）修复，待 Lead 按「harness fix → docs rebase → docs merge」顺序合并；本 docs 分支当前未含该 commit。C1 关闭后需在 docs rebase 后复跑 workspace ×2，届时 REV-102 才能转「通过」。
+
+### 复审门禁
+```bash
+bash scripts/dev/check.sh                 # PASSED
+cd doc/spec-v1.2 && shasum -a 256 0*.md   # 9/9 与 §3 一致
+wc -l 0*.md                               # 00–08=7419
+wc -l *.md                                # spec 目录=7822
+grep -rn '待 V5a|996|226/|6038' doc README.md  # 无核心残留（7409/7811 与 DR-011 见 R1/R2）
+```
