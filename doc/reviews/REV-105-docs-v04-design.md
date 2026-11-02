@@ -14,9 +14,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1 条件 C1–C4**（D1 内 docs 修订可关闭，见 §5/§6）；P2 3 项、P3 若干建议。范围/波次/兼容红线/8 工具语义/opt-in/jail/OS 沙箱/spike 主体结论与 spec 增补方向正确，但**冻结文档之间仍有 4 组会直接误导 D2–D5 实现的矛盾**（allow-path 读写权限、bash 执行形式/上限、read/搜索/ v7 限额常量、hardlink/firmlink 安全面），必须先统一再开 D2。
+> **结论历史**：首轮（基准 `5f15de9`）为「**有条件通过**」——P1 C1–C4（`--allow-path` 读写权限矛盾、bash 执行形式/上限、read/v7 限额常量、hardlink/firmlink 安全面）+ P2 ×3。作者 `923a89a`（C1–C4/P2/P3 主体）与 `2132478`（C2 两处 16 KiB、index 拆行、AC-21 f 负例）关闭后，评审人跑 `check.sh` + v0.4 段旧值 grep 清零（§8），C1–C4/P2 全部 closed（§6/§8），结论改**通过**；P3 残余仅为后续 docs 清理项。
+>
+> 首轮意见（历史保留）：P0=0；P1 条件 C1–C4（D1 内 docs 修订可关闭，见 §5/§6）；P2 3 项、P3 若干建议；冻结文档间 4 组矛盾必须先统一再开 D2。
 
 ### 1.1 已核对成立（设计主体）
 
@@ -102,14 +104,37 @@ bash scripts/dev/check.sh              # CHECK PASSED（fmt/diff-check 等）
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 `--allow-path` 统一只读 + AC-21 f 写拒绝 | **open** | docs 小 commit；复核 grep 无「读写全开/目录即全开」残余 |
-| C2 bash `--noprofile --norc -c`/16 KiB/120s/command 上限统一 | **open** | docs 小 commit；复核无 `-lc`/32 KiB/30s/131072 残余 |
-| C3 read 1 MiB/10000、v7 32/16、search/glob/command/path 常量统一 | **open** | docs 小 commit；00/DR-012/DR-013/DR-014/05/06 交叉一致 |
-| C4 hardlink/firmlink 文件工具策略 + 负例（或接受残余风险+ISSUE） | **open** | DR-013 §2 + AC-21 f/AC-23；grep hardlink/firmlink/System/Volumes/Data 有明确口径 |
+| C1 `--allow-path` 统一只读 + AC-21 f 写拒绝 | **closed（923a89a/2132478）** | DR-013 §2.1/§2.2/§10、05 §5.15.2/§5.15.3、spike allowlist 均只读；写 → `TOOL_ERROR{path_read_only}`；AC-21 f 负例在 spec 07 + DR-013 §9；旧值「读写全开」grep 清零；ISSUE-175 记 `--allow-write-path` 后续 |
+| C2 bash `--noprofile --norc -c`/16 KiB/120s/command 上限统一 | **closed（923a89a + 2132478）** | `923a89a` 统一 no-login/120s/command 8 KiB；`2132478` 把 DR-013 §3.8:180 与 05 §5.15.3:1515 的 32 KiB 改 **16 KiB head+tail**；复核无 `-lc`（仅「禁 -lc」说明）/131072/各 32 KiB 残余 |
+| C3 read 1 MiB/10000、v7 32/16、search/glob/command/path 常量统一 | **closed（923a89a）** | read 1 MiB/10000（默认 2000）/结果 32 KiB；grep/glob 32 KiB/默认 1000/上限 5000；v7 32/16；00 常量补全（含 `BUILTIN_GLOB_*`/`BASH_COMMAND_MAX_BYTES`/`TOOL_CALL_PATH_MAX_BYTES`）；DR-012 §8 已改 32/16 |
+| C4 hardlink/firmlink 文件工具策略 + 负例（或接受残余风险+ISSUE） | **closed（923a89a）** | DR-013 §2.2:55 明确 hardlink 残余风险接受（无法可靠识别）+ ISSUE-167；`/System/Volumes/Data` firmlink 依赖 canonicalize；spec 07 AC-21 f 注明只承诺 symlink/`..`/绝对路径 |
 
 ## 7. 遗留问题
 
-- 上述 C1–C4（D1 内关闭）；P2-1–P2-3；P3 版式/状态/数字说明。
+- C1–C4/P2 已关闭（§8）；P3 已清理主要项，DDL 命名/约束留 D2/D5。
 - spike 附录 A/D 的 31/31 断言与真实 `sandbox-exec` 已由 arch-researcher 在沙箱外执行器验证；本评审只读报告与 DR 落盘，未重跑（D4 实现时应有独立负例）。
 - 设计分支 docs-only，不触发 workspace 测试；D2–D5 实现后按 DR-012 发布条件补全测试/门禁。
 - 待 Lead 裁决确认：C1（只读）/C2（120s/16 KiB/8 KiB command）/C3（read 1 MiB/10000、v7 32/16）是否按本记录建议冻结；若 Lead 选择不同值，D2 前需在同一 D1 文档中明确唯一值。
+
+## 8. 条件关闭复核（2026-11-02）
+
+复核提交链：`f06ca47`（首轮评审）→ `923a89a`（C1/C3/C4 + P2/P3 主体）→ `2132478`（C2 剩余两处 16 KiB、index 拆行、AC-21 f 负例）。评审人执行：
+
+```bash
+git status --porcelain                      # 空
+git diff --stat 923a89a..2132478            # 3 files +5/−4（DR-013 / 05 / index；docs-only）
+bash scripts/dev/check.sh                   # CHECK PASSED
+# v0.4 段旧值 grep：-lc / 131072 / 读写全开 / 64 KiB / 256 KiB / 各 32 KiB
+# → 仅命中「禁 -lc」说明与既有 06 payload 64 KiB；无 v0.4 旧值残留
+```
+
+| 条件 | 复核结果 |
+|---|---|
+| **C1** `--allow-path` 只读 | ✅ 全链统一只读（DR-013 §2.1/§2.2/§10、05 §5.15.2/§5.15.3、spike allowlist）；写 → `path_read_only`；AC-21 f 负例（spec 07 + DR-013 §9）；`--allow-write-path` 记 ISSUE-175 |
+| **C2** bash 形式/上限 | ✅ `/bin/bash --noprofile --norc -c`；16 KiB head+tail（`923a89a` + `2132478` 清 DR-013 §3.8/05 §5.15.3 两处 32 KiB）；command 8 KiB、timeout 120s/600s、drain 2 MiB；无 `-lc`/131072/30s v0.4 残留 |
+| **C3** 限额/常量 | ✅ read 1 MiB/10000（默认 2000）/结果 32 KiB；grep/glob 32 KiB/1000/5000；v7 32/16；00 常量补全；DR-012 旧值改 32/16 |
+| **C4** hardlink/firmlink | ✅ hardlink 残余风险接受 + ISSUE-167；firmlink 依赖 canonicalize；AC-21 f 明确只承诺 symlink/`..`/绝对路径 |
+| **P2** | ✅ 06 §6.15.4 reexec 标 v0.4 未实现/v0.5；08 §8.13 补 `--allow-exec-path`；00 §0.4 登记 `REPLAY_TOOL_*`（CLI/append-only） |
+| **P3** | ✅ index DR-014 行已拆；DR-013 §9 AC-21 f 同步；DR-012/013 spike 状态已更新；issues 版式/ISSUE-175 已补；spike 64K/blobs 收窄说明已写入 DR-014 §10；DDL 命名/约束为后续 D2/D5 小项（不阻塞冻结） |
+
+**最终状态**：C1–C4 全部 closed；P2 全部 closed；P3 无阻塞项。`923a89a..2132478` 仅 3 个 docs 文件改动，无代码/测试/既有评审改动；`check.sh` PASSED。**建议 Lead merge D1 → 开 D2（文件类工具 + jail）。**
