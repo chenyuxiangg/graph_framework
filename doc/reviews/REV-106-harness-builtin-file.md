@@ -121,3 +121,14 @@ bash scripts/dev/check.sh                     # PASSED
 ```
 - **一次既有 codex 并行 flake**：首轮 features/pytest 出现 `codex_adapter_*`/`ac20h` 超时（非 D2 文件）；重跑 harness 默认/features 279/0/1、workspace 1082/0/3、pytest 183 全绿；隔离 `plugin::tests::codex` 串行 2/2、pytest codex 10/10 通过。属既有 Codex fake adapter 负载敏感，建议 D5 前加固（不阻断 D2）。
 - 范围：`4b093fc` 3 files；默认路径无回归；无既有评审/产品代码回退。
+
+## 8. 第二评审 · 跨模块（cli/Cargo）（Lead 追加，2026-11-02）
+
+- **评审人**：`lead`（**≠ 作者** `dsl-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`051bf11..a9866e4`）：
+  1. `crates/zgraph-cli/src/run_cmd.rs`：`--allow-builtin-tools` / `--workspace-dir` / `--allow-path` 解析、usage、非法 workspace/allow-path 预检 exit 3（不产生 run）、透传 `HarnessExecutor::with_builtin_tools`；`validate`/`trace` 未改；默认路径行为不变。
+  2. `Cargo.toml` + `crates/zgraph-harness/Cargo.toml` + `Cargo.lock`：新增 `sha2`（sha256）、`similar`（diff/apply_patch）；精确锁定、无版本漂移；无 feature 构建不变。
+- **核对结论（通过）**：cli 为机械接线（新增 flag 默认关、非法配置 exit 3 与既有入口校验口径一致）；Cargo 依赖为 v0.4 D2 冻结所需最小集；未改既有 CLI 行为/退出码；无其它跨模块文件。
+- **Lead 亲自验证**：`git diff 051bf11..a9866e4 --stat` 仅 harness builtin 模块 + cli 1 + 2×Cargo + lock（+ REV 记录）；`cargo test --workspace --offline` = 1082/0/3；`cargo test -p zgraph-harness --offline` = 279/0/1；`cargo check -p zgraph-harness --no-default-features` 通过。
+- **裁决/后续**：跨源冲突 reason 按 Lead 裁决保持（builtin reserved_prefix/tool_name_conflict；MCP↔Python v0.3 `HARNESS_MCP_ERROR{name_conflict}` 例外，D6 文档注明）；N5/N7/N9/N11 与 codex 并行 flake 加固留 D5/D6。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
