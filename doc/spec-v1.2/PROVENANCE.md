@@ -100,6 +100,7 @@
     - **补齐（同分支第二提交）**：02 §2.7.4 `validate` 退出码删除 M1 临时口径 `3`（REV-043）；`README.md` 双通道口径改「M6 已拆回 8192+1024 + 发送序号有序合并（REV-041）」、行数表同步（05/06/07/08）、批次索引补 M6（§2 第 13 条）。
     - **第三提交（ISSUE-082 回写，REV-048；含 C1 方案 B 口径：`update_run_columns` 失败为尽力写）**：06 §6.2.4/§6.2.13/§6.9.1（两列写入口径/形状/`:memory:` 不写）、05 §5.13.3 L10 与 M6 状态、07 §7.2 状态、08 §8.8（ISSUE-082 → fixed）、`architecture §5.2`、`doc/issues.md`（ISSUE-082 → fixed）；§3 行数重测（00–08 合计 **6033 行**，第三提交时点；后续 ISSUE-088 回写后最终 6038 行）。
     - **后续提交（ISSUE-088 回写 + ISSUE-095/096 登记，REV-056；096 引用 REV-061 wrapup）**：06 §6.8.1/§6.8.3、08 §8.8、`doc/issues.md`（088 fixed、新增 095/096）、本文件 §2 第 13 条/§3/§5；§3 行数重测。
+    - **V5a e2e 实测回写（REV-101，2026-11-02）**：`tests/e2e/{skills_v03,mcp_v03,harness_v03,v03_regression}.rs` **31 用例**（AC-18 10 / AC-19 11 / AC-20 7 / 回归 3），四 target 连跑 3 次稳定；新语义（MCP 重启 spawn=2/`transport_closed`、截断 JSON+后缀、`http_insecure`、`llm_calls` 1 条/节点、Codex iterations=1/cached 丢弃/L2 不 spawn）已写入 07/05/08。e2e **137/0/2**、workspace **1037/0/3**、pytest **183**、harness **235/0/1**。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **6038 行**）。
 
 14. **W1 SOP v1 回写批次**（2026-10-31，REV-066；分支 `docs/docs-sop-v1-ac`）：
@@ -251,7 +252,7 @@
     - **07**：AC-18/19/20 实现已合并（V2/V3/V4）；**实测用例名/计数/DoD 待 V5a e2e 合并后回写（本批只留占位，不编造）**；默认零配置回归由既有 golden 覆盖。
     - **08 §8.12.1**：3 kind/码、`Subprocess` enum、py-worker adapters、`rmcp` feature-gated、trace 不 v7 的 source-breaking as-built 确认。
     - **DR 执行记录**：DR-004 §10 + DR-008 §9 + DR-009 §11 + DR-010 §12 + DR-011 §13（分支/提交/REV/合并点/偏差/已知限制，只追加）。
-    - **测试证据（已实测）**：harness **226/0/1**（`--features mcp` **225/0/1**）、workspace **996/0/3**、pytest **180**；`--no-default-features` 构建通过；e2e/AC-18/19/20 待 V5a。
+    - **测试证据（已实测）**：harness **235/0/1**（`--features mcp` **235/0/1**）、e2e **137/0/2**、workspace **1037/0/3**、pytest **183**；`--no-default-features` 构建通过；V5a AC 31 用例已回写。
     - **台账/索引**：`doc/issues.md` 新增 **ISSUE-156–163**（V2/V3/V4 残余 P2/P3 + 真实环境验证）；`doc/index.md`/`README.md`/`doc/progress.md` 状态同步（v0.3.0 发布收口）；reviews README REV-097–101 由评审人补。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **7409 行**；00–08 numstat **72/13（净 59）**；全 spec 目录 numstat **91/20（净 71）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 7811 行））。
 
@@ -263,12 +264,12 @@
 | `02-DSL与校验.md` | dc6211df39712b5945bd010c0c97a9370f4372447354823b82a26f35026a3f32 | 987 |
 | `03-调度器与生命周期.md` | fd132ad0dfbdba09d9852ac29b15d4ca5a1d510c84d752cd55d8f536b1b8d864 | 685 |
 | `04-节点接口与扩展点.md` | 63a788bbfe94c15716bed9160716ad3b0c50e4c4aea8d5ea5dbc9a637574e9bb | 940 |
-| `05-AgentHarness.md` | cf682382588811a425608de772af753a8459f99fd15f25cf3fe7f05e71da95fe | 1487 |
+| `05-AgentHarness.md` | 6be3e1d59654d68d324e151a083486f631cf642e5a7fc40fb613211e67a1b6bb | 1489 |
 | `06-存储与可观测.md` | d9b3e4cfeb3f5e70d046e4e433a28cf4d51d16dfa0d35353796d30e18f293380 | 1306 |
-| `07-验收用例.md` | 3f0142dd00f355643de7e1e0fcec0d1899014db34cf792de2c05b251bb40ae44 | 543 |
-| `08-审计关闭矩阵.md` | 7b7389c8af72bcefee3935e637b6e94b451010311cf3c4d6b384cc3efb43bb34 | 627 |
+| `07-验收用例.md` | 966353e5742e6ea613c3bcffedebf7b8feb4453035f164a41eb00341d55f9a6f | 552 |
+| `08-审计关闭矩阵.md` | 67ccd59f8814c5b7255ecb033d1187f94051fb36acb1ba6fa19c97b054fd6cae | 629 |
 
-> 00–08 合计 **7406 行**（`wc -l` 口径；2026-11-02 **v0.3（M8）实现回写批次后**实测（REV-101；**00–08 numstat +69/−13（净 +56）**；**全 spec 目录 numstat +94/−26（净 +68）**；见 §2 第 26 条）；此前 W4b as-built 批次 7154 行/§2 第 25 条；W4a 设计冻结 + REV-096 收口 7202 行/§2 第 24 条；W3a as-built 6886 行；W3a0 6815 行；W2b 6491 行；W2a 6385 行；W2a0 6308 行；W1 6051 行、M6 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7808 行）。
+> 00–08 合计 **7419 行**（`wc -l` 口径；2026-11-02 **v0.3（M8）实现回写批次后**实测（REV-101/102；**00–08 numstat +109/−40（净 +69）**；**全 spec 目录 numstat +135/−53（净 +82）**；见 §2 第 26 条）；此前 W4b as-built 批次 7154 行/§2 第 25 条；W4a 设计冻结 + REV-096 收口 7202 行/§2 第 24 条；W3a as-built 6886 行；W3a0 6815 行；W2b 6491 行；W2a 6385 行；W2a0 6308 行；W1 6051 行、M6 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7822 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 

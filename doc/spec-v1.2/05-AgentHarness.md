@@ -1485,3 +1485,5 @@ pub trait AgentProvider: Send + Sync {
 9. **`plan`/`usage_update`**：实现把 `plan` 当未知 event 忽略+warn（REV-099 N1 建议改 progress）；`usage_update` 忽略（不新增 kind）；待 V4 后续/台账。
 
 **保留的已知限制（V5a/发布文档）**：真实 Codex/DSH 环境未验证（adapter 骨架，best-effort；release notes 标注）；MCP 真实 stdio/HTTP 传输与进程组 kill 由 V5a e2e 覆盖；skills L2 `llm_calls.request_json` 是否含正文待 AC-18 e 实测口径确认；`max_items`/8 MiB 总输出等边界见 ISSUE 台账。
+
+**V5a e2e 实测（2026-11-02，REV-101；31 用例）**：`tests/e2e/{skills_v03,mcp_v03,harness_v03,v03_regression}.rs`——skills 10（a/b1、c4、d2、e1、f1）、MCP 11（a1/b1/c2/d3/e2/f1/g1）、harness 7（a/b/c/d/f/h；e/g 组合覆盖）、回归 3；四 target 连跑 3 次稳定。新语义实测：MCP 崩溃**每 run 每 server 仅重启 1 次（spawn=2）**，超限 `TOOL_ERROR{transport_closed}`；>32768 chars 结果 JSON `{truncated,is_error,text}` + 后缀 `…[mcp result truncated]`；insecure http reason `http_insecure`；`llm_calls` 外部节点每节点 1 条；Codex `iterations=1`/cached 丢弃/无 token delta；L2 replay 不 spawn adapter。计数：e2e 137/0/2、workspace 1037/0/3、pytest 183、harness 235/0/1。
