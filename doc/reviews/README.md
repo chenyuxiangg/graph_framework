@@ -105,6 +105,7 @@
 | [REV-101](REV-101-e2e-v03.md) | 2026-11-02 | e2e | `test/e2e-v03` | 通过（V5a 真链路：AC-18 a–f 10 用例、AC-19 a–g 11、AC-20 a–h 7、v0.2 回归 3；e2e 18 target/137/0/2 ignored、workspace 1037/0/3、pytest 183；新语义 spawn=2/transport_closed、truncated JSON、http_insecure 均实测；P3 见记录 §3） | reviewer-a |
 | [REV-102](REV-102-docs-v03-spec.md) | 2026-11-02 | docs | `docs/docs-v03-spec` | 通过（首轮有条件通过：C1 C3 race、C2 as-built stale；C1 由 REV-103 `050f86f`、C2 由 `adb687e`+`df37762` 关闭；AC 31、PROVENANCE §3 7419/7822/9/9、workspace ×2 1037/0/3；见记录 §6/§9） | reviewer-b |
 | [REV-103](REV-103-harness-codex-cancel-race.md) | 2026-11-02 | harness（测试侧） | `fix/harness-codex-cancel-race` | 通过（REV-102 C1：删除固定 600ms，canceller 有界等待 pid 文件 ≤10s 后再 cancel；超时/无 pid 先 close_provider 清理；原断言全保留；仅 plugin.rs 测试 +25/−22；隔离 ×5、harness 235/0/1 双构建、workspace ×2 1037/0/3、pytest 183、clippy/fmt/check/no-default 全绿） | reviewer-a |
+| [REV-104](REV-104-process-v03-release.md) | 2026-11-02 | process/docs | `chore/process-v03-release` | 通过（v0.3.0 发布收口：version 0.3.0 + 7 本地 crate lock；release `--locked`/`--version`=`zgraph 0.3.0 (DSL 1.0)`；perf-baseline-v0.3 与 Lead 实测一致（AC-01 +0.0%/AC-12 −4.0%/smoke −7.3%/validate +15%，门禁通过）；README 235/1037/137/183/31；workspace 1037/0/3（首次 known ISSUE-091 flake 复跑绿）；check.sh；已更新 index/reviews） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
