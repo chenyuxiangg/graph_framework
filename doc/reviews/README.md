@@ -108,6 +108,7 @@
 | [REV-104](REV-104-process-v03-release.md) | 2026-11-02 | process/docs | `chore/process-v03-release` | 通过（v0.3.0 发布收口：version 0.3.0 + 7 本地 crate lock；release `--locked`/`--version`=`zgraph 0.3.0 (DSL 1.0)`；perf-baseline-v0.3 与 Lead 实测一致（AC-01 +0.0%/AC-12 −4.0%/smoke −7.3%/validate +15%，门禁通过）；README 235/1037/137/183/31；workspace 1037/0/3（首次 known ISSUE-091 flake 复跑绿）；check.sh；已更新 index/reviews） | reviewer-a |
 | [REV-105](REV-105-docs-v04-design.md) | 2026-11-02 | docs | `docs/docs-v04-design` | **通过**（v0.4 D1 设计冻结：DR-012/013/014 + spec 00/02/05/06/07/08 草案；首轮有条件通过（C1–C4：allow-path 只读、bash 形式/上限、read/v7 限额、hardlink/firmlink）→ `923a89a`+`2132478` 关闭后复审；v0.4 旧值 grep 清零、`check.sh` 绿、spike §5/§11 已合入；P2/P3 见记录 §3/§8） | reviewer-a |
 | [REV-107](REV-107-harness-builtin-search.md) | 2026-11-02 | harness（Cargo 依赖跨模块） | `feat/harness-builtin-search` | 通过（v0.4 D3 grep/glob：ignore/.gitignore/隐藏/二进制/2MiB、排序/1000/32KiB/单条 text 4K、glob 排序/隐藏/1000/5000/32KiB、jail allow-path 只读/越界、7 工具注册/streaming/sink；harness 293/0/1、workspace 1096/0/3 ×2、pytest 183、clippy/fmt/check/no-default 全绿；P3 见记录 §3） | reviewer-a |
+| [REV-109](REV-109-trace-v7.md) | 2026-11-02 | trace（含 cli 机械） | `feat/trace-v7` | **有条件通过**（v0.4 D5a schema v7 + tool_calls：DDL/迁移/备份/链式/非事件路径/writer 幂等+10000 行上限/32KiB+16KiB 截断/无 blobs 主体成立；trace 112/0、migration 21/0、tool_calls 9/0、workspace 1150/0；C1 reader 排序 `(started_at,call_id)` 与 C2 error_json 全量 sha256 待关闭，C3 唯一键 node_id 口径待 Lead 裁决；P3 见记录 §3） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
