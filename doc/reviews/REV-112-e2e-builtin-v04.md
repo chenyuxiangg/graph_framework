@@ -9,9 +9,9 @@
 
 ## 1. 结论
 
-**结论：通过**（首轮有条件通过 → C1 由 `7530bec` 关闭；P2 修复 2/3，read cap 残余见 §7）
+**结论：通过**（首轮有条件通过 → C1/P2 由 `7530bec`+`0a47295` 关闭；历史见 §7）
 
-P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。真 CLI 链路成立，AC-21 文件/jail、AC-22 搜索、AC-23 嵌套 fail-closed、AC-24 trace/migration/replay 主体覆盖到位；最终 e2e **23 target / 166 passed / 0 failed / 2 ignored（连跑 2 次）**、workspace **1216/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余已由 `0a47295` 关闭（见 §7）；P3 后续。真 CLI 链路成立，AC-21 文件/jail、AC-22 搜索、AC-23 嵌套 fail-closed、AC-24 trace/migration/replay 主体覆盖到位；最终 e2e **23 target / 166 passed / 0 failed / 2 ignored（连跑 2 次）**、workspace **1216/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
 > **首轮历史（保留）**：`598ccff` 首轮为有条件通过——C1 `ac21g` 预检失败 DB 断言对象错误（恒真）。`7530bec` 已关闭 C1，并补多文件 apply_patch side_effect NULL / write/edit 失败不变；read cap 补强未真正断言（P2 残余）。
 
@@ -23,7 +23,7 @@ P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。真 CLI 链�
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ✅ | 真 CLI/真 DB/真工具主链路；C1 DB 断言已修正并有正向对照；P2 残余见 §7 |
+| 功能正确性 | ✅ | 真 CLI/真 DB/真工具主链路；C1 DB 断言已修正并有正向对照；P2 残余已由 `0a47295` 关闭 |
 | 结构合理性 | ✅ | v04_support 复用 v03，CLI/DB/workspace 快照/环境探测分层清晰；5 target 独立；未改 golden |
 | 逻辑性 | ✅（P2） | AC 映射基本逐条；环境感知分支 fail-closed；P2 为覆盖缺口 |
 | 可读性 | ✅（P3） | AC 注释/环境限制/基线说明清楚；P3 为补强 |
@@ -120,3 +120,9 @@ bash scripts/dev/check.sh           # PASSED
 - 范围：仅 e2e/baseline；无产品代码/golden 篡改；无 mock 被测对象。
 - **P2 残余**：read cap 未断言（上）；write 原子失败未覆盖 temp/rename 且 inode 未记录；AC-24 f/AC-23 非嵌套边界/多 source/多文件 etc. 仍按首轮 P2 留 D6。
 - **环境限制**：仍为嵌套 Seatbelt；AC-23 非嵌套分支不可执行、真实隔离证据归用户普通终端 `verify-sandbox.sh`（D6），本轮未伪造。
+
+### P2 残余关闭（2026-11-02，`0a47295`，parent `1c53382`）
+
+- **read cap 已补真实断言**：`ac21a` 对 `r11`（40k 字符 `long.txt`, limit 10000）读取实际 `tool_calls` 行，断言 `result.truncated == true`、`raw_result_json.len() <= 32768`、`result.content.chars().count() < 40000`；无降级/绕道。定向 `cargo test -p zgraph-e2e --test builtin_files_v04` **10/10 passed**。
+- **原子失败说明已更正**：`ac21b_atomic_failures_leave_files_untouched` 注释/提交说明明确失败发生在写入前（exists/edit 匹配失败），只断言 bytes/mode/mtime+mtime_nsec 不变 + workspace 无 temp 残留；**不**宣称 inode 不变，**不**覆盖 temp→rename 回滚（由 D2 单测覆盖），口径诚实。
+- 仅 `builtin_files_v04.rs` +28；无产品代码/基线计数变化；结论保持 **通过**。
