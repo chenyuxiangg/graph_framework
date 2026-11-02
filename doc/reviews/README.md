@@ -101,6 +101,7 @@
 | [REV-097](REV-097-harness-skills.md) | 2026-11-01 | harness（含 cli/kernel 机械） | `feat/harness-skills` | 通过（V2 skills：发现/校验/索引注入/`skill_view`/预算/安全；harness 182/0/1、workspace 951/0/3；P2/P3 见记录 §3） | reviewer-b |
 | [REV-098](REV-098-harness-mcp.md) | 2026-11-01 | harness（含 cli/kernel/Cargo 机械） | `feat/harness-mcp` | 通过（首轮有条件通过 → C1/C2 + P2 加固由 `15f3d18` 关闭后复审通过；V3 MCP：rmcp 3.8.0 feature-gated 双 era/registry/`--allow-mcp`/工具桥接/`close_mcp` 幂等；harness 207/206、workspace 976/0/3；P2⑥ 残余与 P3 见记录 §6.3） | reviewer-a（主审）+ lead（裁决/第二评审） |
 | [REV-101](REV-101-e2e-v03.md) | 2026-11-02 | e2e | `test/e2e-v03` | 通过（V5a 真链路：AC-18 a–f 10 用例、AC-19 a–g 11、AC-20 a–h 7、v0.2 回归 3；e2e 18 target/137/0/2 ignored、workspace 1037/0/3、pytest 183；新语义 spawn=2/transport_closed、truncated JSON、http_insecure 均实测；P3 见记录 §3） | reviewer-a |
+| [REV-103](REV-103-harness-codex-cancel-race.md) | 2026-11-02 | harness（测试侧） | `fix/harness-codex-cancel-race` | 通过（REV-102 C1：删除固定 600ms，canceller 有界等待 pid 文件 ≤10s 后再 cancel；超时/无 pid 先 close_provider 清理；原断言全保留；仅 plugin.rs 测试 +25/−22；隔离 ×5、harness 235/0/1 双构建、workspace ×2 1037/0/3、pytest 183、clippy/fmt/check/no-default 全绿） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
