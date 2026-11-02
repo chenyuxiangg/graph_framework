@@ -10,7 +10,7 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：v0.3.0 发布收口（M8：skills + MCP + 可插拔 harness）
+## 当前状态：v0.3.0 已发布（M0–M8：skills + MCP + 可插拔 harness）
 
 **v0.3.0（M8）**：能力扩展三件已实现并合并（V2 skills / V3 MCP / V4 harness 插件）：
 
@@ -18,7 +18,8 @@
 - **MCP**：rmcp 3.8.0 **双 era**（`2026-07-28` 无状态 + `2025-11-25` legacy）、stdio + Streamable HTTP、`mcp_servers.json`、`mcp__<server>__<tool>`（必须显式进 `AgentConfig.tools`）、`--allow-mcp`、静态 env Bearer、默认 https；trace **不 v7**。
 - **可插拔 harness**：`AgentProvider`（Builtin 默认 / Subprocess）、`zgraph-harness/1` NDJSON 协议、Codex adapter（`exec --json`/`--output-last-message`；无 token delta、iterations=1、cached tokens 丢弃）、DSH ACP 骨架；外部 harness 不写 trace/状态机、L2 不重跑。
 - **测试（已实测）**：`cargo test -p zgraph-e2e` **137/0/2**（V5a 四 target 连跑 3 次）；`cargo test --workspace` **1037/0/3**；pytest **183**；`cargo test -p zgraph-harness` **235/0/1**（`--features mcp` 235/0/1）；V5a AC-18/19/20 + 回归 **31 用例**。
-- **发布产物**：`dist/zgraph-v0.3.0-*.tar.gz` + sha256 由发布流程构建；性能基线由发布收口实测（v0.2 基线见 [`doc/perf-baseline-v0.2.txt`](doc/perf-baseline-v0.2.txt)，v0.3.0 基线待发布确认）。
+- **发布产物**：`dist/zgraph-v0.3.0-*.tar.gz` + sha256、`dist/RELEASE_NOTES-v0.3.0.md` 由 Lead/发布流程构建；性能基线 [`doc/perf-baseline-v0.3.txt`](doc/perf-baseline-v0.3.txt)（AC-01 +0.0%、AC-12 −4.0%、SOP smoke −7.3%，门禁通过；full-60 运行期 ISSUE-112 发布例外）。
+- **发布状态**：tag `v0.3.0`（**发布流程执行中**）；GitHub Release：`chenyuxiangg/graph_framework`（由发布流程创建）。
 - **已知限制**：真实 Codex/DSH 环境**未验证**（adapter 骨架，release notes 标注）；W5 共享评审队列延至 v0.4；P2/P3 台账见 [issues](doc/issues.md) ISSUE-156–163。
 - **下一步**：v0.4（M9）W5 共享评审队列 + ISSUE 清理；详见 [DR-008](doc/decisions/DR-008-v03-scope-and-waves.md) / [progress](doc/progress.md)。
 

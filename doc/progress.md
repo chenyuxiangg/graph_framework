@@ -2,14 +2,13 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.3.0（M8）**发布收口（V5b）**：V2 skills（REV-097）、V3 MCP（REV-098）、V4 harness 插件（REV-099）、V5a e2e（REV-101）已合并 main；AC-18/19/20 实测 31 用例；tag `v0.3.0`/产物/性能基线待发布流程（REV-103）确认。
+**当前阶段**：v0.3.0（M8）**已发布**：skills/MCP/可插拔 harness（V2–V4）+ V5a e2e 已合并 main；REV-104 发布收口提交；tag `v0.3.0`（发布流程执行中）、`dist/RELEASE_NOTES-v0.3.0.md`、[`doc/perf-baseline-v0.3.txt`](perf-baseline-v0.3.txt)。
 
 **进行中任务**
-- docs `docs/docs-v03-spec`（**REV-102**，作者 docs-dev）：v0.3 as-built + AC-18/19/20 实测回写（31 用例）+ PROVENANCE 第 26 条 + README v0.3.0；待 reviewer-b 评审。
+- 无。
 
 **下一步**
-- REV-102 评审 → 发布 v0.3.0（tag/产物/性能基线，REV-103）→ v0.4（M9）**W5 共享评审队列** + ISSUE 清理。
+- v0.4（M9）规划：**W5 共享评审队列** + ISSUE 清理（ISSUE-112/143–163）；真实 Codex/DSH 环境验证（adapter 骨架后续）。
 
 **阻塞**
-- 无硬阻塞；AC 数字需 V5a e2e 结果（Lead 转）；真实 Codex/DSH 环境未验证（adapter 骨架，best-effort，release notes 标注）。
-- 台账：ISSUE-156–163（v0.3 V2/V3/V4 P2/P3 与真实环境验证）open；ISSUE-105–155 历史项见 `doc/issues.md`。
+- 无硬阻塞；v0.3.0 tag/GitHub Release 由发布流程执行（Lead）；性能 full-60 运行期为 ISSUE-112 发布例外。
