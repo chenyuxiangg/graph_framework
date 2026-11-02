@@ -100,6 +100,7 @@
 | [REV-096](REV-096-docs-v03-design.md) | 2026-11-01 | docs | `docs/docs-v03-design` | 通过（首轮有条件通过 → C1–C5 + 6 项跨文档残留由 `80a42c1`/`7659ec8` 关闭后复审通过；v0.3 V1 设计冻结：DR-008..011 + spec 00/02/05/06/07 草案 + AC-18/19/20 设计；§5.14 编号保留；P2/P3 见记录 §6.4） | reviewer-a（主审）+ lead（裁决/第二评审） |
 | [REV-097](REV-097-harness-skills.md) | 2026-11-01 | harness（含 cli/kernel 机械） | `feat/harness-skills` | 通过（V2 skills：发现/校验/索引注入/`skill_view`/预算/安全；harness 182/0/1、workspace 951/0/3；P2/P3 见记录 §3） | reviewer-b |
 | [REV-098](REV-098-harness-mcp.md) | 2026-11-01 | harness（含 cli/kernel/Cargo 机械） | `feat/harness-mcp` | 通过（首轮有条件通过 → C1/C2 + P2 加固由 `15f3d18` 关闭后复审通过；V3 MCP：rmcp 3.8.0 feature-gated 双 era/registry/`--allow-mcp`/工具桥接/`close_mcp` 幂等；harness 207/206、workspace 976/0/3；P2⑥ 残余与 P3 见记录 §6.3） | reviewer-a（主审）+ lead（裁决/第二评审） |
+| [REV-101](REV-101-e2e-v03.md) | 2026-11-02 | e2e | `test/e2e-v03` | 通过（V5a 真链路：AC-18 a–f 10 用例、AC-19 a–g 11、AC-20 a–h 7、v0.2 回归 3；e2e 18 target/137/0/2 ignored、workspace 1037/0/3、pytest 183；新语义 spawn=2/transport_closed、truncated JSON、http_insecure 均实测；P3 见记录 §3） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
