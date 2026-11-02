@@ -501,6 +501,14 @@ impl HarnessCtx for HarnessNodeCtx {
         NodeContext::run_id(&self.inner)
     }
 
+    fn node_id(&self) -> &str {
+        NodeContext::node_id(&self.inner)
+    }
+
+    fn attempt(&self) -> u32 {
+        NodeContext::attempt(&self.inner)
+    }
+
     fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
         Some(self.limits.clone())
     }

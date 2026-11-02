@@ -12,16 +12,23 @@
 //! **W4b foreach 展开行（DR-007 §8.4）**：事件（与 human 决策行）之后按
 //! `(at, expansion_id)` 追加 `foreach node='<F>' items=<N> keys=[...]` 摘要或
 //! `{"kind":"ForeachExpansion",...}` NDJSON 行；展开事实**不是** `TraceEvent`
-//! （`events.kind` 不变），无 foreach 的 run 输出逐字节不变；`--stats` 不新增字段。
+//! （`events.kind` 不变），无 foreach 的 run 输出逐字节不变。
+//!
+//! **v0.4 D5b2 工具调用行（DR-014 §3；Lead 裁决保持 NDJSON）**：事件/决策/展开
+//! 之后按 `(started_at, call_id)` 追加一次工具调用一行的人类摘要（tool_name/status/
+//! duration/truncated/参数摘要/bash exit，**不打印完整 args/result**）或
+//! `{"kind":"ToolCall",...}` NDJSON 行（`trace --json` 仍为纯 NDJSON，不做顶层数组）；
+//! 无工具调用的 run 输出逐字节不变。`--stats` 追加 `tool_calls` 计数（仅 >0 时，
+//! 保持无工具 run 的输出兼容）。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use zgraph_trace::{
     EventQuery, EventRow, ForeachExpansionRow, HumanDecisionRow, RunRow, RunStats, RunStatus,
-    TraceError, TraceReader,
+    ToolCallRow, TraceError, TraceReader,
 };
 
 use crate::{EXIT_OTHER, EXIT_STORAGE, EXIT_SUCCESS};
@@ -292,10 +299,15 @@ fn run_timeline(
         Ok(expansions) => expansions,
         Err(error) => return report_storage_error(&error),
     };
+    let tool_calls = match reader.tool_calls(&options.run_id) {
+        Ok(tool_calls) => tool_calls,
+        Err(error) => return report_storage_error(&error),
+    };
     if options.json {
         print_ndjson(&events);
         print_human_decisions_ndjson(&decisions);
         print_foreach_expansions_ndjson(&expansions);
+        print_tool_calls_ndjson(&tool_calls);
         if truncated {
             eprintln!("{}", truncation_note(run));
         }
@@ -304,6 +316,7 @@ fn run_timeline(
         print_human(run, &events, &duration, truncated);
         print_human_decisions(&decisions);
         print_foreach_expansions(&expansions);
+        print_tool_calls(&tool_calls);
     }
     exit_code(run.status, truncated)
 }
@@ -501,6 +514,144 @@ fn print_foreach_expansions(expansions: &[ForeachExpansionRow]) {
     }
 }
 
+/// 追加工具调用 NDJSON 行（v0.4/D5b2 / DR-014 §3；一行一次调用，`kind=ToolCall`）。
+///
+/// 字段与 `tool_calls` 表一致（args/result/error 解析为 JSON；截断行保留存储原文为
+/// 字符串并由 `truncated`/`*_sha256` 证明不完整）。顺序由 reader 保证
+/// `(started_at, call_id)` 升序（`trace --json` 保持纯 NDJSON，不做顶层数组）。
+fn print_tool_calls_ndjson(tool_calls: &[ToolCallRow]) {
+    for call in tool_calls {
+        println!("{}", tool_call_json_value(call));
+    }
+}
+
+/// 追加工具调用人类摘要（v0.4/D5b2 / DR-014 §3；无工具调用时不输出 → 默认不变）。
+///
+/// 每次调用一行：`tool_name`/status/duration/truncated/关键参数摘要/bash exit，
+/// **不打印完整 args/result**（避免终端泄漏敏感信息）。
+fn print_tool_calls(tool_calls: &[ToolCallRow]) {
+    if tool_calls.is_empty() {
+        return;
+    }
+    println!();
+    println!("tool_calls: {}", tool_calls.len());
+    for call in tool_calls {
+        println!("  {}", tool_call_human_line(call));
+    }
+}
+
+/// 工具调用行的人类可读单行（`trace` 与 `replay --mode=tools` 共用）。
+pub(crate) fn tool_call_human_line(call: &ToolCallRow) -> String {
+    let mut line = format!(
+        "{} {} source={} status={} duration={}ms truncated={} args={}",
+        call.call_id,
+        call.tool_name,
+        call.source.as_str(),
+        call.status.as_str(),
+        call.duration_ms,
+        call.truncated,
+        tool_args_summary(&call.args_json, call.truncated),
+    );
+    if let Some(exit_code) = call.bash_exit_code {
+        line.push_str(&format!(" bash_exit={exit_code}"));
+    }
+    if let Some(path) = &call.side_effect_path {
+        line.push_str(&format!(" path={path}"));
+    }
+    line
+}
+
+/// 工具调用行的 NDJSON 对象（`trace --json` 与 `replay --mode=tools --json` 共用）。
+pub(crate) fn tool_call_json_value(call: &ToolCallRow) -> Value {
+    let mut object = Map::new();
+    object.insert("kind".to_string(), json!("ToolCall"));
+    object.insert("tool_call_id".to_string(), json!(call.tool_call_id));
+    object.insert("run_id".to_string(), json!(call.run_id.as_str()));
+    object.insert("instance_id".to_string(), json!(call.instance_id.as_str()));
+    object.insert("node_id".to_string(), json!(call.node_id.as_str()));
+    object.insert("attempt".to_string(), json!(call.attempt));
+    object.insert("call_id".to_string(), json!(call.call_id.as_str()));
+    object.insert("tool_name".to_string(), json!(call.tool_name.as_str()));
+    object.insert("source".to_string(), json!(call.source.as_str()));
+    object.insert("status".to_string(), json!(call.status.as_str()));
+    object.insert("args".to_string(), decode_json_text(&call.args_json));
+    object.insert(
+        "result".to_string(),
+        call.result_json
+            .as_deref()
+            .map(decode_json_text)
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "error".to_string(),
+        call.error_json
+            .as_deref()
+            .map(decode_json_text)
+            .unwrap_or(Value::Null),
+    );
+    object.insert("truncated".to_string(), json!(call.truncated));
+    object.insert("args_sha256".to_string(), json!(call.args_sha256));
+    object.insert("result_sha256".to_string(), json!(call.result_sha256));
+    object.insert("error_sha256".to_string(), json!(call.error_sha256));
+    object.insert("started_at".to_string(), json!(call.started_at.as_str()));
+    object.insert("finished_at".to_string(), json!(call.finished_at.as_str()));
+    object.insert("duration_ms".to_string(), json!(call.duration_ms));
+    object.insert("bash_signal".to_string(), json!(call.bash_signal));
+    object.insert("side_effect_path".to_string(), json!(call.side_effect_path));
+    object.insert(
+        "side_effect_before".to_string(),
+        json!(call.side_effect_before),
+    );
+    object.insert(
+        "side_effect_after".to_string(),
+        json!(call.side_effect_after),
+    );
+    object.insert(
+        "side_effect_bytes_before".to_string(),
+        json!(call.side_effect_bytes_before),
+    );
+    object.insert(
+        "side_effect_bytes_after".to_string(),
+        json!(call.side_effect_bytes_after),
+    );
+    object.insert("bash_command".to_string(), json!(call.bash_command));
+    object.insert("bash_cwd".to_string(), json!(call.bash_cwd));
+    object.insert("bash_exit_code".to_string(), json!(call.bash_exit_code));
+    object.insert("bash_stdout".to_string(), json!(call.bash_stdout));
+    object.insert("bash_stderr".to_string(), json!(call.bash_stderr));
+    object.insert("bash_truncated".to_string(), json!(call.bash_truncated));
+    object.insert(
+        "sandbox_profile_sha256".to_string(),
+        json!(call.sandbox_profile_sha256),
+    );
+    Value::Object(object)
+}
+
+/// 工具参数**结构摘要**（人类输出用；不打印完整 args）。
+///
+/// 截断行只给标记（避免展示 prefix 造成「完整」误解）；非截断按 JSON 类型给
+/// `keys=[...]`/`items=N`/`bytes=N`。
+fn tool_args_summary(args_json: &str, truncated: bool) -> String {
+    if truncated {
+        return "truncated".to_string();
+    }
+    let bytes = args_json.len();
+    match serde_json::from_str::<Value>(args_json) {
+        Ok(Value::Object(map)) => {
+            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            format!("keys=[{}] bytes={bytes}", keys.join(","))
+        }
+        Ok(Value::Array(items)) => format!("items={} bytes={bytes}", items.len()),
+        Ok(_) => format!("bytes={bytes}"),
+        Err(_) => format!("bytes={bytes}"),
+    }
+}
+
+/// 存储的 JSON 文本 → `Value`；不可解析（截断 prefix）时保留原文为字符串。
+fn decode_json_text(text: &str) -> Value {
+    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
+}
+
 /// 人类可读回放：头部两行 + `seq at kind node instance detail` 表格（06 §6.10.4）。
 fn print_human(run: &RunRow, events: &[EventRow], duration: &str, truncated: bool) {
     println!(
@@ -581,10 +732,16 @@ fn run_stats(
         Ok(stats) => stats,
         Err(error) => return report_storage_error(&error),
     };
+    // v0.4/D5b2（DR-014 §3）：`--stats` 追加 `tool_calls` 计数（additive；无工具调用
+    // 的 run 不输出该行/键，保持与 v6 输出一致）。
+    let tool_calls = match reader.tool_calls(&run.run_id) {
+        Ok(tool_calls) => tool_calls.len(),
+        Err(error) => return report_storage_error(&error),
+    };
     if options.json {
-        print_stats_json(&stats);
+        print_stats_json(&stats, tool_calls);
     } else {
-        print_stats_human(&stats);
+        print_stats_human(&stats, tool_calls);
         if truncated {
             println!();
             println!("{}", truncation_note(run));
@@ -593,8 +750,8 @@ fn run_stats(
     exit_code(run.status, truncated)
 }
 
-/// `--stats` 人类可读输出（06 §6.11.2）。
-fn print_stats_human(stats: &RunStats) {
+/// `--stats` 人类可读输出（06 §6.11.2；v0.4 追加 `tool_calls` 计数，仅 >0 时）。
+fn print_stats_human(stats: &RunStats, tool_calls: usize) {
     println!(
         "run {} status={} duration={}",
         stats.run_id,
@@ -621,10 +778,13 @@ fn print_stats_human(stats: &RunStats) {
         format_size(stats.db_size_bytes),
         stats.db_runs
     );
+    if tool_calls > 0 {
+        println!("tool_calls {tool_calls}");
+    }
 }
 
-/// `--stats --json` 输出对象（06 §6.11.2）。
-fn print_stats_json(stats: &RunStats) {
+/// `--stats --json` 输出对象（06 §6.11.2；v0.4 追加 `"tool_calls"` 键，仅 >0 时）。
+fn print_stats_json(stats: &RunStats, tool_calls: usize) {
     let kinds: serde_json::Map<String, Value> = stats
         .kinds
         .iter()
@@ -651,6 +811,10 @@ fn print_stats_json(stats: &RunStats) {
             "runs": stats.db_runs,
         },
     });
+    let mut value = value;
+    if tool_calls > 0 {
+        value["tool_calls"] = serde_json::json!(tool_calls);
+    }
     println!("{value}");
 }
 

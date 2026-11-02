@@ -27,13 +27,14 @@
 //! `RunOptions::default()` 再赋值（或 `..Default::default()`），禁止穷举字段。
 //! 本模块的测试也遵循该约定。
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
 
+use zgraph_harness as harness;
 use zgraph_kernel as kernel;
 use zgraph_trace as trace;
 
@@ -294,6 +295,76 @@ impl kernel::TraceSink for TraceBridge {
     /// fail-stop 轮询（06 §6.4.5）：非阻塞取走 trace 写线程的不可恢复错误。
     fn take_error(&self) -> Option<String> {
         self.handle.take_error()
+    }
+}
+
+/// CLI 侧工具调用记录 sink（D5b2 / DR-014 §1/§3）：harness `ToolCallRecord` →
+/// trace v7 `TraceInput::ToolCall`（落 `tool_calls` 表，**不产生 events 行**）。
+///
+/// - 上下文（run/instance/node/attempt）来自 `agent_loop` 填入的
+///   [`harness::ToolCallExecContext`]；
+/// - 落库前**再脱敏一次**（[`harness::redact_sensitive_record`]；防未来新增路径绕过
+///   harness 侧首轮脱敏）并单测断言；
+/// - `source`/`status` 字符串 fail-closed 映射（未知值丢弃该行，不猜默认值）；
+/// - 单 run 行数上限 [`trace::TOOL_CALLS_MAX_PER_RUN`]：达到后停止写入并**只告警一次**
+///   （writer 另有防御性上限；不 fail run，DR-014 §5）。
+pub struct ToolCallTraceSink {
+    handle: trace::TraceHandle,
+    /// 每个 run 已提交的记录数（单 run 进程内通常一个键）。
+    counts: Mutex<HashMap<String, u32>>,
+    /// 已告警「达到上限」的 run（warning 只发一次）。
+    warned: Mutex<HashSet<String>>,
+}
+
+impl ToolCallTraceSink {
+    /// 用 trace 写句柄构造 sink（与 run 的其它 trace 生产者共享同一写线程）。
+    pub fn new(handle: trace::TraceHandle) -> Self {
+        Self {
+            handle,
+            counts: Mutex::new(HashMap::new()),
+            warned: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// 计入一次记录并返回是否继续写入（超限 → 告警一次并停止）。
+    fn admit(&self, run_id: &str) -> bool {
+        let max_rows = u32::try_from(trace::TOOL_CALLS_MAX_PER_RUN).unwrap_or(u32::MAX);
+        let mut counts = match self.counts.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let used = counts.entry(run_id.to_string()).or_insert(0);
+        if *used >= max_rows {
+            drop(counts);
+            let mut warned = match self.warned.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if warned.insert(run_id.to_string()) {
+                eprintln!(
+                    "warning: tool_calls limit {max_rows} reached for run {run_id};                      further tool calls are not recorded (DR-014 §5)"
+                );
+            }
+            return false;
+        }
+        *used += 1;
+        true
+    }
+}
+
+impl harness::ToolCallRecordSink for ToolCallTraceSink {
+    fn record_tool_call(
+        &self,
+        context: &harness::ToolCallExecContext,
+        record: &harness::ToolCallRecord,
+    ) {
+        if !self.admit(&context.run_id) {
+            return;
+        }
+        let Some(mapped) = map_tool_call_record(context, record) else {
+            return;
+        };
+        self.handle.send(trace::TraceInput::ToolCall(mapped));
     }
 }
 
@@ -721,6 +792,67 @@ fn map_foreach_expansion(record: &kernel::ForeachExpansionRecord) -> trace::Fore
     }
 }
 
+/// harness source 字符串 → trace 枚举（**fail-closed**：未知值返回 `None`）。
+fn map_tool_source(source: &str) -> Option<trace::ToolCallSource> {
+    trace::ToolCallSource::parse(source)
+}
+
+/// harness status 字符串 → trace 枚举（**fail-closed**：未知值返回 `None`）。
+fn map_tool_status(status: &str) -> Option<trace::ToolCallStatus> {
+    trace::ToolCallStatus::parse(status)
+}
+
+/// harness 工具调用记录 → trace v7 `ToolCallRecord`（D5b2 / DR-014 §1）。
+///
+/// - 落库前**再脱敏一次**（复用 harness 递归脱敏：敏感键 → `***`、bash `env` 值全打码）；
+/// - `source`/`status` 字符串 fail-closed（未知 → `None`，调用方丢弃并告警）；
+/// - 执行身份（run/instance/node/attempt）由 `context` 补齐；
+/// - 副作用/bash 字段直映（trace writer 负责 cap/truncated/sha256）。
+fn map_tool_call_record(
+    context: &harness::ToolCallExecContext,
+    record: &harness::ToolCallRecord,
+) -> Option<trace::ToolCallRecord> {
+    let mut redacted = record.clone();
+    harness::redact_sensitive_record(&mut redacted);
+    let source = map_tool_source(redacted.source.as_str())?;
+    let status = map_tool_status(redacted.status.as_str())?;
+    Some(trace::ToolCallRecord {
+        run_id: context.run_id.clone(),
+        instance_id: context.instance_id.clone(),
+        node_id: context.node_id.clone(),
+        attempt: context.attempt,
+        call_id: redacted.call_id.clone(),
+        tool_name: redacted.tool_name.clone(),
+        source,
+        status,
+        args: redacted.args.clone(),
+        result: redacted.result.clone(),
+        error: redacted.error.clone(),
+        started_at: redacted.started_at.clone(),
+        finished_at: redacted.finished_at.clone(),
+        duration_ms: redacted.duration_ms,
+        side_effect: redacted
+            .side_effect
+            .as_ref()
+            .map(|side_effect| trace::ToolSideEffect {
+                path: side_effect.path.clone(),
+                before_sha256: side_effect.before_sha256.clone(),
+                after_sha256: side_effect.after_sha256.clone(),
+                bytes_before: side_effect.bytes_before,
+                bytes_after: side_effect.bytes_after,
+            }),
+        bash: redacted.bash.as_ref().map(|bash| trace::BashToolCall {
+            command: bash.command.clone(),
+            cwd: bash.cwd.clone(),
+            exit_code: bash.exit_code,
+            signal: bash.signal,
+            stdout: bash.stdout.clone(),
+            stderr: bash.stderr.clone(),
+            sandbox_profile_sha256: bash.sandbox_profile_sha256.clone(),
+        }),
+    })
+}
+
 /// 把 `usize` 边号收窄为 `i64`（真实图规模不会溢出）。
 fn edge_index_i64(edge_index: kernel::EdgeIdx) -> i64 {
     i64::try_from(edge_index).unwrap_or(i64::MAX)
@@ -877,10 +1009,14 @@ mod tests {
         map_instance_status, node_error_json, run_in_process, BridgeError, HumanRecording,
         TraceBridge,
     };
+    use serde_json::json;
+    use zgraph_harness as harness;
+    use zgraph_harness::ToolCallRecordSink as _;
     use zgraph_kernel::{
         FakeExecutor, InstanceSnapshot, InstanceStatus, NodeError, RunOptions, RunSpec, RunStatus,
         StreamingEvent, TraceSink,
     };
+    use zgraph_trace as trace;
 
     const LINEAR_JSON: &str = r#"{
       "version": "1.0",
@@ -1620,5 +1756,163 @@ mod tests {
             Some(serde_json::json!({"tenant": "acme", "threshold": 5})),
             "runs.global_vars_json 必须记录启动快照"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.4/D5b2：工具调用 sink（映射/脱敏/上下文/枚举 fail-closed/行数上限）
+    // -----------------------------------------------------------------------
+
+    /// 构造一条带敏感字段/副作用/bash 元数据的 harness 工具调用记录。
+    fn harness_tool_record() -> harness::ToolCallRecord {
+        harness::ToolCallRecord {
+            call_id: "call-1".to_string(),
+            tool_name: "builtin__bash".to_string(),
+            source: harness::ToolCallSource::Builtin,
+            status: harness::ToolCallStatus::Ok,
+            started_at: "2026-11-02T10:00:00.000Z".to_string(),
+            finished_at: "2026-11-02T10:00:00.012Z".to_string(),
+            duration_ms: 12,
+            args: serde_json::json!({
+                "api_key": "sk-secret",
+                "query": "select 1",
+                "env": {"TOKEN": "tok-value", "SAFE": "visible"},
+            }),
+            result: Some(serde_json::json!({
+                "authorization": "Bearer x",
+                "output": "ok",
+            })),
+            error: None,
+            truncated: false,
+            side_effect: Some(harness::ToolSideEffect {
+                path: "notes/a.txt".to_string(),
+                before_sha256: Some("before".to_string()),
+                after_sha256: Some("after".to_string()),
+                bytes_before: Some(1),
+                bytes_after: Some(2),
+            }),
+            bash: Some(harness::BashCallRecord {
+                command: "echo hi".to_string(),
+                cwd: "/workspace".to_string(),
+                exit_code: Some(0),
+                signal: None,
+                stdout: "hi\n".to_string(),
+                stderr: String::new(),
+                sandbox_profile_sha256: Some("p".repeat(64)),
+            }),
+        }
+    }
+
+    fn harness_context() -> harness::ToolCallExecContext {
+        harness::ToolCallExecContext {
+            run_id: "run-tool".to_string(),
+            instance_id: "inst-agent-0".to_string(),
+            node_id: "agent_node".to_string(),
+            attempt: 3,
+        }
+    }
+
+    /// D5b2：harness 记录 → trace v7 记录；上下文补齐、source/status 直映、
+    /// 副作用/bash 直映，且**落库前再脱敏一次**（args/result 敏感键 + bash env 值）。
+    #[test]
+    fn map_tool_call_record_redacts_and_maps_context() {
+        let mapped = super::map_tool_call_record(&harness_context(), &harness_tool_record())
+            .expect("valid source/status maps");
+        assert_eq!(mapped.run_id, "run-tool");
+        assert_eq!(mapped.instance_id, "inst-agent-0");
+        assert_eq!(mapped.node_id, "agent_node");
+        assert_eq!(mapped.attempt, 3);
+        assert_eq!(mapped.call_id, "call-1");
+        assert_eq!(mapped.tool_name, "builtin__bash");
+        assert_eq!(mapped.source, trace::ToolCallSource::Builtin);
+        assert_eq!(mapped.status, trace::ToolCallStatus::Ok);
+        assert_eq!(mapped.duration_ms, 12);
+        // 第二轮脱敏：args 敏感键与 bash env 值一律 `***`。
+        assert_eq!(mapped.args["api_key"], json!("***"));
+        assert_eq!(mapped.args["env"]["TOKEN"], json!("***"));
+        assert_eq!(mapped.args["query"], json!("select 1"), "非敏感参数保留");
+        assert_eq!(
+            mapped.result.as_ref().unwrap()["authorization"],
+            json!("***")
+        );
+        assert_eq!(mapped.result.as_ref().unwrap()["output"], json!("ok"));
+        // 副作用 / bash 直映。
+        let side_effect = mapped.side_effect.expect("side effect mapped");
+        assert_eq!(side_effect.path, "notes/a.txt");
+        assert_eq!(side_effect.before_sha256.as_deref(), Some("before"));
+        assert_eq!(side_effect.bytes_after, Some(2));
+        let bash = mapped.bash.expect("bash mapped");
+        assert_eq!(bash.command, "echo hi");
+        assert_eq!(bash.cwd, "/workspace");
+        assert_eq!(bash.exit_code, Some(0));
+        assert_eq!(bash.stdout, "hi\n");
+        assert_eq!(
+            bash.sandbox_profile_sha256.as_deref().map(str::len),
+            Some(64)
+        );
+    }
+
+    /// D5b2：source/status 字符串映射 fail-closed（未知值 → `None`，不猜默认值）。
+    #[test]
+    fn map_tool_source_and_status_fail_closed_on_unknown_values() {
+        assert_eq!(
+            super::map_tool_source("builtin"),
+            Some(trace::ToolCallSource::Builtin)
+        );
+        assert_eq!(
+            super::map_tool_source("mcp"),
+            Some(trace::ToolCallSource::Mcp)
+        );
+        assert_eq!(
+            super::map_tool_source("python"),
+            Some(trace::ToolCallSource::Python)
+        );
+        assert_eq!(super::map_tool_source("framework"), None);
+        assert_eq!(
+            super::map_tool_status("ok"),
+            Some(trace::ToolCallStatus::Ok)
+        );
+        assert_eq!(
+            super::map_tool_status("timeout"),
+            Some(trace::ToolCallStatus::Timeout)
+        );
+        assert_eq!(super::map_tool_status("unknown"), None);
+    }
+
+    /// D5b2：sink 落 `tool_calls`（非 events 行）；行数上限 10000 后停止并只告警一次
+    /// （边界用 `admit` 直接验证，避免 10000 条真实写入）。
+    #[test]
+    fn tool_call_sink_writes_trace_rows_and_enforces_row_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trace.db");
+        let writer = zgraph_trace::TraceWriter::open(&path).expect("writer");
+        let sink = super::ToolCallTraceSink::new(writer.handle());
+        sink.record_tool_call(&harness_context(), &harness_tool_record());
+        // 默认源记录：无 sink 不写（在 `run_cmd` 侧不注入即 no-op）；此处断言写入正确。
+        writer.flush().expect("flush");
+        writer.close().expect("close");
+
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        let calls = reader.tool_calls("run-tool").expect("tool calls");
+        assert_eq!(calls.len(), 1, "one row per recorded tool call: {calls:?}");
+        assert_eq!(calls[0].call_id, "call-1");
+        assert_eq!(calls[0].node_id, "agent_node");
+        assert_eq!(calls[0].attempt, 3);
+        assert_eq!(calls[0].source, trace::ToolCallSource::Builtin);
+        // 非 events 行（events.kind 不变）。
+        assert!(reader
+            .events("run-tool", &zgraph_trace::EventQuery::default())
+            .expect("events")
+            .is_empty());
+
+        // 行数上限边界：第 10001 条被拒绝，其余已准入。
+        let limit = trace::TOOL_CALLS_MAX_PER_RUN as u32;
+        let admitted = (0..limit).filter(|_| sink.admit("run-limit")).count();
+        assert_eq!(admitted as u32, limit);
+        assert!(!sink.admit("run-limit"), "limit reached → stop recording");
+        assert!(
+            !sink.admit("run-limit"),
+            "already warned；仍返回 false 且不 panic"
+        );
+        assert!(sink.admit("run-other"), "limit is per run");
     }
 }

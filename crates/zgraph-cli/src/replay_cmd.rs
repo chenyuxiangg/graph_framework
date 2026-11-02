@@ -2,6 +2,8 @@
 //!
 //! - `--mode=events`（默认，L1）：复用 [`crate::trace_cmd`] 的只读回放实现与输出格式，
 //!   **不重跑、不写库**；
+//! - `--mode=tools`（L3，v0.4/D5b2）：只读 `tool_calls` 还原工具调用（recorded-only，
+//!   **绝不执行任何工具/副作用**；`--replay-tools=reexec` 为 v0.5 接口 → v0.4 用法错误）；
 //! - `--mode=outputs`（L2）：只读打开 DB，校验 `--record=full` 记录完整性后，用
 //!   [`RecordedExecutor`] 重跑内核（不启动 worker/LLM、内存 trace sink 不落库），
 //!   比较重跑输出与原始 `runs.output_json`。成功 exit 0，不一致
@@ -55,7 +57,7 @@ use zgraph_kernel::{
 };
 use zgraph_trace::{
     ForeachExpansionRow, InstanceRow, InstanceStatus as TraceInstanceStatus, RecordedOutputRow,
-    RunRow, RunStatus as TraceRunStatus, TraceError, TraceReader,
+    RunRow, RunStatus as TraceRunStatus, StreamingRow, ToolCallRow, TraceError, TraceReader,
 };
 
 use crate::run_cmd::output_hash;
@@ -68,9 +70,10 @@ usage: zgraph replay --run <run_id> [options]
 
 options:
   --run <run_id>        run to replay
-  --mode <mode>         events (L1, default) | outputs (L2)
+  --mode <mode>         events (L1, default) | outputs (L2) | tools (recorded tool calls)
+  --replay-tools <mode> recorded (default; v0.4 recorded-only) | reexec (v0.4 未实现)
   --db <path>           trace database (default: $ZGRAPH_DB or .zgraph/trace.db)
-  --json                machine-readable output (events: NDJSON; outputs: JSON object)
+  --json                machine-readable output (events/tools: NDJSON; outputs: JSON object)
   --help, -h            print this help";
 
 /// `REPLAY_RECORD_MISSING`：`--record=full` 记录缺失/不完整（DR-002 §3.3）。
@@ -84,6 +87,15 @@ pub const CODE_REPLAY_RECORD_CORRUPT: &str = "REPLAY_RECORD_CORRUPT";
 
 /// `REPLAY_OUTPUT_MISMATCH`：L2 重跑结果与原始输出不一致。
 pub const CODE_REPLAY_OUTPUT_MISMATCH: &str = "REPLAY_OUTPUT_MISMATCH";
+
+/// `REPLAY_TOOL_RECORD_MISSING`：`--mode=tools` 缺 `tool_calls` 记录（CLI 命名空间）。
+pub const CODE_REPLAY_TOOL_RECORD_MISSING: &str = "REPLAY_TOOL_RECORD_MISSING";
+
+/// `REPLAY_TOOL_RECORD_TRUNCATED`：`tool_calls` 记录被截断，不能安全回放（fail-closed）。
+pub const CODE_REPLAY_TOOL_RECORD_TRUNCATED: &str = "REPLAY_TOOL_RECORD_TRUNCATED";
+
+/// `REPLAY_TOOL_RECORD_MISMATCH`：`tool_calls` 记录 JSON 不合法 / 全量 sha256 不符。
+pub const CODE_REPLAY_TOOL_RECORD_MISMATCH: &str = "REPLAY_TOOL_RECORD_MISMATCH";
 
 /// replay 的 CLI 命名空间记录类错误退出码（DR-002 §3.3）。
 const EXIT_RECORD: u8 = 3;
@@ -101,6 +113,8 @@ pub enum ReplayMode {
     Events,
     /// L2：按记录输出重跑。
     Outputs,
+    /// L3：工具级回放（`tool_calls` recorded；绝不执行任何工具）。
+    Tools,
 }
 
 /// `replay` 的参数。
@@ -135,9 +149,17 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
             mode = parse_mode(value)?;
             continue;
         }
+        if let Some(value) = arg.strip_prefix("--replay-tools=") {
+            parse_replay_tools(value)?;
+            continue;
+        }
         match arg.as_str() {
             "--run" => run_id = Some(option_value(&mut iter, "--run")?),
             "--mode" => mode = parse_mode(&option_value(&mut iter, "--mode")?)?,
+            "--replay-tools" => {
+                let value = option_value(&mut iter, "--replay-tools")?;
+                parse_replay_tools(&value)?;
+            }
             "--db" => db = Some(PathBuf::from(option_value(&mut iter, "--db")?)),
             "--json" => json = true,
             flag if flag.starts_with('-') => return Err(format!("unknown option: {flag}")),
@@ -176,8 +198,24 @@ fn parse_mode(value: &str) -> Result<ReplayMode, String> {
     match value {
         "events" => Ok(ReplayMode::Events),
         "outputs" => Ok(ReplayMode::Outputs),
+        "tools" => Ok(ReplayMode::Tools),
         other => Err(format!(
-            "invalid --mode '{other}' (expected events|outputs)"
+            "invalid --mode '{other}' (expected events|outputs|tools)"
+        )),
+    }
+}
+
+/// 解析 `--replay-tools`（v0.4 只实现 `recorded`；`reexec` 为 v0.5 接口 → 用法错误）。
+fn parse_replay_tools(value: &str) -> Result<(), String> {
+    match value {
+        "recorded" => Ok(()),
+        "reexec" => Err(
+            "--replay-tools=reexec is not implemented in v0.4 (recorded-only replay); \
+             use --replay-tools=recorded"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "invalid --replay-tools '{other}' (expected recorded|reexec)"
         )),
     }
 }
@@ -186,6 +224,7 @@ fn parse_mode(value: &str) -> Result<ReplayMode, String> {
 pub fn run(args: &ReplayArgs) -> ExitCode {
     match args.mode {
         ReplayMode::Events => run_events(args),
+        ReplayMode::Tools => run_tools(args),
         ReplayMode::Outputs => match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -197,6 +236,151 @@ pub fn run(args: &ReplayArgs) -> ExitCode {
             }
         },
     }
+}
+
+/// L3：工具级 recorded 回放（v0.4/D5b2；DR-014 §4/§7）。
+///
+/// 只读 `tool_calls` 还原并按 `(started_at, call_id)` 输出；**绝不执行任何工具**
+/// （无 spawn、无 workspace 写入、不新增 `tool_calls` 行）。fail-closed 校验：
+/// `streaming tool_call_start` 计数 > 记录行数 → `REPLAY_TOOL_RECORD_MISSING`；
+/// 任一行 `truncated=1` → `REPLAY_TOOL_RECORD_TRUNCATED`；args/result/error JSON
+/// 不可解析或全量 sha256 不符 → `REPLAY_TOOL_RECORD_MISMATCH`（均 CLI 码、exit 3，
+/// 不写 `runs.error_code`）。
+fn run_tools(args: &ReplayArgs) -> ExitCode {
+    let db_path = resolve_db_path(args.db.as_deref());
+    let reader = match TraceReader::open_readonly(&db_path) {
+        Ok(reader) => reader,
+        Err(error) => return report(ReplayError::from(error)),
+    };
+    let run = match reader.run(&args.run_id) {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            return report(ReplayError::storage(format!(
+                "run not found: {}",
+                args.run_id
+            )))
+        }
+        Err(error) => return report(ReplayError::from(error)),
+    };
+    let calls = match reader.tool_calls(&run.run_id) {
+        Ok(calls) => calls,
+        Err(error) => return report(ReplayError::from(error)),
+    };
+    let streaming = match reader.streaming_events(&run.run_id) {
+        Ok(streaming) => streaming,
+        Err(error) => return report(ReplayError::from(error)),
+    };
+    if let Err(error) = validate_tool_calls(&calls, &streaming) {
+        return report(error);
+    }
+    if args.json {
+        for call in &calls {
+            println!("{}", trace_cmd::tool_call_json_value(call));
+        }
+    } else {
+        println!(
+            "run {}  status={}  graph={}  hash={}",
+            run.run_id,
+            run.status.as_str(),
+            run.graph_name.as_deref().unwrap_or("-"),
+            run.graph_hash
+        );
+        println!("tool_calls: {} (recorded; no tools executed)", calls.len());
+        for call in &calls {
+            println!("  {}", trace_cmd::tool_call_human_line(call));
+        }
+    }
+    ExitCode::from(EXIT_SUCCESS)
+}
+
+/// `--mode=tools` 的 fail-closed 校验（顺序：missing → truncated → mismatch）。
+fn validate_tool_calls(
+    calls: &[ToolCallRow],
+    streaming: &[StreamingRow],
+) -> Result<(), ReplayError> {
+    let starts = streaming
+        .iter()
+        .filter(|row| row.kind == "tool_call_start")
+        .count();
+    if starts > calls.len() {
+        return Err(ReplayError::record(
+            CODE_REPLAY_TOOL_RECORD_MISSING,
+            format!(
+                "run has {starts} streaming tool_call_start event(s) but only {} tool_calls \
+                 record(s) (recorded replay is fail-closed)",
+                calls.len()
+            ),
+        ));
+    }
+    if let Some(call) = calls.iter().find(|call| call.truncated) {
+        return Err(ReplayError::record(
+            CODE_REPLAY_TOOL_RECORD_TRUNCATED,
+            format!(
+                "tool_calls row call_id='{}' node='{}' is truncated (truncated=1); \
+                 recorded replay is fail-closed",
+                call.call_id, call.node_id
+            ),
+        ));
+    }
+    for call in calls {
+        verify_tool_json("args", &call.args_json, call.args_sha256.as_deref(), call)?;
+        if let Some(raw) = &call.result_json {
+            verify_tool_json("result", raw, call.result_sha256.as_deref(), call)?;
+        }
+        if let Some(raw) = &call.error_json {
+            verify_tool_json("error", raw, call.error_sha256.as_deref(), call)?;
+        }
+    }
+    Ok(())
+}
+
+/// 单个 JSON 字段的可解析性 + 全量 sha256 复核（fail-closed → MISMATCH）。
+fn verify_tool_json(
+    field: &str,
+    raw: &str,
+    sha: Option<&str>,
+    call: &ToolCallRow,
+) -> Result<(), ReplayError> {
+    serde_json::from_str::<Value>(raw)
+        .map_err(|error| tool_mismatch(call, field, format!("is not valid JSON: {error}")))?;
+    let expected = sha.ok_or_else(|| {
+        tool_mismatch(
+            call,
+            field,
+            format!("has no {field}_sha256 (cannot verify recorded content)"),
+        )
+    })?;
+    let actual = sha256_hex(raw.as_bytes());
+    if actual != expected {
+        return Err(tool_mismatch(
+            call,
+            field,
+            format!("sha256 mismatch recorded={expected} recomputed={actual}"),
+        ));
+    }
+    Ok(())
+}
+
+/// `REPLAY_TOOL_RECORD_MISMATCH` 错误（CLI 命名空间，exit 3）。
+fn tool_mismatch(call: &ToolCallRow, field: &str, detail: String) -> ReplayError {
+    ReplayError::record(
+        CODE_REPLAY_TOOL_RECORD_MISMATCH,
+        format!(
+            "tool_calls row call_id='{}' node='{}' field {field} {detail}",
+            call.call_id, call.node_id
+        ),
+    )
+}
+
+/// 小写 hex sha256（与 trace writer 的 `args_sha256`/`result_sha256` 同口径）。
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// L1：委托 [`crate::trace_cmd`] 的默认时间线/NDJSON 回放（语义与退出码完全一致）。
@@ -1122,6 +1306,51 @@ mod tests {
         assert!(parse(&args(&["--run", "r", "--mode", "all"])).is_err());
         assert!(parse(&args(&["--run", "r", "--nope"])).is_err());
         assert!(parse(&args(&["--run", "r", "positional"])).is_err());
+    }
+
+    #[test]
+    fn parse_accepts_tools_mode_and_recorded_replay_tools() {
+        let parsed = parse(&args(&["--run", "r", "--mode=tools"]))
+            .expect("parse")
+            .expect("not help");
+        assert_eq!(parsed.mode, ReplayMode::Tools);
+        let parsed = parse(&args(&[
+            "--run",
+            "r",
+            "--mode",
+            "tools",
+            "--replay-tools=recorded",
+        ]))
+        .expect("parse")
+        .expect("not help");
+        assert_eq!(parsed.mode, ReplayMode::Tools);
+        assert!(parse(&args(&[
+            "--run",
+            "r",
+            "--mode=events",
+            "--replay-tools",
+            "recorded"
+        ]))
+        .expect("parse")
+        .is_some());
+    }
+
+    #[test]
+    fn parse_rejects_reexec_and_unknown_replay_tools() {
+        // v0.4 只实现 recorded；reexec 是 v0.5 接口 → 用法错误（exit 2 由 dispatch 映射）。
+        let error = parse(&args(&[
+            "--run",
+            "r",
+            "--mode=tools",
+            "--replay-tools=reexec",
+        ]))
+        .expect_err("reexec not implemented");
+        assert!(error.contains("not implemented in v0.4"), "{error}");
+        let error = parse(&args(&["--run", "r", "--replay-tools=bogus"]))
+            .expect_err("invalid replay-tools");
+        assert!(error.contains("invalid --replay-tools"), "{error}");
+        let error = parse(&args(&["--run", "r", "--mode=bogus"])).expect_err("invalid mode");
+        assert!(error.contains("events|outputs|tools"), "{error}");
     }
 
     #[test]

@@ -16,6 +16,8 @@ use crate::llm::{LlmDelta, LlmStreamSink};
 
 /// `HarnessCtx::run_id()` 的默认值（未覆写实现的只读身份；仅作每 run 上限的兜底桶）。
 const UNKNOWN_RUN_ID: &str = "unknown";
+/// `HarnessCtx::node_id()` 的默认值（未覆写实现；D5b2 工具调用记录上下文）。
+const UNKNOWN_NODE_ID: &str = "unknown";
 
 /// Harness 可见的节点上下文（05 §5.1.1 H1 的**最窄**接口面）。
 ///
@@ -44,6 +46,14 @@ pub trait HarnessCtx: Send + Sync {
     /// 所属 run ID（ISSUE-079：每 run 并发上限的键；默认 `"unknown"`）。
     fn run_id(&self) -> &str {
         UNKNOWN_RUN_ID
+    }
+    /// 执行节点 ID（D5b2 工具调用记录上下文；默认 `"unknown"`）。
+    fn node_id(&self) -> &str {
+        UNKNOWN_NODE_ID
+    }
+    /// 实例 attempt（D5b2 工具调用记录上下文；默认 0）。
+    fn attempt(&self) -> u32 {
+        0
     }
     /// CLI 组合根注入的共享并发上限；`None` = 使用 Harness 进程级默认上限。
     fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
@@ -90,6 +100,14 @@ impl HarnessCtx for NodeContext {
 
     fn run_id(&self) -> &str {
         NodeContext::run_id(self)
+    }
+
+    fn node_id(&self) -> &str {
+        NodeContext::node_id(self)
+    }
+
+    fn attempt(&self) -> u32 {
+        NodeContext::attempt(self)
     }
 }
 

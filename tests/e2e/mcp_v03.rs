@@ -976,6 +976,9 @@ fn ac19f_trace_schema_and_tool_identity_unchanged() {
         .iter()
         .map(|line| line["kind"].as_str().unwrap_or_default().to_string())
         .collect();
+    // v0.4/D5b2（DR-014 §3 / AC-24 i）：`trace --json` 在事件 NDJSON 之后追加
+    // additive 的 `{"kind":"ToolCall"}` 行（工具审计，**不写入 events.kind**）；
+    // 事件行本身仍只有既有 7 类——这里只要求出现过的 kind ⊆ 7 类事件 + ToolCall。
     let allowed = [
         "RunStarted",
         "Transition",
@@ -984,10 +987,11 @@ fn ac19f_trace_schema_and_tool_identity_unchanged() {
         "NodeAbandoned",
         "Streaming",
         "RunFinished",
+        "ToolCall",
     ];
     assert!(
         kinds.iter().all(|kind| allowed.contains(&kind.as_str())),
-        "events.kind 不变: {kinds:?}"
+        "events.kind 不变（仅追加 ToolCall 审计行）: {kinds:?}"
     );
     // L1 replay 与 trace 逐字节一致。
     let replay = v03::replay_events_json(&db, &run_id);

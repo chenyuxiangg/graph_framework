@@ -100,9 +100,10 @@ pub use provider::{
 pub use record::{LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
 pub use skills::SkillEntry;
 pub use tools::{
-    BashCallRecord, FakeToolBehavior, FakeToolRunner, ToolCallRecord, ToolCallRecordSink,
-    ToolCallRequest, ToolCallSource, ToolCallStatus, ToolDef, ToolFailure, ToolRegistry,
-    ToolRunner, ToolSchema, ToolSideEffect, WorkerToolRunner,
+    redact_sensitive_record, redact_sensitive_value, BashCallRecord, FakeToolBehavior,
+    FakeToolRunner, ToolCallExecContext, ToolCallRecord, ToolCallRecordSink, ToolCallRequest,
+    ToolCallSource, ToolCallStatus, ToolDef, ToolFailure, ToolRegistry, ToolRunner, ToolSchema,
+    ToolSideEffect, WorkerToolRunner,
 };
 
 #[cfg(test)]

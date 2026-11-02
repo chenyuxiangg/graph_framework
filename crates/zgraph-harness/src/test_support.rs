@@ -103,9 +103,13 @@ impl LlmCallRecorder for CapturingRecorder {
 }
 
 /// v0.4/D5b1：捕获富化工具调用记录的测试 sink（每类工具断言用）。
+///
+/// D5b2：同时捕获执行上下文（run/instance/node/attempt），供 harness 单测断言
+/// `agent_loop` 发射时已填入。
 #[derive(Debug, Default)]
 pub struct RecordingToolCallSink {
     records: Mutex<Vec<crate::tools::ToolCallRecord>>,
+    contexts: Mutex<Vec<crate::tools::ToolCallExecContext>>,
 }
 
 impl RecordingToolCallSink {
@@ -121,13 +125,39 @@ impl RecordingToolCallSink {
             Err(poisoned) => poisoned.into_inner().clone(),
         }
     }
+
+    /// 已捕获执行上下文（与 [`Self::records`] 同序）。
+    pub fn contexts(&self) -> Vec<crate::tools::ToolCallExecContext> {
+        match self.contexts.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
 }
 
 impl crate::tools::ToolCallRecordSink for RecordingToolCallSink {
-    fn record_tool_call(&self, record: &crate::tools::ToolCallRecord) {
-        match self.records.lock() {
-            Ok(mut guard) => guard.push(record.clone()),
-            Err(poisoned) => poisoned.into_inner().push(record.clone()),
+    fn record_tool_call(
+        &self,
+        context: &crate::tools::ToolCallExecContext,
+        record: &crate::tools::ToolCallRecord,
+    ) {
+        match (self.contexts.lock(), self.records.lock()) {
+            (Ok(mut contexts), Ok(mut records)) => {
+                contexts.push(context.clone());
+                records.push(record.clone());
+            }
+            (Err(poisoned), Ok(mut records)) => {
+                poisoned.into_inner().push(context.clone());
+                records.push(record.clone());
+            }
+            (Ok(mut contexts), Err(poisoned)) => {
+                contexts.push(context.clone());
+                poisoned.into_inner().push(record.clone());
+            }
+            (Err(poisoned_ctx), Err(poisoned_rec)) => {
+                poisoned_ctx.into_inner().push(context.clone());
+                poisoned_rec.into_inner().push(record.clone());
+            }
         }
     }
 }
@@ -155,6 +185,8 @@ pub struct TestCtx {
     seed: u64,
     vars: HashMap<String, Value>,
     run_id: String,
+    node_id: String,
+    attempt: u32,
     tool_limits: Option<Arc<WorkerLimits>>,
 }
 
@@ -170,6 +202,8 @@ impl Default for TestCtx {
             seed: 42,
             vars: HashMap::new(),
             run_id: "test-run".to_string(),
+            node_id: "test-node".to_string(),
+            attempt: 0,
             tool_limits: None,
         }
     }
@@ -194,6 +228,16 @@ impl TestCtx {
         Arc::new(Self {
             run_id: run_id.to_string(),
             tool_limits: Some(limits),
+            ..Self::default()
+        })
+    }
+
+    /// D5b2：指定执行身份（instance/node/attempt），供工具调用记录上下文断言。
+    pub fn with_node_identity(instance_id: &str, node_id: &str, attempt: u32) -> Arc<Self> {
+        Arc::new(Self {
+            instance_id: instance_id.to_string(),
+            node_id: node_id.to_string(),
+            attempt,
             ..Self::default()
         })
     }
@@ -296,6 +340,14 @@ impl HarnessCtx for TestCtx {
 
     fn run_id(&self) -> &str {
         &self.run_id
+    }
+
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    fn attempt(&self) -> u32 {
+        self.attempt
     }
 
     fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
@@ -447,7 +499,11 @@ impl PanickingToolCallSink {
 }
 
 impl crate::tools::ToolCallRecordSink for PanickingToolCallSink {
-    fn record_tool_call(&self, _record: &crate::tools::ToolCallRecord) {
+    fn record_tool_call(
+        &self,
+        _context: &crate::tools::ToolCallExecContext,
+        _record: &crate::tools::ToolCallRecord,
+    ) {
         panic!("sink panic must not affect the run");
     }
 }

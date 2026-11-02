@@ -1413,6 +1413,11 @@ fn build_executor(
         }
         None => HarnessExecutor::with_tool_limits(settings, limits),
     };
+    // v0.4/D5b2（DR-014 §1）：工具调用审计落 trace v7 `tool_calls`（独立于
+    // `--record` 与 events；默认无工具调用时零行、既有输出不变）。
+    let harness = harness.with_tool_call_record_sink(Arc::new(
+        crate::bridge::ToolCallTraceSink::new(trace_handle.clone()),
+    ));
     // v0.3（DR-009 §1）：`--skills-dir`/env 显式覆盖；None 时 harness 回退资产默认。
     // v0.3（DR-010 §2.2）：`--allow-mcp` 显式开关（默认关；未开启且配置 MCP → 预检 exit 3）。
     // v0.4/D2：`--allow-builtin-tools` 注册 5 个 Rust 内置文件工具（additive）。

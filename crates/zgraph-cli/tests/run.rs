@@ -1014,6 +1014,95 @@ fn run_ac08_record_none_writes_no_recorded_outputs() {
     assert_eq!(event_count(&db, "RunFinished"), 1);
 }
 
+/// v0.4/D5b2 真链路（fake LLM + 真 Python worker 工具）：工具调用落 trace v7
+/// `tool_calls`（原生 call_id/source/status/args + run/instance/node/attempt 上下文），
+/// `replay --mode=tools` 可还原且**不执行工具**（DB 只读）。
+#[test]
+fn run_ac08_records_tool_calls_and_tool_replay_restores_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (output, db) = run_ac08(dir.path(), &["--json"]);
+    assert_exit(&output, 0, "AC-08 tool_calls");
+    let payload = json_stdout(&output);
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+
+    type ToolRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        Option<String>,
+    );
+    let conn = connect(&db);
+    let rows: Vec<ToolRow> = conn
+        .prepare(
+            "SELECT call_id, tool_name, source, status, node_id, attempt, args_json, result_json \
+             FROM tool_calls WHERE run_id = ?1 ORDER BY started_at, call_id",
+        )
+        .expect("prepare tool_calls")
+        .query_map([&run_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })
+        .expect("query tool_calls")
+        .collect::<Result<_, _>>()
+        .expect("collect tool_calls");
+    assert_eq!(rows.len(), 1, "exactly one tool call row: {rows:?}");
+    let (call_id, tool_name, source, status, node_id, attempt, args_json, result_json) = &rows[0];
+    assert_eq!(call_id, "call_add_1", "native provider call id");
+    assert_eq!(tool_name, "add");
+    assert_eq!(source, "python");
+    assert_eq!(status, "ok");
+    assert_eq!(node_id, "answer_writer");
+    assert_eq!(*attempt, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(args_json).expect("args json"),
+        json!({"a": 2, "b": 3})
+    );
+    assert!(result_json
+        .as_deref()
+        .is_some_and(|text| text.contains("sum")));
+
+    // `replay --mode=tools --json`：还原同一行，且不执行工具（DB 主文件字节不变）。
+    let db_before = std::fs::read(&db).expect("read db before replay");
+    let replay = run_cli(
+        &[
+            "replay".to_string(),
+            "--run".to_string(),
+            run_id,
+            "--mode=tools".to_string(),
+            "--json".to_string(),
+            "--db".to_string(),
+            arg(&db),
+        ],
+        dir.path(),
+    );
+    assert_exit(&replay, 0, "replay --mode=tools");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&replay.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("tool NDJSON line"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one recorded tool call replayed");
+    assert_eq!(lines[0]["call_id"], json!("call_add_1"));
+    assert_eq!(lines[0]["args"], json!({"a": 2, "b": 3}));
+    assert_eq!(lines[0]["status"], json!("ok"));
+    assert_eq!(
+        std::fs::read(&db).expect("read db after replay"),
+        db_before,
+        "recorded 工具回放只读（不执行工具、不改 trace）"
+    );
+}
+
 #[test]
 fn run_bare_fake_llm_uses_builtin_default_script() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -399,16 +399,37 @@ pub struct ToolCallRecord {
     pub bash: Option<BashCallRecord>,
 }
 
+/// 工具调用执行上下文（D5b2 / DR-014 §1）：记录行的执行身份。
+///
+/// 由 `agent_loop` 在每次发射 `ToolCallRecord` 时填入（run/实例/节点/attempt），
+/// sink 侧据此补齐 trace v7 `tool_calls` 的 `run_id/instance_id/node_id/attempt`
+/// 列（harness 自身不持有 trace 数据模型）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallExecContext {
+    /// 所属 run。
+    pub run_id: String,
+    /// 执行工具调用的实例。
+    pub instance_id: String,
+    /// 节点 id。
+    pub node_id: String,
+    /// 实例 attempt（按 `(node,item)` 作用域，W4b）。
+    pub attempt: u32,
+}
+
 /// 工具调用记录 sink（v0.4 v7；默认无注入 = no-op，不新增表/不写 DB）。
 pub trait ToolCallRecordSink: Send + Sync {
-    /// 记录一次工具调用终态（不得改变执行语义/不得 panic 影响调用方）。
-    fn record_tool_call(&self, record: &ToolCallRecord);
+    /// 记录一次工具调用终态（`context` 为执行身份；不得改变执行语义/不得 panic）。
+    fn record_tool_call(&self, context: &ToolCallExecContext, record: &ToolCallRecord);
 }
 
 /// 安全调用 sink（panic 静默吞掉，观察者不改变语义）。
-pub(crate) fn record_tool_call_safely(sink: &dyn ToolCallRecordSink, record: &ToolCallRecord) {
+pub(crate) fn record_tool_call_safely(
+    sink: &dyn ToolCallRecordSink,
+    context: &ToolCallExecContext,
+    record: &ToolCallRecord,
+) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        sink.record_tool_call(record);
+        sink.record_tool_call(context, record);
     }));
 }
 
@@ -903,7 +924,7 @@ fn is_record_sensitive_key(key: &str) -> bool {
 ///
 /// 用于 `ToolCallRecord.args/result/error`；D5b2 落库前需再断言一次（bridge 测试），
 /// 防止后续新增路径绕过本函数。
-pub(crate) fn redact_sensitive_value(value: &Value) -> Value {
+pub fn redact_sensitive_value(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut redacted = Map::new();
@@ -926,7 +947,7 @@ pub(crate) fn redact_sensitive_value(value: &Value) -> Value {
 ///
 /// - `args`/`result`/`error` 递归敏感键 → `***`；
 /// - `builtin__bash` 的 `args.env` **所有值**打码（env 值不记录；键名保留供审计）。
-pub(crate) fn redact_sensitive_record(record: &mut ToolCallRecord) {
+pub fn redact_sensitive_record(record: &mut ToolCallRecord) {
     if record.tool_name == "builtin__bash" {
         if let Some(env) = record.args.get_mut("env").and_then(Value::as_object_mut) {
             for value in env.values_mut() {

@@ -18,6 +18,8 @@ mcp = ["zgraph-harness/mcp"]
 [dependencies]
 blake3.workspace = true
 chrono.workspace = true
+# v0.4/D5b2（DR-014 §4）：`tool_calls` 全量 sha256 复核（recorded 回放 fail-closed）。
+sha2.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 uuid.workspace = true

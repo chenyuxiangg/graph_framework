@@ -47,8 +47,8 @@ use crate::skills;
 use crate::tools::{
     acquire_tool_permits, record_tool_call_safely, redact_sensitive_record, serialize_tool_result,
     summarize_args, summarize_result, tool_error_content, validate_tool_arguments, BashCallRecord,
-    ToolCallRecord, ToolCallRecordSink, ToolCallRequest, ToolCallSource, ToolCallStatus, ToolDef,
-    ToolFailure, ToolRunner, ToolSchema,
+    ToolCallExecContext, ToolCallRecord, ToolCallRecordSink, ToolCallRequest, ToolCallSource,
+    ToolCallStatus, ToolDef, ToolFailure, ToolRunner, ToolSchema,
 };
 
 /// `agent_call` 节点的输出契约（05 §5.9.1 / §5.9.2）。
@@ -155,6 +155,16 @@ pub(crate) struct AgentRun<'a> {
     pub(crate) builtin: Option<&'a Arc<BuiltinToolSet>>,
     /// v0.4/D2：工具调用记录 sink（D5 v7 预留；默认 `None` = no-op）。
     pub(crate) tool_call_sink: Option<&'a Arc<dyn ToolCallRecordSink>>,
+}
+
+/// D5b2：工具调用记录的执行上下文（run/实例/节点/attempt；由 [`HarnessCtx`] 提供）。
+fn tool_call_context(run: &AgentRun<'_>) -> ToolCallExecContext {
+    ToolCallExecContext {
+        run_id: run.ctx.run_id().to_string(),
+        instance_id: run.ctx.instance_id().to_string(),
+        node_id: run.ctx.node_id().to_string(),
+        attempt: run.ctx.attempt(),
+    }
 }
 
 /// 执行一次 Agent（05 §5.5.4 语义；Loading 由 executor 预先完成）。
@@ -448,7 +458,8 @@ impl LoopState {
                             bash_fallback.clone(),
                         );
                         redact_sensitive_record(&mut record);
-                        record_tool_call_safely(sink.as_ref(), &record);
+                        let context = tool_call_context(run);
+                        record_tool_call_safely(sink.as_ref(), &context, &record);
                     }
                     return Err(RunFailure::Cancelled);
                 }
@@ -466,7 +477,8 @@ impl LoopState {
                             bash_fallback.clone(),
                         );
                         redact_sensitive_record(&mut record);
-                        record_tool_call_safely(sink.as_ref(), &record);
+                        let context = tool_call_context(run);
+                        record_tool_call_safely(sink.as_ref(), &context, &record);
                     }
                     return Err(RunFailure::InstanceTimeout { elapsed_ms });
                 }
@@ -484,7 +496,8 @@ impl LoopState {
                     bash_fallback.as_ref(),
                 );
                 redact_sensitive_record(&mut record);
-                record_tool_call_safely(sink.as_ref(), &record);
+                let context = tool_call_context(run);
+                record_tool_call_safely(sink.as_ref(), &context, &record);
             }
             let ok = outcome.ok;
             let tool_content = outcome.content;
@@ -2710,6 +2723,38 @@ STEP TWO",
             .filter(|event| matches!(event, StreamingEvent::ToolCallStart { .. }))
             .count();
         assert_eq!(starts, 2);
+    }
+
+    /// D5b2：sink 收到的执行上下文 = 当前 run/instance/node/attempt（agent_loop 填入）。
+    #[tokio::test]
+    async fn tool_call_sink_receives_exec_context() {
+        let fake = script(json!({"calls": [
+            tool_calls(json!([{"call_id": "c1", "name": "now", "args": {}}])),
+            text("done")
+        ]}));
+        let runner = Arc::new(
+            FakeToolRunner::new()
+                .tool(no_args_tool("now"))
+                .behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let agent = loaded_agent(vec![no_args_tool("now")], 5, 1, "role");
+        let ctx = TestCtx::with_node_identity("inst-ctx", "node-ctx", 2);
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        execute_with_dyn_runner(
+            &agent,
+            &fake,
+            runner,
+            &ctx,
+            Some(&(sink.clone() as Arc<dyn crate::tools::ToolCallRecordSink>)),
+        )
+        .await
+        .expect("run ok");
+        let contexts = sink.contexts();
+        assert_eq!(contexts.len(), 1, "one context per recorded call");
+        assert_eq!(contexts[0].run_id, "test-run");
+        assert_eq!(contexts[0].instance_id, "inst-ctx");
+        assert_eq!(contexts[0].node_id, "node-ctx");
+        assert_eq!(contexts[0].attempt, 2);
     }
 
     /// REV-110 N2：默认无 sink / sink panic 均不改变 run 行为。
