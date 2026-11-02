@@ -9,6 +9,7 @@
 > **W4b 实现回写（2026-11-01，REV-094；见 PROVENANCE §2 第 25 条）**：as-built——`foreach`/R17/R18 已实现（`ForeachConfig`/`OnItemError::{Fail}`、`NODE_KEYS` 7→8、`DSL_FOREACH_INVALID` 第 19 码、执行顺序 R15→R18→R16→R14）；reason 闭集 11 值中 **`region_overlap` 为防御性不可达**（row4/row8 先拦截；dsl 单测锁定优先级）；子图内 foreach（含合法形状）由 R6 收敛 `DSL_SUBGRAPH_INVALID`（精确 message `node '{id}' declares foreach, which is not supported inside subgraphs`）；dsl **118/0**、fixtures 56 bad/8 valid、既有 42 fixture A/B 84/84 一致。
 > **v0.3（M8）V1 设计冻结草案（2026-11-01，REV-096）**：**DSL 不变**——skills/MCP/外部 harness 属 Harness Loading/AgentConfig（§2.5.7），不出现在图 schema、不参与 R1–R18/`graph_hash`；无配置的图/校验/hash 逐字节不变。
 > **v0.3 实现回写（2026-11-02，REV-101）**：as-built——DSL 仍 **1.0 / R1–R18 / 19 码**；`AgentConfig.skills`/`mcp`/`harness` 仅 Harness 资产字段（不进 DSL、不参与 `graph_hash`）；V2–V4 合并后既有图 validate/hash golden 不变。
+> **v0.4（M9）V1 设计冻结草案（2026-11-02，REV-105）**：**DSL 不变**——`builtin__*` 工具、`--workspace-dir`/`--allow-path`/`--allow-*` 属 Harness Loading/CLI，**不出现在图 schema、不参与 R1–R18/`graph_hash`**；无 opt-in 的图/校验/hash 逐字节不变（DR-013）。
 > **状态**：规格冻结（编码前置）。本分册冻结**图 DSL schema、加载期校验规则 R1–R16、错误响应契约、符号解析、graph_hash**；这些内容可直接转成 Loader / `types.rs` / CLI 的实现与测试。
 > **取代关系**：本分册细化并修正《详细设计 v1.1》第 1 章（`/tmp/designdoc/doc.txt` L84–L270）与第 6 章符号解析相关部分；冲突时**以本规格为准**，00 分册为本册的上级锚点。v1.1 原文保留作为意图参考与审计依据。
 > **范围**：仅内核（见 [`doc/analysis/decision-record-01-scope.md`](../analysis/decision-record-01-scope.md) §2）。子图**执行**、人工介入、Agent 资产平台、API/前端不在本规格内。

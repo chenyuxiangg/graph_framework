@@ -170,3 +170,11 @@
 | ISSUE-162 | P3 | harness/plugin | REV-099 P2 N2–N5：stderr 只保留 head 8 KiB（字段叫 tail）；hello limits 填单行 1MiB/常量 300s 非真实总输出/node timeout；cancel 写入无超时；Codex adapter stderr 未并发排空/EOF 忙轮询 | 诊断/取消健壮性（非阻塞） | 环形 tail、hello 真实 limits、cancel 写短超时、adapter 并发 drain stderr | **fixed（REV-100）**：stderr tail/hello limits/cancel 超时/stderr drain 已修 | fixed | 2026-11-02 |
 | ISSUE-163 | P3 | harness/plugin | REV-099 N12/N13 + Lead：真实 Codex/DSH 环境**未验证**（adapter 骨架 best-effort；DSH 仅 ACP 骨架）；8 MiB/总输出/in-flight cancel、L2 不 spawn/CLI 全出口等由 V5a/后续覆盖 | 发布已知限制（release notes 需标注） | V5a 真链路/环境验证；release notes 标注「adapter 骨架，待真实环境验证」；后续补测试 | open | 2026-11-02 |
 | ISSUE-164 | P3 | process/release | v0.3.0 发布例外：SOP full-60 运行期未测（沿用 ISSUE-112），release notes 需标注；真实 Codex/DSH 环境未验证（adapter 骨架，见 ISSUE-163） | 发布已知限制（不阻塞 v0.3.0） | 发布说明标注；v0.4/后续补真实环境与 full-60 运行期 | open | 2026-11-02 |
+| ISSUE-165 | P3 | harness/sandbox | v0.4 D1：macOS `sandbox-exec` 已标记 deprecated；profile 语法/系统只读路径集合/行为随 OS 版本变化；沙箱可用性探测方式待 spike | bash 沙箱实现/兼容性风险 | spike 锁定 profile+系统路径+探测；不可用 fail-closed；文档标注 macOS 版本 | open | 2026-11-02 |
+| ISSUE-166 | P3 | harness/sandbox | v0.4 D1：Linux（bwrap/landlock）/Windows 无等价保证；v0.4 只承诺 macOS | 跨平台 bash 不可用/文档承诺范围 | v0.4 只保证 macOS；Linux 文档化未保证；后续再评估 | open | 2026-11-02 |
+| ISSUE-167 | P3 | harness/jail | v0.4 D1：文件工具 TOCTOU/symlink 逃逸；检查与使用间路径被替换；`--allow-path` 同样 canonicalize | 安全边界（jail 逃逸） | canonicalize+O_NOFOLLOW/目录 fd 尽量；负例测试；文档说明残余风险 | open | 2026-11-02 |
+| ISSUE-168 | P3 | harness/sandbox | v0.4 D1：bash 网络默认 deny/`--allow-network` 全开不做域名白名单；本地服务/包管理受限 | 可用性/安全权衡 | 默认 deny；显式 `--allow-network` 文档警示；v0.5 再评估白名单 | open | 2026-11-02 |
+| ISSUE-169 | P3 | harness/tools | v0.4 D1：apply_patch 多文件严格原子实现复杂度（暂存+回滚）；unified diff 格式边界（rename/copy/二进制不支持） | 实现风险/部分应用风险 | D2 先校验全部再写；失败不改任何文件；AC-21 d 负例 | open | 2026-11-02 |
+| ISSUE-170 | P3 | harness/tools | v0.4 D1：grep/glob crate 选型（ignore/globset/regex）与 .gitignore/隐藏/二进制/大小上限行为需实现确认 | 搜索语义/依赖 | D3 锁定 crate 与默认策略；补确定性/上限测试 | open | 2026-11-02 |
+| ISSUE-171 | P3 | trace/replay | v0.4 D1：v6→v7 迁移不可逆/截断记录回放 fail-closed/reexec 结果 mismatch 口径 | 数据迁移/回放风险 | 备份+只读拒绝+链式；截断 fail-closed；mismatch 新 CLI 码；D5 测试 | open | 2026-11-02 |
+| ISSUE-172 | P3 | trace/replay | v0.4 D1：reexec 仅只读工具（read/grep/glob/diff）判定依赖工具白名单；工具演化/参数误判可能重跑副作用 | 回放安全 | 默认 recorded；reexec 显式+白名单+hash 校验；AC-24 h 负例 | open | 2026-11-02 |

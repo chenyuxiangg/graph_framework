@@ -2,13 +2,14 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.3.0（M8）**已发布**：skills/MCP/可插拔 harness（V2–V4）+ V5a e2e 已合并 main；REV-104 发布收口提交；tag `v0.3.0`（发布流程执行中）、`dist/RELEASE_NOTES-v0.3.0.md`、[`doc/perf-baseline-v0.3.txt`](perf-baseline-v0.3.txt)。
+**当前阶段**：v0.4（M9）**D1 设计冻结进行中**（分支 `docs/docs-v04-design`，REV-105）：内置工具（文件/搜索/bash）+ 严格 workspace jail + OS 沙箱 + trace v7/工具回放；W5→v0.5。v0.3.0 已发布（tag `v0.3.0`）。
 
 **进行中任务**
-- 无。
+- docs `docs/docs-v04-design`（REV-105，作者 docs-dev）：DR-012/013/014 + spec 00/02/05/06/07/08 冻结草案 + AC-21–24；待 arch-researcher 沙箱 spike 结论补 profile/系统路径细节。
 
 **下一步**
-- v0.4（M9）规划：**W5 共享评审队列** + ISSUE 清理（ISSUE-112/143–163）；真实 Codex/DSH 环境验证（adapter 骨架后续）。
+- D1 评审通过 → D2 文件类+jail → D3 搜索类 → D4 bash+OS 沙箱 → D5 trace v7+回放+e2e → D6 兼容/性能/发布 v0.4.0（需用户授权）。
 
 **阻塞**
-- 无硬阻塞；v0.3.0 tag/GitHub Release 由发布流程执行（Lead）；性能 full-60 运行期为 ISSUE-112 发布例外。
+- arch-researcher 沙箱 spike 结论待 Lead 转发（macOS sandbox-exec profile/系统只读路径/网络 deny/性能）；不阻塞 DR 骨架与 spec 草案。
+- 台账：v0.4 风险登记 ISSUE-165+（sandbox-exec 弃用/Linux/TOCTOU/网络/大输出/v7 迁移/reexec）。

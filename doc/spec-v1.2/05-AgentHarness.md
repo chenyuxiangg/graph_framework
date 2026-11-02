@@ -1487,3 +1487,40 @@ pub trait AgentProvider: Send + Sync {
 **保留的已知限制（V5a/发布文档）**：真实 Codex/DSH 环境未验证（adapter 骨架，best-effort；release notes 标注）；MCP 真实 stdio/HTTP 传输与进程组 kill 由 V5a e2e 覆盖；skills L2 `llm_calls.request_json` 是否含正文待 AC-18 e 实测口径确认；`max_items`/8 MiB 总输出等边界见 ISSUE 台账。
 
 **V5a e2e 实测（2026-11-02，REV-101；31 用例）**：`tests/e2e/{skills_v03,mcp_v03,harness_v03,v03_regression}.rs`——skills 10（a/b1、c4、d2、e1、f1）、MCP 11（a1/b1/c2/d3/e2/f1/g1）、harness 7（a/b/c/d/f/h；e/g 组合覆盖）、回归 3；四 target 连跑 3 次稳定。新语义实测：MCP 崩溃**每 run 每 server 仅重启 1 次（spawn=2）**，超限 `TOOL_ERROR{transport_closed}`；>32768 chars 结果 JSON `{truncated,is_error,text}` + 后缀 `…[mcp result truncated]`；insecure http reason `http_insecure`；`llm_calls` 外部节点每节点 1 条；Codex `iterations=1`/cached 丢弃/无 token delta；L2 replay 不 spawn adapter。计数：e2e 137/0/2、workspace 1037/0/3、pytest 183、harness 235/0/1。
+
+---
+
+## 5.15 v0.4 冻结草案：内置工具 / workspace jail / OS 沙箱（2026-11-02，REV-105；待实现回写）
+
+> **V1 设计冻结草案**；实现波次 D2–D5（DR-012）。默认（无 opt-in/无 workspace）不注册工具、无副作用、输出逐字节不变。工具属 Harness Loading，不进 DSL/hash（02 §2.5.7）。
+
+### 5.15.1 工具集与工具源
+
+- 8 个：`builtin__read`/`write`/`edit`/`apply_patch`/`diff`/`grep`/`glob`/`bash`（语义/JSON Schema 见 DR-013 §3）。
+- 工具源并列：`builtin__*`（Rust）、`mcp__<server>__<tool>`（v0.3）、Python `tools/`（§5.6）；**同名即冲突**（`HARNESS_CONFIG_LOAD{reason:"tool_name_conflict"}`），无覆盖语义。
+- `AgentConfig.tools` 仍是唯一白名单；未列不可见/不可调用；`--allow-builtin-tools` 只注册文件/搜索 7 个，`--allow-bash` 额外注册 bash。
+
+### 5.15.2 workspace jail
+
+- `--workspace-dir <dir>`（缺省 `.`，canonicalize）+ `--allow-path <dir>`（可重复，目录级白名单）。
+- 路径：词法归一化 → canonicalize → 真实路径前缀比较（组件边界）；拒绝 `..`/symlink 出根/绝对路径越界 → `TOOL_ERROR{reason:"path_escape"}`。
+- 文件工具 Rust 强制；不做「文件级 allow-path/通配」；`--allow-path` 是显式信任（读写全开）。
+
+### 5.15.3 bash OS 沙箱
+
+- **必须**在 macOS `sandbox-exec` profile 内：仅 workspace+allowlist 读写、系统只读路径（spike 定集合）、`TMPDIR=<workspace>/.tmp`；网络默认 **deny**（`--allow-network` 全开）。
+- 无沙箱 fallback；沙箱不可用/启动失败 → **fail-closed**（`HARNESS_SANDBOX_UNAVAILABLE` 或 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`，Lead 裁决）。
+- bash 超时/取消 → kill 进程组；stdout/stderr 各 32 KiB cap；cwd 必须在 jail 内；环境白名单。
+
+### 5.15.4 错误面
+
+| 场景 | 错误 |
+|---|---|
+| opt-in/配置/workspace 非法/名称冲突 | `HARNESS_CONFIG_LOAD{reason}`（Crashed） |
+| 运行期文件/搜索/bash 失败/越界 | `TOOL_ERROR{reason}`（喂回 LLM） |
+| bash 沙箱不可用 | `HARNESS_SANDBOX_UNAVAILABLE`（推荐；fail-closed） |
+| 既有错误码 | 不变；新码 append-only（00 §0.4） |
+
+### 5.15.5 结果上限
+
+read 256 KiB/2000 行；write/edit 1 MiB；grep/glob 1000 条/256 KiB；bash stdout/stderr 各 32 KiB；`tool_calls` args/result 各 64 KiB（DR-014 §5）；超限截断标记 + hash。
