@@ -1,6 +1,6 @@
 # DR-012 · v0.4（M9）范围与波次（内置工具 + 严格 workspace 沙箱 + 工具级 trace/replay）
 
-> **状态**：V1 设计冻结（REV-105；沙箱 spike 结论待 Lead 转发，相关数字标「待 spike」）。
+> **状态**：V1 设计冻结（REV-105 已评审；沙箱 spike 结论已合入）。
 > **日期**：2026-11-02 · **作者**：docs-dev · **关联**：DR-013、DR-014、task-74 合同、05 §5.6/§5.14、06 §6.2/§6.14、07 AC-21–24
 > **用户决策（task-74）**：文件/搜索/bash 工具 + **严格 workspace jail** + **OS 沙箱**，全部 **opt-in**；工具命名 **`builtin__<tool>`**；trace **schema v7 + `tool_calls` + 默认 recorded 回放**；W5 顺延 **v0.5**。
 
@@ -115,8 +115,8 @@ D1 docs 设计冻结（本批，REV-105）
 | 1 | 错误码命名 | **零新码（Lead 裁决）**：不新增 `HARNESS_SANDBOX_UNAVAILABLE`/kind；配置/启动前 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（喂回 LLM） |
 | 2 | 网络默认 | **已裁决：deny**；`--allow-network` 显式全开（不做域名白名单） |
 | 3 | bash 沙箱不可用错误面 | **fail-closed**：配置/启动前不可用 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期探测/执行失败 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（不 fail run）；**无无沙箱 fallback** |
-| 4 | `--allow-path` 粒度 | **已裁决：目录级**（canonicalize；读写全开），不接受文件级/通配；可重复 |
+| 4 | `--allow-path` 粒度 | **已裁决：目录级只读**（canonicalize；`file-read* only`）；写目标仅 workspace（写 allow-path → `path_read_only`）；不接受文件级/通配；可重复 |
 | 5 | apply_patch 多文件原子性 | **已裁决：严格原子**：全成功或全不改；跨文件事务用「暂存+回滚」；不做部分应用 |
-| 6 | v7 字段上限 | **已裁决**：args/result **64 KiB**、stdout/stderr **32 KiB**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；超限 truncated + 全量 sha256；副作用回放遇截断 **fail-closed**；只读 reexec 可重算 |
+| 6 | v7 字段上限 | **已裁决**：args/result **32 KiB**、bash stdout/stderr **16 KiB head+tail**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；超限 truncated + 全量 sha256；副作用回放遇截断 **fail-closed**；reexec v0.5 |
 | 7 | 只读工具 reexec 集合 | **已裁决**：`read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永不** reexec |
 | 8 | W5 | 顺延 v0.5（已裁决） |

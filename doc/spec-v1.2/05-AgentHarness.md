@@ -1502,9 +1502,9 @@ pub trait AgentProvider: Send + Sync {
 
 ### 5.15.2 workspace jail
 
-- `--workspace-dir <dir>`（缺省 `.`，canonicalize）+ `--allow-path <dir>`（可重复，目录级白名单）。
+- `--workspace-dir <dir>`（缺省 `.`，canonicalize）+ `--allow-path <dir>`（可重复，**目录级只读** `file-read* only`；写目标仅 workspace，写 allow-path → `TOOL_ERROR{reason:"path_read_only"}`）。
 - 路径：词法归一化 → canonicalize → 真实路径前缀比较（组件边界）；拒绝 `..`/symlink 出根/绝对路径越界 → `TOOL_ERROR{reason:"path_escape"}`。
-- 文件工具 Rust 强制；不做「文件级 allow-path/通配」；`--allow-path` 是显式信任（读写全开）。
+- 文件工具 Rust 强制；`--allow-path` **只读（file-read* only）**；写目标仅 workspace（写 allow-path → `TOOL_ERROR{reason:"path_read_only"}`）；不做文件级/通配；外部可写请改 `--workspace-dir`（v0.4 无 `--allow-write-path`）。
 
 ### 5.15.3 bash OS 沙箱
 
@@ -1525,4 +1525,4 @@ pub trait AgentProvider: Send + Sync {
 
 ### 5.15.5 结果上限
 
-read 1 MiB/10000 行（默认 2000）；write/edit 1 MiB；grep/glob 1000 条/256 KiB；bash stdout/stderr 各 **16 KiB head+tail**（drain 2 MiB）；`tool_calls` args/result 各 **32 KiB**（DR-014 §5）；超限截断标记 + hash。
+read 1 MiB/10000 行（默认 2000）、结果 ≤32 KiB；write/edit/apply_patch 输入 ≤1 MiB、结果 ≤32 KiB；grep 1000 条/扫描 2 MiB、glob 默认1000/上限5000，结果均 ≤32 KiB；bash command ≤8 KiB、timeout 120s（max 600s）、stdout/stderr 各 **16 KiB head+tail**（drain 2 MiB）；`tool_calls` args/result 各 **32 KiB**（DR-014 §5）；所有内置工具结果对 LLM/trace ≤32 KiB；超限截断标记 + hash。

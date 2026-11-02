@@ -1,6 +1,6 @@
 # DR-013 · v0.4 内置工具与工作区 jail（8 工具 + OS 沙箱）
 
-> **状态**：V1 设计冻结（REV-105；macOS sandbox-exec profile 的系统只读路径/探测方式待 arch-researcher spike 结论；本文标「待 spike」处按推荐冻结）。
+> **状态**：V1 设计冻结（REV-105 已评审；macOS sandbox-exec profile 按 spike 附录 A 冻结）。
 > **日期**：2026-11-02 · **作者**：docs-dev · **关联**：DR-012、DR-014、05 §5.6/§5.14、06 §6.2、07 AC-21/22/23、task-74
 > **安全合同（用户加严）**：所有文件操作**只能在 `--workspace-dir` 内**，除非显式 `--allow-path` 白名单；**bash 必须 OS 沙箱**；**无沙箱 fallback**。
 
@@ -12,7 +12,7 @@
 | 命名 | `builtin__<tool>`（双下划线；与 `mcp__<server>__<tool>` 并列，不出现在现有 `^[a-z][a-z0-9_]{0,63}$` 冲突范围外） |
 | opt-in | `--allow-builtin-tools`（文件/搜索）；`--allow-bash`（bash 额外）；缺省关 |
 | jail | `--workspace-dir <dir>`（缺省 `.`，canonicalize）；`--allow-path <dir>` 可重复；词法 + canonicalize + symlink 逃逸拒绝 |
-| bash | macOS `sandbox-exec` profile：仅 workspace+allowlist 读写、系统只读、`TMPDIR=<workspace>/.tmp`；网络默认 deny；`--allow-network` 全开；沙箱不可用 → **fail-closed** |
+| bash | macOS `sandbox-exec` profile：workspace 读写、**allow-path 只读**、系统只读、`TMPDIR=<workspace>/.tmp`；网络默认 deny；`--allow-network` 全开；沙箱不可用 → **fail-closed** |
 | 安全模型 | 文件工具 **Rust 强制** jail；bash **OS 沙箱强制**；不做应用层黑名单/无沙箱 fallback |
 | 错误 | **零新码**：工具失败 `TOOL_ERROR{reason}`；opt-in/配置/启动前沙箱探测失败 `HARNESS_CONFIG_LOAD{reason}`；运行期沙箱失败 `TOOL_ERROR{reason:"sandbox_unavailable"}`；无新 kind/码（§6） |
 | trace | 每次工具调用写 `tool_calls`（v7，DR-014）；默认 recorded 回放 |
@@ -45,20 +45,20 @@
 | CLI/env | 语义 |
 |---|---|
 | `--workspace-dir <dir>` | 工作区根；缺省 `.`；必须存在且为目录；**canonicalize**；写入 `workspace_root` |
-| `--allow-path <dir>`（可重复） | 额外允许的**目录**（canonicalize；读写全开）；非目录/不存在 → 配置错误；不递归子路径限制（目录即全开） |
+| `--allow-path <dir>`（可重复） | 额外允许的**只读目录**（canonicalize；**file-read\* only**）；非目录/不存在 → 配置错误；写目标只能 workspace；不做文件级/通配 |
 | env `ZGRAPH_WORKSPACE_DIR` / `ZGRAPH_ALLOW_PATHS`（`:` 分隔） | 与 CLI 等价（CLI 优先）；v0.4 至少 CLI |
 
 - **路径解析顺序**：工具参数 path（相对/绝对）→ 词法归一化（拒绝 `..` 逃逸）→ `canonicalize`（解析 symlink）→ 与 `workspace_root`/`allow_paths` 的**真实路径前缀**比较（按路径组件边界，非字符串前缀）。
 - **越界**：`TOOL_ERROR{reason:"path_escape", path, root}`（喂回 LLM）；不执行任何读写。
 - **symlink**：文件/中间目录 symlink 指向 jail 外 → 拒绝；指向 jail 内 → 允许（按真实路径判定）。
 - **特殊文件**：device/FIFO/socket → `TOOL_ERROR{reason:"not_regular_file"}`；只读普通文件。
-- **TOCTOU**：打开时尽量 `O_NOFOLLOW`（文件工具）+ 目录 fd/真实路径；负例仅承诺 jail 判定（OS 沙箱覆盖 bash）。
+- **TOCTOU/hardlink**：打开时尽量 `O_NOFOLLOW`（文件工具）+ 目录 fd/真实路径；**hardlink 到 jail 外 inode 的残余风险接受并文档化**（无法可靠识别，ISSUE-167）；`/System/Volumes/Data` firmlink 依赖 canonicalize 解析别名（spike 未复现则文档注明）；负例只承诺 symlink/`..`/绝对路径（bash 侧由 Seatbelt 覆盖）。
 - 无 workspace 参数时也不得默认 `/`：缺省 `.`（当前目录 canonicalize）；`--allow-builtin-tools` 未开时不解析 workspace。
 
 ### 2.2 风险说明
 
 - 文件工具是**进程内 Rust**（不是 Python worker），jail 由 Rust 强制；不依赖 OS 沙箱。
-- `--allow-path` 是**用户显式信任**的目录（读写全开），文档警示；不提供文件级/通配粒度（Lead 裁决项）。
+- `--allow-path` 是**用户显式信任的只读目录**（file-read* only）；写目标仅 workspace；写 allow-path 目标 → `TOOL_ERROR{reason:"path_read_only"}`；不提供文件级/通配；外部可写请把 `--workspace-dir` 指向该目录（v0.4 不做 `--allow-write-path`，登记 ISSUE）。
 - 不防「用户自己把 workspace 指向 `/`」——显式配置即信任，文档警示。
 
 ## 3. 8 个工具语义（冻结）
@@ -69,12 +69,12 @@
 {"type":"object","properties":{
   "path":{"type":"string","description":"相对 workspace 或 allow-path 的路径；绝对路径须在 jail 内"},
   "offset":{"type":"integer","minimum":0},
-  "limit":{"type":"integer","minimum":1,"maximum":10000,"default":2000}
+  "limit":{"type":"integer","minimum":1,"maximum":10000,"default":2000,"description":"行数上限 BUILTIN_READ_MAX_LINES"}
 },"required":["path"],"additionalProperties":false}
 ```
 
 - 读 UTF-8 文本；`offset` 行偏移（0 基），`limit` 行数（缺省 2000，≤10000）；二进制（前 8 KiB NUL）→ `TOOL_ERROR{reason:"binary_file"}`；非 UTF-8 → `invalid_utf8`（不做 base64）。
-- 结果：`{content, lines, total_lines?, truncated?}`；单次输出 cap（推荐 256 KiB/32K chars，见 §8）。
+- 结果：`{content, lines, total_lines?, truncated?}`；文件/扫描 ≤1 MiB、行 ≤10000（默认 2000）；**返回内容 ≤32 KiB（truncated 标记，见 §8）**。
 - 目录/不存在/越界 → `TOOL_ERROR{reason:"is_directory"|"not_found"|"path_escape"}`。
 
 ### 3.2 `builtin__write`
@@ -89,7 +89,7 @@
 ```
 
 - **原子**：同目录临时文件 + fsync + rename；失败不改原文件；**父目录不自动创建**（`create_parents=true` 才建）；**覆盖已存在文件需 `overwrite=true`**（否则 `E_EXISTS` 附 size/mtime/sha256）；只写 UTF-8。
-- 覆盖写；结果 `{path, bytes_written, sha256_before?, sha256_after}`；大小上限（推荐 1 MiB/次；超限拒绝 `too_large`）。
+- 覆盖写；结果 `{path, bytes_written, sha256_before?, sha256_after}`；输入 ≤1 MiB（超限 `too_large`）；结果 ≤32 KiB；写 allow-path 目标 → `TOOL_ERROR{reason:"path_read_only"}`。
 - 副作用记录：v7 `tool_calls` 记 path + before/after sha256 + bytes（DR-014）。
 
 ### 3.3 `builtin__edit`
@@ -105,7 +105,7 @@
 
 - `old_string` 必须在文件中**唯一匹配**（`replace_all=false`）；0 或多匹配 → `TOOL_ERROR{reason:"no_match"|"multiple_matches", count}`；失败**不改文件**。
 - `replace_all=true`：全替换（至少 1 处）；结果 `{path, replacements, sha256_before, sha256_after}`。
-- 原子写（同 write）；保留文件权限（不新建时）。
+- 原子写（同 write）；保留文件权限（不新建时）；输入 ≤1 MiB；写 allow-path 目标 → `path_read_only`；结果 ≤32 KiB。
 
 ### 3.4 `builtin__apply_patch`
 
@@ -118,7 +118,7 @@
 
 - 支持 `---/+++`、`@@`、多文件（含 `\ No newline at end of file`；rename/delete 按 v0.4 范围）；**两阶段严格原子**：①全部在内存解析/校验（含 CAS）→ ②各自 tmp → ③依次 rename；任一失败清理 tmp、**不落盘任何文件**（窗口极小但不宣称 rename 级原子）。
 - 只允许 workspace/allow-path；`a/`/`b/` 前缀按 `strip` 去；不支持二进制/rename/copy（→ `TOOL_ERROR{reason:"unsupported_patch"}`）。
-- 结果：`{files:[{path, added, removed, sha256_before, sha256_after}], total_added, total_removed}`；每文件/总大小上限。
+- 结果：`{files:[{path, added, removed, sha256_before, sha256_after}], total_added, total_removed}`；patch ≤1 MiB；结果 ≤32 KiB；写 allow-path 目标 → `path_read_only`。
 
 ### 3.5 `builtin__diff`
 
@@ -147,7 +147,7 @@
 },"required":["pattern"],"additionalProperties":false}
 ```
 
-- 遍历：**尊重 `.gitignore`**（推荐 `ignore` crate；`--no-ignore` 不做）/隐藏文件默认跳过（推荐）；二进制跳过（NUL 探测）；单文件 ≤2 MiB、总结果 ≤1000 条/≤256 KiB；路径 jail 同 read。
+- 遍历：**尊重 `.gitignore`**（推荐 `ignore` crate；`--no-ignore` 不做）/隐藏文件默认跳过（推荐）；二进制跳过（NUL 探测）；扫描单文件 ≤2 MiB、结果 **≤1000 条且 ≤32 KiB**（truncated）；路径 jail 同 read；`--allow-path` 只读。
 - 结果 `{matches:[{path,line,column,text}], total, truncated}`；排序确定（path, line）。
 - regex 由 `regex` crate（线性时间；拒绝回溯爆炸）；`fixed_strings` 用字面查找。
 
@@ -162,16 +162,16 @@
 },"required":["pattern"],"additionalProperties":false}
 ```
 
-- `globset` 匹配；不递归出 jail；结果按路径排序（确定性）；数量/大小上限；越界拒绝。
+- `globset` 匹配；不递归出 jail；结果按路径排序（确定性）；默认 1000/上限 5000、**结果 ≤32 KiB**（truncated）；越界拒绝。
 - 结果 `{paths:[...], total, truncated}`；目录是否返回（推荐仅文件）。
 
 ### 3.8 `builtin__bash`
 
 ```json
 {"type":"object","properties":{
-  "command":{"type":"string","minLength":1,"maxLength":131072},
+  "command":{"type":"string","minLength":1,"maxLength":8192},
   "cwd":{"type":"string","default":"."},
-  "timeout_ms":{"type":"integer","minimum":100,"maximum":600000,"default":30000},
+  "timeout_ms":{"type":"integer","minimum":100,"maximum":600000,"default":120000},
   "env":{"type":"object","additionalProperties":{"type":"string"},"description":"可选，仅白名单追加"}
 },"required":["command"],"additionalProperties":false}
 ```
@@ -180,7 +180,7 @@
 - 超时/取消 → kill **进程组**；stdout/stderr 各 cap 32 KiB（截断标记）；结果 `{exit_code, stdout, stderr, truncated, sandbox:"macos-sandbox-exec", duration_ms}`。
 - 非 0 退出是**正常工具结果**（喂回 LLM，不 fail run）；沙箱启动失败/不可用 → fail-closed（§5.3）。
 - 网络默认 deny；`--allow-network` 显式开启（全局，v0.4 不做域名白名单）。
-- 不提供 `shell` 选项（固定 `/bin/bash -lc`）；环境变量只透传白名单（PATH/HOME/TMPDIR/LANG 等）+ 显式 `env`；不写 token。
+- 不提供 `shell` 选项（固定 `/bin/bash --noprofile --norc -c`）；env 仅白名单（HOME/TMPDIR/PATH/LANG/LC_ALL/SHELL/USER/LOGNAME/DEVELOPER_DIR/SDKROOT）+ 显式 `env`；不写 token。
 
 ## 4. opt-in 与配置
 
@@ -267,13 +267,16 @@
 
 | 工具 | 单次上限 |
 |---|---|
-| read | 1 MiB max_bytes / 10000 行（默认 2000） |
-| write/edit | 1 MiB 输入；结果摘要 ≤8 KiB |
-| diff | 256 KiB diff |
-| grep | 1000 条 / 256 KiB |
-| glob | 5000 条 / 1 MiB |
-| bash stdout/stderr | 各 16 KiB head+tail（给 LLM/记录；drain 2 MiB；truncated 标记） |
-| 单文件处理上限 | 2 MiB（grep/read）；超限 `too_large` 或 truncated |
+| read | 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB |
+| write/edit | 1 MiB 输入；结果 ≤32 KiB |
+| diff | 结果 ≤32 KiB（truncated） |
+| grep | 1000 条、扫描单文件 2 MiB、结果 ≤32 KiB |
+| glob | 默认 1000/上限 5000、结果 ≤32 KiB |
+| bash stdout/stderr | 各 16 KiB head+tail（给 LLM/记录；drain 2 MiB；truncated 标记）；command ≤8 KiB、timeout 120s（max 600s） |
+| 单文件处理上限 | 2 MiB（grep 扫描）；read/write/edit/apply_patch 1 MiB；超限 `too_large` 或 truncated |
+| 所有 builtin 工具结果（LLM/trace） | ≤32 KiB（文件/搜索）；bash 16 KiB head+tail |
+
+> **统一上限**：所有内置工具结果对 LLM 与 trace 均 **≤32 KiB**（bash stdout/stderr 各 16 KiB head+tail）；超限 `truncated` 标记 + 全量 sha256。
 
 ## 9. AC-21（文件）/ AC-22（搜索）/ AC-23（bash+沙箱）——设计冻结
 
@@ -303,7 +306,7 @@
 | 1 | 错误码 | **零新码**：配置/启动前沙箱不可用 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（喂回 LLM）；不新增码/kind |
 | 2 | 网络 | 默认 **deny**；`--allow-network` 显式全开（不做域名白名单） |
 | 3 | bash 沙箱不可用 | **fail-closed**：配置期 Crashed(Config)；运行期工具错误；**无无沙箱 fallback** |
-| 4 | `--allow-path` | **目录级**（canonicalize、读写全开、可重复）；不做文件级/通配 |
+| 4 | `--allow-path` | **目录级只读**（canonicalize、`file-read* only`、可重复）；写目标仅 workspace，写 allow-path → `path_read_only`；不做文件级/通配/`--allow-write-path`（ISSUE-167） |
 | 5 | apply_patch | **严格原子**（全成功或全不改；暂存+回滚） |
 | 6 | v7 上限 | args/result **32 KiB**、bash stdout/stderr 各 **16 KiB head+tail**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；截断带 `truncated` + 全量 `sha256`；副作用回放遇截断 fail-closed；只读 reexec（v0.5）可重算 |
 | 7 | reexec | 仅 `read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永远 recorded-only** |

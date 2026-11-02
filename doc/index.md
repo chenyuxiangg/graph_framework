@@ -14,7 +14,6 @@
 | [`decisions/DR-009-v03-skills-design.md`](decisions/DR-009-v03-skills-design.md) | **v0.3 skills 设计冻结**：`skills/<name>/SKILL.md`、frontmatter、`--skills-dir`、AgentConfig `skills`、索引注入 + `skill_view`、预算/安全/错误码、AC-18 a–f；实现 REV-097（合并 `6515f12`） |
 | [`decisions/DR-010-v03-mcp-design.md`](decisions/DR-010-v03-mcp-design.md) | **v0.3 MCP 设计冻结**：rmcp client（stdio/Streamable HTTP）、`mcp_servers.json`、`mcp__<server>__<tool>`、allowlist/超时/取消/进程组、trace 默认不变（v7 候选）、AC-19 a–g；实现 REV-098（合并 `6515f12`） |
 | [`decisions/DR-011-v03-harness-plugin-design.md`](decisions/DR-011-v03-harness-plugin-design.md) | **v0.3 harness 可插拔设计冻结**：`AgentProvider` seam、`zgraph-harness/1` 子进程协议、流式映射/取消/L2、Codex/DSH 薄 adapter 边界、AC-20 a–h；实现 REV-099（合并 `6515f12`） |
-
 | [`decisions/DR-012-v04-scope-and-waves.md`](decisions/DR-012-v04-scope-and-waves.md) | **v0.4（M9）范围与波次**：内置工具 8 个 + 严格 workspace jail + OS 沙箱 + trace v7/工具回放；D1–D6 波次/发布条件/兼容矩阵/AC-21–24 矩阵/风险；W5→v0.5（REV-105） |
 | [`decisions/DR-013-v04-builtin-tools-jail.md`](decisions/DR-013-v04-builtin-tools-jail.md) | **v0.4 内置工具与 workspace jail**：8 工具语义/JSON Schema；`--workspace-dir`/`--allow-path`/`--allow-builtin-tools`/`--allow-bash`；路径 jail/symlink/越界；macOS sandbox-exec profile/网络 deny/fail-closed；错误码/安全模型；AC-21–23 |
 | [`decisions/DR-014-v04-trace-v7-tool-replay.md`](decisions/DR-014-v04-trace-v7-tool-replay.md) | **v0.4 trace v7 与工具回放**：`tool_calls` 表/字段/上限、v6→v7 迁移、trace 人类/`--json` 工具行、`--replay-tools=recorded\|reexec`、L2 关系、AC-24 || [`architecture-v2.md`](architecture-v2.md) | **架构蓝图 v2**：进程模型、NDJSON 协议、可复现分级、代码布局、里程碑 |

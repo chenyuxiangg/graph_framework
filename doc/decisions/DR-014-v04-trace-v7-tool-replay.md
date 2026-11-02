@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   started_at       TEXT NOT NULL,
   finished_at      TEXT NOT NULL,
   duration_ms      INTEGER NOT NULL,
-  signal           INTEGER,                    -- bash 被信号杀死时记录
+  bash_signal      INTEGER,                    -- bash 被信号杀死时记录
   -- 副作用（write/edit/apply_patch；其他 NULL）
   side_effect_path     TEXT,
   side_effect_before   TEXT,                   -- sha256 before（不存在 = NULL）
@@ -158,7 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 
 | 事项 | 冻结 |
 |---|---|
-| 存储策略 | **v0.4 不做 blobs/外部文件**：args/result 32 KiB、bash stdout/stderr 各 16 KiB head+tail、command 8 KiB、path 4 KiB；截断 + 全量 sha256；单 run 10000 行 |
+| 存储策略 | **Lead 收窄（spike D 原建议 64K+blobs 不采纳）**：args/result 32 KiB、bash stdout/stderr 各 16 KiB head+tail、command 8 KiB、path 4 KiB；截断 + 全量 sha256；单 run 10000 行；**不做 blobs/外部文件** |
 | bash 记录 | command/cwd/exit_code/signal/duration_ms/stdout+stderr（16 KiB head+tail）/sandbox_profile_sha256；drain 上限 2 MiB |
 | 副作用 | write/edit/apply_patch 记 path + pre_sha256/post_sha256 + bytes；多文件 apply_patch 一行（`files[]` 摘要） |
 | 回放 | 默认 **recorded-only**（绝不执行任何工具/副作用）；`reexec` 接口保留、v0.5 落地（仅只读 + pre_sha256 漂移检查） |
