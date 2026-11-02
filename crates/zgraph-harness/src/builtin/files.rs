@@ -197,6 +197,33 @@ impl BuiltinToolSet {
         Ok(BuiltinCallOutput { content, metadata })
     }
 
+    /// D5b1/REV-110 N1：bash 执行前可记录的元数据摘要（command/cwd/profile_sha256）。
+    ///
+    /// 用于取消/超时等「未返回 outcome」路径仍保留 bash 元数据；输出字段为空、
+    /// exit/signal 未知（`None`）。env 不进入本结构（args 侧统一脱敏）。
+    pub(crate) fn bash_record_stub(&self, args: &Value) -> Option<crate::tools::BashCallRecord> {
+        let command = args.get("command").and_then(Value::as_str)?.to_string();
+        let cwd_raw = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+        let cwd = self
+            .jail
+            .resolve_any(cwd_raw, Access::Read)
+            .map(|resolved| resolved.path.display().to_string())
+            .unwrap_or_else(|_| cwd_raw.to_string());
+        let sandbox_profile_sha256 = self
+            .bash_runner
+            .as_ref()
+            .map(|runner| runner.profile_sha256().to_string());
+        Some(crate::tools::BashCallRecord {
+            command,
+            cwd,
+            exit_code: None,
+            signal: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            sandbox_profile_sha256,
+        })
+    }
+
     /// 结果序列化 + 统一上限（`truncated:true` + 全量 sha256 由各工具提供）。
     pub(crate) fn limit_result(&self, payload: Value) -> String {
         // D4：bash 结果按 stdout/stderr 各 16 KiB head+tail（DR-013 §8 例外），

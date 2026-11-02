@@ -869,7 +869,79 @@ pub fn summarize_result(content: &str, ok: bool) -> Value {
 }
 
 /// 敏感键判定：键名归一化（小写 + 去非字母数字）后包含敏感词即命中。
-fn is_sensitive_key(key: &str) -> bool {
+pub(crate) fn is_sensitive_key(key: &str) -> bool {
+    if is_record_sensitive_key(key) {
+        return true;
+    }
+    let normalized = normalize_key(key);
+    SENSITIVE_KEY_TOKENS
+        .iter()
+        .any(|token| normalized.contains(token))
+}
+
+/// 记录侧附加敏感键（DR-014 §1：headers 不写；`x-api-key` 等已由 token 词覆盖）。
+const RECORD_EXTRA_SENSITIVE_TOKENS: &[&str] = &["header"];
+
+/// 记录脱敏掩码（与 preview 的 `***` 一致）。
+pub(crate) const REDACTED_VALUE: &str = "***";
+
+fn normalize_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_record_sensitive_key(key: &str) -> bool {
+    let normalized = normalize_key(key);
+    RECORD_EXTRA_SENSITIVE_TOKENS
+        .iter()
+        .any(|token| normalized.contains(token))
+}
+
+/// D5b1/REV-110 C1：递归脱敏 Value（任意深度；敏感键值 → `***`，保留结构）。
+///
+/// 用于 `ToolCallRecord.args/result/error`；D5b2 落库前需再断言一次（bridge 测试），
+/// 防止后续新增路径绕过本函数。
+pub(crate) fn redact_sensitive_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut redacted = Map::new();
+            for (key, child) in map {
+                let value = if is_sensitive_key(key) {
+                    Value::from(REDACTED_VALUE)
+                } else {
+                    redact_sensitive_value(child)
+                };
+                redacted.insert(key.clone(), value);
+            }
+            Value::Object(redacted)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_value).collect()),
+        other => other.clone(),
+    }
+}
+
+/// D5b1/REV-110 C1：记录落 sink 前统一脱敏。
+///
+/// - `args`/`result`/`error` 递归敏感键 → `***`；
+/// - `builtin__bash` 的 `args.env` **所有值**打码（env 值不记录；键名保留供审计）。
+pub(crate) fn redact_sensitive_record(record: &mut ToolCallRecord) {
+    if record.tool_name == "builtin__bash" {
+        if let Some(env) = record.args.get_mut("env").and_then(Value::as_object_mut) {
+            for value in env.values_mut() {
+                *value = Value::from(REDACTED_VALUE);
+            }
+        }
+    }
+    record.args = redact_sensitive_value(&record.args);
+    record.result = record.result.as_ref().map(redact_sensitive_value);
+    record.error = record.error.as_ref().map(redact_sensitive_value);
+}
+
+/// 原始 is_sensitive_key 实现（保留 preview 语义，不含记录侧 headers 词）。
+#[allow(dead_code)]
+fn is_preview_sensitive_key(key: &str) -> bool {
     let normalized: String = key
         .chars()
         .filter(|ch| ch.is_alphanumeric())
@@ -2562,5 +2634,106 @@ mod tests {
         assert!(!is_tool_name("1now"));
         assert!(!is_tool_name("now.get"));
         assert!(!is_tool_name(&"a".repeat(65)));
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_sensitive_keys_at_any_depth_case_and_separator_insensitive() {
+        let value = json!({
+            "api_key": "sk-1",
+            "X-Api-Key": "sk-2",
+            "nested": {
+                "Authorization": "Bearer t",
+                "safe": 1,
+                "list": [{"private_key": "p"}, {"ok": "v"}]
+            },
+            "headers": {"x-custom": "keep-out"},
+            "normal": "visible"
+        });
+        let redacted = redact_sensitive_value(&value);
+        assert_eq!(redacted["api_key"], json!("***"));
+        assert_eq!(redacted["X-Api-Key"], json!("***"));
+        assert_eq!(redacted["headers"], json!("***"));
+        assert_eq!(redacted["nested"]["Authorization"], json!("***"));
+        assert_eq!(redacted["nested"]["list"][0]["private_key"], json!("***"));
+        assert_eq!(redacted["nested"]["list"][1]["ok"], json!("v"));
+        assert_eq!(redacted["nested"]["safe"], json!(1));
+        assert_eq!(redacted["normal"], json!("visible"));
+    }
+
+    #[test]
+    fn redacts_record_args_result_and_error_before_sink() {
+        let mut record = ToolCallRecord {
+            call_id: "c1".to_string(),
+            tool_name: "echo".to_string(),
+            source: ToolCallSource::Python,
+            status: ToolCallStatus::Ok,
+            started_at: "2026-01-01T00:00:00.000Z".to_string(),
+            finished_at: "2026-01-01T00:00:00.001Z".to_string(),
+            duration_ms: 1,
+            args: json!({"token": "sk-args", "q": 1}),
+            result: Some(json!({"access_token": "sk-result", "ok": true})),
+            error: Some(json!({"error": {"message": "visible", "password": "sk-err"}})),
+            truncated: false,
+            side_effect: None,
+            bash: None,
+        };
+        redact_sensitive_record(&mut record);
+        assert_eq!(record.args["token"], json!("***"));
+        assert_eq!(record.args["q"], json!(1));
+        assert_eq!(
+            record.result.as_ref().unwrap()["access_token"],
+            json!("***")
+        );
+        assert_eq!(
+            record.error.as_ref().unwrap()["error"]["password"],
+            json!("***")
+        );
+        assert_eq!(
+            record.error.as_ref().unwrap()["error"]["message"],
+            json!("visible")
+        );
+        let serialized = format!(
+            "{}{}{}",
+            serde_json::to_string(&record.args).expect("args"),
+            serde_json::to_string(&record.result).expect("result"),
+            serde_json::to_string(&record.error).expect("error"),
+        );
+        assert!(!serialized.contains("sk-args"));
+        assert!(!serialized.contains("sk-result"));
+        assert!(!serialized.contains("sk-err"));
+    }
+
+    #[test]
+    fn redacts_all_bash_env_values_even_when_key_names_are_benign() {
+        let mut record = ToolCallRecord {
+            call_id: "b1".to_string(),
+            tool_name: "builtin__bash".to_string(),
+            source: ToolCallSource::Builtin,
+            status: ToolCallStatus::Ok,
+            started_at: "2026-01-01T00:00:00.000Z".to_string(),
+            finished_at: "2026-01-01T00:00:00.001Z".to_string(),
+            duration_ms: 1,
+            args: json!({
+                "command": "echo hi",
+                "env": {"CUSTOM_FLAG": "secret-value", "API_KEY": "sk-env"},
+            }),
+            result: None,
+            error: None,
+            truncated: false,
+            side_effect: None,
+            bash: None,
+        };
+        redact_sensitive_record(&mut record);
+        assert_eq!(record.args["command"], json!("echo hi"));
+        assert_eq!(record.args["env"]["CUSTOM_FLAG"], json!("***"));
+        assert_eq!(record.args["env"]["API_KEY"], json!("***"));
+        let serialized = serde_json::to_string(&record.args).expect("args");
+        assert!(!serialized.contains("secret-value"));
+        assert!(!serialized.contains("sk-env"));
     }
 }

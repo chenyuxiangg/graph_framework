@@ -45,10 +45,10 @@ use crate::record::{
 };
 use crate::skills;
 use crate::tools::{
-    acquire_tool_permits, record_tool_call_safely, serialize_tool_result, summarize_args,
-    summarize_result, tool_error_content, validate_tool_arguments, ToolCallRecord,
-    ToolCallRecordSink, ToolCallRequest, ToolCallSource, ToolCallStatus, ToolDef, ToolFailure,
-    ToolRunner, ToolSchema,
+    acquire_tool_permits, record_tool_call_safely, redact_sensitive_record, serialize_tool_result,
+    summarize_args, summarize_result, tool_error_content, validate_tool_arguments, BashCallRecord,
+    ToolCallRecord, ToolCallRecordSink, ToolCallRequest, ToolCallSource, ToolCallStatus, ToolDef,
+    ToolFailure, ToolRunner, ToolSchema,
 };
 
 /// `agent_call` 节点的输出契约（05 §5.9.1 / §5.9.2）。
@@ -389,6 +389,17 @@ impl LoopState {
             } else {
                 Some(ToolCallSource::Python)
             };
+            // D5b1/REV-110 N1：bash 执行前捕获元数据摘要（command/cwd/profile_sha），
+            // 使取消/节点 deadline 超时记录仍保留 bash 元数据。
+            let bash_fallback = if source == Some(ToolCallSource::Builtin)
+                && tool.name == crate::builtin::TOOL_BASH
+            {
+                run.builtin
+                    .as_ref()
+                    .and_then(|builtin| builtin.bash_record_stub(&call.args))
+            } else {
+                None
+            };
             let execution: Result<ToolOutcome, RunFailure> = if is_skill_view {
                 let (ok, content) = self.execute_skill_view(run, tool, call);
                 Ok(ToolOutcome {
@@ -428,29 +439,51 @@ impl LoopState {
                 Ok(outcome) => outcome,
                 Err(RunFailure::Cancelled) => {
                     if let (Some(source), Some(sink)) = (source, run.tool_call_sink.as_ref()) {
-                        let record = cancelled_tool_call_record(
+                        let mut record = cancelled_tool_call_record(
                             call,
                             source,
                             started_at,
                             run.ctx.now_rfc3339_millis(),
                             started,
+                            bash_fallback.clone(),
                         );
+                        redact_sensitive_record(&mut record);
                         record_tool_call_safely(sink.as_ref(), &record);
                     }
                     return Err(RunFailure::Cancelled);
+                }
+                // REV-110 C2：ToolCallStart 已发后节点 deadline 耗尽 → 恰 1 条
+                // status=timeout 记录（run 仍按 NodeError::Timeout 失败）。
+                Err(RunFailure::InstanceTimeout { elapsed_ms }) => {
+                    if let (Some(source), Some(sink)) = (source, run.tool_call_sink.as_ref()) {
+                        let mut record = timeout_tool_call_record(
+                            call,
+                            source,
+                            started_at,
+                            run.ctx.now_rfc3339_millis(),
+                            started,
+                            elapsed_ms,
+                            bash_fallback.clone(),
+                        );
+                        redact_sensitive_record(&mut record);
+                        record_tool_call_safely(sink.as_ref(), &record);
+                    }
+                    return Err(RunFailure::InstanceTimeout { elapsed_ms });
                 }
                 Err(other) => return Err(other),
             };
             let finished_at = run.ctx.now_rfc3339_millis();
             if let (Some(source), Some(sink)) = (source, run.tool_call_sink.as_ref()) {
-                let record = build_tool_call_record(
+                let mut record = build_tool_call_record(
                     call,
                     source,
                     started_at,
                     finished_at,
                     started,
                     &outcome,
+                    bash_fallback.as_ref(),
                 );
+                redact_sensitive_record(&mut record);
                 record_tool_call_safely(sink.as_ref(), &record);
             }
             let ok = outcome.ok;
@@ -864,6 +897,7 @@ fn build_tool_call_record(
     finished_at: String,
     started: std::time::Instant,
     outcome: &ToolOutcome,
+    bash_fallback: Option<&BashCallRecord>,
 ) -> ToolCallRecord {
     let status = if outcome.ok {
         ToolCallStatus::Ok
@@ -883,10 +917,11 @@ fn build_tool_call_record(
             .and_then(|value| value.get("truncated"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    let (side_effect, bash) = match metadata {
-        Some(meta) => (meta.side_effect.clone(), meta.bash.clone()),
-        None => (None, None),
-    };
+    let side_effect = metadata.and_then(|meta| meta.side_effect.clone());
+    // 工具错误/取消/超时也保留执行前捕获的 bash 元数据（REV-110 N1）。
+    let bash = metadata
+        .and_then(|meta| meta.bash.clone())
+        .or_else(|| bash_fallback.cloned());
     ToolCallRecord {
         call_id: call.call_id.clone(),
         tool_name: call.name.clone(),
@@ -911,6 +946,7 @@ fn cancelled_tool_call_record(
     started_at: String,
     finished_at: String,
     started: std::time::Instant,
+    bash: Option<BashCallRecord>,
 ) -> ToolCallRecord {
     ToolCallRecord {
         call_id: call.call_id.clone(),
@@ -926,7 +962,40 @@ fn cancelled_tool_call_record(
         error: Some(json!({"error": {"reason": "cancelled"}})),
         truncated: false,
         side_effect: None,
-        bash: None,
+        bash,
+    }
+}
+
+/// D5b1/REV-110 C2：节点 deadline 超时记录（ToolCallStart 已发但工具未完成）。
+fn timeout_tool_call_record(
+    call: &ToolCall,
+    source: ToolCallSource,
+    started_at: String,
+    finished_at: String,
+    started: std::time::Instant,
+    elapsed_ms: u64,
+    bash: Option<BashCallRecord>,
+) -> ToolCallRecord {
+    ToolCallRecord {
+        call_id: call.call_id.clone(),
+        tool_name: call.name.clone(),
+        source,
+        status: ToolCallStatus::Timeout,
+        started_at,
+        finished_at,
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        args: call.args.clone(),
+        result: None,
+        error: Some(json!({
+            "error": {
+                "reason": "timeout",
+                "message": "node deadline exhausted before tool completed",
+                "elapsed_ms": elapsed_ms,
+            }
+        })),
+        truncated: false,
+        side_effect: None,
+        bash,
     }
 }
 
@@ -2476,6 +2545,15 @@ STEP TWO",
             records[0].error.as_ref().unwrap()["error"]["reason"],
             json!("cancelled")
         );
+        // REV-110 N1：取消记录保留 bash 元数据（command/cwd/profile_sha）。
+        let bash = records[0].bash.as_ref().expect("bash metadata on cancel");
+        assert_eq!(bash.command, "sleep 10");
+        assert_eq!(bash.exit_code, None);
+        assert!(!bash.cwd.is_empty());
+        assert_eq!(
+            bash.sandbox_profile_sha256.as_deref().map(str::len),
+            Some(64)
+        );
         let _ = handle.await;
     }
     /// D5b1：`skill_view`（framework）成功/失败都不写 `tool_calls`（source 闭集无 framework）。
@@ -2513,5 +2591,158 @@ STEP TWO",
         .expect("skill_view run");
         assert_eq!(output.content, "done");
         assert!(sink.records().is_empty(), "skill_view must not be recorded");
+    }
+    /// D5b1/REV-110：用任意 `ToolRunner`（含自定义）执行 agent_call（sink 可选）。
+    async fn execute_with_dyn_runner(
+        agent: &LoadedAgent,
+        fake: &Arc<FakeLlmProvider>,
+        runner: Arc<dyn ToolRunner>,
+        ctx: &Arc<TestCtx>,
+        sink: Option<&Arc<dyn crate::tools::ToolCallRecordSink>>,
+    ) -> Result<AgentOutput, RunFailure> {
+        let provider: Arc<dyn LlmProvider> = fake.clone();
+        let inputs = HashMap::from([("message".to_string(), json!("hi"))]);
+        let ports = declared_ports();
+        let node_mapping = BTreeMap::new();
+        let cancel = CancelToken::new(ctx.clone());
+        let budget = Arc::new(AtomicU32::new(0));
+        run_agent(AgentRun {
+            agent,
+            tools_dir: Path::new("/tmp/tools"),
+            provider: &provider,
+            tool_runner: &runner,
+            inputs: &inputs,
+            declared_ports: &ports,
+            node_mapping: &node_mapping,
+            max_iterations: agent.config.max_iterations,
+            node_timeout_ms: agent.config.node_timeout_ms,
+            ctx: ctx.clone(),
+            cancel,
+            recorder: None,
+            skill_view_budget: &budget,
+            mcp: None,
+            builtin: None,
+            tool_call_sink: sink,
+        })
+        .await
+    }
+
+    /// REV-110 C2：`ToolCallStart` 已发后节点 deadline 耗尽 → 恰 1 条 timeout 记录。
+    #[tokio::test]
+    async fn node_deadline_after_tool_start_records_timeout() {
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicU64;
+
+        struct ZeroAfterFirstCall {
+            deadline: Arc<AtomicU64>,
+        }
+
+        #[async_trait]
+        impl ToolRunner for ZeroAfterFirstCall {
+            async fn discover(
+                &self,
+                _tools_dir: &Path,
+                _ctx: Arc<dyn HarnessCtx>,
+            ) -> Result<Vec<ToolDef>, HarnessError> {
+                Ok(vec![no_args_tool("a"), no_args_tool("b")])
+            }
+
+            async fn call(
+                &self,
+                _request: ToolCallRequest,
+                _ctx: Arc<dyn HarnessCtx>,
+            ) -> Result<Value, ToolFailure> {
+                // 第一个工具执行期间节点 deadline 耗尽。
+                self.deadline.store(0, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({"ok": true}))
+            }
+        }
+
+        let fake = script(json!({"calls": [
+            tool_calls(json!([
+                {"call_id": "t1", "name": "a", "args": {}},
+                {"call_id": "t2", "name": "b", "args": {}}
+            ])),
+            text("never")
+        ]}));
+        let deadline = Arc::new(AtomicU64::new(180_000));
+        let provider_deadline = deadline.clone();
+        let ctx = TestCtx::with_remaining_provider(Arc::new(move || {
+            provider_deadline.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        let runner: Arc<dyn ToolRunner> = Arc::new(ZeroAfterFirstCall {
+            deadline: deadline.clone(),
+        });
+        let agent = loaded_agent(vec![no_args_tool("a"), no_args_tool("b")], 5, 1, "role");
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        let failure = execute_with_dyn_runner(
+            &agent,
+            &fake,
+            runner,
+            &ctx,
+            Some(&(sink.clone() as Arc<dyn crate::tools::ToolCallRecordSink>)),
+        )
+        .await
+        .expect_err("deadline");
+        assert_eq!(failure, RunFailure::InstanceTimeout { elapsed_ms: 10_000 });
+        assert_eq!(
+            failure.clone().into_node_error(),
+            NodeError::Timeout { elapsed_ms: 10_000 }
+        );
+        let records = sink.records();
+        assert_eq!(
+            records.len(),
+            2,
+            "exactly one record per started call: {records:?}"
+        );
+        assert_eq!(records[0].call_id, "t1");
+        assert_eq!(records[0].status, crate::tools::ToolCallStatus::Ok);
+        assert_eq!(records[1].call_id, "t2");
+        assert_eq!(records[1].status, crate::tools::ToolCallStatus::Timeout);
+        assert_eq!(
+            records[1].error.as_ref().unwrap()["error"]["reason"],
+            json!("timeout")
+        );
+        // 两个 ToolCallStart 都已发射（记录与 Start 数一致）。
+        let starts = ctx
+            .events()
+            .iter()
+            .filter(|event| matches!(event, StreamingEvent::ToolCallStart { .. }))
+            .count();
+        assert_eq!(starts, 2);
+    }
+
+    /// REV-110 N2：默认无 sink / sink panic 均不改变 run 行为。
+    #[tokio::test]
+    async fn no_sink_and_panicking_sink_do_not_affect_run() {
+        use crate::test_support::PanickingToolCallSink;
+
+        let fake = script(json!({"calls": [
+            tool_calls(json!([{"call_id": "c1", "name": "now", "args": {}}])),
+            text("done")
+        ]}));
+        let runner_fake = Arc::new(
+            FakeToolRunner::new()
+                .tool(no_args_tool("now"))
+                .behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let agent = loaded_agent(vec![no_args_tool("now")], 5, 1, "role");
+
+        // 默认 None：无回调、行为不变。
+        let ctx = TestCtx::new();
+        let runner: Arc<dyn ToolRunner> = runner_fake.clone();
+        let output = execute_with_dyn_runner(&agent, &fake, runner, &ctx, None)
+            .await
+            .expect("no sink");
+        assert_eq!(output.content, "done");
+
+        // panicking sink：record_tool_call_safely 吞 panic，run 仍成功。
+        let panicking: Arc<dyn crate::tools::ToolCallRecordSink> = PanickingToolCallSink::new();
+        let ctx = TestCtx::new();
+        let runner: Arc<dyn ToolRunner> = runner_fake;
+        let output = execute_with_dyn_runner(&agent, &fake, runner, &ctx, Some(&panicking))
+            .await
+            .expect("panicking sink must not fail the run");
+        assert_eq!(output.content, "done");
     }
 }

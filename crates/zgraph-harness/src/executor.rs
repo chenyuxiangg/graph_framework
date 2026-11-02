@@ -2639,7 +2639,9 @@ mod tests {
                     {"call_id": "l1", "name": "builtin__glob", "args": {"pattern": "*.txt"}}
                 ]},
                 {"kind": "tool_calls", "content": null, "tool_calls": [
-                    {"call_id": "b1", "name": "builtin__bash", "args": {"command": "echo hi"}}
+                    {"call_id": "b1", "name": "builtin__bash",
+                     "args": {"command": "echo hi",
+                              "env": {"API_KEY": "sk-secret", "CUSTOM_FLAG": "on"}}}
                 ]},
                 {"kind": "text", "content": "done"}
             ])))
@@ -2770,7 +2772,15 @@ mod tests {
             records[1].error.as_ref().unwrap()["error"]["reason"],
             json!("timeout")
         );
-        assert!(records[1].bash.is_none(), "failed bash has no metadata");
+        // REV-110 N1：bash 超时记录保留 command/cwd/profile_sha（输出/exit 为空）。
+        let bash = records[1].bash.as_ref().expect("bash metadata on timeout");
+        assert_eq!(bash.command, "sleep 9");
+        assert_eq!(bash.exit_code, None);
+        assert!(bash.stdout.is_empty() && bash.stderr.is_empty());
+        assert_eq!(
+            bash.sandbox_profile_sha256.as_deref().map(str::len),
+            Some(64)
+        );
         executor.close_provider().await;
     }
 
@@ -2781,7 +2791,8 @@ mod tests {
         let fake = Arc::new(
             FakeLlmProvider::from_script(fake_script(json!([
                 {"kind": "tool_calls", "content": null, "tool_calls": [
-                    {"call_id": "m1", "name": "mcp__fake__echo", "args": {"q": 1}}
+                    {"call_id": "m1", "name": "mcp__fake__echo",
+                     "args": {"q": 1, "token": "sk-mcp-secret"}}
                 ]},
                 {"kind": "text", "content": "done"}
             ])))
@@ -2807,7 +2818,11 @@ mod tests {
         assert_eq!(records[0].source, crate::tools::ToolCallSource::Mcp);
         assert_eq!(records[0].tool_name, "mcp__fake__echo");
         assert_eq!(records[0].result, Some(json!("mcp-ok")));
+        assert_eq!(records[0].args["token"], json!("***"));
         assert!(records[0].side_effect.is_none() && records[0].bash.is_none());
+        assert!(!serde_json::to_string(&records[0].args)
+            .expect("args")
+            .contains("sk-mcp-secret"));
         executor.close_mcp().await;
         executor.close_provider().await;
 
@@ -2816,7 +2831,8 @@ mod tests {
         let fake = Arc::new(
             FakeLlmProvider::from_script(fake_script(json!([
                 {"kind": "tool_calls", "content": null, "tool_calls": [
-                    {"call_id": "p1", "name": "echo", "args": {"q": 2}}
+                    {"call_id": "p1", "name": "echo",
+                     "args": {"q": 2, "password": "pw-secret"}}
                 ]},
                 {"kind": "text", "content": "done"}
             ])))

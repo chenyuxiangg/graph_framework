@@ -132,12 +132,24 @@ impl crate::tools::ToolCallRecordSink for RecordingToolCallSink {
     }
 }
 
+/// REV-110 C2：`TestCtx` 动态 deadline provider（`Mutex` 内含非 Debug 闭包）。
+#[derive(Default)]
+pub struct RemainingProvider(pub Mutex<Option<Arc<dyn Fn() -> u64 + Send + Sync>>>);
+
+impl std::fmt::Debug for RemainingProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RemainingProvider(..)")
+    }
+}
+
 /// 可注入上下文：记录全部 streaming 事件、可设取消/剩余 deadline。
 #[derive(Debug)]
 pub struct TestCtx {
     events: Mutex<Vec<StreamingEvent>>,
     cancel: AtomicBool,
     remaining_ms: AtomicU64,
+    /// REV-110 C2 测试：可注入的剩余 deadline provider（优先于 `remaining_ms`）。
+    remaining_provider: RemainingProvider,
     user_id: String,
     instance_id: String,
     seed: u64,
@@ -152,6 +164,7 @@ impl Default for TestCtx {
             events: Mutex::new(Vec::new()),
             cancel: AtomicBool::new(false),
             remaining_ms: AtomicU64::new(180_000),
+            remaining_provider: RemainingProvider::default(),
             user_id: "test-user".to_string(),
             instance_id: "test-instance".to_string(),
             seed: 42,
@@ -189,6 +202,15 @@ impl TestCtx {
     pub fn with_remaining_ms(remaining_ms: u64) -> Arc<Self> {
         let ctx = Self::new();
         ctx.remaining_ms.store(remaining_ms, Ordering::SeqCst);
+        ctx
+    }
+
+    /// REV-110 C2：注入动态剩余 deadline provider（工具执行中可变；返回毫秒）。
+    pub fn with_remaining_provider(provider: Arc<dyn Fn() -> u64 + Send + Sync>) -> Arc<Self> {
+        let ctx = Arc::new(Self::default());
+        if let Ok(mut guard) = ctx.remaining_provider.0.lock() {
+            *guard = Some(provider);
+        }
         ctx
     }
 
@@ -248,6 +270,11 @@ impl HarnessCtx for TestCtx {
     }
 
     fn node_deadline_remaining_ms(&self) -> u64 {
+        if let Ok(guard) = self.remaining_provider.0.lock() {
+            if let Some(provider) = guard.as_ref() {
+                return provider();
+            }
+        }
         self.remaining_ms.load(Ordering::SeqCst)
     }
 
@@ -405,5 +432,22 @@ pub fn bash_outcome_with_large_output() -> BashOutcome {
         stderr: "b".repeat(50_000).into_bytes(),
         drain_truncated: false,
         duration_ms: 1,
+    }
+}
+
+/// REV-110 N2：record 时 panic 的 sink（断言 `record_tool_call_safely` 吞 panic）。
+#[derive(Debug, Default)]
+pub struct PanickingToolCallSink;
+
+impl PanickingToolCallSink {
+    /// 新建。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self)
+    }
+}
+
+impl crate::tools::ToolCallRecordSink for PanickingToolCallSink {
+    fn record_tool_call(&self, _record: &crate::tools::ToolCallRecord) {
+        panic!("sink panic must not affect the run");
     }
 }
