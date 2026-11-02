@@ -63,12 +63,15 @@ fn v02_default_agent_path_golden_unchanged() {
         "默认无 v0.3 工具"
     );
 
-    // trace schema 仍 v6；无 v0.3 专属表/列。
+    // v0.4/D5 起 trace schema 全局为 v7（tool_calls）；v0.3 无专属表/列。
     let conn = cli_support::read_only_connect(&db);
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("user_version");
-    assert_eq!(version, 6, "trace 不升 v7");
+    assert_eq!(
+        version, 7,
+        "当前 trace schema 为 v7（v0.4/D5），v0.3 不新增表"
+    );
     let tables: Vec<String> = {
         let mut statement = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")

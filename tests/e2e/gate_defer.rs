@@ -15,9 +15,9 @@
 //! 1. **fixtures 静态断言**：三个 defer 图 `zgraph validate` 通过（R13/R15）且
 //!    `on_gate_false` 形状符合冻结；
 //! 2. **AC-14 h**：`tests/fixtures/trace/schema_v3_seed.sql` 建 v3 库 → 真
-//!    `zgraph run` 触发 v3→v4→v5→v6 逐版本迁移 → 备份/审计/旧行默认值/旧 payload 保持
+//!    `zgraph run` 触发 v3→…→v7 逐版本迁移 → 备份/审计/旧行默认值/旧 payload 保持
 //!    历史形态 →
-//!    `trace`/`replay --mode=events` 对照冻结 golden；只读 v3 拒绝；v6 新 run 的
+//!    `trace`/`replay --mode=events` 对照冻结 golden；只读 v3 拒绝；v7 新 run 的
 //!    `deferred`/`attempt`/`verdict` 为真实运行值（REV-071 N1），并锁定超限那次
 //!    GateResult 不入库；
 //! 3. **AC-14 a/b/f/g 运行时用例**：真 kernel deferrable gate + 真 worker + 真 SQLite；
@@ -279,10 +279,10 @@ fn defer_fixtures_validate_with_r13_r15_and_expected_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. AC-14 h：v3 seed → v6 逐版本迁移 / 只读拒绝 / L1 回放
+// 2. AC-14 h：v3 seed → v7 逐版本迁移 / 只读拒绝 / L1 回放
 // ---------------------------------------------------------------------------
 
-/// h：v3 seed 由真 `zgraph run` 触发 v3→v4→v5→v6 逐版本迁移；备份/审计/旧行默认值/
+/// h：v3 seed 由真 `zgraph run` 触发 v3→…→v7 逐版本迁移；备份/审计/旧行默认值/
 /// 旧 payload 形态（W3a v5 / W4b v6 版本期望机械同步）。
 #[test]
 fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
@@ -301,7 +301,7 @@ fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
     assert_ne!(new_run_id, old_run_id, "迁移后的新 run 必须是新 id");
 
     let conn = cli_support::connect(&db);
-    assert_eq!(user_version(&conn), 6, "迁移后 user_version=6");
+    assert_eq!(user_version(&conn), 7, "迁移后 user_version=7");
     let versions: Vec<i64> = {
         let mut stmt = conn
             .prepare("SELECT version FROM schema_migrations ORDER BY version")
@@ -311,11 +311,15 @@ fn v3_seed_is_migrated_to_v4_on_run_and_history_is_preserved() {
             .map(|row| row.expect("version"))
             .collect()
     };
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6], "schema_migrations 1..6");
+    assert_eq!(
+        versions,
+        vec![1, 2, 3, 4, 5, 6, 7],
+        "schema_migrations 1..7"
+    );
 
-    // 备份 = 逐版本迁移前快照（v3→v4、v4→v5、v5→v6 各一份；W4b 机械同步期望）。
+    // 备份 = 逐版本迁移前快照（v3→v4 … v6→v7 各一份）。
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 3, "v3→v6 逐版本三份备份: {backups:?}");
+    assert_eq!(backups.len(), 4, "v3→v7 逐版本四份备份: {backups:?}");
     let backup = backups
         .iter()
         .find(|path| {
@@ -610,8 +614,8 @@ fn v3_seed_readonly_trace_is_rejected_without_migration() {
     assert_exit(&output, 4, "只读 trace 对 v3 库应 exit 4");
     let stderr = stderr_text(&output);
     assert!(
-        stderr.contains("unsupported schema version=3, expected 6"),
-        "stderr 应说明 v3 < 6 且不迁移: {stderr}"
+        stderr.contains("unsupported schema version=3, expected 7"),
+        "stderr 应说明 v3 < 7 且不迁移: {stderr}"
     );
     let conn = cli_support::read_only_connect(&db);
     assert_eq!(user_version(&conn), 3, "只读拒绝不得迁移");

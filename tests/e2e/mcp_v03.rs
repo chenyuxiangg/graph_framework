@@ -905,7 +905,7 @@ fn ac19e_secret_env_is_expanded_but_not_logged() {
 }
 
 // ---------------------------------------------------------------------------
-// AC-19 f：trace 不升 v7（tool_name 命名空间 / call_id 原生 / 无新表列）
+// AC-19 f：trace 无 MCP 专属表/列（v0.4/D5 后全局 v7；tool_name 命名空间 / call_id 原生）
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -928,11 +928,14 @@ fn ac19f_trace_schema_and_tool_identity_unchanged() {
     let payload = json_stdout(&output);
     let run_id = payload_run_id(&payload);
     let conn = cli_support::read_only_connect(&db);
-    // schema 仍 v6；无 MCP 新表/列。
+    // v0.4/D5 起 schema 全局为 v7；MCP 不新增专属表/列。
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("user_version");
-    assert_eq!(version, 6, "不得升 trace v7");
+    assert_eq!(
+        version, 7,
+        "v0.4/D5 全局 v7（tool_calls），但 MCP 不得新增专属表/列"
+    );
     let tables: Vec<String> = {
         let mut statement = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -959,7 +962,7 @@ fn ac19f_trace_schema_and_tool_identity_unchanged() {
     };
     assert!(
         !streaming_columns.iter().any(|name| name.contains("server")),
-        "无 MCP server 列（不 v7）: {streaming_columns:?}"
+        "无 MCP server 列: {streaming_columns:?}"
     );
     drop(conn);
     // tool_name 命名空间 + 原生 call_id 保留；events.kind 仍是既有 7 类。
@@ -1028,12 +1031,12 @@ fn ac19g_default_without_mcp_is_unchanged() {
     );
     assert!(!spawn.is_file(), "无 MCP 配置不启动 server");
     assert!(!log.is_file(), "无 MCP 配置不读/连 server");
-    // trace schema/replay 与 v0.2 一致。
+    // trace schema 与当前 v0.4 全局版本一致（v7）；replay 与 v0.2 口径一致。
     let conn = cli_support::read_only_connect(&db);
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("user_version");
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     drop(conn);
     let trace = v03::trace_json(&db, &run_id);
     let replay = v03::replay_events_json(&db, &run_id);

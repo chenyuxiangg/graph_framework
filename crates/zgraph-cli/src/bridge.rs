@@ -1443,6 +1443,7 @@ mod tests {
                 zgraph_trace::TraceInput::RecordedOutput(_) => "RecordedOutput",
                 zgraph_trace::TraceInput::LlmCall(_) => "LlmCall",
                 zgraph_trace::TraceInput::ForeachExpansion(_) => "ForeachExpansion",
+                zgraph_trace::TraceInput::ToolCall(_) => "ToolCall",
             };
             observer_seen.lock().expect("lock").push(kind);
         });

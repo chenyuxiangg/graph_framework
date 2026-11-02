@@ -503,7 +503,7 @@ fn graph_hash_depends_only_on_graph_json_including_foreach() {
 // 2. trace v5 seed：只读拒绝（不迁移）
 // ---------------------------------------------------------------------------
 
-/// AC-17 i：只读 `trace`/`replay` 对 v5 库 exit 4（expected 6）且不迁移。
+/// AC-17 i：只读 `trace`/`replay` 对 v5 库 exit 4（expected 7）且不迁移。
 #[test]
 fn v5_seed_readonly_trace_and_replay_are_rejected_without_migration() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -516,7 +516,7 @@ fn v5_seed_readonly_trace_and_replay_are_rejected_without_migration() {
         assert_exit(&output, 4, &format!("只读 {label} 对 v5 库应 exit 4"));
         let stderr = stderr_text(&output);
         assert!(
-            stderr.contains("unsupported schema version=5, expected 6"),
+            stderr.contains("unsupported schema version=5, expected 7"),
             "{label} stderr 应说明 v5 < 6 且不迁移: {stderr}"
         );
         assert!(
@@ -566,18 +566,27 @@ fn v5_seed_migrates_to_v6_preserving_history_and_replay() {
     );
 
     let conn = read_only_connect(&db);
-    assert_eq!(user_version(&conn), 6, "迁移后 user_version=6");
+    assert_eq!(user_version(&conn), 7, "迁移后 user_version=7");
     assert_eq!(
         migration_versions(&conn),
-        vec![1, 2, 3, 4, 5, 6],
-        "schema_migrations 1..6"
+        vec![1, 2, 3, 4, 5, 6, 7],
+        "schema_migrations 1..7"
     );
 
-    // 备份恰一份 v5 快照。
+    // 备份 = 逐版本迁移前快照（v5→v6、v6→v7 各一份）。
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 1, "v5→v6 恰一份备份: {backups:?}");
+    assert_eq!(backups.len(), 2, "v5→v7 逐版本两份备份: {backups:?}");
     assert!(has_backup_version(&backups, "5"), "备份应含 .bak.v5-");
-    let backup_conn = Connection::open(&backups[0]).expect("open backup");
+    assert!(has_backup_version(&backups, "6"), "备份应含 .bak.v6-");
+    let backup = backups
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().contains(".bak.v5-"))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("missing .bak.v5- backup: {backups:?}"));
+    let backup_conn = Connection::open(backup).expect("open backup");
     assert_eq!(user_version(&backup_conn), 5, "备份保持 v5");
 
     // v6 新列/新表/索引。
@@ -658,21 +667,21 @@ fn v5_seed_migrates_to_v6_preserving_history_and_replay() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. v3 seed → v3→v4→v5→v6 链式迁移：v0.1.0 L1 golden 不变
+// 4. v3 seed → v3→…→v7 链式迁移：v0.1.0 L1 golden 不变
 // ---------------------------------------------------------------------------
 
-/// AC-17 i：v3 seed → 真 CLI run 触发 v3→v4→v5→v6 链式迁移；v0.1.0 L1 golden 不变、
-/// 逐版本备份 3/4/5 各一份、旧 payload 保持 v3 形态。
+/// AC-17 i：v3 seed → 真 CLI run 触发 v3→…→v7 链式迁移；v0.1.0 L1 golden 不变、
+/// 逐版本备份 3/4/5/6 各一份、旧 payload 保持 v3 形态。
 #[test]
 fn v3_seed_chain_to_v6_preserves_v01_golden() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (db, old_run_id) = seeded_v3_db(dir.path());
 
-    // 只读 v3：expected 6（不迁移）。
+    // 只读 v3：expected 7（不迁移）。
     let readonly = trace_json(&db, &old_run_id);
     assert_exit(&readonly, 4, "只读 trace 对 v3 库应 exit 4");
     assert!(
-        stderr_text(&readonly).contains("unsupported schema version=3, expected 6"),
+        stderr_text(&readonly).contains("unsupported schema version=3, expected 7"),
         "stderr: {}",
         stderr_text(&readonly)
     );
@@ -682,14 +691,14 @@ fn v3_seed_chain_to_v6_preserves_v01_golden() {
     assert_eq!(json_stdout(&output)["status"], json!("Completed"));
 
     let conn = read_only_connect(&db);
-    assert_eq!(user_version(&conn), 6, "迁移后 user_version=6");
-    assert_eq!(migration_versions(&conn), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(user_version(&conn), 7, "迁移后 user_version=7");
+    assert_eq!(migration_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
     assert!(sqlite_object_exists(&conn, "table", "foreach_expansions"));
     drop(conn);
 
-    // 链式迁移每版本恰一份备份（v3→v4、v4→v5、v5→v6）。
+    // 链式迁移每版本恰一份备份（v3→v4 … v6→v7）。
     let backups = backup_files(dir.path());
-    for version in ["3", "4", "5"] {
+    for version in ["3", "4", "5", "6"] {
         assert!(
             has_backup_version(&backups, version),
             "链式迁移应含 .bak.v{version}-*: {backups:?}"
@@ -2072,10 +2081,10 @@ fn ac17i_v5_migrated_db_foreach_run_and_l2() {
     assert_ne!(new_run_id, old_run_id);
 
     let conn = read_only_connect(&db);
-    assert_eq!(user_version(&conn), 6, "v5→v6 迁移完成");
-    assert_eq!(migration_versions(&conn), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(user_version(&conn), 7, "v5→v7 迁移完成");
+    assert_eq!(migration_versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
     assert!(sqlite_object_exists(&conn, "table", "foreach_expansions"));
-    assert_eq!(backup_files(dir.path()).len(), 1, "v5→v6 恰一份备份");
+    assert_eq!(backup_files(dir.path()).len(), 2, "v5→v7 逐版本两份备份");
     drop(conn);
 
     let reader = TraceReader::open_readonly(&db).expect("open trace");

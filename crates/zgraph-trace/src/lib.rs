@@ -36,6 +36,11 @@
 //!   [`TraceReader::foreach_expansions`] 读取；不产生 events 行）；v5 旧库按同一
 //!   forward-only 框架迁移（重建 `instances` 期间临时关闭 FK 校验以保留
 //!   `human_decisions` 行）。无 foreach 的旧 run 的 trace/回放 golden 不变。
+//! - schema 升 **v7**（v0.4/D5 / DR-014）：**仅新增** `tool_calls` 表 + 3 索引
+//!   （v6→v7 不重建既有表）；[`TraceInput::ToolCall`] 写入工具调用审计（不产生
+//!   `events` 行），writer 按 DR-014 §5 做 32 KiB args/result、16 KiB head+tail bash
+//!   输出等截断并保留全量 sha256，单 run 行数上限 [`TOOL_CALLS_MAX_PER_RUN`]；
+//!   [`TraceReader::tool_calls`] 只读（无工具调用的旧 run 输出与 v6 一致）。
 //! - 崩溃标定（06 §6.8）是两段式原语：`TraceWriter::interrupted_candidates` 查
 //!   `Running`/`Paused` 候选，`TraceWriter::mark_interrupted` 单事务标定为
 //!   `Failed + interrupted=1`；判活（`kill(pid, 0)`/heartbeat 陈旧）由调用方负责。
@@ -109,6 +114,7 @@ mod model;
 mod reader;
 mod recovery;
 mod schema;
+mod toolcall;
 mod writer;
 
 pub use decision::{
@@ -117,19 +123,23 @@ pub use decision::{
 };
 pub use error::TraceError;
 pub use model::{
-    ForeachExpansionRecord, GateResultRecord, InstanceSnapshot, InstanceStatus, LlmCallRecord,
-    RecordMode, RecordedOutput, RunFinishedInfo, RunMetrics, RunStartedInfo, RunStatus,
-    StreamingEvent, TraceFailure, TraceInput, TransitionRecord,
+    BashToolCall, ForeachExpansionRecord, GateResultRecord, InstanceSnapshot, InstanceStatus,
+    LlmCallRecord, RecordMode, RecordedOutput, RunFinishedInfo, RunMetrics, RunStartedInfo,
+    RunStatus, StreamingEvent, ToolCallRecord, ToolCallSource, ToolCallStatus, ToolSideEffect,
+    TraceFailure, TraceInput, TransitionRecord,
 };
 pub use reader::{
     EventQuery, EventRow, ForeachExpansionRow, GateResultRow, GraphRow, InstanceRow, LlmCallRow,
-    RecordedOutputRow, RunRow, RunStats, StreamingRow, TraceReader, TransitionRow,
+    RecordedOutputRow, RunRow, RunStats, StreamingRow, ToolCallRow, TraceReader, TransitionRow,
 };
 pub use recovery::{InterruptedCandidate, RecoveredRun, INTERRUPTED_ERROR_MESSAGE};
 pub use schema::{
     DB_BUSY_TIMEOUT_MS, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, DECISION_POLL_BUSY_TIMEOUT_MS,
     HEARTBEAT_INTERVAL_MS, STREAMING_CHANNEL_CAP, STREAM_SEGMENT_MAX_BYTES,
-    STREAM_SEGMENT_MAX_CHARS, STREAM_TOKEN_AGGREGATE_MS, TRACE_BATCH_INTERVAL_MS, TRACE_BATCH_ROWS,
-    TRACE_CHANNEL_CAP, TRACE_PAYLOAD_MAX_BYTES, TRACE_SCHEMA_VERSION, WAL_CHECKPOINT_INTERVAL_MS,
+    STREAM_SEGMENT_MAX_CHARS, STREAM_TOKEN_AGGREGATE_MS, TOOL_CALLS_MAX_PER_RUN,
+    TOOL_CALL_ARGS_MAX_BYTES, TOOL_CALL_BASH_OUTPUT_MAX_BYTES, TOOL_CALL_COMMAND_MAX_BYTES,
+    TOOL_CALL_PATH_MAX_BYTES, TOOL_CALL_RESULT_MAX_BYTES, TRACE_BATCH_INTERVAL_MS,
+    TRACE_BATCH_ROWS, TRACE_CHANNEL_CAP, TRACE_PAYLOAD_MAX_BYTES, TRACE_SCHEMA_VERSION,
+    WAL_CHECKPOINT_INTERVAL_MS,
 };
 pub use writer::{TraceHandle, TraceWriter};

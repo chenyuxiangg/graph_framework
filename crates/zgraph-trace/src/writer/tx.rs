@@ -14,12 +14,14 @@ use serde_json::{json, Value};
 use crate::error::TraceError;
 use crate::model::{
     json_opt, json_req, ForeachExpansionRecord, GateResultRecord, InstanceSnapshot, InstanceStatus,
-    LlmCallRecord, RecordedOutput, RunFinishedInfo, RunStartedInfo, RunStatus, TraceInput,
-    TransitionRecord,
+    LlmCallRecord, RecordedOutput, RunFinishedInfo, RunStartedInfo, RunStatus, ToolCallRecord,
+    TraceInput, TransitionRecord,
 };
 use crate::schema::{
-    db_err, now_rfc3339_millis, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, TRACE_PAYLOAD_MAX_BYTES,
+    db_err, now_rfc3339_millis, DB_WRITE_RETRY, DB_WRITE_RETRY_INTERVAL_MS, TOOL_CALLS_MAX_PER_RUN,
+    TRACE_PAYLOAD_MAX_BYTES,
 };
+use crate::toolcall::normalize;
 use crate::writer::stream::Segment;
 
 /// 一批待提交的写操作。
@@ -104,6 +106,9 @@ struct Tracker {
     run_counts: HashMap<String, u64>,
     started: Vec<String>,
     finished: Vec<String>,
+    /// 本批已占用的 `tool_calls` 行数（batch 开始时按 run 从 DB 读取一次，
+    /// 用于单 run [`TOOL_CALLS_MAX_PER_RUN`] 上限；重复 call_id 回退计数）。
+    tool_call_rows: HashMap<String, i64>,
 }
 
 impl Tracker {
@@ -193,6 +198,7 @@ fn write_op(tx: &Transaction<'_>, op: &WriteOp, tracker: &mut Tracker) -> Result
         WriteOp::Input(TraceInput::RecordedOutput(record)) => write_recorded_output(tx, record),
         WriteOp::Input(TraceInput::LlmCall(record)) => write_llm_call(tx, record),
         WriteOp::Input(TraceInput::ForeachExpansion(record)) => write_foreach_expansion(tx, record),
+        WriteOp::Input(TraceInput::ToolCall(record)) => write_tool_call(tx, record, tracker),
         WriteOp::Input(TraceInput::Streaming { .. }) => Err(TxError::Fatal(TraceError::Storage(
             "streaming input must be aggregated before writing".to_string(),
         ))),
@@ -717,6 +723,141 @@ fn write_foreach_expansion(
     )
     .map_err(sql_err)?;
     Ok(())
+}
+
+/// 写一行工具调用审计（v0.4/D5 / DR-014 §1/§5；不产生 events 行）。
+///
+/// - 字段归一化（32 KiB args/result、16 KiB head+tail bash 输出、8/4 KiB command/path；
+///   全量 sha256）在 [`normalize`] 完成；
+/// - 单 run 行数上限 [`TOOL_CALLS_MAX_PER_RUN`]：达到上限后**停止记录**（不 fail run；
+///   上层 sink 负责 warning，DR-014 §5）；
+/// - 唯一键 `(run_id,instance_id,attempt,call_id)` 冲突 → `ON CONFLICT DO NOTHING`
+///   （重复上报/重试幂等，不产生第二行也不中断写线程）。
+fn write_tool_call(
+    tx: &Transaction<'_>,
+    record: &ToolCallRecord,
+    tracker: &mut Tracker,
+) -> Result<(), TxError> {
+    let normalized = normalize(record).map_err(TxError::Fatal)?;
+    let max_rows = i64::try_from(TOOL_CALLS_MAX_PER_RUN).unwrap_or(i64::MAX);
+    let run_id = record.run_id.clone();
+    if !tracker.tool_call_rows.contains_key(&run_id) {
+        let existing: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM tool_calls WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get(0),
+            )
+            .map_err(sql_err)?;
+        tracker.tool_call_rows.insert(run_id.clone(), existing);
+    }
+    let used = tracker.tool_call_rows.get(&run_id).copied().unwrap_or(0);
+    if used >= max_rows {
+        return Ok(());
+    }
+    if let Some(used) = tracker.tool_call_rows.get_mut(&run_id) {
+        *used += 1;
+    }
+
+    let duration_ms = u64_to_i64(record.duration_ms, "tool call duration_ms")?;
+    let bash_signal = record
+        .bash
+        .as_ref()
+        .and_then(|bash| bash.signal)
+        .map(i64::from);
+    let (side_path, side_before, side_after, side_bytes_before, side_bytes_after) =
+        match &record.side_effect {
+            Some(side_effect) => (
+                normalized.side_effect_path.as_deref(),
+                side_effect.before_sha256.as_deref(),
+                side_effect.after_sha256.as_deref(),
+                side_effect
+                    .bytes_before
+                    .map(|value| u64_to_i64(value, "side_effect bytes_before"))
+                    .transpose()?,
+                side_effect
+                    .bytes_after
+                    .map(|value| u64_to_i64(value, "side_effect bytes_after"))
+                    .transpose()?,
+            ),
+            None => (None, None, None, None, None),
+        };
+    let (bash_command, bash_cwd, bash_exit_code, bash_stdout, bash_stderr) =
+        match (&record.bash, &normalized.bash) {
+            (Some(bash), Some(normalized)) => (
+                Some(normalized.command.as_str()),
+                Some(normalized.cwd.as_str()),
+                bash.exit_code.map(i64::from),
+                Some(normalized.stdout.as_str()),
+                Some(normalized.stderr.as_str()),
+            ),
+            _ => (None, None, None, None, None),
+        };
+    let sandbox_profile_sha256 = record
+        .bash
+        .as_ref()
+        .and_then(|bash| bash.sandbox_profile_sha256.as_deref());
+
+    let changed = tx
+        .execute(
+            "INSERT INTO tool_calls \
+         (run_id, instance_id, node_id, attempt, call_id, tool_name, source, status, \
+          args_json, result_json, error_json, truncated, args_sha256, result_sha256, \
+          started_at, finished_at, duration_ms, bash_signal, \
+          side_effect_path, side_effect_before, side_effect_after, \
+          side_effect_bytes_before, side_effect_bytes_after, \
+          bash_command, bash_cwd, bash_exit_code, bash_stdout, bash_stderr, \
+          bash_truncated, sandbox_profile_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
+                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, \
+                 ?29, ?30) \
+         ON CONFLICT(run_id, instance_id, attempt, call_id) DO NOTHING",
+            params![
+                record.run_id,
+                record.instance_id,
+                record.node_id,
+                i64::from(record.attempt),
+                record.call_id,
+                record.tool_name,
+                record.source.as_str(),
+                record.status.as_str(),
+                normalized.args_json,
+                normalized.result_json,
+                normalized.error_json,
+                i64::from(normalized.truncated),
+                normalized.args_sha256,
+                normalized.result_sha256,
+                record.started_at,
+                record.finished_at,
+                duration_ms,
+                bash_signal,
+                side_path,
+                side_before,
+                side_after,
+                side_bytes_before,
+                side_bytes_after,
+                bash_command,
+                bash_cwd,
+                bash_exit_code,
+                bash_stdout,
+                bash_stderr,
+                i64::from(normalized.bash_truncated),
+                sandbox_profile_sha256
+            ],
+        )
+        .map_err(sql_err)?;
+    if changed == 0 {
+        // 重复 call_id（幂等冲突）不占用行预算。
+        if let Some(used) = tracker.tool_call_rows.get_mut(&run_id) {
+            *used -= 1;
+        }
+    }
+    Ok(())
+}
+
+fn u64_to_i64(value: u64, what: &str) -> Result<i64, TxError> {
+    i64::try_from(value)
+        .map_err(|_| TxError::Fatal(TraceError::Storage(format!("{what} overflow: {value}"))))
 }
 
 fn upsert_instance(

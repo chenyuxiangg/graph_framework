@@ -260,7 +260,7 @@ fn decide_records_waiting_human_decision_and_prints_summary() {
     assert_eq!(row_decision_id, decision_id);
     assert!(decided_at.ends_with('Z'), "{decided_at}");
     assert_eq!(*consumed_at, None, "decide 不写 consumed_at");
-    assert_eq!(user_version(fx.path()), 6, "decide 不迁移/不改版本");
+    assert_eq!(user_version(fx.path()), 7, "decide 不迁移/不改版本");
 }
 
 #[test]
@@ -462,7 +462,7 @@ fn newer_schema_version_exits_4() {
     let fx = fixture(false);
     Connection::open(fx.path())
         .expect("open db")
-        .execute_batch("PRAGMA user_version = 7;")
+        .execute_batch("PRAGMA user_version = 8;")
         .expect("upgrade version");
     let output = run_args(&decide_args(fx.path()));
     assert_eq!(code(&output), 4, "stderr={}", stderr(&output));
@@ -471,7 +471,7 @@ fn newer_schema_version_exits_4() {
         "{}",
         stderr(&output)
     );
-    assert!(stderr(&output).contains("6"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("8"), "{}", stderr(&output));
 }
 
 // ---------------------------------------------------------------------------

@@ -413,6 +413,153 @@ pub struct LlmCallRecord {
     pub recorded_at: String,
 }
 
+/// 工具调用来源（DR-014 §1 `source` CHECK 三值；对应工具名前缀 `builtin__`/`mcp__`/Python）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolCallSource {
+    /// Rust 内置（`builtin__*`）。
+    Builtin,
+    /// MCP（`mcp__*`）。
+    Mcp,
+    /// Python `tools/`（05 §5.6）。
+    Python,
+}
+
+impl ToolCallSource {
+    /// 存储用稳定字符串（DR-014 §1 DDL CHECK）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Mcp => "mcp",
+            Self::Python => "python",
+        }
+    }
+
+    /// 把存储值解析回枚举；未知值返回 `None`。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "builtin" => Some(Self::Builtin),
+            "mcp" => Some(Self::Mcp),
+            "python" => Some(Self::Python),
+            _ => None,
+        }
+    }
+}
+
+/// 工具调用终态（DR-014 §1 `status` CHECK 四值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolCallStatus {
+    /// 成功。
+    Ok,
+    /// 工具错误（`TOOL_ERROR` 结果；不 fail run）。
+    Error,
+    /// 被取消（run 取消传播）。
+    Cancelled,
+    /// 超时。
+    Timeout,
+}
+
+impl ToolCallStatus {
+    /// 存储用稳定字符串（DR-014 §1 DDL CHECK）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    /// 把存储值解析回枚举；未知值返回 `None`。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ok" => Some(Self::Ok),
+            "error" => Some(Self::Error),
+            "cancelled" => Some(Self::Cancelled),
+            "timeout" => Some(Self::Timeout),
+            _ => None,
+        }
+    }
+}
+
+/// 工具调用副作用（write/edit/apply_patch；DR-014 §1/§5）。
+///
+/// 多文件 `apply_patch` 仍为一行（`files[]` 摘要放 result）；`path` 仅单文件时填。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSideEffect {
+    /// 单文件目标路径（jail 内相对/绝对路径原文；writer 按 4 KiB 防御性截断）。
+    pub path: String,
+    /// 修改前 sha256（文件不存在 = `None`）。
+    pub before_sha256: Option<String>,
+    /// 修改后 sha256（失败/回滚 = `None`）。
+    pub after_sha256: Option<String>,
+    /// 修改前字节数（不存在 = `None`）。
+    pub bytes_before: Option<u64>,
+    /// 修改后字节数（失败/回滚 = `None`）。
+    pub bytes_after: Option<u64>,
+}
+
+/// bash 工具调用记录（仅 `builtin__bash`；DR-014 §1/§5）。
+///
+/// writer 按 DR-014 §5 截断：`command` 8 KiB、`stdout`/`stderr` 各 16 KiB head+tail。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashToolCall {
+    /// 命令原文（可能含敏感信息；文档警示、不写 env 值）。
+    pub command: String,
+    /// 执行 cwd（jail 内路径）。
+    pub cwd: String,
+    /// 退出码（被信号杀死时为 `None`）。
+    pub exit_code: Option<i32>,
+    /// 杀死信号（`None` = 未因信号退出）。
+    pub signal: Option<i32>,
+    /// stdout（head+tail ≤16 KiB）。
+    pub stdout: String,
+    /// stderr（head+tail ≤16 KiB）。
+    pub stderr: String,
+    /// 渲染后 sandbox profile 的 sha256（含 allowlist/network 开关）。
+    pub sandbox_profile_sha256: Option<String>,
+}
+
+/// 一次工具调用审计记录（trace v7 / DR-014 §1；`TraceInput::ToolCall` 载荷）。
+///
+/// writer 负责把 `args`/`result`/`error` 序列化为 JSON 文本并按 DR-014 §5 截断
+/// （全量 sha256 保留）、把 bash 输出截断为 head+tail，并执行单 run 行数上限；
+/// 本类型只描述调用事实。不产生 `events` 行（`events.kind` 不变）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallRecord {
+    /// 所属 run。
+    pub run_id: String,
+    /// 执行工具调用的实例。
+    pub instance_id: String,
+    /// 节点 id。
+    pub node_id: String,
+    /// 实例 attempt。
+    pub attempt: u32,
+    /// provider/工具原生 call id（不伪造）。
+    pub call_id: String,
+    /// 工具名（`builtin__read` / `mcp__server__tool` / Python 名）。
+    pub tool_name: String,
+    /// 工具来源。
+    pub source: ToolCallSource,
+    /// 终态。
+    pub status: ToolCallStatus,
+    /// 完整参数（writer 序列化后按 32 KiB 截断）。
+    pub args: Value,
+    /// 成功结果（失败时为 `None`）。
+    pub result: Option<Value>,
+    /// `TOOL_ERROR` JSON（成功时为 `None`）。
+    pub error: Option<Value>,
+    /// 开始时刻（RFC3339 毫秒 Z）。
+    pub started_at: String,
+    /// 结束时刻（RFC3339 毫秒 Z）。
+    pub finished_at: String,
+    /// 耗时（毫秒）。
+    pub duration_ms: u64,
+    /// 副作用（write/edit/apply_patch；其它工具为 `None`）。
+    pub side_effect: Option<ToolSideEffect>,
+    /// bash 记录（仅 `builtin__bash`）。
+    pub bash: Option<BashToolCall>,
+}
+
 /// foreach 展开事实（W4a / DR-007 §8.3；10 §1.5 风格输入记录）。
 ///
 /// 一次 F 的展开一行（`item_count=0` 也写）；展开校验失败（非数组/超限/key 重复）
@@ -493,6 +640,8 @@ pub enum TraceInput {
     LlmCall(LlmCallRecord),
     /// foreach 展开事实（仅 foreach_expansions 行；不产生 events 行，W4a）。
     ForeachExpansion(ForeachExpansionRecord),
+    /// 工具调用审计记录（仅 tool_calls 行；不产生 events 行，v0.4/D5）。
+    ToolCall(ToolCallRecord),
 }
 
 /// 把 `Option<&Value>` 序列化为可空 TEXT（写线程内部使用）。

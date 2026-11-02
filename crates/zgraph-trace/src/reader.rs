@@ -13,7 +13,9 @@ use serde_json::Value;
 
 use crate::decision::HumanDecisionRow;
 use crate::error::TraceError;
-use crate::model::{parse_json, parse_json_opt, InstanceStatus, RunStatus};
+use crate::model::{
+    parse_json, parse_json_opt, InstanceStatus, RunStatus, ToolCallSource, ToolCallStatus,
+};
 use crate::schema::{self, db_err};
 
 /// `zgraph trace` 的查询参数。
@@ -203,6 +205,76 @@ pub struct ForeachExpansionRow {
     pub keys: Option<Value>,
     /// 展开时刻（RFC3339 毫秒 Z）。
     pub at: String,
+}
+
+/// 工具调用审计行（v7 / DR-014 §1；`TraceReader::tool_calls`）。
+///
+/// `args_json`/`result_json`/`error_json` 保留**原始存储文本**（超限时为 prefix，
+/// 不是合法 JSON）；消费方必须先看 `truncated`（回放遇截断 fail-closed）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallRow {
+    /// 表内自增主键（同一 `started_at` 时的稳定排序键）。
+    pub tool_call_id: i64,
+    /// 所属 run。
+    pub run_id: String,
+    /// 执行工具调用的实例。
+    pub instance_id: String,
+    /// 节点 id。
+    pub node_id: String,
+    /// 实例 attempt。
+    pub attempt: u32,
+    /// provider/工具原生 call id。
+    pub call_id: String,
+    /// 工具名。
+    pub tool_name: String,
+    /// 工具来源（`builtin`/`mcp`/`python`）。
+    pub source: ToolCallSource,
+    /// 终态（`ok`/`error`/`cancelled`/`timeout`）。
+    pub status: ToolCallStatus,
+    /// 参数 JSON 原文（超限为 prefix）。
+    pub args_json: String,
+    /// 成功结果 JSON 原文（失败为 `None`；超限为 prefix）。
+    pub result_json: Option<String>,
+    /// `TOOL_ERROR` JSON 原文（成功为 `None`；超限为 prefix）。
+    pub error_json: Option<String>,
+    /// args/result/error（或防御性 path）是否被截断。
+    pub truncated: bool,
+    /// 完整 args 的 sha256（截断时用于证明记录不完整）。
+    pub args_sha256: Option<String>,
+    /// 完整 result 的 sha256。
+    pub result_sha256: Option<String>,
+    /// 开始时刻。
+    pub started_at: String,
+    /// 结束时刻。
+    pub finished_at: String,
+    /// 耗时（毫秒）。
+    pub duration_ms: u64,
+    /// bash 被信号杀死时的信号值。
+    pub bash_signal: Option<i32>,
+    /// 单文件副作用路径。
+    pub side_effect_path: Option<String>,
+    /// 修改前 sha256。
+    pub side_effect_before: Option<String>,
+    /// 修改后 sha256。
+    pub side_effect_after: Option<String>,
+    /// 修改前字节数。
+    pub side_effect_bytes_before: Option<u64>,
+    /// 修改后字节数。
+    pub side_effect_bytes_after: Option<u64>,
+    /// bash 命令原文（≤ cap）。
+    pub bash_command: Option<String>,
+    /// bash cwd。
+    pub bash_cwd: Option<String>,
+    /// bash 退出码。
+    pub bash_exit_code: Option<i32>,
+    /// bash stdout（head+tail ≤16 KiB）。
+    pub bash_stdout: Option<String>,
+    /// bash stderr（head+tail ≤16 KiB）。
+    pub bash_stderr: Option<String>,
+    /// bash stdout/stderr/command/cwd 是否被截断。
+    pub bash_truncated: bool,
+    /// 渲染后 sandbox profile 的 sha256。
+    pub sandbox_profile_sha256: Option<String>,
 }
 
 /// 状态迁移明细行（06 §6.2.7；`seq` 1:1 关联 events）。
@@ -485,6 +557,27 @@ impl TraceReader {
         Ok(expansions)
     }
 
+    /// 查询 run 的工具调用审计行（v7 / DR-014 §1；按 `(started_at, tool_call_id)` 升序）。
+    ///
+    /// 无工具调用的 run 返回空 `Vec`（默认输出与 v6 一致）。
+    pub fn tool_calls(&self, run_id: &str) -> Result<Vec<ToolCallRow>, TraceError> {
+        let sql = "SELECT tool_call_id, run_id, instance_id, node_id, attempt, call_id, \
+                   tool_name, source, status, args_json, result_json, error_json, truncated, \
+                   args_sha256, result_sha256, started_at, finished_at, duration_ms, \
+                   bash_signal, side_effect_path, side_effect_before, side_effect_after, \
+                   side_effect_bytes_before, side_effect_bytes_after, bash_command, bash_cwd, \
+                   bash_exit_code, bash_stdout, bash_stderr, bash_truncated, \
+                   sandbox_profile_sha256 FROM tool_calls WHERE run_id = ?1 \
+                   ORDER BY started_at ASC, tool_call_id ASC";
+        let mut stmt = self.conn.prepare(sql).map_err(db_err)?;
+        let mut rows = stmt.query([run_id]).map_err(db_err)?;
+        let mut calls = Vec::new();
+        while let Some(row) = rows.next().map_err(db_err)? {
+            calls.push(map_tool_call_row(row)?);
+        }
+        Ok(calls)
+    }
+
     /// 查询状态迁移（按权威序 `seq` 升序）。
     pub fn transitions(&self, run_id: &str) -> Result<Vec<TransitionRow>, TraceError> {
         let sql = "SELECT transition_id, seq, run_id, instance_id, node_id, attempt, \
@@ -705,6 +798,64 @@ pub(crate) fn parse_status(text: &str) -> Result<InstanceStatus, TraceError> {
 pub(crate) fn parse_run_status(text: &str) -> Result<RunStatus, TraceError> {
     RunStatus::parse(text)
         .ok_or_else(|| TraceError::Storage(format!("invalid run status in db: {text}")))
+}
+
+fn parse_tool_call_source(text: &str) -> Result<ToolCallSource, TraceError> {
+    ToolCallSource::parse(text)
+        .ok_or_else(|| TraceError::Storage(format!("invalid tool_calls.source in db: {text}")))
+}
+
+fn parse_tool_call_status(text: &str) -> Result<ToolCallStatus, TraceError> {
+    ToolCallStatus::parse(text)
+        .ok_or_else(|| TraceError::Storage(format!("invalid tool_calls.status in db: {text}")))
+}
+
+fn to_opt_i32(value: Option<i64>) -> Option<i32> {
+    value.and_then(|raw| i32::try_from(raw).ok())
+}
+
+fn to_opt_u64(value: Option<i64>) -> Option<u64> {
+    value.and_then(|raw| u64::try_from(raw).ok())
+}
+
+fn map_tool_call_row(row: &rusqlite::Row<'_>) -> Result<ToolCallRow, TraceError> {
+    let source: String = row.get(7).map_err(db_err)?;
+    let status: String = row.get(8).map_err(db_err)?;
+    let truncated: i64 = row.get(12).map_err(db_err)?;
+    let bash_truncated: i64 = row.get(29).map_err(db_err)?;
+    Ok(ToolCallRow {
+        tool_call_id: row.get(0).map_err(db_err)?,
+        run_id: row.get(1).map_err(db_err)?,
+        instance_id: row.get(2).map_err(db_err)?,
+        node_id: row.get(3).map_err(db_err)?,
+        attempt: to_u32(row.get(4).map_err(db_err)?),
+        call_id: row.get(5).map_err(db_err)?,
+        tool_name: row.get(6).map_err(db_err)?,
+        source: parse_tool_call_source(&source)?,
+        status: parse_tool_call_status(&status)?,
+        args_json: row.get(9).map_err(db_err)?,
+        result_json: row.get(10).map_err(db_err)?,
+        error_json: row.get(11).map_err(db_err)?,
+        truncated: truncated != 0,
+        args_sha256: row.get(13).map_err(db_err)?,
+        result_sha256: row.get(14).map_err(db_err)?,
+        started_at: row.get(15).map_err(db_err)?,
+        finished_at: row.get(16).map_err(db_err)?,
+        duration_ms: to_u64(row.get(17).map_err(db_err)?),
+        bash_signal: to_opt_i32(row.get(18).map_err(db_err)?),
+        side_effect_path: row.get(19).map_err(db_err)?,
+        side_effect_before: row.get(20).map_err(db_err)?,
+        side_effect_after: row.get(21).map_err(db_err)?,
+        side_effect_bytes_before: to_opt_u64(row.get(22).map_err(db_err)?),
+        side_effect_bytes_after: to_opt_u64(row.get(23).map_err(db_err)?),
+        bash_command: row.get(24).map_err(db_err)?,
+        bash_cwd: row.get(25).map_err(db_err)?,
+        bash_exit_code: to_opt_i32(row.get(26).map_err(db_err)?),
+        bash_stdout: row.get(27).map_err(db_err)?,
+        bash_stderr: row.get(28).map_err(db_err)?,
+        bash_truncated: bash_truncated != 0,
+        sandbox_profile_sha256: row.get(30).map_err(db_err)?,
+    })
 }
 
 fn map_run_row(row: &rusqlite::Row<'_>) -> Result<RunRow, TraceError> {

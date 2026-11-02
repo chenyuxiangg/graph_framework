@@ -1,10 +1,11 @@
-//! schema 迁移与只读打开语义（06 §6.7 / §6.6；v3 = ISSUE-087、v4 = W2a、v5 = W3a、v6 = W4a）。
+//! schema 迁移与只读打开语义（06 §6.7 / §6.6；v3 = ISSUE-087、v4 = W2a、v5 = W3a、
+//! v6 = W4a、v7 = v0.4/D5 tool_calls）。
 //!
 //! 覆盖（DR-007 §8.1/§8.2 / 06 §6.2.5/§6.2.15/§6.7 的 W4b 测试清单）：
-//! - 新库 v6：DDL/索引/`schema_migrations` 1..6/无备份；`item_index`/`item_key`
+//! - 新库 v7：DDL/索引/`schema_migrations` 1..7/无备份；`item_index`/`item_key`
 //!   默认 0/NULL；唯一键 `(run_id,node_id,attempt,item_index)`；`foreach_expansions`；
-//! - v1→v6 / v2→v6 / v3→v6 / v4→v6 / v5→v6 逐版本链：每版本恰一份备份、原行逐列保留；
-//! - v5→v6：旧行 item 列取 `0/NULL`、`human_decisions`/gates/events 保留、唯一键生效、
+//! - v1..v6→v7 逐版本链：每版本恰一份备份、原行逐列保留；tool_calls 空表；
+//! - v5→v6→v7：旧行 item 列取 `0/NULL`、`human_decisions`/gates/events 保留、唯一键生效、
 //!   `foreach_expansions` 可写；只读 v5 拒绝且不迁移；迁移失败注入 → 恢复 v5 备份。
 
 mod common;
@@ -13,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use zgraph_trace::{
-    EventQuery, InstanceSnapshot, InstanceStatus, RunStatus, TraceError, TraceInput, TraceReader,
-    TraceWriter, TRACE_SCHEMA_VERSION,
+    EventQuery, InstanceSnapshot, InstanceStatus, RunStatus, ToolCallRecord, ToolCallSource,
+    ToolCallStatus, TraceError, TraceInput, TraceReader, TraceWriter, TRACE_SCHEMA_VERSION,
 };
 
 const EXPECTED_TABLES: &[&str] = &[
@@ -29,6 +30,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "runs",
     "schema_migrations",
     "streaming_events",
+    "tool_calls",
     "transitions",
 ];
 
@@ -53,6 +55,9 @@ const EXPECTED_INDEXES: &[&str] = &[
     "idx_stream_kind",
     "idx_stream_run_seq",
     "idx_stream_tool",
+    "idx_tool_calls_instance",
+    "idx_tool_calls_name",
+    "idx_tool_calls_run",
     "idx_transitions_instance",
     "idx_transitions_run_seq",
     "idx_transitions_run_status",
@@ -676,7 +681,7 @@ fn fresh_database_migrates_to_current_version_with_all_tables_and_indexes() {
     );
 
     let conn = Connection::open(&path).expect("inspect connection");
-    assert_eq!(user_version(&conn), 6, "v6 = W4a");
+    assert_eq!(user_version(&conn), 7, "v7 = v0.4/D5 tool_calls");
     let tables = sqlite_names(&conn, "table");
     for expected in EXPECTED_TABLES {
         assert!(
@@ -759,6 +764,43 @@ fn fresh_database_migrates_to_current_version_with_all_tables_and_indexes() {
         unique_index_columns(&conn, "instances"),
         vec!["run_id", "node_id", "attempt", "item_index"],
         "v6 唯一键必须是 item 定位键"
+    );
+    assert_eq!(
+        table_columns(&conn, "tool_calls"),
+        vec![
+            "tool_call_id",
+            "run_id",
+            "instance_id",
+            "node_id",
+            "attempt",
+            "call_id",
+            "tool_name",
+            "source",
+            "status",
+            "args_json",
+            "result_json",
+            "error_json",
+            "truncated",
+            "args_sha256",
+            "result_sha256",
+            "started_at",
+            "finished_at",
+            "duration_ms",
+            "bash_signal",
+            "side_effect_path",
+            "side_effect_before",
+            "side_effect_after",
+            "side_effect_bytes_before",
+            "side_effect_bytes_after",
+            "bash_command",
+            "bash_cwd",
+            "bash_exit_code",
+            "bash_stdout",
+            "bash_stderr",
+            "bash_truncated",
+            "sandbox_profile_sha256",
+        ],
+        "v7 tool_calls 列集合必须与 DR-014 §1 一致"
     );
     assert_eq!(
         table_columns(&conn, "foreach_expansions"),
@@ -977,6 +1019,30 @@ fn readonly_reader_rejects_v5_schema_without_migrating() {
 }
 
 #[test]
+fn readonly_reader_rejects_v6_schema_without_migrating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v6.db");
+    create_v6_database(&path);
+    match TraceReader::open_readonly(&path) {
+        Ok(_) => panic!("readonly reader must reject v6 schema"),
+        Err(TraceError::Storage(message)) => assert!(
+            message.contains(&format!(
+                "unsupported schema version=6, expected {TRACE_SCHEMA_VERSION}"
+            )),
+            "unexpected message: {message}"
+        ),
+        Err(other) => panic!("expected Storage, got {other:?}"),
+    }
+    let conn = Connection::open(&path).expect("inspect after rejection");
+    assert_eq!(user_version(&conn), 6, "只读拒绝不得迁移");
+    assert!(!table_exists(&conn, "tool_calls"), "只读拒绝不得创建 v7 表");
+    assert!(
+        backup_files(dir.path()).is_empty(),
+        "只读拒绝不得生成迁移备份"
+    );
+}
+
+#[test]
 fn readonly_open_of_file_without_trace_schema_errors_and_writes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("empty.db");
@@ -1120,10 +1186,11 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
                 |row| row.get(0),
             )
             .expect("migration row");
-        assert_eq!(migrated, 1, "v1 库已有 v1 审计行，链式迁移补齐 1..6");
+        assert_eq!(migrated, 1, "v1 库已有 v1 审计行，链式迁移补齐 1..7");
     }
     assert!(table_exists(&conn, "human_decisions"));
     assert!(table_exists(&conn, "foreach_expansions"));
+    assert!(table_exists(&conn, "tool_calls"));
     assert_eq!(
         unique_index_columns(&conn, "instances"),
         vec!["run_id", "node_id", "attempt", "item_index"]
@@ -1186,10 +1253,10 @@ fn v1_database_is_upgraded_to_current_version_in_place() {
     let backups = backup_files(dir.path());
     assert_eq!(
         backups.len(),
-        5,
-        "expected five migration backups: {backups:?}"
+        6,
+        "expected six migration backups: {backups:?}"
     );
-    for old_version in 1..=5 {
+    for old_version in 1..=6 {
         let backup = backups
             .iter()
             .find(|path| backup_name(path).contains(&format!(".bak.v{old_version}-")))
@@ -1237,9 +1304,9 @@ fn v2_database_is_upgraded_to_current_version_with_backup_and_preserves_rows() {
         "pre-v3 run has no global_vars record (compat: replay falls back to empty map)"
     );
 
-    // 备份 = 迁移前快照（user_version=2、无 global_vars_json/v4/v5/v6 增量）。
+    // 备份 = 迁移前快照（user_version=2、无 v3..v7 增量）。
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 4, "v2→v6 逐版本四份备份: {backups:?}");
+    assert_eq!(backups.len(), 5, "v2→v7 逐版本五份备份: {backups:?}");
     let backup = backups
         .iter()
         .find(|path| backup_name(path).contains(".bak.v2-"))
@@ -1260,7 +1327,7 @@ fn v2_database_is_upgraded_to_current_version_with_backup_and_preserves_rows() {
 }
 
 #[test]
-fn v3_database_is_upgraded_to_v6_with_gate_result_defaults_and_backup() {
+fn v3_database_is_upgraded_to_v7_with_gate_result_defaults_and_backup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v3.db");
     create_v3_database(&path);
@@ -1281,7 +1348,7 @@ fn v3_database_is_upgraded_to_v6_with_gate_result_defaults_and_backup() {
     assert_eq!(legacy_rows, 1);
     drop(conn);
 
-    // 打开写端触发 v3→v4→v5→v6：补列后旧行取默认值，新行写入三字段。
+    // 打开写端触发 v3→v4→v5→v6→v7：补列后旧行取默认值，新行写入三字段。
     let writer = TraceWriter::open(&path).expect("upgrade v3 db");
     let handle = writer.handle();
     handle.send(common::gate_with_v4(
@@ -1319,7 +1386,7 @@ fn v3_database_is_upgraded_to_v6_with_gate_result_defaults_and_backup() {
     assert_eq!(gates[1].verdict, Some(serde_json::json!({"x": 1})));
     drop(reader);
 
-    // 迁移后：v4/v5/v6 增量存在、审计行 6 写入、备份为 v3/v4/v5 快照。
+    // 迁移后：v4..v7 增量存在、审计行 7 写入、备份为 v3..v6 快照。
     let conn = Connection::open(&path).expect("inspect v6");
     assert_eq!(user_version(&conn), TRACE_SCHEMA_VERSION);
     let v4_columns = table_columns(&conn, "gate_results");
@@ -1331,19 +1398,19 @@ fn v3_database_is_upgraded_to_v6_with_gate_result_defaults_and_backup() {
     }
     let description: String = conn
         .query_row(
-            "SELECT description FROM schema_migrations WHERE version = 6",
+            "SELECT description FROM schema_migrations WHERE version = 7",
             [],
             |row| row.get(0),
         )
-        .expect("v6 audit row");
+        .expect("v7 audit row");
     assert!(
-        description.contains("W4a"),
-        "v6 audit description should name W4a: {description}"
+        description.contains("tool_calls"),
+        "v7 audit description should name tool_calls: {description}"
     );
     drop(conn);
 
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 3, "v3→v6 逐版本三份备份: {backups:?}");
+    assert_eq!(backups.len(), 4, "v3→v7 逐版本四份备份: {backups:?}");
     let backup = backups
         .iter()
         .find(|path| backup_name(path).contains(".bak.v3-"))
@@ -1405,7 +1472,7 @@ fn v4_schema_rejects_waiting_human_statuses_before_migration() {
 }
 
 #[test]
-fn v4_database_is_upgraded_to_v6_preserving_instances_transitions_and_events() {
+fn v4_database_is_upgraded_to_v7_preserving_instances_transitions_and_events() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v4.db");
     create_v4_database(&path);
@@ -1430,7 +1497,7 @@ fn v4_database_is_upgraded_to_v6_preserving_instances_transitions_and_events() {
         snapshot
     };
 
-    // 打开写端触发 v4→v5→v6（备份 → 单事务重建 + 建 human/expansions）。
+    // 打开写端触发 v4→v5→v6→v7（备份 → 重建 + 建 human/expansions/tool_calls）。
     let writer = TraceWriter::open(&path).expect("upgrade v4 db");
     writer.flush().expect("flush");
 
@@ -1494,9 +1561,9 @@ fn v4_database_is_upgraded_to_v6_preserving_instances_transitions_and_events() {
     drop(reader);
     writer.close().expect("close writer");
 
-    // 备份 = 逐版本迁移前快照（v4→v5 与 v5→v6 各一份；W4b 机械同步期望）。
+    // 备份 = 逐版本迁移前快照（v4→v5、v5→v6、v6→v7 各一份）。
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 2, "v4→v6 逐版本两份备份: {backups:?}");
+    assert_eq!(backups.len(), 3, "v4→v7 逐版本三份备份: {backups:?}");
     let backup = backups
         .iter()
         .find(|path| backup_name(path).contains(".bak.v4-"))
@@ -1521,7 +1588,7 @@ fn v4_database_is_upgraded_to_v6_preserving_instances_transitions_and_events() {
 }
 
 #[test]
-fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_table() {
+fn v5_database_is_upgraded_to_v7_with_item_defaults_unique_key_and_expansions_table() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v5.db");
     create_v5_database(&path);
@@ -1573,10 +1640,10 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
         TRACE_SCHEMA_VERSION
     );
 
-    let conn = Connection::open(&path).expect("inspect v6");
-    assert_eq!(user_version(&conn), 6);
-    // 1..6 审计行齐备。
-    for version in 1..=6 {
+    let conn = Connection::open(&path).expect("inspect v7");
+    assert_eq!(user_version(&conn), 7);
+    // 1..7 审计行齐备。
+    for version in 1..=7 {
         let migrated: i64 = conn
             .query_row(
                 "SELECT count(*) FROM schema_migrations WHERE version = ?1",
@@ -1650,11 +1717,12 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
     assert_eq!(decisions[0].instance_id, "inst-waiting");
     // trace 读取 golden：迁移后 TraceReader 的事件投影与迁移前 events 表逐字段一致。
     assert_trace_events_match(&reader, "run-v5", &before.2);
-    // foreach_expansions 存在且为空（无 foreach 旧 run）。
+    // foreach_expansions/tool_calls 存在且为空（无 foreach/工具调用的旧 run）。
     assert!(reader
         .foreach_expansions("run-v5")
         .expect("expansions")
         .is_empty());
+    assert!(reader.tool_calls("run-v5").expect("tool calls").is_empty());
     // v6 唯一键生效；同 (run,node,attempt) 不同 item_index 可共存。
     assert_unique_rejects(
         &conn,
@@ -1703,11 +1771,13 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
     );
     drop(writer);
 
-    // 备份恰一份 v5 快照（user_version=5、无 item 列/expansions、旧数据）。
+    // 备份 = 逐版本迁移前快照（v5→v6、v6→v7 各一份）。
     let backups = backup_files(dir.path());
-    assert_eq!(backups.len(), 1, "v5→v6 恰一份备份: {backups:?}");
-    let backup = &backups[0];
-    assert!(backup_name(backup).contains(".bak.v5-"));
+    assert_eq!(backups.len(), 2, "v5→v7 逐版本两份备份: {backups:?}");
+    let backup = backups
+        .iter()
+        .find(|path| backup_name(path).contains(".bak.v5-"))
+        .unwrap_or_else(|| panic!("missing .bak.v5- backup: {backups:?}"));
     let backup_conn = Connection::open(backup).expect("open backup");
     assert_eq!(user_version(&backup_conn), 5, "备份保持 v5");
     assert!(
@@ -1724,6 +1794,190 @@ fn v5_database_is_upgraded_to_v6_with_item_defaults_unique_key_and_expansions_ta
         vec!["run_id", "node_id", "attempt"],
         "v5 备份保持旧唯一键"
     );
+}
+
+#[test]
+fn v6_database_is_upgraded_to_v7_by_adding_tool_calls_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v6.db");
+    create_v6_database(&path);
+
+    // 迁移前：真实 v6 形状（W4b 后、v7 前；所有既有表 + WaitingHuman/human/expansion）。
+    let before = {
+        let conn = Connection::open(&path).expect("inspect v6");
+        assert_eq!(user_version(&conn), 6);
+        assert!(!table_exists(&conn, "tool_calls"), "v6 库不应有 tool_calls");
+        let snapshot = (
+            full_table_rows(&conn, "runs", "run_id"),
+            full_table_rows(&conn, "graphs", "graph_hash"),
+            instance_rows_v6(&conn),
+            transition_rows(&conn),
+            event_rows(&conn),
+            gate_result_rows(&conn),
+            streaming_rows(&conn),
+            full_table_rows(&conn, "recorded_outputs", "recorded_output_id"),
+            full_table_rows(&conn, "llm_calls", "llm_call_id"),
+            human_decision_rows(&conn),
+            full_table_rows(&conn, "foreach_expansions", "expansion_id"),
+        );
+        assert_eq!(snapshot.0.len(), 1, "seed 恰一条 run");
+        assert_eq!(
+            snapshot.2.len(),
+            2,
+            "seed：Completed + WaitingHuman 两条实例"
+        );
+        assert_eq!(snapshot.9.len(), 1, "seed 恰一条 human decision");
+        assert_eq!(snapshot.10.len(), 1, "seed 恰一条 expansion");
+        snapshot
+    };
+
+    // C1 类回归：v6→v7 迁移只加表，不得重建/改写既有表。
+    let writer = TraceWriter::open(&path).expect("v6→v7 迁移成功");
+    let handle = writer.handle();
+    let reader = TraceReader::open_readonly(&path).expect("reader");
+    assert_eq!(
+        reader.schema_version().expect("version"),
+        TRACE_SCHEMA_VERSION
+    );
+    assert!(
+        reader.tool_calls("run-v6").expect("tool calls").is_empty(),
+        "无工具调用的旧 run 不产生 tool_calls"
+    );
+
+    let conn = Connection::open(&path).expect("inspect v7");
+    assert_eq!(user_version(&conn), 7);
+    for version in 1..=7 {
+        let migrated: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )
+            .expect("migration row");
+        assert_eq!(migrated, 1, "missing schema_migrations row v{version}");
+    }
+    let after = (
+        full_table_rows(&conn, "runs", "run_id"),
+        full_table_rows(&conn, "graphs", "graph_hash"),
+        instance_rows_v6(&conn),
+        transition_rows(&conn),
+        event_rows(&conn),
+        gate_result_rows(&conn),
+        streaming_rows(&conn),
+        full_table_rows(&conn, "recorded_outputs", "recorded_output_id"),
+        full_table_rows(&conn, "llm_calls", "llm_call_id"),
+        human_decision_rows(&conn),
+        full_table_rows(&conn, "foreach_expansions", "expansion_id"),
+    );
+    assert_eq!(after.0, before.0, "runs 逐列保留");
+    assert_eq!(after.1, before.1, "graphs 逐列保留");
+    assert_eq!(after.2, before.2, "instances 逐列保留");
+    assert_eq!(after.3, before.3, "transitions 逐列保留");
+    assert_eq!(after.4, before.4, "events 逐列保留");
+    assert_eq!(after.5, before.5, "gate_results 逐列保留");
+    assert_eq!(after.6, before.6, "streaming_events 逐列保留");
+    assert_eq!(after.7, before.7, "recorded_outputs 逐列保留");
+    assert_eq!(after.8, before.8, "llm_calls 逐列保留");
+    assert_eq!(after.9, before.9, "human_decisions 逐列保留");
+    assert_eq!(after.10, before.10, "foreach_expansions 逐列保留");
+    assert_eq!(
+        foreign_key_violations(&conn),
+        0,
+        "v6→v7 迁移后 foreign_key_check 为空"
+    );
+    drop(conn);
+    drop(reader);
+
+    // 迁移后的库可写 tool_calls（v7 数据面可用）。
+    handle.send(TraceInput::ToolCall(minimal_tool_call(
+        "run-v6",
+        "inst-run-v6",
+        "call-v7-1",
+    )));
+    writer.flush().expect("migrated db accepts tool call rows");
+    let reader = TraceReader::open_readonly(&path).expect("reader");
+    let calls = reader.tool_calls("run-v6").expect("tool calls");
+    assert_eq!(calls.len(), 1, "迁移后 tool_calls 可写可读");
+    assert_eq!(calls[0].call_id, "call-v7-1");
+    drop(reader);
+    writer.close().expect("close");
+
+    // 备份恰一份 v6 快照（user_version=6、无 tool_calls、旧数据）。
+    let backups = backup_files(dir.path());
+    assert_eq!(backups.len(), 1, "v6→v7 恰一份备份: {backups:?}");
+    let backup = &backups[0];
+    assert!(backup_name(backup).contains(".bak.v6-"));
+    let backup_conn = Connection::open(backup).expect("open backup");
+    assert_eq!(user_version(&backup_conn), 6, "备份保持 v6");
+    assert!(!table_exists(&backup_conn, "tool_calls"));
+    assert_eq!(
+        human_decision_rows(&backup_conn),
+        before.9,
+        "备份保留 human_decisions 行"
+    );
+}
+
+#[test]
+fn failed_v6_to_v7_migration_restores_backup_and_leaves_v6_untouched() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("locked-v6.db");
+    create_v6_database(&path);
+    let human_before = {
+        let conn = Connection::open(&path).expect("inspect v6");
+        human_decision_rows(&conn)
+    };
+    {
+        // 故障注入：v6→v7 迁移在写 schema_migrations 审计行时 ABORT（单事务回滚）。
+        let conn = Connection::open(&path).expect("install trigger");
+        conn.execute_batch(
+            "CREATE TRIGGER abort_schema_migration BEFORE INSERT ON schema_migrations \
+             BEGIN SELECT RAISE(ABORT, 'injected v7 migration failure'); END;",
+        )
+        .expect("create abort trigger");
+    }
+
+    let error = match TraceWriter::open(&path) {
+        Ok(_) => panic!("migration must fail under injected abort"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&error, TraceError::Storage(message) if message.contains("injected v7 migration failure")),
+        "unexpected error: {error:?}"
+    );
+
+    let conn = Connection::open(&path).expect("inspect restored db");
+    assert_eq!(user_version(&conn), 6, "restored db keeps v6");
+    assert!(
+        !table_exists(&conn, "tool_calls"),
+        "回滚后 tool_calls 必须不存在"
+    );
+    assert_eq!(
+        human_decision_rows(&conn),
+        human_before,
+        "失败/恢复路径 human_decisions 逐列保留"
+    );
+    assert_eq!(foreign_key_violations(&conn), 0, "恢复后 FK 完整");
+    drop(conn);
+    assert!(
+        backup_files(dir.path())
+            .iter()
+            .any(|path| backup_name(path).contains(".bak.v6-")),
+        "failed migration must leave the v6 backup for recovery"
+    );
+
+    // 清掉故障注入后重试：同一库可正常迁移到当前版本。
+    let conn = Connection::open(&path).expect("drop trigger");
+    conn.execute_batch("DROP TRIGGER abort_schema_migration;")
+        .expect("drop trigger");
+    drop(conn);
+    let writer = TraceWriter::open(&path).expect("retry migration");
+    writer.close().expect("close writer");
+    let reader = TraceReader::open_readonly(&path).expect("reader");
+    assert_eq!(
+        reader.schema_version().expect("version"),
+        TRACE_SCHEMA_VERSION
+    );
+    assert!(reader.run("run-v6").expect("query").is_some());
 }
 
 #[test]
@@ -1943,12 +2197,16 @@ fn backup_name(path: &Path) -> String {
 /// 把当前 v6 库降级为真实 v5 形状：删 `foreach_expansions`、重建 `instances`
 /// （无 item 列、唯一键 3 列）、删 v6 审计行、`user_version=5`（保留 human_decisions）。
 fn downgrade_to_v5_shape(conn: &Connection) {
+    conn.execute_batch("DROP TABLE IF EXISTS tool_calls;")
+        .expect("drop tool_calls");
     conn.execute_batch("DROP TABLE IF EXISTS foreach_expansions;")
         .expect("drop foreach_expansions");
     conn.execute_batch(V5_INSTANCES_REBUILD)
         .expect("rebuild instances to v5 shape");
-    conn.execute_batch("DELETE FROM schema_migrations WHERE version = 6; PRAGMA user_version = 5;")
-        .expect("downgrade to v5");
+    conn.execute_batch(
+        "DELETE FROM schema_migrations WHERE version IN (6, 7); PRAGMA user_version = 5;",
+    )
+    .expect("downgrade to v5");
     assert_eq!(user_version(conn), 5);
 }
 
@@ -1962,7 +2220,7 @@ fn downgrade_to_v4_shape(conn: &Connection) {
     conn.execute_batch(V4_TRANSITIONS_REBUILD)
         .expect("rebuild transitions to v4 shape");
     conn.execute_batch(
-        "DELETE FROM schema_migrations WHERE version IN (5, 6); PRAGMA user_version = 4;",
+        "DELETE FROM schema_migrations WHERE version IN (5, 6, 7); PRAGMA user_version = 4;",
     )
     .expect("downgrade to v4");
     assert_eq!(user_version(conn), 4);
@@ -1992,6 +2250,63 @@ fn seed_current_database(path: &Path, run_id: &str) {
     handle.send(common::finished(run_id, RunStatus::Completed));
     writer.flush().expect("flush");
     writer.close().expect("close writer");
+}
+
+/// 把当前 v7 库降级为真实 v6 形状：删 tool_calls、删 v7 审计行、user_version=6。
+fn downgrade_to_v6_shape(conn: &Connection) {
+    conn.execute_batch("DROP TABLE IF EXISTS tool_calls;")
+        .expect("drop tool_calls");
+    conn.execute_batch("DELETE FROM schema_migrations WHERE version = 7; PRAGMA user_version = 6;")
+        .expect("downgrade to v6");
+    assert_eq!(user_version(conn), 6);
+}
+
+/// 造一个真实 v6 库（W4b 之后、v7 之前）：含 WaitingHuman 实例、human decision、
+/// 一条 expansion、L2 记录；所有 v6 表齐备且无 tool_calls。
+fn create_v6_database(path: &Path) {
+    seed_current_database(path, "run-v6");
+    let conn = Connection::open(path).expect("open for v6 fixture");
+    downgrade_to_v6_shape(&conn);
+    conn.execute_batch(
+        "INSERT INTO instances (instance_id, run_id, node_id, node_type, attempt, item_index, \
+         status, input) VALUES ('inst-waiting', 'run-v6', 'review', 'python_node', 0, 0, \
+         'WaitingHuman', '{\"spec\":\"v6\"}');
+         INSERT INTO human_decisions (run_id, instance_id, decision, approver, reason, \
+         decision_id, decided_at, consumed_at) VALUES ('run-v6', 'inst-waiting', 'approved', \
+         'alice', 'lgtm', 'decision-v6', '2026-01-01T00:00:01.000Z', NULL);
+         INSERT INTO foreach_expansions (run_id, expansion_id, node_id, source_instance_id, \
+         item_count, keys_json, at) VALUES ('run-v6', 'expansion-v6', 'foreach-node', NULL, \
+         2, '[{\"$index\":0},{\"$index\":1}]', '2026-01-01T00:00:02.000Z');
+         INSERT INTO recorded_outputs (run_id, instance_id, node_id, attempt, output_hash, \
+         output_json, recorded_at) VALUES ('run-v6', 'inst-run-v6', 'node-seed', 0, \
+         'hash-v6', '{\"result\":\"ok\"}', '2026-01-01T00:00:01.500Z');
+         INSERT INTO llm_calls (run_id, instance_id, call_index, request_json, response_json, \
+         status, recorded_at) VALUES ('run-v6', 'inst-run-v6', 0, '{\"model\":\"m\"}', \
+         '{\"ok\":true}', 'ok', '2026-01-01T00:00:01.600Z');",
+    )
+    .expect("seed v6 data");
+}
+
+/// 构造一条最小可写工具调用记录（v7 迁移后数据面验证用）。
+fn minimal_tool_call(run_id: &str, instance_id: &str, call_id: &str) -> ToolCallRecord {
+    ToolCallRecord {
+        run_id: run_id.to_string(),
+        instance_id: instance_id.to_string(),
+        node_id: "node-tool".to_string(),
+        attempt: 0,
+        call_id: call_id.to_string(),
+        tool_name: "builtin__read".to_string(),
+        source: ToolCallSource::Builtin,
+        status: ToolCallStatus::Ok,
+        args: serde_json::json!({"path": "a.txt"}),
+        result: Some(serde_json::json!({"content": "hi"})),
+        error: None,
+        started_at: "2026-01-01T00:00:03.000Z".to_string(),
+        finished_at: "2026-01-01T00:00:03.100Z".to_string(),
+        duration_ms: 100,
+        side_effect: None,
+        bash: None,
+    }
 }
 
 /// 造一个真实 v5 库（W3a）：在 seed 之上补 WaitingHuman 实例 + human decision，

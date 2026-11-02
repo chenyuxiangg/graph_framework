@@ -24,9 +24,14 @@
 //! `0/NULL`）；新增 `foreach_expansions` 展开事实表 + `run_id` 索引（写入者为
 //! [`crate::TraceWriter`]：内核执行事实，不是 C13 决策表）。
 //!
+//! v7 = v0.4/D5（DR-014 §1/§2 + 06 §6.15）：**仅新增** `tool_calls` 表 + 3 索引
+//! （既有表/事件/`recorded_outputs` 不变）。工具调用审计记录由 [`crate::TraceWriter`]
+//! 随批事务写入（[`crate::TraceInput::ToolCall`]，不产生 `events` 行）；字段超限按
+//! DR-014 §5 截断并保留全量 sha256；单 run 行数上限 [`TOOL_CALLS_MAX_PER_RUN`]。
+//!
 //! 版本策略：`PRAGMA user_version` 为权威；`0` = 新库（单事务建当前版本），
-//! `1` = spec 06 v1 库、`2` = v2 库、`3` = v3 库、`4` = v4 库、`5` = v5 库
-//! （逐版本迁移到 v6），`6` = 就绪，`>6` = 拒绝。
+//! `1` = spec 06 v1 库、`2` = v2 库、`3` = v3 库、`4` = v4 库、`5` = v5 库、
+//! `6` = v6 库（逐版本迁移到 v7），`7` = 就绪，`>7` = 拒绝。
 //! 迁移前 `VACUUM INTO '<db>.bak.v{old}-{ts}'` 备份；每版本一个事务；失败则恢复
 //! 备份并返回 [`TraceError::Storage`]（06 §6.7）。
 
@@ -39,8 +44,9 @@ use crate::error::TraceError;
 
 /// 本 crate 实现的 trace schema 版本（06 §6.7 + architecture §5.2；
 /// v4 = W2a / DR-005，v5 = W3a / DR-006（`WaitingHuman` + `human_decisions`），
-/// v6 = W4a / DR-007（item 实例 + `foreach_expansions`））。
-pub const TRACE_SCHEMA_VERSION: i64 = 6;
+/// v6 = W4a / DR-007（item 实例 + `foreach_expansions`），
+/// v7 = v0.4/D5（DR-014：`tool_calls` 工具调用审计）。
+pub const TRACE_SCHEMA_VERSION: i64 = 7;
 
 /// SQLite `busy_timeout`（毫秒，06 §6.2.1）。
 pub const DB_BUSY_TIMEOUT_MS: u32 = 5_000;
@@ -56,6 +62,24 @@ pub const DB_WRITE_RETRY: u32 = 3;
 
 /// 每次 busy 重试的等待间隔（毫秒，06 §6.2.1）。
 pub const DB_WRITE_RETRY_INTERVAL_MS: u64 = 50;
+
+/// `tool_calls.args_json` / `result_json` / `error_json` 字段 cap（DR-014 §5 / 00 §0.5）。
+pub const TOOL_CALL_ARGS_MAX_BYTES: usize = 32_768;
+
+/// `tool_calls.result_json` 字段 cap（与 args 同 32 KiB；DR-014 §5）。
+pub const TOOL_CALL_RESULT_MAX_BYTES: usize = 32_768;
+
+/// `tool_calls.bash_stdout` / `bash_stderr` 各自 cap（16 KiB head+tail；DR-014 §5）。
+pub const TOOL_CALL_BASH_OUTPUT_MAX_BYTES: usize = 16_384;
+
+/// `tool_calls.bash_command` cap（8 KiB；DR-014 §5，工具层超限拒绝、trace 防御性截断）。
+pub const TOOL_CALL_COMMAND_MAX_BYTES: usize = 8_192;
+
+/// `tool_calls.side_effect_path` / `bash_cwd` cap（4 KiB；DR-014 §5）。
+pub const TOOL_CALL_PATH_MAX_BYTES: usize = 4_096;
+
+/// 单 run `tool_calls` 行数上限（DR-014 §5 / 00 §0.5；超限停止记录，不 fail run）。
+pub const TOOL_CALLS_MAX_PER_RUN: usize = 10_000;
 
 /// 无损事件通道容量（06 §6.4.1 / 03 §3.12 `TRACE_CHANNEL_CAP`）。
 pub const TRACE_CHANNEL_CAP: usize = 8_192;
@@ -444,6 +468,54 @@ CREATE TABLE IF NOT EXISTS foreach_expansions (
 CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_id);
 "#;
 
+/// v7 `tool_calls` 工具调用审计表 + 3 索引（DR-014 §1 / 06 §6.15.1）。
+///
+/// **仅新增表/索引**（v6→v7 不重建既有表）。写入者：[`crate::TraceWriter`]（每次
+/// 工具调用一行；工具执行与写入解耦，写入硬错误按既有 fail-stop 口径）。
+/// `(run_id, instance_id, attempt, call_id)` 唯一；`call_id` 为 provider 原生 id
+/// （不伪造）。按 DR-014 冻结 DDL：单 `truncated` 标记（args/result/error）+
+/// `bash_truncated`；无 FK（DR 冻结原文）。
+const DDL_TOOL_CALLS: &str = r#"
+CREATE TABLE IF NOT EXISTS tool_calls (
+  tool_call_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id           TEXT NOT NULL,
+  instance_id      TEXT NOT NULL,
+  node_id          TEXT NOT NULL,
+  attempt          INTEGER NOT NULL,
+  call_id          TEXT NOT NULL,
+  tool_name        TEXT NOT NULL,
+  source           TEXT NOT NULL CHECK (source IN ('builtin','mcp','python')),
+  status           TEXT NOT NULL CHECK (status IN ('ok','error','cancelled','timeout')),
+  args_json        TEXT NOT NULL,
+  result_json      TEXT,
+  error_json       TEXT,
+  truncated        INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  args_sha256      TEXT,
+  result_sha256    TEXT,
+  started_at       TEXT NOT NULL,
+  finished_at      TEXT NOT NULL,
+  duration_ms      INTEGER NOT NULL,
+  bash_signal      INTEGER,
+  side_effect_path     TEXT,
+  side_effect_before   TEXT,
+  side_effect_after    TEXT,
+  side_effect_bytes_before INTEGER,
+  side_effect_bytes_after  INTEGER,
+  bash_command     TEXT,
+  bash_cwd         TEXT,
+  bash_exit_code   INTEGER,
+  bash_stdout      TEXT,
+  bash_stderr      TEXT,
+  bash_truncated   INTEGER NOT NULL DEFAULT 0 CHECK (bash_truncated IN (0,1)),
+  sandbox_profile_sha256 TEXT,
+  UNIQUE (run_id, instance_id, attempt, call_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run      ON tool_calls(run_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_instance ON tool_calls(run_id, instance_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_name     ON tool_calls(run_id, tool_name);
+"#;
+
 /// v5→v6 重建 `instances`（SQLite 12 步法；DR-007 §8.2 / 06 §6.2.5）。
 ///
 /// 新列 `item_index INTEGER NOT NULL DEFAULT 0`、`item_key TEXT`；唯一键由
@@ -624,6 +696,7 @@ fn create_current(conn: &mut Connection) -> Result<(), TraceError> {
     tx.execute_batch(DDL_INSTANCES_V6_INDEX).map_err(db_err)?;
     tx.execute_batch(DDL_HUMAN_DECISIONS).map_err(db_err)?;
     tx.execute_batch(DDL_FOREACH_EXPANSIONS).map_err(db_err)?;
+    tx.execute_batch(DDL_TOOL_CALLS).map_err(db_err)?;
     for version in 1..=TRACE_SCHEMA_VERSION {
         record_migration(&tx, version)?;
     }
@@ -709,6 +782,11 @@ fn migrate_step_inner(conn: &mut Connection, from: i64) -> Result<(), TraceError
             tx.execute_batch(DDL_FOREACH_EXPANSIONS).map_err(db_err)?;
             record_migration(&tx, 6)?;
         }
+        6 => {
+            // v6→v7（DR-014 §2）：仅新增 tool_calls 表 + 3 索引（不重建既有表）。
+            tx.execute_batch(DDL_TOOL_CALLS).map_err(db_err)?;
+            record_migration(&tx, 7)?;
+        }
         other => {
             return Err(TraceError::Storage(format!(
                 "no migration step from schema version {other}"
@@ -765,6 +843,7 @@ fn migration_description(version: i64) -> &'static str {
         4 => "v4: gate_results deferred/attempt/verdict (W2a)",
         5 => "v5: WaitingHuman statuses + human_decisions (W3a)",
         6 => "v6: instances item_index/item_key + foreach_expansions (W4a)",
+        7 => "v7: tool_calls audit table (v0.4/D5, DR-014)",
         _ => "unknown migration",
     }
 }

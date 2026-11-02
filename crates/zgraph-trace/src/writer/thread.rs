@@ -266,6 +266,10 @@ impl Writer {
             TraceInput::ForeachExpansion(record) => {
                 batch.push_snapshot(TraceInput::ForeachExpansion(record));
             }
+            // v0.4/D5：工具调用审计不产生 events 行，与快照同走非事件路径。
+            TraceInput::ToolCall(record) => {
+                batch.push_snapshot(TraceInput::ToolCall(record));
+            }
             TraceInput::Transition { record, snapshot } => {
                 self.state
                     .aggregator
