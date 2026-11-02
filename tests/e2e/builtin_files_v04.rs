@@ -173,6 +173,29 @@ fn ac21a_read_offset_limit_and_text_policies() {
         by_id("r10").result.expect("r10")["content"],
         json!("allowed read")
     );
+    // read 结果 32 KiB cap（REV-112 P2 残余）：40k 字符文件必须真正触发工具层截断。
+    let r11 = by_id("r11");
+    let r11_result = r11.result.clone().expect("r11 result");
+    assert_eq!(
+        r11_result["truncated"],
+        json!(true),
+        "40k 字符 read 应 truncated=true: {r11_result}"
+    );
+    let raw = r11.raw_result_json.as_deref().expect("r11 raw result");
+    assert!(
+        raw.len() <= 32_768,
+        "read 结果 JSON 必须 ≤32 KiB，实际 {} bytes",
+        raw.len()
+    );
+    assert!(
+        r11_result["content"]
+            .as_str()
+            .expect("r11 content")
+            .chars()
+            .count()
+            < 40_000,
+        "截断后 content 字符数必须 < 40000"
+    );
     // read 的 1 MiB 上限与 UTF-8 策略由工具内落实；trace 行保持 builtin 源/agent 节点。
     assert!(rows.iter().all(|row| row.source == "builtin"));
     assert!(rows.iter().all(|row| row.node_id == "agent"));
@@ -293,6 +316,11 @@ fn ac21b_write_atomic_overwrite_and_create_parents() {
 #[test]
 fn ac21b_atomic_failures_leave_files_untouched() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // 口径说明（REV-112）：本用例的失败发生在**写入之前**（exists 冲突 / edit 匹配
+    // 失败），因此断言的是「失败不改 bytes/mode/mtime+mtime_nsec、workspace 无 temp
+    // 残留」；**不**断言 inode 不变，也**不**覆盖「temp→rename 中途失败回滚」路径——
+    // 该原子写回滚路径由 zgraph-harness D2 单测覆盖（e2e 不重复/不夸大）。
 
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = workspace(dir.path());
