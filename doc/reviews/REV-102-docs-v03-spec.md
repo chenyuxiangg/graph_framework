@@ -10,11 +10,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**（C2 复审于 `adb687e`：**部分关闭**；C1 由 REV-103 `050f86f` 修复/待合并；见 §9）
+**结论：通过**
 
-P0=0；**P1=2**（C1 由 REV-103、C2 仍有残留）；P2=6；P3=3。AC 实测与 PROVENANCE §3 的核心证据**真实、可复核**：AC-18 10 / AC-19 11 / AC-20 7 / 回归 3 = **31**，28 个 AC 用例名与 07 逐名一致；e2e **137/0/2**、workspace（一次通过）**1037/0/3**、pytest **183**、harness **235/0/1**；spec 00–08 **7419 行**、全目录 **7822 行**，§3 9/9 SHA 与实测完全一致；check.sh PASSED；无代码/测试改动。
+P0=0；**P1=0**（C1 由 REV-103 `050f86f`、C2 由 `adb687e`+`df37762` 关闭；见 §6/§9）；P2/P3 为发布后续建议。AC 实测与 PROVENANCE §3 的核心证据**真实、可复核**：AC-18 10 / AC-19 11 / AC-20 7 / 回归 3 = **31**，28 个 AC 用例名与 07 逐名一致；e2e **137/0/2**、workspace **×2 1037/0/3**、pytest **183**、harness **235/0/1**；spec 00–08 **7419 行**、全目录 **7822 行**，§3 9/9 SHA 与实测完全一致；check.sh PASSED；无代码/测试改动。
 
-但两项需关闭后才能作为发布 as-built：
+> **首轮历史（保留）**：`36098c4` 首轮为**有条件通过**——C1 workspace 一次 C3 race 失败、C2 as-built 多处 stale；`adb687e` 部分关闭 C2、`df37762` 关闭剩余 4 项并 rebase 到含 REV-103 的 main；C1 由 REV-103 关闭。以下两项为首轮条件（**均已关闭**）：
 
 - **C1（P1）workspace 仍存在 flake**：复核 `cargo test --workspace` 一次失败——`plugin::tests::codex_in_flight_cancel_leaves_no_orphan_process_group` panic `fake Codex pid file not written within 10s`（234 passed/1 failed/1 ignored）；随后重跑 **1037/0/3** 通过，隔离单测 3 次通过。**REV-100 的“有界等待”只消除 hang，未消除 pid 等待竞态**；在 README/PROVENANCE 宣称 1037/0/3 稳定前需修测试（等待 fake Codex 写入 pid 后再 cancel，或让 fake Codex 同步到可观测点）+ workspace 连跑 2 次。
 - **C2（P1）as-built 仍有多处“待 V5a”/旧计数，和 07/README 实测矛盾**：00 top banner、05 §5.14.4 表格（226/996/180）与偏差 #9（仍称 `plan` 忽略）、06 §6.14.1（workspace 996/待 V5a）、08 §8.12.1（待 V5a）、PROVENANCE §2 第 26 条（`07 待 V5a` + 末尾 `6038 行`）、DR-004/008/009/010/011 执行记录（旧 226/996/180、AC 待 V5a；DR-008 V5b 写 REV-101 而非 REV-102）均未更新到最终 **31/235/1037/137/183** 口径。07 本身已正确实测；这些残留会误导发布文档，需全量对齐并删除“待 V5a”占位。
@@ -25,7 +25,7 @@ P0=0；**P1=2**（C1 由 REV-103、C2 仍有残留）；P2=6；P3=3。AC 实测�
 |---|---|---|
 | 功能正确性（AC 实测） | ✅ | 4 target 用例名/计数与 07 一致：skills 10 / MCP 11 / harness 7 / regression 3；新语义（MCP 重启 spawn=2/transport_closed、截断 keys+后缀、http_insecure、llm_calls 1、Codex iterations=1/cached/无 delta、L2 不 spawn）已写入 05/07/08 |
 | 结构合理性 | ✅ | 07 改为“用例名 + 断言”双列；PROVENANCE 第 26 条 + §3 重算；DR 只追加；README/progress/index 发布态 |
-| 逻辑性 | ⚠️（C1/P2） | 核心 AC 逻辑正确；但 C3 测试竞态导致 workspace 门禁不稳定，as-built 文档部分仍停留在 V5a 前口径 |
+| 逻辑性 | ✅ | 核心 AC 逻辑正确；C1 经 REV-103 修复、C2 经 `adb687e`/`df37762` 关闭；workspace ×2 1037/0/3 |
 | 可读性 | ✅（P2/P3） | 07 可读/可追溯；P2/P3 为跨文档 stale/旧计数、reviews README 缺行等 |
 
 ## 3. 发现清单
@@ -79,12 +79,38 @@ wc -l *.md                                        # 全目录 = 7822
 - **范围**：17 files 全 docs/README；无代码/测试/既有评审记录改动；无 token/密钥；`git status` 空。
 - **新语义**：07/05/08 已写 spawn=2、`transport_closed`、truncated keys+后缀、`http_insecure`、`llm_calls` 1、Codex iterations=1/cached/无 delta、L2 不 spawn；**但 05 旧偏差 #9 仍写 plan 忽略（C2）**。
 
-## 5. 遗留问题 / 条件关闭
+## 5. 遗留问题（发布后续）
 
-- **C1**：修 C3 测试竞态；workspace 连跑 2 次；否则 README/PROVENANCE 的 1037/0/3 不成立。
-- **C2**：更新 00/05/06/08/PROVENANCE/DR 的旧计数与“待 V5a”，使 as-built 与 07/README 一致；保留“只追加”历史段。
-- P2/P3 N1–N10 随 C2 收口/发布前处理；reviews README 本评审补 REV-102 行（REV-099/100 缺行由对应评审人/本次一并补）。
-- 无 P0；C1/C2 关闭后复审转「通过」，再进入 REV-103 发布。
+- P2/P3 首轮 N1–N10 中：计数/占位类已随 C2 关闭；剩余仅为发布后台账/覆盖建议（不阻断）。
+- reviews README 已补 REV-099/100/102 行；index REV-102 已改「通过」。
+- 真实 Codex/DSH 环境、8 MiB/L2 全出口 e2e 按 V5/发布后续跟踪。
+
+## 6. 条件关闭复核（C1+C2 全部关闭）
+
+**结论：通过**（`df37762`，parent `2972f92`；首轮 conditional 保留在 §1/§3/§9）。
+
+### C1（REV-103 `050f86f`）
+- `codex_in_flight_cancel` 删除固定 600ms，canceller **有界等待 fake Codex pid 文件 ≤10s** 后再 cancel；无 pid/超时先 `close_provider()` 清理；原断言保留。REV-103 已合并（docs base main `1eb8bfb` 含 `050f86f`）。
+- **workspace ×2 实测：1037/0/3、1037/0/3**；`codex_in_flight_cancel` 两次均 ok。
+
+### C2（`adb687e` + `df37762`）
+- **R1** `PROVENANCE.md:257`：末行 → **7419 / +109−40 / +135−53 / 7822**（与 §3 一致）。
+- **R2** `DR-011:169`：→ `plan`→Progress、`usage_update` 折入 final usage、stderr head+tail 各4KiB（REV-100）。
+- **R3** `DR-004:280`：→ docs **REV-102**、下一步 **REV-104 发布**（V5a/V5b 已完成）。
+- **R4** `index:29`：→「通过（REV-102；C1 见 REV-103）」。
+- P3：PROVENANCE 26「reviews README REV-097–101」→ **REV-097–102**；reviews README 已补 REV-099/100/102 行。
+- 全库 grep：无核心「待 V5a/996/226/6038/7409/7811」残留；历史评审/历史批次中的旧数字属留痕，不改。
+
+### 门禁（`df37762`）
+```bash
+bash scripts/dev/check.sh                 # PASSED
+cd doc/spec-v1.2 && shasum -a 256 0*.md   # 9/9 与 §3 一致
+wc -l 0*.md                               # 00–08=7419
+wc -l *.md                                # spec 目录=7822
+cargo test --workspace                    # ×2：1037/0/3 两次
+```
+- 范围：`df37762` docs-only 4 files +5/−5；本分支相对 main 仍全 docs/README + 评审记录，无代码/测试/既有评审记录改动。
+- **最终 HEAD**：以提交后 `git rev-parse HEAD` 为准（见报告）。
 
 ## 9. C2 条件关闭复审（2026-11-02，`adb687e`，parent `b85d008`）
 
