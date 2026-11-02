@@ -129,3 +129,12 @@ bash scripts/dev/check.sh                     # PASSED
 ```
 - 范围：5 files（CLI 40 行机械 + harness sandbox/bash/agent_loop/test_support）；无 Cargo 新依赖；默认路径无回归；无 unsafe/无无沙箱 fallback。
 - 环境感知：嵌套 Seatbelt 下仍按 `sandbox_nested`/`unavailable` fail-closed，不伪造成功；普通终端/D5 证据按预裁决。
+
+## 7. 第二评审 · 跨模块（cli）（Lead 追加，2026-11-02）
+
+- **评审人**：`lead`（**≠ 作者** `dsl-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`9069e6d..4b2ef3d`）：`crates/zgraph-cli/src/run_cmd.rs` —— `--allow-bash` / `--allow-exec-path`（可重复）/ `--allow-network` 解析与 usage；**preflight 前移到 trace storage 打开之前**（失败 exit 3、不产生 run、不创建 DB）；`BuiltinToolSet::new_with_options` additive 透传；未改 validate/trace/其它命令行行为；无 Cargo 依赖新增。
+- **核对结论（通过）**：cli 为机械接线；新增 flag 默认关、互依校验（exec-path/network 必须伴随 allow-bash）；预检失败路径与既有入口预检口径一致；默认无 opt-in 行为不变；无其它跨模块文件。
+- **Lead 亲自验证**：`git diff 9069e6d..4b2ef3d --stat` 仅 harness builtin/bash+sandbox+agent_loop/test_support + cli 1（+ REV 记录）；`cargo test --workspace --offline` = 1132/0/3；`cargo test -p zgraph-harness --offline` = 327/0/1；`cargo test -p zgraph-cli --offline` 全绿（含预检不建 DB 用例）。
+- **裁决/后续**：AC-23 c 真隔离矩阵待普通终端（D6 用户脚本证据）与 D5 e2e 环境感知；N1/N4/N9/N11/N12 留 D5/D6。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
