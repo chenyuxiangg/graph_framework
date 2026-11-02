@@ -314,6 +314,8 @@ pub struct ToolCallTraceSink {
     counts: Mutex<HashMap<String, u32>>,
     /// 已告警「达到上限」的 run（warning 只发一次）。
     warned: Mutex<HashSet<String>>,
+    /// 已告警「未知 source/status 丢行」的 run（fail-closed warning 只发一次）。
+    invalid_warned: Mutex<HashSet<String>>,
 }
 
 impl ToolCallTraceSink {
@@ -323,6 +325,7 @@ impl ToolCallTraceSink {
             handle,
             counts: Mutex::new(HashMap::new()),
             warned: Mutex::new(HashSet::new()),
+            invalid_warned: Mutex::new(HashSet::new()),
         }
     }
 
@@ -342,13 +345,30 @@ impl ToolCallTraceSink {
             };
             if warned.insert(run_id.to_string()) {
                 eprintln!(
-                    "warning: tool_calls limit {max_rows} reached for run {run_id};                      further tool calls are not recorded (DR-014 §5)"
+                    "warning: tool_calls limit {max_rows} reached for run {run_id}; further tool calls are not recorded (DR-014 §5)"
                 );
             }
             return false;
         }
         *used += 1;
         true
+    }
+
+    /// 未知 source/status（fail-closed 丢行）时告警一次（含 tool_name；不重复刷屏）。
+    fn warn_unknown_enum(&self, run_id: &str, record: &harness::ToolCallRecord) {
+        let mut warned = match self.invalid_warned.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if warned.insert(run_id.to_string()) {
+            eprintln!(
+                "warning: dropping tool call '{}' (call_id={}) for run {run_id}: unknown source '{}' or status '{}' (fail-closed)",
+                record.tool_name,
+                record.call_id,
+                record.source.as_str(),
+                record.status.as_str()
+            );
+        }
     }
 }
 
@@ -358,12 +378,15 @@ impl harness::ToolCallRecordSink for ToolCallTraceSink {
         context: &harness::ToolCallExecContext,
         record: &harness::ToolCallRecord,
     ) {
+        // P3-1（REV-111）：先映射，失败（未知 source/status）时告警一次且**不消耗**
+        // 行数预算；仅真正落库的记录才计入 10000 上限。
+        let Some(mapped) = map_tool_call_record(context, record) else {
+            self.warn_unknown_enum(&context.run_id, record);
+            return;
+        };
         if !self.admit(&context.run_id) {
             return;
         }
-        let Some(mapped) = map_tool_call_record(context, record) else {
-            return;
-        };
         self.handle.send(trace::TraceInput::ToolCall(mapped));
     }
 }
@@ -1878,8 +1901,27 @@ mod tests {
         assert_eq!(super::map_tool_status("unknown"), None);
     }
 
+    /// 最小 harness 工具记录（行数上限全路径测试用；无 bash/副作用，降低写入量）。
+    fn minimal_harness_tool_record(call_id: &str) -> harness::ToolCallRecord {
+        harness::ToolCallRecord {
+            call_id: call_id.to_string(),
+            tool_name: "builtin__read".to_string(),
+            source: harness::ToolCallSource::Builtin,
+            status: harness::ToolCallStatus::Ok,
+            started_at: "2026-11-02T10:00:00.000Z".to_string(),
+            finished_at: "2026-11-02T10:00:00.001Z".to_string(),
+            duration_ms: 1,
+            args: json!({}),
+            result: Some(json!({"ok": true})),
+            error: None,
+            truncated: false,
+            side_effect: None,
+            bash: None,
+        }
+    }
+
     /// D5b2：sink 落 `tool_calls`（非 events 行）；行数上限 10000 后停止并只告警一次
-    /// （边界用 `admit` 直接验证，避免 10000 条真实写入）。
+    /// （P3-2：走 `record_tool_call` 全路径，非直接 `admit`）。
     #[test]
     fn tool_call_sink_writes_trace_rows_and_enforces_row_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1889,8 +1931,6 @@ mod tests {
         sink.record_tool_call(&harness_context(), &harness_tool_record());
         // 默认源记录：无 sink 不写（在 `run_cmd` 侧不注入即 no-op）；此处断言写入正确。
         writer.flush().expect("flush");
-        writer.close().expect("close");
-
         let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
         let calls = reader.tool_calls("run-tool").expect("tool calls");
         assert_eq!(calls.len(), 1, "one row per recorded tool call: {calls:?}");
@@ -1904,15 +1944,49 @@ mod tests {
             .expect("events")
             .is_empty());
 
-        // 行数上限边界：第 10001 条被拒绝，其余已准入。
-        let limit = trace::TOOL_CALLS_MAX_PER_RUN as u32;
-        let admitted = (0..limit).filter(|_| sink.admit("run-limit")).count();
-        assert_eq!(admitted as u32, limit);
-        assert!(!sink.admit("run-limit"), "limit reached → stop recording");
-        assert!(
-            !sink.admit("run-limit"),
-            "already warned；仍返回 false 且不 panic"
+        // P3-2：行数上限走 `record_tool_call` 全路径（第 10001 条起停止记录 + 只告警一次）。
+        let limit = trace::TOOL_CALLS_MAX_PER_RUN;
+        let limit_ctx = harness::ToolCallExecContext {
+            run_id: "run-limit".to_string(),
+            instance_id: "inst-limit".to_string(),
+            node_id: "agent_limit".to_string(),
+            attempt: 0,
+        };
+        for index in 0..limit {
+            sink.record_tool_call(
+                &limit_ctx,
+                &minimal_harness_tool_record(&format!("c{index}")),
+            );
+        }
+        // 第 10001/10002 条：超限丢弃，告警集合恰一个 run。
+        sink.record_tool_call(&limit_ctx, &minimal_harness_tool_record("overflow-1"));
+        sink.record_tool_call(&limit_ctx, &minimal_harness_tool_record("overflow-2"));
+        assert_eq!(
+            sink.counts.lock().expect("counts").get("run-limit"),
+            Some(&u32::try_from(limit).expect("limit fits u32")),
+            "预算按已准入记录计数"
         );
-        assert!(sink.admit("run-other"), "limit is per run");
+        assert_eq!(
+            sink.warned.lock().expect("warned").len(),
+            1,
+            "达到上限的 warning 只记录一次"
+        );
+        // 未知 source/status 的 fail-closed 告警也只发一次（P3-7；枚举当前封闭，
+        // 这里直接覆盖告警簿记路径）。
+        let invalid = minimal_harness_tool_record("invalid");
+        sink.warn_unknown_enum("run-limit", &invalid);
+        sink.warn_unknown_enum("run-limit", &invalid);
+        assert_eq!(
+            sink.invalid_warned.lock().expect("invalid warned").len(),
+            1,
+            "未知枚举告警只发一次"
+        );
+        writer.flush().expect("flush");
+        writer.close().expect("close");
+
+        let reader = zgraph_trace::TraceReader::open_readonly(&path).expect("reader");
+        let limited = reader.tool_calls("run-limit").expect("tool calls");
+        assert_eq!(limited.len(), limit, "10000 条上限内全量落库");
+        assert_eq!(reader.tool_calls("run-other").expect("call").len(), 0);
     }
 }

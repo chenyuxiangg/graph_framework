@@ -511,6 +511,103 @@ fn replay_tools_sha_or_json_mismatch_is_fail_closed() {
     );
 }
 
+/// C1（REV-111）：`--replay-tools` 在 `--mode=events` 下按 Lead 裁决**忽略**——
+/// recorded/reexec 均不报错、events 输出与不带该参数时逐字节一致。
+#[test]
+fn replay_tools_option_is_ignored_for_events_mode() {
+    let fx = fixture();
+    let db = path_str(fx.path());
+    let baseline = zgraph(&[
+        "replay",
+        "--run",
+        RUN_ID,
+        "--mode=events",
+        "--json",
+        "--db",
+        db,
+    ]);
+    assert_eq!(code(&baseline), 0, "{}", stderr(&baseline));
+    for tools in ["recorded", "reexec"] {
+        let flag = format!("--replay-tools={tools}");
+        let output = zgraph(&[
+            "replay",
+            "--run",
+            RUN_ID,
+            "--mode=events",
+            "--json",
+            "--db",
+            db,
+            &flag,
+        ]);
+        assert_eq!(code(&output), 0, "{tools}: stderr={}", stderr(&output));
+        assert_eq!(
+            stdout(&output),
+            stdout(&baseline),
+            "--replay-tools 在 events 模式不得改变输出（{tools}）"
+        );
+    }
+}
+
+/// C1（REV-111）：`--replay-tools` 在 `--mode=outputs` 下同样被忽略——
+/// recorded/reexec 仍走既有 L2 记录校验（hash 记录 → REPLAY_RECORD_MISSING exit3，
+/// **不是** 用法错误 exit2）。
+#[test]
+fn replay_tools_option_is_ignored_for_outputs_mode() {
+    let fx = fixture();
+    let db = path_str(fx.path());
+    let baseline = zgraph(&["replay", "--run", RUN_ID, "--mode=outputs", "--db", db]);
+    assert_eq!(code(&baseline), 3, "hash 记录不能 L2");
+    assert!(stderr(&baseline).contains("REPLAY_RECORD_MISSING"));
+    for tools in ["recorded", "reexec"] {
+        let flag = format!("--replay-tools={tools}");
+        let output = zgraph(&[
+            "replay",
+            "--run",
+            RUN_ID,
+            "--mode=outputs",
+            "--db",
+            db,
+            &flag,
+        ]);
+        assert_eq!(
+            code(&output),
+            3,
+            "{tools} 应被忽略（非 usage error）：stderr={}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("REPLAY_RECORD_MISSING"),
+            "{tools}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+/// bogus `--replay-tools` 值在任何 mode 下都是用法错误（exit 2）。
+#[test]
+fn unknown_replay_tools_value_is_usage_error_in_any_mode() {
+    let fx = fixture();
+    let db = path_str(fx.path());
+    for mode in ["events", "outputs", "tools"] {
+        let mode_flag = format!("--mode={mode}");
+        let output = zgraph(&[
+            "replay",
+            "--run",
+            RUN_ID,
+            &mode_flag,
+            "--replay-tools=bogus",
+            "--db",
+            db,
+        ]);
+        assert_eq!(code(&output), 2, "{mode}: stderr={}", stderr(&output));
+        assert!(
+            stderr(&output).contains("invalid --replay-tools"),
+            "{mode}: {}",
+            stderr(&output)
+        );
+    }
+}
+
 #[test]
 fn replay_tools_reexec_is_usage_error_not_implemented() {
     let fx = fixture();

@@ -71,7 +71,8 @@ usage: zgraph replay --run <run_id> [options]
 options:
   --run <run_id>        run to replay
   --mode <mode>         events (L1, default) | outputs (L2) | tools (recorded tool calls)
-  --replay-tools <mode> recorded (default; v0.4 recorded-only) | reexec (v0.4 未实现)
+  --replay-tools <mode> recorded (default) | reexec (--mode=tools: v0.4 未实现；
+                        --mode=events|outputs: ignored)
   --db <path>           trace database (default: $ZGRAPH_DB or .zgraph/trace.db)
   --json                machine-readable output (events/tools: NDJSON; outputs: JSON object)
   --help, -h            print this help";
@@ -137,6 +138,7 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
     }
     let mut run_id = None;
     let mut mode = ReplayMode::Events;
+    let mut replay_tools: Option<ReplayTools> = None;
     let mut db = None;
     let mut json = false;
     let mut iter = args.iter();
@@ -150,7 +152,7 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
             continue;
         }
         if let Some(value) = arg.strip_prefix("--replay-tools=") {
-            parse_replay_tools(value)?;
+            replay_tools = Some(parse_replay_tools(value)?);
             continue;
         }
         match arg.as_str() {
@@ -158,7 +160,7 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
             "--mode" => mode = parse_mode(&option_value(&mut iter, "--mode")?)?,
             "--replay-tools" => {
                 let value = option_value(&mut iter, "--replay-tools")?;
-                parse_replay_tools(&value)?;
+                replay_tools = Some(parse_replay_tools(&value)?);
             }
             "--db" => db = Some(PathBuf::from(option_value(&mut iter, "--db")?)),
             "--json" => json = true,
@@ -167,6 +169,12 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
         }
     }
     let run_id = run_id.ok_or_else(|| "replay requires --run <run_id>".to_string())?;
+    // C1（REV-111）：`--replay-tools` 仅对 `--mode=tools` 有意义；events/outputs 下
+    // 按 Lead 裁决**忽略** recorded/reexec（不报错、无副作用）。bogus 值在解析阶段
+    // 已是用法错误（与 mode 无关）。reexec 是 v0.5 接口 → tools 模式下 exit 2。
+    if mode == ReplayMode::Tools && replay_tools == Some(ReplayTools::Reexec) {
+        return Err(REPLAY_TOOLS_REEXEC_UNIMPLEMENTED.to_string());
+    }
     Ok(Some(ReplayArgs {
         run_id,
         mode,
@@ -205,15 +213,24 @@ fn parse_mode(value: &str) -> Result<ReplayMode, String> {
     }
 }
 
-/// 解析 `--replay-tools`（v0.4 只实现 `recorded`；`reexec` 为 v0.5 接口 → 用法错误）。
-fn parse_replay_tools(value: &str) -> Result<(), String> {
+/// `--replay-tools` 取值（v0.4 只实现 `recorded`；`reexec` 为 v0.5 接口）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayTools {
+    /// recorded-only（默认；绝不执行工具）。
+    Recorded,
+    /// 重执行只读工具（v0.5；v0.4 仅保留接口）。
+    Reexec,
+}
+
+/// `--replay-tools=reexec` 的用法错误（仅 `--mode=tools` 时报告）。
+const REPLAY_TOOLS_REEXEC_UNIMPLEMENTED: &str =
+    "--replay-tools=reexec is not implemented in v0.4 (recorded-only replay); use --replay-tools=recorded";
+
+/// 解析 `--replay-tools` 取值（闭集；bogus 值 → 用法错误，与 mode 无关）。
+fn parse_replay_tools(value: &str) -> Result<ReplayTools, String> {
     match value {
-        "recorded" => Ok(()),
-        "reexec" => Err(
-            "--replay-tools=reexec is not implemented in v0.4 (recorded-only replay); \
-             use --replay-tools=recorded"
-                .to_string(),
-        ),
+        "recorded" => Ok(ReplayTools::Recorded),
+        "reexec" => Ok(ReplayTools::Reexec),
         other => Err(format!(
             "invalid --replay-tools '{other}' (expected recorded|reexec)"
         )),
@@ -1336,19 +1353,61 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_reexec_and_unknown_replay_tools() {
-        // v0.4 只实现 recorded；reexec 是 v0.5 接口 → 用法错误（exit 2 由 dispatch 映射）。
+    fn parse_rejects_reexec_only_for_tools_mode() {
+        // C1（REV-111）：reexec 仅 `--mode=tools` 报「v0.4 未实现」（exit 2）。
         let error = parse(&args(&[
             "--run",
             "r",
             "--mode=tools",
             "--replay-tools=reexec",
         ]))
-        .expect_err("reexec not implemented");
+        .expect_err("reexec not implemented for tools mode");
         assert!(error.contains("not implemented in v0.4"), "{error}");
-        let error = parse(&args(&["--run", "r", "--replay-tools=bogus"]))
+        // tools + recorded（显式/缺省）合法。
+        assert!(parse(&args(&["--run", "r", "--mode=tools"])).is_ok());
+        assert!(parse(&args(&[
+            "--run",
+            "r",
+            "--mode=tools",
+            "--replay-tools=recorded"
+        ]))
+        .is_ok());
+        // events/outputs：recorded/reexec 均按裁决**忽略**（不报错）。
+        for mode in ["events", "outputs"] {
+            for tools in ["recorded", "reexec"] {
+                let parsed = parse(&args(&[
+                    "--run",
+                    "r",
+                    &format!("--mode={mode}"),
+                    &format!("--replay-tools={tools}"),
+                ]))
+                .unwrap_or_else(|error| panic!("{mode}+{tools} must be ignored: {error}"))
+                .expect("not help");
+                assert_eq!(
+                    parsed.mode,
+                    if mode == "events" {
+                        ReplayMode::Events
+                    } else {
+                        ReplayMode::Outputs
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_replay_tools_and_mode() {
+        // bogus 值与 mode 无关 → 用法错误（events/outputs 也不静默接受未知值）。
+        for mode in ["events", "outputs", "tools"] {
+            let error = parse(&args(&[
+                "--run",
+                "r",
+                &format!("--mode={mode}"),
+                "--replay-tools=bogus",
+            ]))
             .expect_err("invalid replay-tools");
-        assert!(error.contains("invalid --replay-tools"), "{error}");
+            assert!(error.contains("invalid --replay-tools"), "{error}");
+        }
         let error = parse(&args(&["--run", "r", "--mode=bogus"])).expect_err("invalid mode");
         assert!(error.contains("events|outputs|tools"), "{error}");
     }
