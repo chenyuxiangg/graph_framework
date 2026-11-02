@@ -9,11 +9,13 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（首轮有条件通过 → C1/C2 + P2 关键项由 `31a4593` 关闭；见 §7）
 
-P0=0；**P1=2**；P2=7；P3=5。profile 主体/预检分类/`builtin__bash` 参数与上限/进程组回收/CLI 预检/默认零副作用/环境感知测试均与 DR 一致；harness **318/0/1 默认与 features**、workspace **1122/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。profile/预检分类、`builtin__bash`、CLI、默认零副作用、环境感知测试均通过；最终 harness **327/0/1 默认与 features**、workspace **1132/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
-两项安全边界需关闭：
+> **首轮历史（保留）**：`60aff67` 首轮为有条件通过——C1 `ensure_tmpdir` symlink jail、C2 SBPL 模板占位符注入。`31a4593` 已关闭两项并修 P2 关键项（见 §7）。
+
+首轮两项安全边界：
 
 - **C1 `ensure_tmpdir` jail 逃逸**：对 `<workspace>/.gitignore` 直接 `append`、对 `<workspace>/.tmp` 直接 `create_dir_all`；未 canonicalize/拒绝 symlink。恶意 workspace 把 `.gitignore`/`.tmp` 做成指向 workspace 外的 symlink 时，Rust 侧会 **append/创建到 jail 外**（sandbox 只约束 bash 子进程，不约束本进程的这一步）。
 - **C2 SBPL 模板占位符二次替换注入**：`render_profile` 先 `.replace("@WORKSPACE@", workspace)`，再 `.replace("@EXEC_PATHS@"/"@ALLOW_PATHS@"/"@NETWORK@", ...)`；若 workspace/allow/exec 路径包含 `@ALLOW_PATHS@`/`@EXEC_PATHS@`/`@NETWORK@` 字面量，后续替换会把含引号/括号的 SBPL 片段注入到刚渲染的引号字符串内，形成 profile 注入（路径只拒绝了 `\"`/反斜杠/换行/控制字符，未拒绝这些模板 token）。
@@ -22,7 +24,7 @@ P0=0；**P1=2**；P2=7；P3=5。profile 主体/预检分类/`builtin__bash` 参�
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C1/C2） | profile/preflight/bash/CLI/trace 骨架主语义通过；两个 jail/注入边界未覆盖 |
+| 功能正确性 | ✅ | profile/preflight/bash/CLI/trace 主语义通过；C1/C2 已由 `31a4593` 关闭并加负例 |
 | 结构合理性 | ✅ | `sandbox`（profile/preflight/supervision）与 `bash`（参数/env/结果）分层；Fake `SandboxRunner` 可测；CLI 机械；无新 Cargo 依赖 |
 | 逻辑性 | ✅（P2） | 0/71/65 分类、fail-closed、setsid/killpg 近似、drain/head+tail、取消/超时映射均按 DR；P2 见 §3 |
 | 可读性 | ✅（P3） | DR 注释/环境限制脚本/错误闭集清楚；P3 为测试/文档补齐 |
@@ -95,3 +97,35 @@ bash scripts/dev/check.sh                    # PASSED
 - **P2 N1–N7**：setsid/exec-path file-read/LC_*/真实网络断言/取消端到端/CLI 预检 DB 测试/preflight stderr。
 - **P3 N8–N12**：真实终端/D5 e2e/平台/文档/schema 回写。
 - 无 P0；C1/C2 未关闭前不可 merge。
+
+## 7. 条件关闭复核（2026-11-02，`31a4593`，parent `3ea4fdd`）
+
+**复核结论：通过**。`31a4593` 5 files（`bash.rs`/`sandbox.rs`/`agent_loop.rs`/`cli run_cmd.rs`/`test_support.rs`，+683/−88）；工作区干净。
+
+### C1（tmpdir/.gitignore jail）
+- `ensure_tmpdir` 改为 `WorkspaceJail::resolve_any(".tmp", Access::Write)` + 创建后二次 resolve；`.tmp` symlink 出根→`path_escape`；`.tmp` 普通文件→`invalid_args`；`.tmp` 内部 symlink 允许并返回 canonical TMPDIR。
+- `.gitignore` 经 `jail.resolve(..., Access::Write)`；出根/非普通文件→跳过+warn，不写外部。
+- 负例通过：`tmpdir_symlink_escape_is_fail_closed`、`tmpdir_regular_file_is_rejected`、`tmpdir_symlink_inside_workspace_is_allowed_with_canonical_tmpdir`、`gitignore_symlink_escape_is_skipped_without_writing_outside`（外部目标内容不变）。
+
+### C2（SBPL 模板注入）
+- 新增 `TEMPLATE_TOKENS`（`@WORKSPACE@`/`@EXEC_PATHS@`/`@ALLOW_PATHS@`/`@EXEC_READS@`/`@NETWORK@`）；`render_path` realpath 后命中即 `sandbox_profile_invalid`。
+- `fill_template` 单次扫描替换，插入值不再参与匹配；新增 `@EXEC_READS@` 段。
+- 负例 `rejects_template_tokens_in_rendered_paths`（workspace/allow/exec token）通过；反斜杠/换行/控制字符既有负例仍过。
+
+### P2 关键项复核
+- **N2** exec-path 同步 `file-read*`；**N3** 继承全部 `LC_*` 但拒绝 `LD_*`/`DYLD_*`（`inherits_all_lc_vars_but_never_ld_or_dyld`）；**N5** bash 取消端到端 `bash_cancel_propagates_run_cancelled`（RunFailure::Cancelled）；**N6** CLI 预检失败不建 DB `allow_bash_preflight_failure_exits_3_without_creating_db`；**N7** preflight stderr 并发有界 drain `probe_stderr_drain_is_bounded_and_completes`。
+- 仍 P2 残余：`process_group(0)` 非严格 setsid（N1）、real network 断言经 Python 可能假阳性（N4，普通终端/D5）、signal 硬编码/P3、平台 cfg/TOCTOU 文档化。
+
+### 最终门禁（`31a4593`）
+```bash
+cargo test -p zgraph-harness                  # 328 tests：327 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp   # 328 tests：327 passed / 0 failed / 1 ignored
+cargo test --workspace                        # 76 targets：1132 passed / 0 failed / 3 ignored
+pytest -q                                     # exit 0；183 passed
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                    # clean
+cargo check -p zgraph-harness --no-default-features  # clean
+bash scripts/dev/check.sh                     # PASSED
+```
+- 范围：5 files（CLI 40 行机械 + harness sandbox/bash/agent_loop/test_support）；无 Cargo 新依赖；默认路径无回归；无 unsafe/无无沙箱 fallback。
+- 环境感知：嵌套 Seatbelt 下仍按 `sandbox_nested`/`unavailable` fail-closed，不伪造成功；普通终端/D5 证据按预裁决。
