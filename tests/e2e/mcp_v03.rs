@@ -371,14 +371,17 @@ fn ac19b_streamable_http_headers_and_insecure_gate() {
     let run_id = payload_run_id(&payload);
     let (_, code, message, ..) = run_row(&gate_db, &run_id);
     assert_eq!(code.as_deref(), Some("HARNESS_MCP_ERROR"));
-    // DR-010 §8 期望 reason `http_insecure`；当前实现以 `config_invalid` 承载同一
-    // fail-closed 语义（message 说明 `allow_insecure_http` 要求），偏差已上报 Lead。
+    // REV-100 #3：reason 闭集 `http_insecure` + detail.server。
     assert!(
         message
             .as_deref()
-            .is_some_and(|text| text.contains("config_invalid") || text.contains("http_insecure")),
-        "insecure http fail-closed: {message:?}"
+            .is_some_and(|text| text.contains("http_insecure")),
+        "detail.reason http_insecure: {message:?}"
     );
+    let (_, _, error) = v03::instance(&gate_db, &run_id, "agent");
+    let error = error.expect("instance error json");
+    assert_eq!(error["detail"]["reason"], json!("http_insecure"));
+    assert_eq!(error["detail"]["server"], json!("web"), "detail.server");
 }
 
 // ---------------------------------------------------------------------------
@@ -625,40 +628,101 @@ fn ac19d_crash_restarts_at_most_once() {
     let dir = tempfile::tempdir().expect("tempdir");
     let log = dir.path().join("server.log");
     let spawn = dir.path().join("spawn.log");
-    let registry = stdio_registry(dir.path(), "echo", "modern", &log, &spawn, None, &[]);
+    let crash_marker = dir.path().join("crash-once.marker");
+    let mut registry = stdio_registry(dir.path(), "echo", "modern", &log, &spawn, None, &[]);
+    registry["mcpServers"]["echo"]["env"]["ZGRAPH_FAKE_CRASH_ONCE_FILE"] =
+        json!(crash_marker.display().to_string());
     let (output, db, _) = mcp_run(
         dir.path(),
-        &mcp_agent(&["mcp__echo__crash"], &["echo"], &[]),
+        &mcp_agent(
+            &["mcp__echo__crash_once", "mcp__echo__crash"],
+            &["echo"],
+            &[],
+        ),
         &registry,
         json!([
-            mcp_call("c1", "mcp__echo__crash", json!({})),
+            // call#1：crash_once 首次调用崩溃 → 同 run 仅 1 次重启 → 重试成功（传输恢复）。
+            mcp_call("c1", "mcp__echo__crash_once", json!({})),
+            // call#2：重启额度已用满 → crash 后 Closed 不再 spawn → transport_closed。
             mcp_call("c2", "mcp__echo__crash", json!({})),
-            mcp_call("c3", "mcp__echo__crash", json!({})),
             text_call("after crashes")
         ]),
         &["--allow-mcp".to_string()],
     );
-    assert_exit(&output, 0, "server 崩溃是工具错误（不 fail run）");
+    assert_exit(&output, 0, "server 崩溃/重启是工具错误（不 fail run）");
     let payload = json_stdout(&output);
     assert_eq!(payload["status"], json!("Completed"));
     let run_id = payload_run_id(&payload);
+    // 每 run 每 server 恰 1 次重启：spawn/connect 总数 = 2（首启 + 唯一重启）。
     let pids = spawn_pids(&spawn);
-    // 注：实现当前为**每次 call 内**最多重启 1 次（spawn ≤ calls+1），而 DR-010 §4
-    // 冻结的是「同 run 最多重启 1 次」；该偏差已上报 Lead（待裁定 fix/docs）。
-    // e2e 断言可观测上界：3 次 crash 调用 → spawn 数 ≤ 4（每次调用至多重连一次）。
-    assert!(
-        (1..=4).contains(&pids.len()),
-        "每次 crash 调用至多重连 1 次（spawn 次数 {}）：{pids:?}",
-        pids.len()
+    assert_eq!(
+        pids.len(),
+        2,
+        "同 run 每 server 最多重启 1 次 → spawn 总数 = 2: {pids:?}"
     );
-    let failures = tool_events(&db, &run_id)
+    // call#1 经重启重试成功（传输恢复）；call#2 因额度耗尽返回 transport_closed。
+    let requests = llm_requests(&db, &run_id);
+    let tool_messages: Vec<(String, String)> = requests
         .iter()
-        .filter(|(kind, _, tool, ok, _, _)| {
-            kind == "tool_call_end" && tool.as_deref() == Some("mcp__echo__crash") && *ok == Some(0)
+        .flat_map(|request| {
+            request["messages"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|message| message["role"] == json!("tool"))
+                .map(|message| {
+                    (
+                        message["tool_call_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                        message["content"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>()
         })
-        .count();
-    assert_eq!(failures, 3, "三次 crash 调用均为工具错误: {failures}");
-    // 全部 server 进程在 run 结束后回收。
+        .collect();
+    let first = tool_messages
+        .iter()
+        .find(|(call_id, _)| call_id == "c1")
+        .expect("c1 tool message");
+    assert!(
+        first.1.contains("recovered"),
+        "首次 crash 后重试成功（传输恢复）: {:?}",
+        first.1
+    );
+    let second = tool_messages
+        .iter()
+        .find(|(call_id, _)| call_id == "c2")
+        .expect("c2 tool message");
+    let second_payload: Value = serde_json::from_str(&second.1).expect("c2 tool error json");
+    assert_eq!(
+        second_payload["error"]["reason"],
+        json!("transport_closed"),
+        "额度耗尽后的 Closed → TOOL_ERROR transport_closed: {second_payload}"
+    );
+    let events = tool_events(&db, &run_id);
+    assert!(
+        events.iter().any(|(kind, call_id, tool, ok, _, _)| {
+            kind == "tool_call_end"
+                && call_id.as_deref() == Some("c1")
+                && tool.as_deref() == Some("mcp__echo__crash_once")
+                && *ok == Some(1)
+        }),
+        "c1 重试成功 tool_call_end ok=true: {events:?}"
+    );
+    assert!(
+        events.iter().any(|(kind, call_id, tool, ok, _, _)| {
+            kind == "tool_call_end"
+                && call_id.as_deref() == Some("c2")
+                && tool.as_deref() == Some("mcp__echo__crash")
+                && *ok == Some(0)
+        }),
+        "c2 transport_closed tool_call_end ok=false: {events:?}"
+    );
+    // 全部 server 进程在 run 结束后回收；额度用满后不得新增 spawn。
+    assert_eq!(spawn_pids(&spawn).len(), 2, "后续调用不得再 spawn");
     for pid in pids {
         assert!(
             v03::wait_pid_gone(pid, Duration::from_secs(5)),
@@ -710,24 +774,51 @@ fn ac19e_result_truncation_annotations_and_input_required() {
             message["role"] == json!("tool")
                 && message["content"]
                     .as_str()
-                    .is_some_and(|text| text.starts_with("BBBB"))
+                    .is_some_and(|text| text.contains("…[mcp result truncated]"))
         })
         .expect("big tool message");
     let big_text = big_tool["content"].as_str().expect("content");
-    // server 返回 40_000 字符；客户端 `call_result_text` 按 32_768 字符截断。
-    // （注：真实实现截断时未附加 `truncated:true`/marker——偏差已上报 Lead。）
-    assert_eq!(big_text.chars().count(), 32_768, "结果截断到 32768 字符");
-    assert!(big_text.chars().all(|ch| ch == 'B'), "保留前缀内容");
-    // annotations 不可信：带 annotations 的工具仍正常返回（不改变权限/行为）。
+    // REV-100 #2：超 32_768 chars 的最终 ToolResult 是 JSON
+    // `{truncated,is_error,text}`；text 为 32768 chars 头部 + `…[mcp result truncated]`。
+    let truncated_payload: Value =
+        serde_json::from_str(big_text).expect("truncated ToolResult JSON");
+    let mut keys: Vec<&str> = truncated_payload
+        .as_object()
+        .expect("tool result object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["is_error", "text", "truncated"],
+        "truncated ToolResult keys 恰为 {{truncated,is_error,text}}: {truncated_payload}"
+    );
+    assert_eq!(truncated_payload["truncated"], json!(true));
+    assert_eq!(truncated_payload["is_error"], json!(false));
+    let truncated_text = truncated_payload["text"].as_str().expect("text");
     assert!(
-        requests.iter().any(
-            |request| request["messages"]
-                .as_array()
-                .is_some_and(|messages| messages
-                    .iter()
-                    .any(|message| message["content"] == json!("annotated-ok")))
-        ),
-        "annotated 工具结果正常喂回"
+        truncated_text.ends_with("…[mcp result truncated]"),
+        "text 以截断标记结尾: {}",
+        &truncated_text[truncated_text.len().saturating_sub(60)..]
+    );
+    assert!(
+        truncated_text.chars().count() >= 32_768,
+        "text 长度下界为 32768 chars：{}",
+        truncated_text.chars().count()
+    );
+    assert!(truncated_text.starts_with('B'), "text 保留 server 结果前缀");
+    // annotations 不可信：带 annotations 的工具仍正常返回（不改变权限/行为）。
+    let annotated = requests
+        .iter()
+        .flat_map(|request| request["messages"].as_array().cloned().unwrap_or_default())
+        .filter(|message| message["role"] == json!("tool"))
+        .map(|message| message["content"].as_str().unwrap_or_default().to_string())
+        .find(|content| content == "annotated-ok")
+        .expect("annotated 工具结果正常喂回");
+    assert_eq!(
+        annotated, "annotated-ok",
+        "≤32768 时仍是原始文本（非 JSON）"
     );
     // MRTR input_required：结构化失败（喂回 LLM，不静默/不 AI 代答）。
     let needs_input_text = requests

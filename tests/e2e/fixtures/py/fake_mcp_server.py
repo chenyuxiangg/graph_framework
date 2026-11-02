@@ -32,6 +32,8 @@ TOOLS: list[dict[str, Any]] = [
      "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}}},
     {"name": "crash", "description": "Crash the server process",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "crash_once", "description": "Crash only on the first process invocation",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "big", "description": "Return a >32KiB text result",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "needs_input", "description": "Return input_required (MRTR)",
@@ -117,6 +119,13 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": "slow-done"}]}
     if name == "crash":
         os._exit(7)
+    if name == "crash_once":
+        marker = os.environ.get("ZGRAPH_FAKE_CRASH_ONCE_FILE")
+        if marker and not os.path.exists(marker):
+            with open(marker, "w", encoding="utf-8") as marker_handle:
+                marker_handle.write("crashed")
+            os._exit(7)
+        return {"content": [{"type": "text", "text": "recovered"}]}
     if name == "big":
         return {"content": [{"type": "text", "text": "B" * 40_000}]}
     if name == "needs_input":
