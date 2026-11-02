@@ -75,3 +75,12 @@ bash scripts/dev/check.sh                    # CHECK PASSED
 - **P3 测试补强**：P3-1/P3-2/P3-3/P3-4/P3-5 可在 D4/D5 e2e 或后续小 commit 补；不阻塞 D3。
 - **跨模块 Cargo**：`ignore`/`globset`/`regex` 依赖由 Lead 追加第二评审；本记录声明后按流程合并。
 - 无 P0/P1/P2；无默认路径回归；P3 均为测试/文档增强。
+
+## 6. 第二评审 · 跨模块（Cargo）（Lead 追加，2026-11-02）
+
+- **评审人**：`lead`（**≠ 作者** `dsl-dev`；Lead 已批准跨模块依赖，按 AGENTS §2 追加第二评审）
+- **范围**（`b63ae0e..038b144`）：根 `Cargo.toml` + `crates/zgraph-harness/Cargo.toml` + `Cargo.lock` 新增 `ignore`/`globset`/`regex`（精确锁定、无版本漂移）；`crates/zgraph-harness/src/builtin/search.rs` 等 harness 模块改动；无 CLI/其它跨模块文件。
+- **核对结论（通过）**：依赖为 D3 冻结所需最小集（.gitignore 遍历/glob 匹配/线性 regex）；无 feature 构建不变；未改既有行为/错误码。
+- **Lead 亲自验证**：`git diff b63ae0e..038b144 --stat` 仅 harness builtin/search + constants/executor tests + 2×Cargo + lock（+ REV 记录）；`cargo test --workspace --offline` = 1096/0/3；`cargo test -p zgraph-harness --offline` = 293/0/1；no-default-features check 通过。
+- **裁决/后续**：P3 建议（truncated 假阳性、32KiB 用例、`.ignore`/git global 宽于 DR、path 相对口径、常量 D6 回写）留 D5/D6。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
