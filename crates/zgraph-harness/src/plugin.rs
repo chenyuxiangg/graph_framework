@@ -1885,21 +1885,6 @@ if output:
         const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         const SCENARIO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-        async fn wait_for_pid(pid_file: &std::path::Path) -> Option<i32> {
-            let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
-            loop {
-                if let Ok(text) = std::fs::read_to_string(pid_file) {
-                    if let Ok(pid) = text.trim().parse::<i32>() {
-                        return Some(pid);
-                    }
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return None;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        }
-
         async fn wait_until_reaped(pid: i32) -> bool {
             let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
             loop {
@@ -1916,10 +1901,26 @@ if output:
         let fixture = fixture("codex_sleep");
         let pid_file = fixture.pid_file.clone().expect("pid file");
         let ctx = TestCtx::new();
+        // REV-102 C1：cancel 必须发生在 fake Codex **已 spawn 并写好 pid** 之后；固定
+        // sleep 在并行负载下会早于 pid 写入 → 用「有界等待 pid 文件出现」同步（≤10s）。
+        let (pid_tx, pid_rx) = std::sync::mpsc::channel::<Option<i32>>();
         let cancel_ctx = ctx.clone();
+        let pid_file_for_thread = pid_file.clone();
         let canceller = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(600));
+            let deadline = std::time::Instant::now() + WAIT_TIMEOUT;
+            let mut pid = None;
+            while std::time::Instant::now() < deadline {
+                if let Ok(text) = std::fs::read_to_string(&pid_file_for_thread) {
+                    if let Ok(parsed) = text.trim().parse::<i32>() {
+                        pid = Some(parsed);
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // 先等到 pid（或超时）再取消；即使超时也取消，避免被测场景永久挂起。
             cancel_ctx.request_cancel();
+            let _ = pid_tx.send(pid);
         });
         let provider = SubprocessProvider::new();
         let outcome = tokio::time::timeout(
@@ -1928,6 +1929,7 @@ if output:
         )
         .await;
         canceller.join().expect("canceller thread");
+        let observed_pid = pid_rx.recv().expect("canceller reports pid");
         let result = match outcome {
             Ok(result) => result,
             Err(_) => {
@@ -1938,17 +1940,18 @@ if output:
                 );
             }
         };
-        assert!(matches!(result, Err(RunFailure::Cancelled)), "{result:?}");
-        assert_eq!(provider.live_adapter_count().await, 0);
-        // 无论后续断言是否失败，先保证 provider 进程组被回收（测试 flake 时必须清理）。
-        provider.close_provider().await;
-        let Some(pid) = wait_for_pid(&pid_file).await else {
+        let Some(pid) = observed_pid else {
+            provider.close_provider().await;
             panic!(
-                "fake Codex pid file not written within {}s: {}",
+                "fake Codex pid file not written within {}s (cancel race): {}",
                 WAIT_TIMEOUT.as_secs(),
                 pid_file.display()
             );
         };
+        assert!(matches!(result, Err(RunFailure::Cancelled)), "{result:?}");
+        assert_eq!(provider.live_adapter_count().await, 0);
+        // 无论后续断言是否失败，先保证 provider 进程组被回收（测试 flake 时必须清理）。
+        provider.close_provider().await;
         assert!(
             wait_until_reaped(pid).await,
             "fake Codex child {pid} leaked as orphan (>{}s)",
