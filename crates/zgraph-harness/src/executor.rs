@@ -2317,4 +2317,85 @@ mod tests {
             outcome.error
         );
     }
+    // ------------------------------------------------------------------
+    // v0.4/D3：grep/glob 注册（与文件工具共存）/白名单/streaming+sink
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn search_tools_register_with_file_tools_and_run_through_agent_loop() {
+        let dir = assets(
+            agent_config(
+                "parser",
+                &["builtin__read", "builtin__grep", "builtin__glob"],
+            ),
+            "role",
+        );
+        std::fs::write(dir.path().join("a.txt"), "needle one\nmore needle\n").expect("file");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "g1", "name": "builtin__grep",
+                     "args": {"pattern": "needle", "path": "."}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "l1", "name": "builtin__glob",
+                     "args": {"pattern": "*.txt"}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let sink = crate::test_support::CapturingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(builtin_set(dir.path()))
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Completed);
+        let calls = trace.streaming_calls();
+        for expected in ["builtin__grep", "builtin__glob"] {
+            assert!(
+                calls.iter().any(|call| matches!(
+                    &call.event,
+                    StreamingEvent::ToolCallEnd { tool_name, ok, .. }
+                        if tool_name == expected && *ok
+                )),
+                "{expected} missing: {calls:?}"
+            );
+        }
+        let records = sink.records();
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert!(records
+            .iter()
+            .all(|record| record.2 == crate::tools::ToolSource::Builtin && record.3));
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn search_tools_must_be_whitelisted() {
+        let dir = assets(agent_config("parser", &["builtin__read"]), "role");
+        std::fs::write(dir.path().join("a.txt"), "needle\n").expect("file");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "g1", "name": "builtin__grep", "args": {"pattern": "needle"}}
+                ]},
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(builtin_set(dir.path())),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("HARNESS_UNKNOWN_TOOL")
+        );
+    }
 }

@@ -34,7 +34,7 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// v0.4/D2 内置文件工具集合（jail + 固定 5 个工具定义）。
 #[derive(Debug)]
 pub struct BuiltinToolSet {
-    jail: WorkspaceJail,
+    pub(crate) jail: WorkspaceJail,
     defs: Vec<ToolDef>,
 }
 
@@ -42,7 +42,8 @@ impl BuiltinToolSet {
     /// 构造：canonicalize workspace/allow-paths（失败 → `HARNESS_CONFIG_LOAD`）。
     pub fn new(workspace_dir: &Path, allow_paths: &[PathBuf]) -> Result<Arc<Self>, HarnessError> {
         let jail = WorkspaceJail::new(workspace_dir, allow_paths)?;
-        let defs = file_tool_defs();
+        let mut defs = file_tool_defs();
+        defs.extend(crate::builtin::search::search_tool_defs());
         Ok(Arc::new(Self { jail, defs }))
     }
 
@@ -66,6 +67,8 @@ impl BuiltinToolSet {
             TOOL_EDIT => self.edit(args)?,
             TOOL_APPLY_PATCH => self.apply_patch(args)?,
             TOOL_DIFF => self.diff(args)?,
+            crate::builtin::search::TOOL_GREP => self.grep(args)?,
+            crate::builtin::search::TOOL_GLOB => self.glob(args)?,
             other => {
                 return Err(ToolFailure::new(
                     "unknown_builtin_tool",
@@ -77,7 +80,7 @@ impl BuiltinToolSet {
     }
 
     /// 结果序列化 + 统一上限（`truncated:true` + 全量 sha256 由各工具提供）。
-    fn limit_result(&self, payload: Value) -> String {
+    pub(crate) fn limit_result(&self, payload: Value) -> String {
         let compact = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
         if compact.len() <= BUILTIN_RESULT_MAX_BYTES {
             return compact;
@@ -96,6 +99,26 @@ impl BuiltinToolSet {
                 if compact.len() <= BUILTIN_RESULT_MAX_BYTES {
                     return compact;
                 }
+            }
+        }
+        // 搜索类结果：从尾部截断 matches/paths 数组（保留前缀，顺序稳定）。
+        for key in ["matches", "paths"] {
+            loop {
+                let compact = serde_json::to_string(&bounded).unwrap_or_default();
+                if compact.len() <= BUILTIN_RESULT_MAX_BYTES {
+                    return compact;
+                }
+                let Some(object) = bounded.as_object_mut() else {
+                    break;
+                };
+                let Some(Value::Array(items)) = object.get_mut(key) else {
+                    break;
+                };
+                if items.is_empty() {
+                    break;
+                }
+                items.pop();
+                object.insert("truncated".to_string(), Value::Bool(true));
             }
         }
         // 兜底（如超长 path 列表）：保留 hash 与截断标记。
@@ -509,7 +532,7 @@ fn patch_result(staged: &[StagedFile]) -> Value {
 }
 
 /// 固定工具定义（DR-013 §3 JSON Schema）。
-fn file_tool_defs() -> Vec<ToolDef> {
+pub(crate) fn file_tool_defs() -> Vec<ToolDef> {
     vec![
         tool_def(
             TOOL_READ,
@@ -600,13 +623,13 @@ fn tool_def(name: &str, description: &str, parameters: Value) -> ToolDef {
 // 参数/IO/哈希/截断辅助
 // ---------------------------------------------------------------------------
 
-fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolFailure> {
+pub(crate) fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolFailure> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| ToolFailure::new("invalid_args", format!("'{key}' must be a string")))
 }
 
-fn optional_u64(args: &Value, key: &str, default: u64) -> Result<u64, ToolFailure> {
+pub(crate) fn optional_u64(args: &Value, key: &str, default: u64) -> Result<u64, ToolFailure> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(value) => value.as_u64().ok_or_else(|| {
@@ -618,7 +641,7 @@ fn optional_u64(args: &Value, key: &str, default: u64) -> Result<u64, ToolFailur
     }
 }
 
-fn optional_bool(args: &Value, key: &str, default: bool) -> Result<bool, ToolFailure> {
+pub(crate) fn optional_bool(args: &Value, key: &str, default: bool) -> Result<bool, ToolFailure> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(Value::Bool(value)) => Ok(*value),
@@ -720,12 +743,12 @@ fn write_temp(
     }
 }
 
-fn io_failure(action: &str, path: &str, error: &std::io::Error) -> ToolFailure {
+pub(crate) fn io_failure(action: &str, path: &str, error: &std::io::Error) -> ToolFailure {
     ToolFailure::new("io_error", format!("{action} '{path}' failed: {error}"))
 }
 
 /// 按 UTF-8 字符边界截断到 ≤ `max_bytes`（追加 `…[truncated]` 标记）。
-fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
+pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
     if text.len() <= max_bytes {
         return (text.to_string(), false);
     }

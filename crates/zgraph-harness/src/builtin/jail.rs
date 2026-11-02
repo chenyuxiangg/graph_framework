@@ -42,6 +42,21 @@ pub(crate) struct ResolvedPath {
     pub scope: PathScope,
     /// 解析前目标是否已存在（write 覆盖判断用）。
     pub existed: bool,
+    /// 目标是否为目录（搜索工具允许目录路径）。
+    pub is_dir: bool,
+}
+
+impl ResolvedPath {
+    /// 相对 `base` 的 POSIX 风格路径（搜索结果展示用）。
+    pub fn display_relative(&self, base: &Path) -> String {
+        self.path
+            .strip_prefix(base)
+            .unwrap_or(&self.path)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
 }
 
 /// workspace jail（canonicalize 后的根 + 只读 allow-paths）。
@@ -83,6 +98,20 @@ impl WorkspaceJail {
     /// `invalid_args`/`path_too_long`/`path_escape`/`path_read_only`/`not_found`/
     /// `is_directory`/`not_regular_file`。
     pub fn resolve(&self, raw: &str, access: Access) -> Result<ResolvedPath, ToolFailure> {
+        self.resolve_inner(raw, access, false)
+    }
+
+    /// 解析路径（允许目录；grep/glob 的 `path` 参数用）。语义同 [`Self::resolve`]。
+    pub fn resolve_any(&self, raw: &str, access: Access) -> Result<ResolvedPath, ToolFailure> {
+        self.resolve_inner(raw, access, true)
+    }
+
+    fn resolve_inner(
+        &self,
+        raw: &str,
+        access: Access,
+        allow_dir: bool,
+    ) -> Result<ResolvedPath, ToolFailure> {
         if raw.is_empty() {
             return Err(ToolFailure::new("invalid_args", "path must be non-empty"));
         }
@@ -118,11 +147,12 @@ impl WorkspaceJail {
                 format!("path '{raw}' is inside a read-only --allow-path (writes only in --workspace-dir)"),
             ));
         }
-        check_file_kind(&path, access, raw)?;
+        let is_dir = check_file_kind(&path, access, raw, allow_dir)?;
         Ok(ResolvedPath {
             path,
             scope,
             existed,
+            is_dir,
         })
     }
 
@@ -194,6 +224,32 @@ impl WorkspaceJail {
             )
         })?;
         Ok(parent.to_path_buf())
+    }
+
+    /// 只读范围内的根：workspace 根或命中的 allow-path 根（展示相对路径用）。
+    pub fn read_scope_root(&self, canonical: &Path) -> Option<&Path> {
+        if canonical.starts_with(&self.root) {
+            return Some(&self.root);
+        }
+        self.allow_paths
+            .iter()
+            .find(|allow| canonical.starts_with(allow))
+            .map(PathBuf::as_path)
+    }
+
+    /// 遍历期校验：canonical 路径是否在只读允许范围内（workspace 或 allow-path）。
+    pub fn read_scope_of(&self, canonical: &Path) -> Option<PathScope> {
+        if canonical.starts_with(&self.root) {
+            return Some(PathScope::Workspace);
+        }
+        if self
+            .allow_paths
+            .iter()
+            .any(|allow| canonical.starts_with(allow))
+        {
+            return Some(PathScope::AllowPath);
+        }
+        None
     }
 
     fn scope_of(&self, path: &Path, raw: &str) -> Result<PathScope, ToolFailure> {
@@ -289,12 +345,20 @@ fn canonicalize_target(candidate: &Path, raw: &str) -> Result<(PathBuf, bool), T
 }
 
 /// 普通文件/目录/特殊文件判定。
-fn check_file_kind(path: &Path, access: Access, raw: &str) -> Result<(), ToolFailure> {
+fn check_file_kind(
+    path: &Path,
+    access: Access,
+    raw: &str,
+    allow_dir: bool,
+) -> Result<bool, ToolFailure> {
     let Ok(metadata) = std::fs::metadata(path) else {
-        return Ok(());
+        return Ok(false);
     };
     let file_type = metadata.file_type();
     if file_type.is_dir() {
+        if allow_dir {
+            return Ok(true);
+        }
         return Err(ToolFailure::new(
             "is_directory",
             format!("path '{raw}' is a directory"),
@@ -308,7 +372,7 @@ fn check_file_kind(path: &Path, access: Access, raw: &str) -> Result<(), ToolFai
         ));
     }
     let _ = access;
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]

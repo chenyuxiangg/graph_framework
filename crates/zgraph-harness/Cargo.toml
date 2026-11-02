@@ -22,6 +22,10 @@ blake3.workspace = true
 # v0.4/D2（DR-013 §3/§8）：内置文件工具 sha256 / unified diff。
 sha2.workspace = true
 similar.workspace = true
+# v0.4/D3（DR-013 §3.6/§3.7）：内置搜索工具。
+ignore.workspace = true
+globset.workspace = true
+regex.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

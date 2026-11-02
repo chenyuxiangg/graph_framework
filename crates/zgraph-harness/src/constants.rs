@@ -274,3 +274,29 @@ pub const BUILTIN_DIFF_CONTEXT_MAX_LINES: usize = 20;
 
 /// 内置文件工具单次调用超时（毫秒；进程内 Rust，给统一 ToolDef 用）。
 pub const BUILTIN_TOOL_TIMEOUT_MS: u64 = 30_000;
+
+// ---------------------------------------------------------------------------
+// v0.4/D3 内置搜索工具 grep/glob（DR-013 §3.6/§3.7/§8；00 §0.5 append-only）
+// ---------------------------------------------------------------------------
+
+/// grep 结果条数上限（`BUILTIN_SEARCH_MAX_RESULTS` = 1000）。
+pub const BUILTIN_SEARCH_MAX_RESULTS: usize = 1_000;
+
+/// grep/glob 结果字节上限（`BUILTIN_SEARCH_MAX_RESULT_BYTES` = 32 KiB，同
+/// [`BUILTIN_RESULT_MAX_BYTES`]）。
+pub const BUILTIN_SEARCH_MAX_RESULT_BYTES: usize = 32_768;
+
+/// grep 单文件扫描上限（`BUILTIN_SEARCH_MAX_SCAN_BYTES` = 2 MiB）。
+pub const BUILTIN_SEARCH_MAX_SCAN_BYTES: u64 = 2_097_152;
+
+/// grep `max_results` 缺省值（DR-013 §3.6 schema default = 100）。
+pub const BUILTIN_GREP_DEFAULT_RESULTS: usize = 100;
+
+/// glob `max_results` 缺省值（`BUILTIN_GLOB_DEFAULT_RESULTS` = 1000）。
+pub const BUILTIN_GLOB_DEFAULT_RESULTS: usize = 1_000;
+
+/// glob `max_results` 上限（`BUILTIN_GLOB_MAX_RESULTS` = 5000）。
+pub const BUILTIN_GLOB_MAX_RESULTS: usize = 5_000;
+
+/// 单条 grep match `text` 的字节上限（防单行超长撑爆结果；含截断标记）。
+pub const BUILTIN_SEARCH_TEXT_MAX_BYTES: usize = 4_096;
