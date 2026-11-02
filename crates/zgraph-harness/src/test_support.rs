@@ -355,3 +355,54 @@ impl SandboxRunner for FakeSandboxRunner {
         &self.profile_sha256
     }
 }
+
+/// v0.4/D4：会阻塞到被取消的 Fake 沙箱执行器（端到端取消测试用）。
+#[derive(Debug, Default)]
+pub struct BlockingSandboxRunner {
+    started: std::sync::atomic::AtomicBool,
+    profile_sha256: String,
+}
+
+impl BlockingSandboxRunner {
+    /// 新建（记录是否已开始执行）。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            profile_sha256: "b".repeat(64),
+            ..Self::default()
+        })
+    }
+
+    /// 是否已进入 run（说明 agent_loop 真的派发了 bash）。
+    pub fn started(&self) -> bool {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl SandboxRunner for BlockingSandboxRunner {
+    fn run(
+        &self,
+        _request: &BashRequest,
+        control: &ProcessControl,
+    ) -> Result<BashOutcome, ToolFailure> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !control.is_killed() {
+            if std::time::Instant::now() >= deadline {
+                return Err(ToolFailure::new(
+                    "timeout",
+                    "blocking fake runner timed out",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Err(ToolFailure::new(
+            "cancelled",
+            "blocking fake runner cancelled",
+        ))
+    }
+
+    fn profile_sha256(&self) -> &str {
+        &self.profile_sha256
+    }
+}

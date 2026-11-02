@@ -286,8 +286,8 @@ impl BuiltinToolSet {
         }
         let explicit = parse_explicit_env(args.get("env"))?;
         let workspace = self.jail.root().to_path_buf();
-        self.ensure_tmpdir(&workspace)?;
-        let env = build_bash_env(&workspace, &explicit)?;
+        let tmpdir = self.ensure_tmpdir()?;
+        let env = build_bash_env(&workspace, &tmpdir, &explicit)?;
         Ok(BashRequest {
             command: command.to_string(),
             cwd: cwd.path,
@@ -297,32 +297,94 @@ impl BuiltinToolSet {
     }
 
     /// `TMPDIR=<workspace>/.tmp`（创建；best-effort 写入 `.gitignore`）。
-    fn ensure_tmpdir(&self, workspace: &Path) -> Result<(), ToolFailure> {
-        let tmp = workspace.join(".tmp");
-        std::fs::create_dir_all(&tmp).map_err(|error| {
-            ToolFailure::new(
-                "io_error",
-                format!("cannot create TMPDIR '{}': {error}", tmp.display()),
-            )
-        })?;
-        let gitignore = workspace.join(".gitignore");
-        if gitignore.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&gitignore) {
-                if !text
-                    .lines()
-                    .any(|line| line.trim() == ".tmp" || line.trim() == ".tmp/")
-                {
-                    let _ = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&gitignore)
-                        .and_then(|mut file| {
-                            use std::io::Write as _;
-                            writeln!(file, ".tmp/")
-                        });
+    ///
+    /// **REV-108 C1（jail 逃逸修复）**：`.tmp`/`.gitignore` 都必须经 [`WorkspaceJail`]
+    /// 解析（canonicalize + 组件前缀）。恶意 workspace 把它们做成指向 jail 外的
+    /// symlink 时：`.tmp` → fail-closed `path_escape`（绝不使用越界 TMPDIR）；
+    /// `.gitignore` → 跳过并 warn（不 fail bash，但**绝不写 jail 外**）。
+    /// 创建 `.tmp` 后再二次 canonicalize 校验，杜绝 symlink 竞态写外部。
+    fn ensure_tmpdir(&self) -> Result<PathBuf, ToolFailure> {
+        let root = self.jail.root().to_path_buf();
+        let candidate = root.join(".tmp");
+        let tmp = match candidate.symlink_metadata() {
+            Ok(_) => {
+                // 已存在（含 symlink）：经 jail 解析并跟随到真实路径；出根 → path_escape。
+                let resolved = self
+                    .jail
+                    .resolve_any(".tmp", Access::Write)
+                    .map_err(tmpdir_escape_failure)?;
+                if !resolved.is_dir {
+                    return Err(ToolFailure::new(
+                        "invalid_args",
+                        "workspace '.tmp' exists but is not a directory",
+                    ));
                 }
+                resolved.path
             }
+            Err(_) => {
+                // 不存在：父目录是已 canonicalize 的 workspace 根，先创建再二次校验。
+                std::fs::create_dir_all(&candidate).map_err(|error| {
+                    ToolFailure::new(
+                        "io_error",
+                        format!("cannot create TMPDIR '{}': {error}", candidate.display()),
+                    )
+                })?;
+                let resolved = self
+                    .jail
+                    .resolve_any(".tmp", Access::Write)
+                    .map_err(tmpdir_escape_failure)?;
+                if !resolved.is_dir {
+                    return Err(ToolFailure::new(
+                        "path_escape",
+                        "workspace '.tmp' did not resolve to a directory inside the jail",
+                    ));
+                }
+                resolved.path
+            }
+        };
+        self.append_gitignore_if_safe();
+        Ok(tmp)
+    }
+
+    /// best-effort 把 `.tmp/` 追加到 workspace `.gitignore`（不写 jail 外、不 fail bash）。
+    fn append_gitignore_if_safe(&self) {
+        let candidate = self.jail.root().join(".gitignore");
+        if candidate.symlink_metadata().is_err() {
+            return;
         }
-        Ok(())
+        let resolved = match self.jail.resolve(".gitignore", Access::Write) {
+            Ok(resolved) => resolved,
+            Err(failure) => {
+                eprintln!(
+                    "warning: skipping workspace .gitignore update (jail refuses path: {})",
+                    failure.message
+                );
+                return;
+            }
+        };
+        if !resolved.path.is_file() {
+            eprintln!("warning: skipping workspace .gitignore update (not a regular file)");
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(&resolved.path) else {
+            return;
+        };
+        if text
+            .lines()
+            .any(|line| line.trim() == ".tmp" || line.trim() == ".tmp/")
+        {
+            return;
+        }
+        if let Err(error) = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&resolved.path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, ".tmp/")
+            })
+        {
+            eprintln!("warning: cannot update workspace .gitignore: {error}");
+        }
     }
 }
 
@@ -382,30 +444,67 @@ fn parse_explicit_env(value: Option<&Value>) -> Result<BTreeMap<String, String>,
 /// 构建 bash 环境：白名单继承 + jail 强制值 + 显式追加（危险键已拒绝）。
 pub(crate) fn build_bash_env(
     workspace: &Path,
+    tmpdir: &Path,
     explicit: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ToolFailure> {
+    let parent: BTreeMap<String, String> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let value = value.into_string().ok()?;
+            Some((key, value))
+        })
+        .collect();
+    build_bash_env_with_parent(workspace, tmpdir, explicit, &parent)
+}
+
+/// 可注入父进程环境的构建实现（测试用；`LC_*` 全量继承，`LD_*`/`DYLD_*` 永不继承）。
+pub(crate) fn build_bash_env_with_parent(
+    workspace: &Path,
+    tmpdir: &Path,
+    explicit: &BTreeMap<String, String>,
+    parent: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, ToolFailure> {
     let mut env = BTreeMap::new();
     env.insert("HOME".to_string(), workspace.display().to_string());
-    env.insert(
-        "TMPDIR".to_string(),
-        workspace.join(".tmp").display().to_string(),
-    );
+    env.insert("TMPDIR".to_string(), tmpdir.display().to_string());
     env.insert("PATH".to_string(), BASH_FIXED_PATH.to_string());
     env.insert("SHELL".to_string(), "/bin/bash".to_string());
     for key in ENV_WHITELIST {
         if *key == "SHELL" {
             continue;
         }
-        if let Some(value) = std::env::var_os(key) {
-            if let Ok(value) = value.into_string() {
-                env.insert((*key).to_string(), value);
-            }
+        if let Some(value) = parent.get(*key) {
+            env.insert((*key).to_string(), value.clone());
+        }
+    }
+    // DR §3.8：继承全部 `LC_*`（locale 子类），但显式剔除危险键。
+    for (key, value) in parent {
+        if key.starts_with("LC_") && !is_denied_env_key(key) {
+            env.insert(key.clone(), value.clone());
         }
     }
     for (key, value) in explicit {
         env.insert(key.clone(), value.clone());
     }
     Ok(env)
+}
+
+/// `.tmp` 解析失败的包装：jail 越界 → `path_escape`（fail-closed）。
+fn tmpdir_escape_failure(failure: ToolFailure) -> ToolFailure {
+    if matches!(
+        failure.reason.as_str(),
+        "path_escape" | "path_read_only" | "not_regular_file" | "is_directory"
+    ) {
+        ToolFailure::new(
+            "path_escape",
+            format!(
+                "workspace '.tmp' escapes the jail or is not a directory: {}",
+                failure.message
+            ),
+        )
+    } else {
+        failure
+    }
 }
 
 fn valid_env_key(key: &str) -> bool {
@@ -666,7 +765,9 @@ mod tests {
         let mut explicit = BTreeMap::new();
         explicit.insert("LANG".to_string(), "C".to_string());
         explicit.insert("EXTRA".to_string(), "1".to_string());
-        let env = build_bash_env(&workspace, &explicit).expect("env");
+        let tmpdir = workspace.join(".tmp");
+        std::fs::create_dir_all(&tmpdir).expect("tmpdir");
+        let env = build_bash_env(&workspace, &tmpdir, &explicit).expect("env");
         assert_eq!(env.get("HOME"), Some(&workspace.display().to_string()));
         assert_eq!(
             env.get("TMPDIR"),
@@ -676,5 +777,115 @@ mod tests {
         assert_eq!(env.get("SHELL"), Some(&"/bin/bash".to_string()));
         assert_eq!(env.get("LANG"), Some(&"C".to_string()));
         assert_eq!(env.get("EXTRA"), Some(&"1".to_string()));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn tmpdir_symlink_escape_is_fail_closed() {
+        let (workspace, _runner, set) = bash_only_set();
+        let outside = TempDir::new().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(".tmp")).expect("symlink");
+        let before: Vec<String> = std::fs::read_dir(outside.path())
+            .expect("read")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        let error = call_err(&set, json!({"command": "echo hi"}));
+        assert_eq!(error.reason, "path_escape", "{error:?}");
+        let after: Vec<String> = std::fs::read_dir(outside.path())
+            .expect("read")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(before, after, "outside workspace must stay unchanged");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gitignore_symlink_escape_is_skipped_without_writing_outside() {
+        let (workspace, _runner, set) = bash_only_set();
+        let outside = TempDir::new().expect("outside");
+        let victim = outside.path().join("gitignore.txt");
+        std::fs::write(&victim, "target/\n").expect("victim");
+        std::os::unix::fs::symlink(&victim, workspace.path().join(".gitignore")).expect("symlink");
+        let payload = call_ok(&set, json!({"command": "echo hi"}));
+        assert_eq!(payload["exit_code"], json!(0));
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim read"),
+            "target/\n",
+            "jail-external .gitignore must not be modified"
+        );
+        assert!(
+            workspace.path().join(".tmp").is_dir(),
+            "tmpdir created in jail"
+        );
+        // workspace 内真实 .gitignore 仍不受影响（不存在）。
+        assert!(
+            !workspace.path().join(".gitignore").is_file()
+                || std::fs::symlink_metadata(workspace.path().join(".gitignore")).is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tmpdir_symlink_inside_workspace_is_allowed_with_canonical_tmpdir() {
+        let (workspace, runner, set) = bash_only_set();
+        let real = workspace.path().join("real-tmp");
+        std::fs::create_dir_all(&real).expect("real tmp");
+        std::os::unix::fs::symlink(&real, workspace.path().join(".tmp")).expect("symlink");
+        call_ok(&set, json!({"command": "echo hi"}));
+        let requests = runner.requests();
+        let canonical = std::fs::canonicalize(workspace.path()).expect("canonical");
+        assert_eq!(
+            requests[0].env.get("TMPDIR"),
+            Some(&canonical.join("real-tmp").display().to_string())
+        );
+    }
+
+    #[test]
+    fn tmpdir_regular_file_is_rejected() {
+        let (workspace, _runner, set) = bash_only_set();
+        std::fs::write(workspace.path().join(".tmp"), "not a dir").expect("file");
+        let error = call_err(&set, json!({"command": "echo hi"}));
+        assert!(
+            matches!(error.reason.as_str(), "invalid_args" | "path_escape"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn inherits_all_lc_vars_but_never_ld_or_dyld() {
+        let workspace = PathBuf::from("/tmp/ws");
+        let tmpdir = PathBuf::from("/tmp/ws/.tmp");
+        let mut parent = BTreeMap::new();
+        parent.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+        parent.insert("LC_ALL".to_string(), "C".to_string());
+        parent.insert("LC_MESSAGES".to_string(), "zh_CN.UTF-8".to_string());
+        parent.insert("LC_NUMERIC".to_string(), "de_DE.UTF-8".to_string());
+        parent.insert("LD_PRELOAD".to_string(), "/evil.so".to_string());
+        parent.insert(
+            "DYLD_INSERT_LIBRARIES".to_string(),
+            "/evil.dylib".to_string(),
+        );
+        parent.insert("BASH_ENV".to_string(), "/evil.sh".to_string());
+        let env = build_bash_env_with_parent(&workspace, &tmpdir, &BTreeMap::new(), &parent)
+            .expect("env");
+        assert_eq!(env.get("LANG"), Some(&"en_US.UTF-8".to_string()));
+        assert_eq!(env.get("LC_ALL"), Some(&"C".to_string()));
+        assert_eq!(env.get("LC_MESSAGES"), Some(&"zh_CN.UTF-8".to_string()));
+        assert_eq!(env.get("LC_NUMERIC"), Some(&"de_DE.UTF-8".to_string()));
+        assert!(!env.contains_key("LD_PRELOAD"));
+        assert!(!env.contains_key("DYLD_INSERT_LIBRARIES"));
+        assert!(!env.contains_key("BASH_ENV"));
+        assert_eq!(env.get("TMPDIR"), Some(&"/tmp/ws/.tmp".to_string()));
     }
 }

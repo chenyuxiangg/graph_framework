@@ -2110,8 +2110,8 @@ mod tests {
     use super::{
         exit_code_for, graph_agent_using_mcp, graph_has_human, human_recording, is_memory_db,
         lifecycle_detail, llm_call_recorder, output_hash, parse, resolve_builtin_tools,
-        resolve_entry_inputs, Consumed, FakeLlmMode, ParseState, RecordingExecutor, RunArgs,
-        DEFAULT_USER_ID,
+        resolve_entry_inputs, run_in_runtime, Consumed, FakeLlmMode, ParseState, RecordingExecutor,
+        RunArgs, DEFAULT_USER_ID,
     };
     use crate::EXIT_ENTRY_INPUT;
     use serde_json::json;
@@ -2914,5 +2914,43 @@ mod tests {
         .expect("not help");
         assert!(parsed.allow_bash && parsed.allow_network);
         assert_eq!(parsed.exec_paths, vec![PathBuf::from("bin")]);
+    }
+    /// REV-108 N6：`--allow-bash` 预检失败（profile 渲染失败）→ exit 3、**不创建 DB**、
+    /// 不产生 run（预检前移到打开 trace storage 之前）。
+    #[tokio::test]
+    async fn allow_bash_preflight_failure_exits_3_without_creating_db() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = dir.path().join("trace.db");
+        let args = RunArgs {
+            graph: dir.path().join("missing-graph.json"),
+            inputs: "{}".to_string(),
+            user_id: DEFAULT_USER_ID.to_string(),
+            db: Some(db.clone()),
+            assets_dir: Some(dir.path().to_path_buf()),
+            tools_dir: None,
+            skills_dir: None,
+            allow_mcp: false,
+            allow_builtin_tools: false,
+            workspace_dir: Some(dir.path().to_path_buf()),
+            allow_paths: Vec::new(),
+            allow_bash: true,
+            // 不存在的 exec-path → 渲染期 sandbox_profile_invalid（确定性预检失败）。
+            exec_paths: vec![dir.path().join("missing-exec")],
+            allow_network: false,
+            python: None,
+            python_paths: Vec::new(),
+            fake_llm: FakeLlmMode::Off,
+            real: false,
+            record: RecordMode::Hash,
+            stream: false,
+            json: false,
+            quiet: true,
+        };
+        let code = run_in_runtime(&args).await;
+        assert_eq!(code, ExitCode::from(EXIT_ENTRY_INPUT));
+        assert!(
+            !db.exists(),
+            "preflight failure must not create the trace DB"
+        );
     }
 }

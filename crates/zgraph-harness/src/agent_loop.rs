@@ -1137,6 +1137,42 @@ mod tests {
         .await
     }
 
+    /// v0.4/D4：带内置工具集合执行一次 agent_call（取消/工具注册测试用）。
+    async fn execute_with_builtin(
+        agent: &LoadedAgent,
+        fake: &Arc<FakeLlmProvider>,
+        runner: &Arc<FakeToolRunner>,
+        builtin: Arc<BuiltinToolSet>,
+        ctx: &Arc<TestCtx>,
+    ) -> Result<AgentOutput, RunFailure> {
+        let provider: Arc<dyn LlmProvider> = fake.clone();
+        let tool_runner: Arc<dyn ToolRunner> = runner.clone();
+        let inputs = HashMap::from([("message".to_string(), json!("hi"))]);
+        let ports = declared_ports();
+        let node_mapping = BTreeMap::new();
+        let cancel = CancelToken::new(ctx.clone());
+        let budget = Arc::new(AtomicU32::new(0));
+        run_agent(AgentRun {
+            agent,
+            tools_dir: Path::new("/tmp/tools"),
+            provider: &provider,
+            tool_runner: &tool_runner,
+            inputs: &inputs,
+            declared_ports: &ports,
+            node_mapping: &node_mapping,
+            max_iterations: agent.config.max_iterations,
+            node_timeout_ms: agent.config.node_timeout_ms,
+            ctx: ctx.clone(),
+            cancel,
+            recorder: None,
+            skill_view_budget: &budget,
+            mcp: None,
+            builtin: Some(&builtin),
+            tool_call_sink: None,
+        })
+        .await
+    }
+
     fn script(value: Value) -> Arc<FakeLlmProvider> {
         Arc::new(FakeLlmProvider::from_script(value).expect("valid script"))
     }
@@ -2231,5 +2267,46 @@ STEP TWO",
             "tool_calls": [{"call_id": format!("c{index}"), "name": tool_name,
                             "args": {"name": "code-review"}}]
         })
+    }
+    /// REV-108 N5：bash 运行中 run cancel → `RunFailure::Cancelled`（不是 TOOL_ERROR），
+    /// 且取消会先请求 kill 进程组（Blocking runner 观察到控制标志后退出）。
+    #[tokio::test]
+    async fn bash_cancel_propagates_run_cancelled() {
+        use crate::test_support::BlockingSandboxRunner;
+
+        let sandbox = BlockingSandboxRunner::new();
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let set = crate::BuiltinToolSet::new_with_runner(
+            &std::fs::canonicalize(workspace.path()).expect("canonical"),
+            &[],
+            false,
+            sandbox.clone(),
+        )
+        .expect("bash-only set");
+        let bash_tool = set
+            .definitions()
+            .iter()
+            .find(|tool| tool.name == "builtin__bash")
+            .cloned()
+            .expect("bash tool def");
+        let fake = script(json!({"calls": [
+            tool_calls(json!([{"call_id": "b1", "name": "builtin__bash",
+                               "args": {"command": "sleep 10"}}])),
+            text("never")
+        ]}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let agent = loaded_agent(vec![bash_tool], 5, 1, "role");
+        let ctx = TestCtx::new();
+        let canceller = ctx.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            canceller.request_cancel();
+        });
+        let failure = execute_with_builtin(&agent, &fake, &runner, set, &ctx)
+            .await
+            .expect_err("cancelled");
+        assert_eq!(failure, RunFailure::Cancelled);
+        assert!(sandbox.started(), "bash runner was dispatched");
+        let _ = handle.await;
     }
 }

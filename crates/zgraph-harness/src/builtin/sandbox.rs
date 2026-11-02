@@ -109,9 +109,21 @@ const PROFILE_TEMPLATE: &str = r#"(version 1)
 ;;; ---------- 只读白名单（--allow-path） ----------
 @ALLOW_PATHS@
 
+;;; ---------- exec 目录读取（--allow-exec-path 同步授予该目录只读） ----------
+@EXEC_READS@
+
 ;;; ---------- 网络（默认全拒；--allow-network 时放开） ----------
 @NETWORK@
 "#;
+
+/// SBPL 模板占位符（渲染前路径中禁止出现；防二次替换注入，REV-108 C2）。
+const TEMPLATE_TOKENS: [&str; 5] = [
+    "@WORKSPACE@",
+    "@EXEC_PATHS@",
+    "@ALLOW_PATHS@",
+    "@EXEC_READS@",
+    "@NETWORK@",
+];
 
 /// 网络放开时的追加 block（spike verify.py network allow 分支）。
 const NETWORK_ALLOW_BLOCK: &str = r#"(allow network*)
@@ -145,7 +157,12 @@ pub(crate) struct RenderedProfile {
     pub sha256: String,
 }
 
-/// 渲染 profile（路径 realpath + 注入防护；失败 → `HARNESS_CONFIG_LOAD`）。
+/// 渲染 profile（路径 realpath + 注入防护 + **单次**安全模板替换；失败 →
+/// `HARNESS_CONFIG_LOAD{reason:"sandbox_profile_invalid"}`）。
+///
+/// REV-108 C2：路径 realpath 后拒绝包含任一模板 token（`@WORKSPACE@` 等）或
+/// `"`/反斜杠/换行/控制字符；渲染采用一次扫描替换，插入的路径值不会被再次扫描，
+/// 因而不存在「路径把 SBPL 片段注入到已渲染引号内」的二次替换。
 pub(crate) fn render_profile(
     config: &SandboxProfileConfig,
 ) -> Result<RenderedProfile, HarnessError> {
@@ -158,10 +175,13 @@ pub(crate) fn render_profile(
         ));
     }
     let mut exec_lines = String::new();
+    let mut exec_reads = Vec::new();
     for path in &config.exec_paths {
-        exec_lines.push_str(&format!(
-            "\n  (subpath \"{}\")",
-            render_path(path, "exec_path")?
+        let rendered = render_path(path, "exec_path")?;
+        exec_lines.push_str(&format!("\n  (subpath \"{rendered}\")"));
+        // REV-108 N2：exec-path 还需可读（二进制/动态库），否则动态加载器读不到。
+        exec_reads.push(format!(
+            "(allow file-read* file-test-existence (subpath \"{rendered}\"))"
         ));
     }
     let network = if config.allow_network {
@@ -169,15 +189,40 @@ pub(crate) fn render_profile(
     } else {
         "(deny network*)"
     };
-    let text = PROFILE_TEMPLATE
-        .replace("@WORKSPACE@", &workspace)
-        .replace("@EXEC_PATHS@", &exec_lines)
-        .replace("@ALLOW_PATHS@", &allow_lines.join("\n"))
-        .replace("@NETWORK@", network);
+    let text = fill_template(&[
+        ("@WORKSPACE@", workspace.as_str()),
+        ("@EXEC_PATHS@", exec_lines.as_str()),
+        ("@ALLOW_PATHS@", allow_lines.join("\n").as_str()),
+        ("@EXEC_READS@", exec_reads.join("\n").as_str()),
+        ("@NETWORK@", network),
+    ]);
     Ok(RenderedProfile {
         sha256: sha256_hex(text.as_bytes()),
         text,
     })
+}
+
+/// 单次扫描替换模板 token；插入值不再参与后续匹配（防注入）。
+fn fill_template(pairs: &[(&str, &str)]) -> String {
+    let mut output = String::with_capacity(PROFILE_TEMPLATE.len() + 512);
+    let mut rest = PROFILE_TEMPLATE;
+    loop {
+        let mut earliest: Option<(usize, &str, &str)> = None;
+        for (token, value) in pairs {
+            if let Some(index) = rest.find(*token) {
+                if earliest.is_none_or(|(best, _, _)| index < best) {
+                    earliest = Some((index, *token, *value));
+                }
+            }
+        }
+        let Some((index, token, value)) = earliest else {
+            output.push_str(rest);
+            return output;
+        };
+        output.push_str(&rest[..index]);
+        output.push_str(value);
+        rest = &rest[index + token.len()..];
+    }
 }
 
 /// 渲染单个沙箱路径：realpath（`/private/...`）+ 绝对 + 拒绝注入字符。
@@ -203,6 +248,12 @@ fn render_path(path: &Path, label: &str) -> Result<String, HarnessError> {
     {
         return Err(profile_error(format!(
             "sandbox {label} path '{}' contains characters not allowed in SBPL",
+            path.display()
+        )));
+    }
+    if let Some(token) = TEMPLATE_TOKENS.iter().find(|token| text.contains(**token)) {
+        return Err(profile_error(format!(
+            "sandbox {label} path '{}' contains reserved template token {token}",
             path.display()
         )));
     }
@@ -248,6 +299,9 @@ impl SandboxProbe for SandboxExecProbe {
 }
 
 /// 真实探测实现：`sandbox-exec -p <profile> /usr/bin/true`（10s 超时）。
+///
+/// REV-108 N7：stderr 由独立线程**并发 drain**（防 pipe 满阻塞）；超时按进程组
+/// kill（`process_group(0)` + killpg SIGKILL），避免探针子进程残留。
 fn probe_sandbox_exec(profile: &str) -> ProbeOutcome {
     let path = Path::new(SANDBOX_EXEC_PATH);
     if !path.is_file() {
@@ -264,50 +318,96 @@ fn probe_sandbox_exec(profile: &str) -> ProbeOutcome {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    match command.spawn() {
-        Ok(child) => {
-            let deadline = Instant::now() + Duration::from_millis(BASH_PREFLIGHT_TIMEOUT_MS);
-            let mut child = child;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        let mut stderr = String::new();
-                        if let Some(mut pipe) = child.stderr.take() {
-                            let _ = pipe.read_to_string(&mut stderr);
-                        }
-                        return ProbeOutcome {
-                            exit_code: status.code(),
-                            stderr,
-                            spawn_error: None,
-                        };
-                    }
-                    Ok(None) => {
-                        if Instant::now() >= deadline {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return ProbeOutcome {
-                                spawn_error: Some(format!(
-                                    "sandbox preflight timed out after {BASH_PREFLIGHT_TIMEOUT_MS} ms"
-                                )),
-                                ..ProbeOutcome::default()
-                            };
-                        }
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => {
-                        return ProbeOutcome {
-                            spawn_error: Some(format!("sandbox preflight wait failed: {error}")),
-                            ..ProbeOutcome::default()
-                        };
-                    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return ProbeOutcome {
+                spawn_error: Some(format!("cannot execute {SANDBOX_EXEC_PATH}: {error}")),
+                ..ProbeOutcome::default()
+            };
+        }
+    };
+    let pid = child.id() as i32;
+    let (sender, receiver) = mpsc::channel();
+    if let Some(pipe) = child.stderr.take() {
+        spawn_probe_stderr_drain(pipe, sender);
+    }
+    let deadline = Instant::now() + Duration::from_millis(BASH_PREFLIGHT_TIMEOUT_MS);
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break ProbeOutcome {
+                    exit_code: status.code(),
+                    stderr: String::new(),
+                    spawn_error: None,
                 }
             }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    #[cfg(unix)]
+                    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break ProbeOutcome {
+                        spawn_error: Some(format!(
+                            "sandbox preflight timed out after {BASH_PREFLIGHT_TIMEOUT_MS} ms"
+                        )),
+                        ..ProbeOutcome::default()
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                #[cfg(unix)]
+                let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+                let _ = child.kill();
+                break ProbeOutcome {
+                    spawn_error: Some(format!("sandbox preflight wait failed: {error}")),
+                    ..ProbeOutcome::default()
+                };
+            }
         }
-        Err(error) => ProbeOutcome {
-            spawn_error: Some(format!("cannot execute {SANDBOX_EXEC_PATH}: {error}")),
-            ..ProbeOutcome::default()
-        },
-    }
+    };
+    // 子进程退出后回收 stderr（线程已在 drain；最多再等 1s）。
+    let stderr = match receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(text) => text,
+        Err(_) => {
+            #[cfg(unix)]
+            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+            receiver
+                .recv_timeout(Duration::from_millis(200))
+                .unwrap_or_default()
+        }
+    };
+    ProbeOutcome { stderr, ..outcome }
+}
+
+/// stderr 并发 drain（最多保留 64 KiB，其余读空丢弃；线程退出即关闭）。
+fn spawn_probe_stderr_drain(mut pipe: impl Read + Send + 'static, sender: mpsc::Sender<String>) {
+    std::thread::spawn(move || {
+        const KEEP: usize = 64 * 1024;
+        let mut kept: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; 8_192];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    if kept.len() < KEEP {
+                        let room = KEEP - kept.len();
+                        let take = read.min(room);
+                        kept.extend_from_slice(&buffer[..take]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = sender.send(String::from_utf8_lossy(&kept).to_string());
+    });
 }
 
 /// 用给定 probe 做 preflight；失败按 exit 71/65/其它分类为三种 `HARNESS_CONFIG_LOAD`。
@@ -751,6 +851,11 @@ mod tests {
             exec_section.contains(&exec.to_string_lossy().to_string()),
             "{exec_section}"
         );
+        // REV-108 N2：exec path 同时授予 file-read*（二进制/动态库可读）。
+        let exec_read_text = exec.to_string_lossy().to_string();
+        let exec_read_line =
+            format!("(allow file-read* file-test-existence (subpath \"{exec_read_text}\"))");
+        assert!(rendered.text.contains(&exec_read_line), "{}", rendered.text);
         assert!(rendered.text.contains("(deny network*)"));
         assert!(!rendered.text.contains("@WORKSPACE@"));
         assert!(!rendered.text.contains("@ALLOW_PATHS@"));
@@ -1020,17 +1125,24 @@ mod tests {
                     "unexpected real-sandbox classification: {reason}: {}",
                     error.message
                 );
+                assert!(
+                    !error.message.is_empty(),
+                    "preflight failure must carry diagnostics (stderr drain)"
+                );
                 eprintln!(
                     "[D4 real-sandbox] OS sandbox unavailable in this environment: \
-                     reason={reason} (fail-closed verified). Run \
+                     reason={reason} (fail-closed verified; diagnostics: {}). Run \
                      crates/zgraph-harness/scripts/verify-sandbox.sh in a normal terminal \
-                     to exercise the isolation assertions."
+                     to exercise the isolation assertions.",
+                    error.message
                 );
             }
             Ok(_) => {
                 let runner = MacOsSandbox::new(&workspace, &[], &BashOptions::default())
                     .expect("preflight already succeeded");
-                let env = build_bash_env(&workspace, &BTreeMap::new()).expect("env");
+                let tmpdir = workspace.join(".tmp");
+                std::fs::create_dir_all(&tmpdir).expect("tmpdir");
+                let env = build_bash_env(&workspace, &tmpdir, &BTreeMap::new()).expect("env");
                 let run = |command: &str| {
                     runner
                         .run(
@@ -1070,5 +1182,111 @@ mod tests {
                 );
             }
         }
+    }
+    /// REV-108 C2：路径含 SBPL 模板 token → 渲染前拒绝（防二次替换注入）。
+    #[test]
+    fn rejects_template_tokens_in_rendered_paths() {
+        for token in [
+            "@WORKSPACE@",
+            "@EXEC_PATHS@",
+            "@ALLOW_PATHS@",
+            "@EXEC_READS@",
+            "@NETWORK@",
+        ] {
+            let parent = TempDir::new().expect("parent");
+            let workspace = parent.path().join(token);
+            std::fs::create_dir_all(&workspace).expect("workspace dir");
+            let error = render_profile(&SandboxProfileConfig {
+                workspace,
+                allow_paths: Vec::new(),
+                exec_paths: Vec::new(),
+                allow_network: false,
+            })
+            .expect_err(token);
+            assert_eq!(
+                error.detail["reason"],
+                serde_json::json!("sandbox_profile_invalid"),
+                "{token}"
+            );
+            assert!(
+                error.message.contains("reserved template token"),
+                "{token}: {}",
+                error.message
+            );
+        }
+        // allow-path / exec-path 同样拒绝。
+        let (_dir, workspace) = temp_canonical();
+        let parent = TempDir::new().expect("parent");
+        let bad_allow = parent.path().join("@ALLOW_PATHS@");
+        std::fs::create_dir_all(&bad_allow).expect("allow dir");
+        let error = render_profile(&SandboxProfileConfig {
+            workspace: workspace.clone(),
+            allow_paths: vec![bad_allow],
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect_err("allow token");
+        assert_eq!(
+            error.detail["reason"],
+            serde_json::json!("sandbox_profile_invalid")
+        );
+        let bad_exec = parent.path().join("@NETWORK@");
+        std::fs::create_dir_all(&bad_exec).expect("exec dir");
+        let error = render_profile(&SandboxProfileConfig {
+            workspace,
+            allow_paths: Vec::new(),
+            exec_paths: vec![bad_exec],
+            allow_network: false,
+        })
+        .expect_err("exec token");
+        assert_eq!(
+            error.detail["reason"],
+            serde_json::json!("sandbox_profile_invalid")
+        );
+    }
+
+    #[test]
+    fn rejects_backslash_and_control_chars_in_paths() {
+        let parent = TempDir::new().expect("parent");
+        let backslash = parent.path().join("bad\\name");
+        std::fs::create_dir_all(&backslash).expect("backslash dir");
+        let error = render_profile(&SandboxProfileConfig {
+            workspace: backslash,
+            allow_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect_err("backslash");
+        assert_eq!(
+            error.detail["reason"],
+            serde_json::json!("sandbox_profile_invalid")
+        );
+
+        let newline = parent.path().join("bad\nname");
+        std::fs::create_dir_all(&newline).expect("newline dir");
+        let error = render_profile(&SandboxProfileConfig {
+            workspace: newline,
+            allow_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect_err("newline");
+        assert_eq!(
+            error.detail["reason"],
+            serde_json::json!("sandbox_profile_invalid")
+        );
+    }
+
+    /// REV-108 N7：preflight stderr drain 线程在有界队列外继续读空，不阻塞、不无限增长。
+    #[test]
+    fn probe_stderr_drain_is_bounded_and_completes() {
+        let payload = vec![b'x'; 200_000];
+        let (sender, receiver) = mpsc::channel();
+        spawn_probe_stderr_drain(std::io::Cursor::new(payload), sender);
+        let text = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("drain thread finished");
+        assert_eq!(text.len(), 64 * 1024, "only first 64 KiB retained");
+        assert!(text.bytes().all(|byte| byte == b'x'));
     }
 }
