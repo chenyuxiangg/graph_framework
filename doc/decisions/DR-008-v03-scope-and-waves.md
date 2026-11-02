@@ -126,3 +126,17 @@ V1 docs 设计冻结（本批，REV-096）
 | 15 | 适配器顺序 | **Codex 先**（exec --json）；**DSH ACP best-effort 后**（`dsh --profile acp`；headless/sdk 不可依赖） |
 
 > 本表取代原「待确认」状态；W5/v0.3 范围已按裁决固定。
+
+## 9. 实现执行记录（as-built，2026-11-02，REV-101；只追加）
+
+| 波次 | 分支/实现提交 | 评审 | 合并点（main） | 测试证据 |
+|---|---|---|---|---|
+| V1 | `docs/docs-v03-design`（`2babdc8`+`80a42c1`+`7659ec8`） | REV-096（有条件通过 → C1–C5/P1 关闭后通过） | `29ee6d3` | check.sh |
+| V2 skills | `feat/harness-skills`：`cfe6280`+`f286fe8`+`6844573` | REV-097（含跨模块 Lead 第二评审） | `69aeb87` | harness 默认 226/0/1；skills 18 例；workspace 996/0/3 |
+| V3 MCP | `feat/harness-mcp`：`18bf405`+`815abea`+`15f3d18`+`23fa568` | REV-098（含跨模块 Lead 第二评审） | `23fa568` | harness 226/0/1、features mcp 225/0/1；rmcp 3.8.0 feature-gated |
+| V4 plugin | `feat/harness-plugin`：`0584931`+`3bbe4b5` | REV-099（含跨模块 Lead 第二评审） | `6515f12` | harness 226/0/1；workspace 996/0/3；pytest 180；fake external + Codex adapter + DSH ACP 骨架 |
+| V5a e2e / V5b docs | 本批（docs）与 e2e 并行 | REV-101（docs） | 待合并 | AC-18/19/20 待 V5a 回写 |
+
+- 三能力均按 V1 冻结实现；**V2→V3→V4 串行**（同模块 `crates/zgraph-harness`）确认。
+- 默认路径/兼容红线保持；实现偏差见 DR-009/010/011 执行记录与 05 §5.14.4。
+- 遗留：真实 Codex/DSH 环境未验证（adapter 骨架，best-effort）；MCP 真实 stdio/HTTP/进程组由 V5a 覆盖；P2/P3 入台账（ISSUE-156+）。

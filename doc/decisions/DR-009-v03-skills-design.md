@@ -178,3 +178,10 @@ Skill directory: <assets>/skills/pdf-processing
 | 5 | 资产/env | `<assets-dir>/skills` + `ZGRAPH_SKILLS`；`--skills-dir` 最高优先 |
 | 6 | 错误口径 | 被引用不存在 → `HARNESS_CONFIG_LOAD{reason:"skill_not_found"}`；存在但非法 → `HARNESS_SKILL_INVALID`；**不新增 `HARNESS_SKILL_NOT_FOUND`**；未被引用非法 → 跳过+warn |
 | 7 | 不可信数据/`allowed-tools` | 正文按不可信数据注入；`allowed-tools` 仅记录不授权；默认无 skills 路径逐字节不变 |
+
+## 11. 实现执行记录（as-built，2026-11-02，REV-101；只追加）
+
+- **分支/提交**：`feat/harness-skills`：`cfe6280`（发现/注入/skill_view）+ `f286fe8`（run 级预算，REV-097 C1）+ `6844573`（wildcard 语义，P2①）；评审 REV-097（含跨模块 Lead 第二评审）；合并 `69aeb87`。
+- **实测**：harness **226/0/1**；skills 测试 **18 例**；既有 workspace 996/0/3；无 skills system prompt 逐字节不变；catalog 排序/4096/省略标记；`skill_view` enum+`additionalProperties:false`、正文 32768 **字符**（非 bytes；非 ASCII 实际字节可略超）、`MAX_SKILL_VIEWS=5` run 级共享、超限 `TOOL_ERROR{reason:"view_budget"}`、正文不进 trace（仅 chars）。
+- **实现口径/偏差**：`SKILL_BODY_MAX_CHARS` 按**字符**（REV-097 P3）；L2 `--record=full` 的 `llm_calls.request_json` 是否含正文待 AC-18 e/V5a 确认（REV-097 P2 N2）；`skill_view` 输出 `Skill directory: <name>`（未含相对路径，REV-097 P3 N3）；YAML 子集不支持块标量（N6）；wildcard `"*"` 的非法/超限 warn 口径待跟进（N1）。
+- **已知限制**：真实资产兼容/YAML 块标量、L2 正文口径、目录条目上限等 P2/P3 入台账（ISSUE-156+）；AC-18 实测用例名/计数待 V5a 回写。

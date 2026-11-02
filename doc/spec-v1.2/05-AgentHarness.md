@@ -100,6 +100,7 @@ Memory 检索/写入（stub 返回空）、KB 检索（stub 返回空）、多�
 >
 > **与 04 的边界**：04 §4.7 的 R1 ③ 曾在图加载期收集 `agent_call` 的 skill 符号；按 02 §2.6.3/§2.11 P-02-07 的裁定与 00 §0.8 的分工，**tools/skills 归 Harness Loading**（`HARNESS_CONFIG_LOAD`/`HARNESS_UNKNOWN_TOOL`），图加载期不解析。本分册按此执行。
 > **v0.3（M8）V1 设计冻结草案（2026-11-01，REV-096）**：新增 **skills**（Agent Skills 索引/按需加载，DR-009）、**MCP 工具**（stdio + Streamable HTTP，DR-010）、**可插拔 harness**（`AgentProvider` + 子进程协议，DR-011）；均 additive、默认路径（无配置）逐字节不变；实现 V2–V4，as-built 由 V5 回写。
+> **v0.3 实现回写（2026-11-02，REV-101）**：as-built——skills（V2/REV-097）、MCP（V3/REV-098）、可插拔 harness（V4/REV-099）已合并；默认（无配置）行为/输出逐字节不变；实现偏差与实测见 **§5.14.4**。
 
 ### 5.2.2 Schema（字段级，v1 最终版）
 
@@ -1462,3 +1463,25 @@ pub trait AgentProvider: Send + Sync {
 - Codex/DSH：薄 adapter（外部进程；不嵌入 Codex crate/不引入 DSH loop）；**Codex 先**（`exec --json`/`--output-last-message`；无 token delta、iterations=1、退出码仅 0/1、cached tokens 丢弃）；**DSH ACP best-effort**（`dsh --profile acp`；ACP 有 chunk 通道但 DSH 只发 committed 消息；headless `--json`/sdk 不可依赖）；真实适配器不阻塞发布；**`StopReason` 不新增**（`Other{raw}`）。
 
 > **2026-07-28 ACP 修正（REV-096）**：05 §5.9.4 旧结论「ACP 只上线语义事件、拿不到 token delta」修正为：ACP 协议层有 `agent_message_chunk`/`agent_thought_chunk`，是 **DSH 服务端**选择只发 committed 消息（raw provider deltas 不上线）→ v0.3 按「一条消息一次 delta」降级，不是协议缺失。
+
+### 5.14.4 v0.3 实现回写（as-built，2026-11-02，REV-101；只追加）
+
+| 能力 | 实现分支/提交 | 评审 | 证据（实测） |
+|---|---|---|---|
+| skills | `feat/harness-skills`：`cfe6280` + `f286fe8`（run 级预算）+ `6844573`（wildcard） | REV-097（含跨模块 Lead 第二评审） | harness 默认 226/0/1；skills 18 例；catalog 4096/正文 32768 chars/`MAX_SKILL_VIEWS=5`/`MAX_SKILLS=16`；`skill_view` 仅 chars、无正文全文；默认无 skills system prompt 逐字节不变 |
+| MCP | `feat/harness-mcp`：`18bf405` + `815abea`（run 末关闭）+ `15f3d18`（per-agent plan/错误码/脱敏）+ `23fa568`（函数名归一化） | REV-098（含跨模块 Lead 第二评审） | harness 默认 226/0/1、`--features mcp` 225/0/1；workspace 996/0/3；rmcp 3.8.0（feature-gated）；默认证书/路径零进程 |
+| harness 插件 | `feat/harness-plugin`：`0584931` + `3bbe4b5`（C1–C3） | REV-099（含跨模块 Lead 第二评审） | harness 226/0/1；workspace 996/0/3；pytest 180；fake external 真链路 + Codex adapter；DSH ACP 骨架 |
+
+**V4 实现偏差（as-built；均为评审已接受）**
+
+1. **`AgentProvider::run` 返回 `RunFailure`**（非设计稿 `HarnessError`）：builtin 需逐字节保留 `Cancelled`/`Timeout` 语义（对应 `NodeError::Cancelled`/`NODE_TIMEOUT`）；`RunFailure` 为 M4 既有出口类型（`provider.rs`）。
+2. **`AgentProviderKind` 仅 `Builtin | Subprocess`**（无 Codex/ACP 值）；Codex/DSH 经 `Subprocess` + adapter 实现（Open/Closed 扩展面）。
+3. **subprocess `protocol` 必填且仅接受 `"zgraph-harness/1"`**（配置解析 fail-closed；`HARNESS_PLUGIN_PROTOCOL` 常量双写 `v:1`）。
+4. **reason 集合实现口径**：`HARNESS_PLUGIN_ERROR{reason}` 实现为 `spawn_failed`/`handshake`/`version`/`protocol`/`result_invalid`/`line_too_large`/`output_limit`/`event_limit`/`exit_nonzero`/`timeout`（`timeout` 不单列码）；`HARNESS_MCP_ERROR{reason}` 实现为 `config_invalid`/`not_allowed`/`server_not_found`/`init_failed`/`protocol_version`/`tool_not_found`/`name_conflict`/`http_insecure`/`input_required_unsupported`；`skill_view` 预算/IO 走 `TOOL_ERROR{reason}`。
+5. **能力冲突仅节点级 `max_iterations`**：`provider≠builtin` 时与 `tools`/`skills`/`mcp` 冲突 + **节点级 `AgentConfig.max_iterations`** 冲突 → `HARNESS_CONFIG_LOAD{reason:"provider_capability_conflict"}`（全局默认 `DEFAULT_MAX_ITERATIONS` 不算冲突）。
+6. **同 run 同 provider mutex 串行**：`SubprocessHarness` 对 `(run_id, provider)` 用 mutex 串行执行（adapter 每 run 每 provider 常驻）；不并行多节点。
+7. **`llm_calls` 外部节点口径**：每节点由框架写 **1 条** `llm_calls`（request=`provider/agent_id/session_key/inputs_hash`，response=四字段+`event_count`）；不写原始 JSONL/正文全文；不双重写（adapter 不写 trace/llm_calls）。
+8. **常数落地**：00 §0.5 已补 `MCP_TOOLS_LIST_MAX_BYTES`/`MCP_MRTR_MAX_ROUNDS`/`MCP_STDERR_MAX_BYTES`/`MCP_MAX_RESTARTS_PER_RUN`/`MAX_MCP_*`/`HARNESS_PLUGIN_PROTOCOL*`/`HARNESS_PLUGIN_MAX_INVALID_LINES`/skills 字段/资源上限；`SKILL_BODY_MAX_CHARS` 按**字符**口径（非 ASCII 可能略超 32 KiB，见 REV-097 P3）。
+9. **`plan`/`usage_update`**：实现把 `plan` 当未知 event 忽略+warn（REV-099 N1 建议改 progress）；`usage_update` 忽略（不新增 kind）；待 V4 后续/台账。
+
+**保留的已知限制（V5a/发布文档）**：真实 Codex/DSH 环境未验证（adapter 骨架，best-effort；release notes 标注）；MCP 真实 stdio/HTTP 传输与进程组 kill 由 V5a e2e 覆盖；skills L2 `llm_calls.request_json` 是否含正文待 AC-18 e 实测口径确认；`max_items`/8 MiB 总输出等边界见 ISSUE 台账。

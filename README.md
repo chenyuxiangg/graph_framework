@@ -10,16 +10,17 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：v0.2.0 已发布（M0–M7 完成）
+## 当前状态：v0.3.0 发布收口（M8：skills + MCP + 可插拔 harness）
 
-**v0.2.0**（tag `v0.2.0`；发布说明 `dist/RELEASE_NOTES-v0.2.0.md`，产物 `dist/zgraph-v0.2.0-*.tar.gz` + sha256，由 Lead 构建）：
+**v0.3.0（M8）**：能力扩展三件已实现并合并（V2 skills / V3 MCP / V4 harness 插件）：
 
-- **内核与执行**：Rust 内核 + Python 子进程 worker；DSL 1.0 / R1–R18（19 个 DSL 码）；事件循环 + gate/内存通道 + SQLite trace v6。
-- **SOP 与能力**：software_team SOP v1/v1.1（approved/rework）+ **动态 N `foreach`**（W4b，AC-17 a–j）；**人工评审 human decide**（W3a，AC-16）；每节点扇出上限（W2b，AC-15）；L1/L2 回放。
-- **测试**：`cargo test --workspace` **915 passed / 0 failed / 3 ignored**；e2e **106/0/2**（`dynamic_fanout` **21/0**，6 连跑稳定）；pytest **170 passed**（`pytest -q` 实跑；collect-only 170 tests）。
-- **性能基线**：[`doc/perf-baseline-v0.2.txt`](doc/perf-baseline-v0.2.txt)（customer_ticket +17.3%、10 并发 +16.0%、SOP smoke -14.8%，均 ≤20% 门禁内）。
-- **已知限制**：ISSUE-112（SOP full-60 运行期无确定性 fake-LLM 基线，发布例外）；**W3b durable resume 不做**（用户 2026-11-01 决定）；W5 共享评审队列延至 v0.3；P3 清理项见 [issues](doc/issues.md) ISSUE-143–150。
-- **下一步**：v0.3 规划（W5 共享评审队列）+ 清理 ISSUE-112/143–150；详见 [DR-004](doc/decisions/DR-004-v02-scope-and-waves.md) §4/§10 与 [progress](doc/progress.md)。
+- **skills**：`<assets-dir>/skills/<name>/SKILL.md`（frontmatter 校验）、system 仅注入 catalog、`skill_view(name)` 按需加载正文（32K chars、run 级 5 次预算）、`--skills-dir`/`ZGRAPH_SKILLS`；不执行 skill 脚本、正文按不可信数据。
+- **MCP**：rmcp 3.8.0 **双 era**（`2026-07-28` 无状态 + `2025-11-25` legacy）、stdio + Streamable HTTP、`mcp_servers.json`、`mcp__<server>__<tool>`（必须显式进 `AgentConfig.tools`）、`--allow-mcp`、静态 env Bearer、默认 https；trace **不 v7**。
+- **可插拔 harness**：`AgentProvider`（Builtin 默认 / Subprocess）、`zgraph-harness/1` NDJSON 协议、Codex adapter（`exec --json`/`--output-last-message`；无 token delta、iterations=1、cached tokens 丢弃）、DSH ACP 骨架；外部 harness 不写 trace/状态机、L2 不重跑。
+- **测试（已实测）**：`cargo test -p zgraph-harness` **226/0/1**（`--features mcp` 225/0/1）；`cargo test --workspace` **996/0/3**；pytest **180**；e2e/AC-18/19/20 用例名与计数待 V5a e2e 合并后回写（本 README 不预填）。
+- **发布产物**：`dist/zgraph-v0.3.0-*.tar.gz` + sha256 由发布流程构建；性能基线由发布收口实测（v0.2 基线见 [`doc/perf-baseline-v0.2.txt`](doc/perf-baseline-v0.2.txt)，v0.3.0 基线待发布确认）。
+- **已知限制**：真实 Codex/DSH 环境**未验证**（adapter 骨架，release notes 标注）；W5 共享评审队列延至 v0.4；P2/P3 台账见 [issues](doc/issues.md) ISSUE-156–163。
+- **下一步**：v0.4（M9）W5 共享评审队列 + ISSUE 清理；详见 [DR-008](doc/decisions/DR-008-v03-scope-and-waves.md) / [progress](doc/progress.md)。
 
 ## 快速开始
 
