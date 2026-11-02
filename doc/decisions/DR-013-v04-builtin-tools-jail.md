@@ -177,7 +177,7 @@
 ```
 
 - **必须**在 OS 沙箱内执行（§5）；cwd 必须在 jail 内（canonicalize）；`TMPDIR=<workspace>/.tmp`（创建、gitignore）。
-- 超时/取消 → kill **进程组**；stdout/stderr 各 cap 32 KiB（截断标记）；结果 `{exit_code, stdout, stderr, truncated, sandbox:"macos-sandbox-exec", duration_ms}`。
+- 超时/取消 → kill **进程组**；stdout/stderr **各 16 KiB head+tail（truncated 标记；drain 上限 2 MiB）**；结果 `{exit_code, stdout, stderr, truncated, sandbox:"macos-sandbox-exec", duration_ms}`。
 - 非 0 退出是**正常工具结果**（喂回 LLM，不 fail run）；沙箱启动失败/不可用 → fail-closed（§5.3）。
 - 网络默认 deny；`--allow-network` 显式开启（全局，v0.4 不做域名白名单）。
 - 不提供 `shell` 选项（固定 `/bin/bash --noprofile --norc -c`）；env 仅白名单（HOME/TMPDIR/PATH/LANG/LC_ALL/SHELL/USER/LOGNAME/DEVELOPER_DIR/SDKROOT）+ 显式 `env`；不写 token。
@@ -287,7 +287,7 @@
 | AC-21 | c | edit 唯一匹配、0/多匹配失败不改、replace_all |
 | AC-21 | d | apply_patch 多文件原子（任一失败全不改）、strip、unsupported |
 | AC-21 | e | diff 生成/空 diff；jail 越界拒绝 |
-| AC-21 | f | `..`/symlink 出根/绝对路径越界 → `path_escape`；`--allow-path` 白名单生效 |
+| AC-21 | f | `..`/symlink 出根/绝对路径越界 → `path_escape`；**allow-path 只读**（可读）；write/edit/apply_patch 写 allow-path → `TOOL_ERROR{path_read_only}` 负例；hardlink/别名风险文档化 |
 | AC-21 | g | 默认（无 opt-in）不注册/无副作用；`AgentConfig.tools` 白名单语义不变 |
 | AC-22 | a | grep regex/fixed/大小写/glob/单文件上限 |
 | AC-22 | b | `.gitignore`/隐藏/二进制策略；结果排序确定 |

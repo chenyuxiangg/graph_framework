@@ -1512,7 +1512,7 @@ pub trait AgentProvider: Send + Sync {
 - 命令固定 `/bin/bash --noprofile --norc -c`；env 白名单重建（剔除 `BASH_ENV`/`LD_*`/`DYLD_*` 等）；stdin=null；setsid+killpg（SIGTERM 2s→SIGKILL）；drain 2 MiB、结果 16 KiB head+tail。
 - 无沙箱 fallback；**嵌套 Seatbelt（exit 71）→ `HARNESS_CONFIG_LOAD{reason:"sandbox_nested"}`，CLI run 预检失败 → exit 3、不产生 run**；profile 非法（exit 65）→ `sandbox_profile_invalid`；配置/启动前不可用 → `sandbox_unavailable`（Crashed）；运行期 → `TOOL_ERROR{reason:"sandbox_failure"}`；**零新码**。
 - 平台：macOS 26.6 实测；**Linux/Windows 不支持（fail-closed，文档化）**；sandbox-exec DEPRECATED（风险登记）；性能 profile ≈11 ms、每条 bash +22–40 ms（仅 bash）。
-- bash 超时/取消 → kill 进程组；stdout/stderr 各 32 KiB cap；cwd 必须在 jail 内；环境白名单。
+- bash 超时/取消 → kill 进程组；stdout/stderr **各 16 KiB head+tail（drain 2 MiB）**；cwd 必须在 jail 内；环境白名单；command ≤8 KiB、timeout 120s（max 600s）。
 
 ### 5.15.4 错误面
 
