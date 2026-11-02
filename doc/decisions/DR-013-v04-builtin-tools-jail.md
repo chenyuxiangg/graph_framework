@@ -69,11 +69,11 @@
 {"type":"object","properties":{
   "path":{"type":"string","description":"相对 workspace 或 allow-path 的路径；绝对路径须在 jail 内"},
   "offset":{"type":"integer","minimum":0},
-  "limit":{"type":"integer","minimum":1,"maximum":2000}
+  "limit":{"type":"integer","minimum":1,"maximum":10000,"default":2000}
 },"required":["path"],"additionalProperties":false}
 ```
 
-- 读 UTF-8 文本；`offset` 行偏移（0 基），`limit` 行数（缺省 200，≤2000）；非 UTF-8 → `TOOL_ERROR{reason:"invalid_utf8"}`（v0.4 不做二进制 base64）。
+- 读 UTF-8 文本；`offset` 行偏移（0 基），`limit` 行数（缺省 2000，≤10000）；二进制（前 8 KiB NUL）→ `TOOL_ERROR{reason:"binary_file"}`；非 UTF-8 → `invalid_utf8`（不做 base64）。
 - 结果：`{content, lines, total_lines?, truncated?}`；单次输出 cap（推荐 256 KiB/32K chars，见 §8）。
 - 目录/不存在/越界 → `TOOL_ERROR{reason:"is_directory"|"not_found"|"path_escape"}`。
 
@@ -83,11 +83,12 @@
 {"type":"object","properties":{
   "path":{"type":"string"},
   "content":{"type":"string"},
-  "create_dirs":{"type":"boolean","default":false}
+  "overwrite":{"type":"boolean","default":false},
+  "create_parents":{"type":"boolean","default":false}
 },"required":["path","content"],"additionalProperties":false}
 ```
 
-- **原子**：同目录临时文件 + fsync + rename；失败不改原文件；`create_dirs=false` 时父目录须存在。
+- **原子**：同目录临时文件 + fsync + rename；失败不改原文件；**父目录不自动创建**（`create_parents=true` 才建）；**覆盖已存在文件需 `overwrite=true`**（否则 `E_EXISTS` 附 size/mtime/sha256）；只写 UTF-8。
 - 覆盖写；结果 `{path, bytes_written, sha256_before?, sha256_after}`；大小上限（推荐 1 MiB/次；超限拒绝 `too_large`）。
 - 副作用记录：v7 `tool_calls` 记 path + before/after sha256 + bytes（DR-014）。
 
@@ -115,7 +116,7 @@
 },"required":["patch"],"additionalProperties":false}
 ```
 
-- 支持 `---/+++`、`@@`、多文件；**严格原子（Lead 裁决已确认）**：先解析全部 hunk → 校验全部目标文件与上下文 → 全部成功才写；任一失败**不改任何文件**。
+- 支持 `---/+++`、`@@`、多文件（含 `\ No newline at end of file`；rename/delete 按 v0.4 范围）；**两阶段严格原子**：①全部在内存解析/校验（含 CAS）→ ②各自 tmp → ③依次 rename；任一失败清理 tmp、**不落盘任何文件**（窗口极小但不宣称 rename 级原子）。
 - 只允许 workspace/allow-path；`a/`/`b/` 前缀按 `strip` 去；不支持二进制/rename/copy（→ `TOOL_ERROR{reason:"unsupported_patch"}`）。
 - 结果：`{files:[{path, added, removed, sha256_before, sha256_after}], total_added, total_removed}`；每文件/总大小上限。
 
@@ -188,59 +189,67 @@
 | `--allow-builtin-tools` | 文件/搜索 7 个 | 关 |
 | `--allow-bash` | bash（**隐含**需要 OS 沙箱可用；不隐含文件工具） | 关 |
 | `--workspace-dir` | jail 根 | `.` |
-| `--allow-path` | 额外白名单目录 | 空 |
+| `--allow-path` | 额外**只读**白名单目录（canonicalize；**只读**，不给写） | 空 |
+| `--allow-exec-path` | 额外**可执行**目录（opt-in；只读 allow-path ≠ 可执行） | 空 |
 | `--allow-network` | bash 网络 | 关（deny） |
 
 - 未开启 `--allow-builtin-tools` 时，`AgentConfig.tools` 出现 `builtin__*` → `HARNESS_CONFIG_LOAD{reason:"builtin_tools_not_allowed"}`。
 - 开启文件工具但未开 bash：bash 不出现在注册表；引用 → 同上/`tool_not_registered`。
-- `--allow-bash` 但 OS 沙箱启动前探测失败 → **加载期** `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)），不注册 bash（fail-closed；**零新码**，Lead 裁决）。
+- `--allow-bash` 但 OS 沙箱启动前探测失败 → **加载期** `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)），不注册 bash；嵌套 → `sandbox_nested`；profile 非法 → `sandbox_profile_invalid`（均零新码）；CLI run 预检失败 → **exit 3、不产生 run**。
 - 运行时沙箱故障（探测后异常）→ 该次 bash 调用 `TOOL_ERROR{reason:"sandbox_failure"}`，不降级执行。
 
-## 5. OS 沙箱（bash）
+## 5. OS 沙箱（bash，macOS Seatbelt）
 
-### 5.1 macOS `sandbox-exec` profile（推荐骨架；spike 定稿）
+> **spike 结论（2026-11-02）**：macOS 26.6 实测 `sandbox-exec` 可用（DEPRECATED 但未移除）；附录 A profile **31/31 断言通过**；profile 解析+apply ≈**11 ms**，每条 bash 端到端 **+22–40 ms**（中位 ≈25 ms）。**Linux/Windows 不支持（fail-closed，文档化）**。
 
-```scheme
-(version 1)
-(deny default)
-(allow process*)
-(allow sysctl-read)
-(allow file-read* (subpath "<workspace_root>") (subpath "<allow_path>") ...)
-(allow file-write* (subpath "<workspace_root>") (subpath "<workspace_tmp>"))
-(allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/sbin")
-                 (subpath "/System") (subpath "/Library")
-                 (literal "/dev/null") (literal "/dev/urandom") ...)
-(allow file-write* (subpath "<workspace_tmp>"))
-(allow network* )   ; 仅 --allow-network
-```
+### 5.1 profile（按 spike 附录 A 冻结，79 行）
 
-- **系统只读集合**：`/usr`、`/bin`、`/sbin`、`/System`、`/Library`、`/dev/null`、`/dev/urandom` 等（spike 用 `ls -l`/dyld 依赖实测补齐）；`/etc`、`/private/etc` **只读**（或按需）；`/tmp`/`$TMPDIR` **不**开放（TMPDIR 指到 workspace/.tmp）。
-- **写**：仅 `workspace_root` + `allow_paths` + `<workspace>/.tmp`；其余 deny。
-- **网络**：默认 `(deny network*)`；`--allow-network` 时 `(allow network*)`（全开，文档警示）。
-- 进程：允许 fork/exec（bash 需要），但继承同一 profile；限制资源由 timeout/输出 cap 兜底。
-- **可用性探测**：启动时 `sandbox-exec -p <profile> /usr/bin/true` 成功才注册 bash；失败 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)，bash 不注册）。
-- profile 生成：字符串模板 + 路径转义（`"`/`\`）；不拼接用户命令（command 作为 `sandbox-exec` 的 argv 参数，固定 `bash -lc`）。
-- **待 spike**：系统只读路径最小集合、`sandbox-exec` 在 macOS 版本上的弃用行为、dyld/临时文件需求、性能开销、失败模式。
+- `(version 1)` + `(deny default)` + `(debug deny)`；**路径必须 `/private/...`**（`/tmp`/`/etc`/`/var` 是 symlink；workspace/allowlist 渲染前 `realpath`）。
+- **进程**：`process-fork`/`signal(target self)`/`process-info*(target self)`；**`process-exec` 按目录收窄**（默认仅 `/bin`、`/sbin`、`/usr/bin`、`/usr/sbin`、`/usr/lib`、`/System`、`/Library/Apple`、`/Library/Developer/CommandLineTools`、`@WORKSPACE@`）——防 `~/.cargo/bin/cargo`、`/usr/local/bin/node` 执行。
+- **系统只读**：`file-read* file-test-existence` on `/`、`/System`、`/usr/lib`、`/usr/share`、`/usr/bin`、`/usr/sbin`、`/bin`、`/sbin`、`/Library/Apple`、`/Library/Developer/CommandLineTools`、`/private/var/db/{timezone,dyld,DarwinDirectory}`、`/private/etc/localtime`、**`/private/var/select/sh`**（缺它每条命令 stderr 多一行错误）；`file-read-metadata` on `/usr`/`/Library`/`/System`/`/bin`/`/sbin`/`/private` + `/etc`/`/tmp`/`/var` stat。
+- **设备**：`/dev/null`、`/dev/zero`、`/dev/random`、`/dev/urandom`、`/dev/fd`。
+- **mach-lookup**：cfprefsd(agent/daemon)、system.logger、notification_center、opendirectoryd(libinfo/membership)、trustd(agent)、logd(events)、runningboard、secinitd、bsd.dirhelper、analyticsd、cfprefsd local；ipc-posix-shm（notification_center/apple.cfprefs.*）。
+- **workspace**：`file-read* file-write* file-test-existence (subpath @WORKSPACE@)`。
+- **`--allow-path`**：仅 **`file-read* file-test-existence`**（**只读**，不给写）；目录级。
+- **`--allow-exec-path`**（新增，可重复，opt-in）：额外 `process-exec (subpath ...)`；**只读 allow-path ≠ 可执行**。
+- **网络**：默认 `(deny network*)`；`--allow-network` 追加 `(allow network*)` + `/private/etc/ssl`、hosts/resolv.conf 只读 + networkd/networkscored mach（见附录 A）。
+- **渲染**：Rust 侧 `realpath` + 必须 `/` 开头、不含 `"`/换行（否则 `E_BAD_ALLOW_PATH` 防注入）；渲染后 `sha256` 写 `tool_calls.sandbox_profile_sha256`。
 
-### 5.2 Linux（备选，不承诺）
+### 5.2 执行形式（冻结）
 
-- bwrap（`--ro-bind` 系统、`--bind` workspace、`--unshare-net`）或 landlock；v0.4 只文档化，不实测/不承诺；`--allow-bash` 在无可用沙箱的 Linux → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（fail-closed）。
+- **固定 `/bin/bash --noprofile --norc -c <command>`**（禁 `-lc`/登录 shell，避免读 workspace 恶意 `.profile`；bash 路径固定，不依赖 PATH）。
+- `cwd` 必须是 jail 内路径（参数为相对 workspace，Rust canon 后 `current_dir`）；`HOME=<workspace>`、`TMPDIR=<workspace>/.tmp`、`PATH` 固定系统+CLT 目录。
+- **env 白名单重建**（`env_clear()` 后逐项设置）：`HOME`/`TMPDIR`/`PATH`/`LANG`/`LC_ALL`/`SHELL`/`USER`/`LOGNAME`/`DEVELOPER_DIR`/`SDKROOT`；**剔除** `BASH_ENV`/`ENV`/`LD_*`/`DYLD_*`/`PYTHONPATH`/`PYTHONSTARTUP`/`NODE_OPTIONS`/`GIT_CONFIG_*`/`SSH_AUTH_SOCK`/`HTTP(S)_PROXY`/`PWD`/`OLDPWD`。
+- **stdin=null**（`Stdio::null()`；避免挂死等输入）。
+- **进程组**：`setsid()`/`setpgid(0,0)`；超时/取消 `killpg(SIGTERM)` → 等 **2s** → `SIGKILL`；结束时清理残留 `killpg` 并记 `killed_orphans`。
+- **输出**：边读边 drain（**drain 上限 2 MiB**；不能停读否则 pipe 阻塞）；**给 LLM/记录各 16 KiB head+tail（truncated 标记）**；stdout/stderr 分流；超时默认 120s（可配）。
+- **退出**：正常码原样；信号 → `exit_code=null, signal=N`；超时 `status="timeout"`；非 0 为正常工具结果。
 
-### 5.3 失败面（fail-closed）
+### 5.3 失败/嵌套（fail-closed，零新码）
 
 | 场景 | 结果 |
 |---|---|
-| `sandbox-exec` 不存在/不可执行 | 加载期 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed；bash 不注册） |
-| profile 语法/启动失败 | 加载期同上；运行期 `TOOL_ERROR{reason:"sandbox_failure"}` |
-| 沙箱内命令越界写/联网 | 命令自身失败（OS deny）；exit≠0 作为工具结果；**不**降级到无沙箱 |
-| bash 未 opt-in | 不注册；引用 → 配置错误 |
-| OS 非 macOS 且无等价实现 | Linux 文档化；其他平台 bash 不可用（fail-closed） |
+| `sandbox-exec` 不存在/不可执行 | 配置/启动前 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)，bash 不注册） |
+| **嵌套 Seatbelt**（zgraph 运行在 App Sandbox/DSH/IDE/CI wrapper 内）：`sandbox-exec` exit **71** | **硬失败**：启动探测 → `HARNESS_CONFIG_LOAD{reason:"sandbox_nested"}`；CLI **run 启动前预检**失败 → **exit 3、不产生 run**（沿用 `--allow-mcp` 预检口径）；运行期 → `TOOL_ERROR{reason:"sandbox_failure"}` |
+| profile 编译失败（exit **65**） | `HARNESS_CONFIG_LOAD{reason:"sandbox_profile_invalid"}`（附 stderr 前 4 KiB）；运行期 `TOOL_ERROR{reason:"sandbox_failure"}` |
+| 沙箱内命令越界/联网 | 命令自身 EPERM（exit≠0）作为工具结果；**不降级、不无沙箱执行** |
+| 未 opt-in | 不注册；引用 → 配置错误 |
+| **`--unsafe-bash`** | **不提供**（覆盖开关会被 CI 顺手打开） |
+
+> 探测顺序：二进制存在/可执行 → `sandbox-exec -p '(version 1)(deny default)' /usr/bin/true` 在**本进程上下文**成功（检出嵌套）；失败按 exit 71/65 分类 reason；profile `-D` 语法 lint 可用于 CI。
+
+### 5.4 平台/性能/构建工具
+
+- **macOS 26.6 实测**；Linux **不支持**（bwrap/landlock 仅文档，不实现/不承诺）；Windows 不承诺。
+- `sandbox-exec` 自 10.13.6 **DEPRECATED**（Apple 不承诺保留）；备选 `sandbox_init` 私有 API 仅文档，不实现；profile 版本化 + 启动 smoke test（`sh -c 'echo ok'`、`python3 -c pass`、`git --version`）失败 fail-closed。
+- **性能**：profile parse+apply ≈11 ms；每条 bash +22–40 ms（中位 ~25 ms）；**仅 bash**（文件/搜索工具 Rust 内不过沙箱）；不计入默认（无 opt-in）路径性能。
+- **构建工具**：默认不可执行 cargo/node/uv 等用户目录二进制；`--allow-exec-path <dir>`（可重复）扩展 process-exec；`cc` 需 `-isysroot`；cargo/node 默认不可用属已知限制。
 
 ## 6. 错误码/失败面（Lead 裁决：零新码）
 
 | 码/载体 | 触发 | 映射 |
 |---|---|---|
-| `HARNESS_CONFIG_LOAD{reason}` | `builtin_tools_not_allowed`/`tool_not_registered`/`tool_name_conflict`/`reserved_prefix`/`workspace_invalid`/`allow_path_invalid`/**`sandbox_unavailable`**（配置/启动前探测失败） | Crashed（Config） |
+| `HARNESS_CONFIG_LOAD{reason}` | `builtin_tools_not_allowed`/`tool_not_registered`/`tool_name_conflict`/`reserved_prefix`/`workspace_invalid`/`allow_path_invalid`/**`sandbox_unavailable`**/**`sandbox_nested`**/**`sandbox_profile_invalid`**（配置/启动前探测失败） | Crashed（Config） |
 | `TOOL_ERROR{reason}` | 运行期一切工具失败：`path_escape`/`not_found`/`is_directory`/`invalid_utf8`/`too_large`/`no_match`/`multiple_matches`/`unsupported_patch`/**`sandbox_unavailable`**/`timeout`/`cancelled`/`invalid_args` 等 | 喂回 LLM，不 fail run |
 
 - **不新增 `HARNESS_SANDBOX_UNAVAILABLE`、不新增 `HarnessErrorKind::Sandbox`**：配置/启动前 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`；均 fail-closed（拒绝执行，不降级）。
@@ -258,12 +267,12 @@
 
 | 工具 | 单次上限 |
 |---|---|
-| read | 256 KiB / 2000 行 |
+| read | 1 MiB max_bytes / 10000 行（默认 2000） |
 | write/edit | 1 MiB 输入；结果摘要 ≤8 KiB |
 | diff | 256 KiB diff |
 | grep | 1000 条 / 256 KiB |
 | glob | 5000 条 / 1 MiB |
-| bash stdout/stderr | 各 32 KiB（truncated 标记） |
+| bash stdout/stderr | 各 16 KiB head+tail（给 LLM/记录；drain 2 MiB；truncated 标记） |
 | 单文件处理上限 | 2 MiB（grep/read）；超限 `too_large` 或 truncated |
 
 ## 9. AC-21（文件）/ AC-22（搜索）/ AC-23（bash+沙箱）——设计冻结
@@ -296,8 +305,20 @@
 | 3 | bash 沙箱不可用 | **fail-closed**：配置期 Crashed(Config)；运行期工具错误；**无无沙箱 fallback** |
 | 4 | `--allow-path` | **目录级**（canonicalize、读写全开、可重复）；不做文件级/通配 |
 | 5 | apply_patch | **严格原子**（全成功或全不改；暂存+回滚） |
-| 6 | v7 上限 | args/result **64 KiB**、stdout/stderr **32 KiB**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；截断带 `truncated` + 全量 `sha256`；副作用回放遇截断 fail-closed；只读 reexec 可重算 |
+| 6 | v7 上限 | args/result **32 KiB**、bash stdout/stderr 各 **16 KiB head+tail**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；截断带 `truncated` + 全量 `sha256`；副作用回放遇截断 fail-closed；只读 reexec（v0.5）可重算 |
 | 7 | reexec | 仅 `read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永远 recorded-only** |
 | 8 | 工具源/白名单 | **无优先级/无覆盖**，重名 **fail-closed**（§1.1）；`AgentConfig.tools` 白名单对所有源一致；`builtin__` 前缀保留 |
 
 > 第 9 项（macOS sandbox-exec 系统只读路径/弃用行为/TMPDIR/dyld/性能/Linux 承诺）待 arch-researcher spike 结论，落 DR-013 §5/05 §5.15.3。
+
+## 11. spike 落盘补充（2026-11-02，arch-researcher 报告，REV-105）
+
+| 事项 | 冻结 |
+|---|---|
+| profile | 按附录 A 79 行冻结（`/private/...`、realpath 渲染、系统只读集合、mach 服务、`process-exec` 收窄） |
+| 嵌套 Seatbelt | `sandbox-exec` exit **71** → **硬失败** `HARNESS_CONFIG_LOAD{reason:"sandbox_nested"}`；CLI run 预检 **exit 3、不产生 run**；运行期 `TOOL_ERROR{reason:"sandbox_failure"}`；**不提供 `--unsafe-bash`** |
+| profile 非法 | exit **65** → `sandbox_profile_invalid`（附 stderr 前 4 KiB） |
+| 命令形式 | `/bin/bash --noprofile --norc -c <command>`；env 白名单重建；stdin=null；setsid/killpg（SIGTERM 2s→SIGKILL）；drain 2 MiB；结果 16 KiB head+tail |
+| 可执行 | `--allow-exec-path <dir>`（可重复，opt-in）扩展 process-exec；cargo/node/uv 默认不可用（已知限制）；`cc` 需 `-isysroot` |
+| 平台 | macOS 26.6 实测；Linux 不支持（fail-closed/文档化）；Windows 不承诺；sandbox-exec DEPRECATED（风险登记，备选 sandbox_init 仅文档） |
+| 性能 | profile ≈11 ms；每条 bash +22–40 ms（中位 ~25 ms）；仅 bash，不计入默认路径 |

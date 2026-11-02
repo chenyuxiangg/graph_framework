@@ -1508,8 +1508,10 @@ pub trait AgentProvider: Send + Sync {
 
 ### 5.15.3 bash OS 沙箱
 
-- **必须**在 macOS `sandbox-exec` profile 内：仅 workspace+allowlist 读写、系统只读路径（spike 定集合）、`TMPDIR=<workspace>/.tmp`；网络默认 **deny**（`--allow-network` 全开）。
-- 无沙箱 fallback；沙箱不可用/启动失败 → **fail-closed**：配置/启动前 → `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed(Config)）；运行期 → `TOOL_ERROR{reason:"sandbox_unavailable"}`（不 fail run）；**零新码**（Lead 裁决）。
+- **必须**在 macOS `sandbox-exec` profile 内（按 spike 附录 A 79 行冻结）：workspace 读写、`--allow-path` **只读**、系统只读集合（含 `/private/var/select/sh`/CLT/`file-read-metadata`/`/dev/*`/mach 服务）、`TMPDIR=<workspace>/.tmp`；`process-exec` 按目录收窄（`--allow-exec-path` opt-in）；网络默认 **deny**（`--allow-network` 全开）。
+- 命令固定 `/bin/bash --noprofile --norc -c`；env 白名单重建（剔除 `BASH_ENV`/`LD_*`/`DYLD_*` 等）；stdin=null；setsid+killpg（SIGTERM 2s→SIGKILL）；drain 2 MiB、结果 16 KiB head+tail。
+- 无沙箱 fallback；**嵌套 Seatbelt（exit 71）→ `HARNESS_CONFIG_LOAD{reason:"sandbox_nested"}`，CLI run 预检失败 → exit 3、不产生 run**；profile 非法（exit 65）→ `sandbox_profile_invalid`；配置/启动前不可用 → `sandbox_unavailable`（Crashed）；运行期 → `TOOL_ERROR{reason:"sandbox_failure"}`；**零新码**。
+- 平台：macOS 26.6 实测；**Linux/Windows 不支持（fail-closed，文档化）**；sandbox-exec DEPRECATED（风险登记）；性能 profile ≈11 ms、每条 bash +22–40 ms（仅 bash）。
 - bash 超时/取消 → kill 进程组；stdout/stderr 各 32 KiB cap；cwd 必须在 jail 内；环境白名单。
 
 ### 5.15.4 错误面
@@ -1518,9 +1520,9 @@ pub trait AgentProvider: Send + Sync {
 |---|---|
 | opt-in/配置/workspace 非法/名称冲突 | `HARNESS_CONFIG_LOAD{reason}`（Crashed） |
 | 运行期文件/搜索/bash 失败/越界 | `TOOL_ERROR{reason}`（喂回 LLM） |
-| bash 沙箱不可用 | 配置期 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}`（Crashed）／运行期 `TOOL_ERROR{reason:"sandbox_unavailable"}`（fail-closed，零新码） |
+| bash 沙箱不可用/嵌套/profile 非法 | 配置/预检期 `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"\|"sandbox_nested"\|"sandbox_profile_invalid"}`（Crashed；CLI run 预检 exit 3、不产生 run）／运行期 `TOOL_ERROR{reason:"sandbox_failure"}`（fail-closed，零新码） |
 | 既有错误码 | 不变；新码 append-only（00 §0.4） |
 
 ### 5.15.5 结果上限
 
-read 256 KiB/2000 行；write/edit 1 MiB；grep/glob 1000 条/256 KiB；bash stdout/stderr 各 32 KiB；`tool_calls` args/result 各 64 KiB（DR-014 §5）；超限截断标记 + hash。
+read 1 MiB/10000 行（默认 2000）；write/edit 1 MiB；grep/glob 1000 条/256 KiB；bash stdout/stderr 各 **16 KiB head+tail**（drain 2 MiB）；`tool_calls` args/result 各 **32 KiB**（DR-014 §5）；超限截断标记 + hash。

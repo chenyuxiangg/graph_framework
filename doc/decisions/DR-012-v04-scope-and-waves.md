@@ -72,7 +72,7 @@ D1 docs 设计冻结（本批，REV-105）
 2. 默认路径（无 opt-in/无 workspace）兼容矩阵无新增失败；DSL/hash 不变。
 3. trace v6 旧库可迁移 v7（备份/只读拒绝/链式 v1..v6→v7）；无工具调用 v7 行为与 v6 一致。
 4. `cargo test --workspace`/e2e/pytest/clippy/fmt/check.sh 全绿；性能回退 ≤20%（v0.3 基线，同机 release 3 次中位）。
-5. 安全门禁：jail 逃逸/OS 沙箱失败/网络默认拒绝均有负例；无沙箱 fallback。
+5. 安全门禁：jail 逃逸/OS 沙箱失败（含嵌套 exit71）/网络默认拒绝均有负例；无沙箱 fallback；**仅 macOS 支持 bash 沙箱**。
 6. as-built 回写 00/02/05/06/07/08 + PROVENANCE；README/进度/发布材料齐备。
 
 ## 5. 兼容矩阵
@@ -99,10 +99,10 @@ D1 docs 设计冻结（本批，REV-105）
 
 | 风险 | 说明 | 缓解 |
 |---|---|---|
-| macOS sandbox-exec 弃用/行为差异 | `sandbox-exec` 已标记 deprecated，profile 语法/系统路径集合随 OS 变化 | spike 锁定 profile+系统只读集合；运行时探测；不可用 fail-closed（不降级）；文档标注 macOS 版本 |
+| macOS sandbox-exec 弃用/行为差异 | `sandbox-exec` 自 10.13.6 DEPRECATED，profile 语法/系统路径集合随 OS 变化；**嵌套 Seatbelt 必 EPERM** | spike 已锁定 79 行 profile（31/31）；启动探测分 `sandbox_unavailable`/`sandbox_nested`/`sandbox_profile_invalid`；失败 fail-closed；文档标注 macOS 26.6 实测 |
 | Linux 无等价保证 | bwrap/landlock 需 root/内核支持 | v0.4 只承诺 macOS；Linux 文档化「未保证」；v0.5 再评估 |
 | TOCTOU/symlink | 检查与使用之间路径被替换 | canonicalize 后按真实路径校验；文件操作 `O_NOFOLLOW`/目录 fd 尽量；`--allow-path` 同样 canonicalize；负例测试 |
-| bash 逃逸 | 子进程可写 jail 外/联网 | OS 沙箱强制（非应用层黑名单）；默认 deny network；进程组 kill；stderr/stdout cap |
+| bash 逃逸 | 子进程可写 jail 外/联网 | OS 沙箱强制（非应用层黑名单）；默认 deny network；进程组 kill；stdout/stderr 16 KiB head+tail；**构建工具默认不可执行**（`--allow-exec-path` opt-in） |
 | 大输出/内存 | 读大文件/bash 无限输出 | 全部输出 cap+truncated；`read` offset/limit；grep/glob 大小/条数上限 |
 | apply_patch 非原子 | 多文件部分成功 | 先全部校验+临时文件/回滚计划；任一失败不改任何文件；AC 负例 |
 | v7 迁移不可逆 | 旧库升级后旧二进制不可读 | 迁移前备份；`user_version` 只读拒绝；链式 v1..v6→v7；文档 |

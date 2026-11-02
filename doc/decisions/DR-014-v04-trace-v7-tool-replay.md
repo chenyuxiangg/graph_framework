@@ -11,10 +11,10 @@
 | schema | `TRACE_SCHEMA_VERSION = 7`；只新增 `tool_calls` 表 + 索引 + 迁移；既有表/事件不变 |
 | 表键 | `(run_id, instance_id, attempt, call_id)` 唯一（`call_id` 为 provider/tool 原生 id） |
 | 字段 | tool_name、args_json、result_json、status、error_json、started_at/finished_at、truncated、副作用（path/before/after sha256/bytes）、bash（command/cwd/exit/stdout/stderr/沙箱摘要） |
-| 上限 | args/result 64 KiB、stdout/stderr 32 KiB、command 8 KiB、path 4 KiB；超限 truncated+sha256；**回放遇截断 fail-closed** |
+| 上限 | args/result **32 KiB**、bash stdout/stderr 各 **16 KiB head+tail**、command 8 KiB、path 4 KiB；超限 truncated+全量 sha256；**回放遇截断 fail-closed** |
 | 迁移 | v6→v7：备份 → 单事务建表/索引 → `user_version=7`；只读库拒绝；链式 v1..v6→v7 |
 | trace 输出 | 人类新增工具事件行；`--json` 新增 `tool_calls` 数组（只读、additive） |
-| 回放 | `--replay-tools=recorded`（默认）：所有工具从记录回放，**绝不执行副作用**；`reexec` 仅 `read`/`grep`/`glob`/`diff` |
+| 回放 | `--replay-tools=recorded`（默认）：**绝不执行任何工具/副作用**，只从记录还原；`reexec` 仅只读工具（**v0.4 只做 recorded；reexec 接口保留、v0.5 落地**） |
 | 默认不变 | 无工具调用：v7 行为与 v6 一致（除 `user_version`）；L2 `recorded_outputs` 不变 |
 
 ## 1. `tool_calls` 表（DDL 草案）
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   started_at       TEXT NOT NULL,
   finished_at      TEXT NOT NULL,
   duration_ms      INTEGER NOT NULL,
+  signal           INTEGER,                    -- bash 被信号杀死时记录
   -- 副作用（write/edit/apply_patch；其他 NULL）
   side_effect_path     TEXT,
   side_effect_before   TEXT,                   -- sha256 before（不存在 = NULL）
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   bash_stdout      TEXT,
   bash_stderr      TEXT,
   bash_truncated   INTEGER NOT NULL DEFAULT 0 CHECK (bash_truncated IN (0,1)),
-  sandbox_profile  TEXT,                       -- 摘要/版本（不写完整 profile）
+  sandbox_profile_sha256 TEXT,                 -- 渲染后 profile 哈希（含 allowlist/network 开关）
   UNIQUE (run_id, instance_id, attempt, call_id)
 );
 
@@ -87,8 +88,8 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 
 | 模式 | 行为 |
 |---|---|
-| `recorded`（默认） | **所有**工具调用从 `tool_calls` 回放（args 校验/结果还原）；**副作用工具永不执行**；无记录 → fail-closed（`REPLAY_TOOL_RECORD_MISSING`/既有 `REPLAY_RECORD_MISSING`） |
-| `reexec` | 仅**只读工具** `builtin__read`/`grep`/`glob`/`diff` 可重新执行（同 args、同 jail/沙箱配置）；`write`/`edit`/`apply_patch`/`bash` **仍 recorded**（或 fail-closed，推荐 recorded）；需显式开启 + 文档警示 |
+| `recorded`（默认） | **绝不执行任何工具**（含只读）；只从 `tool_calls` 还原 args/result；**副作用永不重跑**；无记录/截断 → fail-closed（`REPLAY_TOOL_RECORD_MISSING`/`REPLAY_TOOL_RECORD_TRUNCATED`） |
+| `reexec`（v0.4 仅接口，v0.5 落地） | 仅 `builtin__read`/`grep`/`glob`/`diff` 可重跑（同 args/jail；**pre_sha256 漂移检查**，不符 `REPLAY_TOOL_MISMATCH`）；`write`/`edit`/`apply_patch`/`bash` 永远 recorded-only；显式开关 + 文档警示 |
 
 - **recorded 校验**：args hash/results 还原；若 `truncated=1` → **fail-closed**（`REPLAY_TOOL_RECORD_TRUNCATED`，新 CLI 码或既有 `REPLAY_RECORD_CORRUPT`；推荐新码 append-only）；不猜测/不重跑。
 - **reexec**：仍受 workspace/jail/沙箱约束；结果与记录不一致 → 告警/失败（推荐 `REPLAY_TOOL_MISMATCH` 或既有 `REPLAY_OUTPUT_MISMATCH` 口径）；不写新 trace。
@@ -99,8 +100,8 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 
 | 字段 | cap | 超限 |
 |---|---|---|
-| args_json / result_json | 64 KiB | 头部 prefix + `truncated=1` + sha256；回放 fail-closed |
-| bash_stdout/stderr | 32 KiB each | tail/head 截断 + `bash_truncated=1`；回放 fail-closed（bash 不 reexec 默认 recorded 需完整） |
+| args_json / result_json | **32 KiB** | 结构化骨架/prefix + `truncated=1` + 全量 sha256；回放 fail-closed |
+| bash_stdout/stderr | **16 KiB head+tail each**（drain 2 MiB） | 中间截断标记 + 全量 bytes + `truncated=1`；回放 fail-closed |
 | bash_command | 8 KiB | 超限拒绝（工具错误） |
 | side_effect_path | 4 KiB | 超限拒绝 |
 | 单 run `tool_calls` 行数 | 10000（推荐） | 超限停止记录 + warning（不 fail run） |
@@ -133,11 +134,11 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 | b | 只读库拒绝；链式 v1..v6→v7；损坏备份恢复 |
 | c | 无工具调用：v7 trace/replay 与 v6 一致（`tool_calls` 空） |
 | d | 每次工具调用恰 1 行；字段/状态/耗时/truncated 正确；call_id 原生 |
-| e | 副作用记录：write/edit/apply_patch path + before/after sha256 + bytes |
+| e | 副作用记录：write/edit/apply_patch path + pre/post sha256 + bytes；bash command/cwd/exit/signal/duration/stdout+stderr 16 KiB head+tail/profile_sha256 |
 | f | bash：command/cwd/exit/stdout/stderr/cap/profile 摘要 |
-| g | `--replay-tools=recorded`：副作用不重跑（文件 hash 不变）；缺记录/截断 fail-closed |
-| h | `reexec` 仅只读；副作用仍 recorded/fail-closed；mismatch 报错 |
-| i | trace 人类/`--json` 工具行 additive；既有输出不变 |
+| g | `--replay-tools=recorded`：**不执行任何工具/副作用**（workspace 快照 diff 不变、spawn 计数=0、tool_calls 行数不变）；缺记录/截断 fail-closed |
+| h | `reexec` 仅只读（v0.5）；pre_sha256 漂移检查；副作用工具永远 recorded-only |
+| i | trace 人类/`--json` 工具行 additive；args/result 32 KiB、bash 16 KiB 上限正确；既有输出不变 |
 | j | 默认（无工具）兼容矩阵不变 |
 
 ## 9. Lead 裁决项
@@ -146,9 +147,20 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 |---|---|---|
 | 1 | 新 CLI 码命名 | `REPLAY_TOOL_RECORD_MISSING`/`REPLAY_TOOL_RECORD_TRUNCATED`/`REPLAY_TOOL_MISMATCH`（append-only） |
 | 2 | 截断回放策略 | **fail-closed**（不猜测） |
-| 3 | `reexec` 默认/集合 | 默认 `recorded`；reexec 仅 read/grep/glob/diff；显式开关 |
-| 4 | 单 run tool_calls 行数上限 | 10000（超限停止记录 + warning） |
+| 3 | `reexec` | **v0.4 只做 recorded（绝不执行任何工具）**；reexec 接口保留、v0.5 落地；集合 read/grep/glob/diff + pre_sha256 漂移检查 |
+| 4 | 单 run tool_calls 行数/大小上限 | 10000 行；单字段 cap（32/32/16/16/8/4 KiB）；不引入 blobs/外部文件（v0.4） |
 | 5 | 多文件 apply_patch 行粒度 | 1 行（`files[]` 摘要）；不拆多行 |
 | 6 | `--json` 顶层键名 | `tool_calls`（additive） |
 | 7 | bash 记录敏感 command | 记录 command（cap）；env 值不记录；文档警示 |
 | 8 | 是否需要 `HARNESS_BUILTIN_TOOL_ERROR` | 不新增（`TOOL_ERROR{reason}` 足够） |
+
+## 10. spike 落盘补充（2026-11-02，REV-105）
+
+| 事项 | 冻结 |
+|---|---|
+| 存储策略 | **v0.4 不做 blobs/外部文件**：args/result 32 KiB、bash stdout/stderr 各 16 KiB head+tail、command 8 KiB、path 4 KiB；截断 + 全量 sha256；单 run 10000 行 |
+| bash 记录 | command/cwd/exit_code/signal/duration_ms/stdout+stderr（16 KiB head+tail）/sandbox_profile_sha256；drain 上限 2 MiB |
+| 副作用 | write/edit/apply_patch 记 path + pre_sha256/post_sha256 + bytes；多文件 apply_patch 一行（`files[]` 摘要） |
+| 回放 | 默认 **recorded-only**（绝不执行任何工具/副作用）；`reexec` 接口保留、v0.5 落地（仅只读 + pre_sha256 漂移检查） |
+| 迁移 | v6→v7 **仅新增表/索引**（无重建）；备份/单事务/失败恢复/只读拒绝沿用现有 `unsupported schema version` 语义；无工具调用输出与 v6 一致 |
+| 无副作用证明 | noop spawner/沙箱调用计数=0、workspace 快照 diff 不变、`tool_calls` 行数不变（AC-24 g） |
