@@ -326,6 +326,20 @@ pub(crate) fn peek_agent_node_timeout(assets_dir: &Path, agent_id: &str) -> Opti
     None
 }
 
+/// 完整 Loading 选项（v0.4/D2 additive）：skills 目录 + MCP 开关 + builtin opt-in。
+///
+/// 既有 [`load_agent`]/[`load_agent_with_skills`]/[`load_agent_with_options`] 语义不变
+/// （builtin 视为未开启）；executor 用本结构传入 `--allow-builtin-tools`。
+#[derive(Debug, Clone, Default)]
+pub struct AgentLoadOptions {
+    /// `--skills-dir` 显式覆盖（None → env → `<assets>/skills`）。
+    pub skills_dir: Option<PathBuf>,
+    /// `--allow-mcp`：允许启动配置的 MCP servers。
+    pub mcp_allowed: bool,
+    /// `--allow-builtin-tools`：允许 `builtin__*` 白名单引用。
+    pub builtin_tools_allowed: bool,
+}
+
 /// 加载并校验一个 Agent（05 §5.2.4 确定性流程 1–10）。
 ///
 /// - `registry`：已发现的工具注册表（步 8 查表）；
@@ -365,6 +379,27 @@ pub fn load_agent_with_options(
     skills_dir: Option<&Path>,
     mcp_allowed: bool,
 ) -> Result<LoadedAgent, HarnessError> {
+    load_agent_with_load_options(
+        assets_dir,
+        agent_id,
+        registry,
+        fake_mode,
+        &AgentLoadOptions {
+            skills_dir: skills_dir.map(Path::to_path_buf),
+            mcp_allowed,
+            builtin_tools_allowed: false,
+        },
+    )
+}
+
+/// [`load_agent_with_options`] 的 v0.4/D2 additive 变体（+ `--allow-builtin-tools`）。
+pub fn load_agent_with_load_options(
+    assets_dir: &Path,
+    agent_id: &str,
+    registry: &ToolRegistry,
+    fake_mode: bool,
+    options: &AgentLoadOptions,
+) -> Result<LoadedAgent, HarnessError> {
     let assets_dir = absolute(assets_dir);
     let index = agent_index(&assets_dir)?;
     let path = index.get(agent_id).cloned().ok_or_else(|| {
@@ -389,6 +424,27 @@ pub fn load_agent_with_options(
     {
         // 外部 harness 拥有自己的 agent loop：能力面必须为空（fail-closed，DR-011 §1）。
         check_subprocess_capabilities(&config, &path)?;
+    }
+    // v0.4/D2（DR-013 §4）：未 opt-in 时引用 `builtin__*` → 专门 reason。
+    if !options.builtin_tools_allowed {
+        if let Some((index, reference)) = config
+            .tools
+            .iter()
+            .enumerate()
+            .find(|(_, reference)| reference.starts_with(crate::constants::BUILTIN_TOOL_PREFIX))
+        {
+            return Err(config_error(
+                "builtin_tools_not_allowed",
+                Some(&path.display().to_string()),
+                Some(&format!("$.tools[{index}]")),
+                Some(Value::from("--allow-builtin-tools")),
+                Some(Value::from(reference.clone())),
+                format!(
+                    "agent '{}' references builtin tool '{reference}' but --allow-builtin-tools is disabled",
+                    config.id
+                ),
+            ));
+        }
     }
     let agent_dir = path.parent().unwrap_or(Path::new("."));
     let role_prompt = read_prompt(
@@ -427,8 +483,11 @@ pub fn load_agent_with_options(
         }
         Some(mcp_config) => {
             let registry = crate::mcp::McpRegistry::load(&assets_dir)?;
-            let plan =
-                registry.resolve(mcp_config, mcp_allowed, crate::constants::MAX_MCP_SERVERS)?;
+            let plan = registry.resolve(
+                mcp_config,
+                options.mcp_allowed,
+                crate::constants::MAX_MCP_SERVERS,
+            )?;
             if plan.is_some() && !mcp_refs.is_empty() {
                 // 工具可用性在 executor 的 async 发现阶段校验（需启 server）。
             } else if plan.is_none() && !mcp_refs.is_empty() {
@@ -453,7 +512,7 @@ pub fn load_agent_with_options(
         ..config.clone()
     };
     let mut tools = resolve_tools(&tools_config, registry)?;
-    let skills = resolve_skills(&assets_dir, &config, skills_dir)?;
+    let skills = resolve_skills(&assets_dir, &config, options.skills_dir.as_deref())?;
     if !skills.is_empty() {
         // v0.3：内置 `skill_view` 仅当 skills 非空时注册（DR-009 §3/§4）。
         tools.push(crate::skills::skill_view_tool(&skills));
@@ -3030,5 +3089,44 @@ mod tests {
             .harness
             .is_some_and(|harness| harness.is_subprocess()));
         assert!(loaded.api_key.is_empty());
+    }
+    /// v0.4/D2（DR-013 §4）：`builtin__*` 引用在未 opt-in 时专用 reason；开启后按
+    /// `AgentConfig.tools` 白名单解析（白名单语义不变）。
+    #[test]
+    fn builtin_tool_reference_requires_allow_builtin_tools() {
+        let workspace = TempDir::new().expect("workspace");
+        let set = crate::BuiltinToolSet::new(
+            &std::fs::canonicalize(workspace.path()).expect("canonical"),
+            &[],
+        )
+        .expect("builtin set");
+        let registry = ToolRegistry::new(set.definitions().to_vec()).expect("builtin registry");
+        let mut agent = valid_agent();
+        agent["tools"] = serde_json::json!(["builtin__read"]);
+        let dir = asset_dir(&agent, "role", None);
+
+        let error =
+            load_agent(dir.path(), "parser", &registry, true).expect_err("builtin tools disabled");
+        assert_eq!(error.kind, zgraph_kernel::HarnessErrorKind::ConfigLoad);
+        assert_eq!(
+            error.detail["reason"],
+            serde_json::json!("builtin_tools_not_allowed")
+        );
+        assert_eq!(error.detail["json_path"], serde_json::json!("$.tools[0]"));
+
+        let loaded = load_agent_with_load_options(
+            dir.path(),
+            "parser",
+            &registry,
+            true,
+            &AgentLoadOptions {
+                builtin_tools_allowed: true,
+                ..Default::default()
+            },
+        )
+        .expect("opt-in resolves builtin tool");
+        assert_eq!(loaded.tools.len(), 1);
+        assert_eq!(loaded.tools[0].name, "builtin__read");
+        assert!(loaded.tools[0].source.starts_with("builtin__"));
     }
 }

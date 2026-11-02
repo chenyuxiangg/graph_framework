@@ -19,6 +19,9 @@ serde.workspace = true
 serde_json.workspace = true
 # v0.3/V4（REV-099 C1）：外部 harness `llm_calls` 的 `inputs_hash`（与图 hash 同算法）。
 blake3.workspace = true
+# v0.4/D2（DR-013 §3/§8）：内置文件工具 sha256 / unified diff。
+sha2.workspace = true
+similar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

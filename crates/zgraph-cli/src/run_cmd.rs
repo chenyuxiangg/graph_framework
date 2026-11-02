@@ -118,6 +118,10 @@ options:
   --skills-dir <dir>     skills directory (default: $ZGRAPH_SKILLS or <assets-dir>/skills)
   --allow-mcp            allow configured MCP servers (default: off; enabling MCP starts child
                          processes / opens network connections; registry: <assets-dir>/mcp_servers.json)
+  --allow-builtin-tools  allow Rust builtin file tools (builtin__read/write/edit/apply_patch/diff;
+                         default: off)
+  --workspace-dir <dir>  workspace jail root for builtin file tools (default: .; canonicalized)
+  --allow-path <dir>     extra read-only directory for builtin file tools; repeatable
   --python <exe>         Python interpreter (default: $PYO3_PYTHON > $ZGRAPH_PYTHON > python3)
   --python-path <dir>    prepend a module search path; repeatable (PYTHONPATH)
   --fake-llm[=<script>]  scripted LLM provider (bare flag = built-in default script)
@@ -206,6 +210,12 @@ pub struct RunArgs {
     pub skills_dir: Option<PathBuf>,
     /// `--allow-mcp`：显式允许启动配置的 MCP servers（默认关；DR-010 §2.2）。
     pub allow_mcp: bool,
+    /// `--allow-builtin-tools`：注册 Rust 内置文件工具（默认关；DR-013 §4）。
+    pub allow_builtin_tools: bool,
+    /// `--workspace-dir`：内置文件工具 jail 根（缺省 `.`，构造时 canonicalize）。
+    pub workspace_dir: Option<PathBuf>,
+    /// `--allow-path`（可重复）：额外**只读**目录（canonicalize）。
+    pub allow_paths: Vec<PathBuf>,
     /// `--python` 显式解释器（`None` 时按 `$ZGRAPH_PYTHON` → `python3`）。
     pub python: Option<String>,
     /// `--python-path`（可重复；按序叠加到 `PYTHONPATH` 之前）。
@@ -260,6 +270,9 @@ struct ParseState {
     tools_dir: Option<PathBuf>,
     skills_dir: Option<PathBuf>,
     allow_mcp: bool,
+    allow_builtin_tools: bool,
+    workspace_dir: Option<PathBuf>,
+    allow_paths: Vec<PathBuf>,
     python: Option<String>,
     python_paths: Vec<PathBuf>,
     fake_llm: FakeLlmMode,
@@ -281,6 +294,9 @@ impl Default for ParseState {
             tools_dir: None,
             skills_dir: None,
             allow_mcp: false,
+            allow_builtin_tools: false,
+            workspace_dir: None,
+            allow_paths: Vec::new(),
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,
@@ -323,6 +339,16 @@ impl ParseState {
             }
             "--allow-mcp" => {
                 self.allow_mcp = true;
+            }
+            "--allow-builtin-tools" => {
+                self.allow_builtin_tools = true;
+            }
+            "--workspace-dir" => {
+                self.workspace_dir = Some(PathBuf::from(option_value(iter, "--workspace-dir")?));
+            }
+            "--allow-path" => {
+                self.allow_paths
+                    .push(PathBuf::from(option_value(iter, "--allow-path")?));
             }
             "--python" => self.python = Some(option_value(iter, "--python")?),
             "--python-path" => {
@@ -370,6 +396,9 @@ impl ParseState {
             tools_dir: self.tools_dir,
             skills_dir: self.skills_dir,
             allow_mcp: self.allow_mcp,
+            allow_builtin_tools: self.allow_builtin_tools,
+            workspace_dir: self.workspace_dir,
+            allow_paths: self.allow_paths,
             python: self.python,
             python_paths: self.python_paths,
             fake_llm: self.fake_llm,
@@ -852,6 +881,37 @@ pub fn run(args: &RunArgs) -> ExitCode {
     }
 }
 
+/// v0.4/D2：解析 `--allow-builtin-tools`/`--workspace-dir`/`--allow-path`。
+///
+/// 未 opt-in → `Ok(None)`（不解析/不触碰 workspace，默认路径零副作用）；配置非法 →
+/// `HARNESS_CONFIG_LOAD{reason}` + exit 3（不产生 run）。
+fn resolve_builtin_tools(
+    args: &RunArgs,
+) -> Result<Option<Arc<zgraph_harness::BuiltinToolSet>>, ExitCode> {
+    if !args.allow_builtin_tools {
+        return Ok(None);
+    }
+    let workspace = args
+        .workspace_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
+    match zgraph_harness::BuiltinToolSet::new(&workspace, &args.allow_paths) {
+        Ok(tools) => Ok(Some(tools)),
+        Err(error) => {
+            let reason = error
+                .detail
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("workspace_invalid");
+            eprintln!(
+                "error[{}]: {} (reason: {reason})",
+                error.code, error.message
+            );
+            Err(ExitCode::from(EXIT_ENTRY_INPUT))
+        }
+    }
+}
+
 /// 运行时内的主流程（启动顺序见模块文档）。
 async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     let db_path = resolve_db_path(args.db.as_deref());
@@ -895,6 +955,14 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
             return ExitCode::from(EXIT_ENTRY_INPUT);
         }
     }
+    // v0.4/D2：内置文件工具 opt-in（未开启时不解析 workspace；非法 → exit 3、不产生 run）。
+    let builtin_tools = match resolve_builtin_tools(args) {
+        Ok(tools) => tools,
+        Err(code) => {
+            close_quietly(writer);
+            return code;
+        }
+    };
     // W3a：human 图启动 decision consumer（非 memory；无 human 图的图不启动，行为不变）。
     let human_consumer = !memory_db && graph_has_human(&graph);
     let (decision_tx, decision_rx) = mpsc::channel::<HumanDecisionRecord>();
@@ -913,6 +981,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         &assets_dir,
         &tools_dir,
         skills_dir,
+        builtin_tools,
         &trace_handle,
         &run_id,
     ) {
@@ -1056,6 +1125,7 @@ fn prepare_executor(
     assets_dir: &Path,
     tools_dir: &Path,
     skills_dir: Option<PathBuf>,
+    builtin_tools: Option<Arc<zgraph_harness::BuiltinToolSet>>,
     trace_handle: &TraceHandle,
     run_id: &str,
 ) -> Result<BuiltExecutors, ExitCode> {
@@ -1069,6 +1139,7 @@ fn prepare_executor(
         assets_dir,
         tools_dir,
         skills_dir,
+        builtin_tools,
         provider,
         fake_mode,
         trace_handle,
@@ -1270,6 +1341,7 @@ fn build_executor(
     assets_dir: &Path,
     tools_dir: &Path,
     skills_dir: Option<PathBuf>,
+    builtin_tools: Option<Arc<zgraph_harness::BuiltinToolSet>>,
     provider: Arc<dyn LlmProvider>,
     fake_mode: bool,
     trace_handle: &TraceHandle,
@@ -1298,11 +1370,17 @@ fn build_executor(
     };
     // v0.3（DR-009 §1）：`--skills-dir`/env 显式覆盖；None 时 harness 回退资产默认。
     // v0.3（DR-010 §2.2）：`--allow-mcp` 显式开关（默认关；未开启且配置 MCP → 预检 exit 3）。
-    let harness = Arc::new(
-        harness
+    // v0.4/D2：`--allow-builtin-tools` 注册 5 个 Rust 内置文件工具（additive）。
+    let harness = {
+        let harness = harness
             .with_skills_dir(skills_dir)
-            .with_mcp_allow(args.allow_mcp),
-    );
+            .with_mcp_allow(args.allow_mcp);
+        let harness = match builtin_tools {
+            Some(tools) => harness.with_builtin_tools(tools),
+            None => harness,
+        };
+        Arc::new(harness)
+    };
     let routing: Arc<dyn NodeExecutor> = Arc::new(RoutingExecutor {
         harness: Arc::clone(&harness),
         worker: Arc::clone(&worker),
@@ -1986,13 +2064,16 @@ fn close_quietly(writer: TraceWriter) {
 mod tests {
     use super::{
         exit_code_for, graph_agent_using_mcp, graph_has_human, human_recording, is_memory_db,
-        lifecycle_detail, llm_call_recorder, output_hash, parse, resolve_entry_inputs, Consumed,
-        FakeLlmMode, ParseState, RecordingExecutor, RunArgs, DEFAULT_USER_ID,
+        lifecycle_detail, llm_call_recorder, output_hash, parse, resolve_builtin_tools,
+        resolve_entry_inputs, Consumed, FakeLlmMode, ParseState, RecordingExecutor, RunArgs,
+        DEFAULT_USER_ID,
     };
+    use crate::EXIT_ENTRY_INPUT;
     use serde_json::json;
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
+    use std::process::ExitCode;
     use std::sync::Arc;
     use zgraph_harness::{
         FakeLlmProvider, FakeToolRunner, HarnessExecutor, HarnessSettings, LlmProvider,
@@ -2115,6 +2196,9 @@ mod tests {
         assert_eq!(parsed.tools_dir, None);
         assert_eq!(parsed.skills_dir, None);
         assert!(!parsed.allow_mcp);
+        assert!(!parsed.allow_builtin_tools);
+        assert_eq!(parsed.workspace_dir, None);
+        assert!(parsed.allow_paths.is_empty());
         assert_eq!(parsed.python, None);
         assert!(parsed.python_paths.is_empty());
         assert_eq!(parsed.fake_llm, FakeLlmMode::Off);
@@ -2142,6 +2226,13 @@ mod tests {
             "--skills-dir",
             "skills",
             "--allow-mcp",
+            "--allow-builtin-tools",
+            "--workspace-dir",
+            "ws",
+            "--allow-path",
+            "ro1",
+            "--allow-path",
+            "ro2",
             "--python",
             "/venv/bin/python",
             "--python-path",
@@ -2163,6 +2254,12 @@ mod tests {
         assert_eq!(parsed.tools_dir, Some(PathBuf::from("tools")));
         assert_eq!(parsed.skills_dir, Some(PathBuf::from("skills")));
         assert!(parsed.allow_mcp);
+        assert!(parsed.allow_builtin_tools);
+        assert_eq!(parsed.workspace_dir, Some(PathBuf::from("ws")));
+        assert_eq!(
+            parsed.allow_paths,
+            vec![PathBuf::from("ro1"), PathBuf::from("ro2")]
+        );
         assert_eq!(parsed.python.as_deref(), Some("/venv/bin/python"));
         assert_eq!(
             parsed.python_paths,
@@ -2309,6 +2406,9 @@ mod tests {
             tools_dir: None,
             skills_dir: None,
             allow_mcp: false,
+            allow_builtin_tools: false,
+            workspace_dir: None,
+            allow_paths: Vec::new(),
             python: None,
             python_paths: Vec::new(),
             fake_llm: FakeLlmMode::Off,
@@ -2675,5 +2775,49 @@ mod tests {
             )),
             4
         );
+    }
+    /// v0.4/D2（DR-013 §4）：未 opt-in → 不解析 workspace（`None`）；非法 workspace →
+    /// `HARNESS_CONFIG_LOAD` + exit 3（CLI 预检、不产生 run）。
+    #[test]
+    fn resolve_builtin_tools_respects_opt_in_and_validates_workspace() {
+        let mut args = RunArgs {
+            graph: PathBuf::from("g.json"),
+            inputs: "{}".to_string(),
+            user_id: DEFAULT_USER_ID.to_string(),
+            db: None,
+            assets_dir: None,
+            tools_dir: None,
+            skills_dir: None,
+            allow_mcp: false,
+            allow_builtin_tools: false,
+            workspace_dir: None,
+            allow_paths: Vec::new(),
+            python: None,
+            python_paths: Vec::new(),
+            fake_llm: FakeLlmMode::Off,
+            real: false,
+            record: RecordMode::Hash,
+            stream: false,
+            json: false,
+            quiet: false,
+        };
+        assert!(resolve_builtin_tools(&args)
+            .expect("not opted in")
+            .is_none());
+
+        args.allow_builtin_tools = true;
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        args.workspace_dir = Some(workspace.path().to_path_buf());
+        let tools = resolve_builtin_tools(&args)
+            .expect("valid workspace")
+            .expect("builtin set");
+        assert_eq!(
+            tools.workspace_root(),
+            std::fs::canonicalize(workspace.path()).expect("canonical")
+        );
+
+        args.workspace_dir = Some(workspace.path().join("missing"));
+        let error = resolve_builtin_tools(&args).expect_err("missing workspace");
+        assert_eq!(error, ExitCode::from(EXIT_ENTRY_INPUT));
     }
 }

@@ -240,3 +240,37 @@ pub const HARNESS_PLUGIN_MAX_INVALID_LINES: u32 = 3;
 
 /// 读取协议帧的轮询粒度（毫秒；用于在阻塞读中响应取消/节点 deadline）。
 pub const HARNESS_PLUGIN_READ_POLL_MS: u64 = 50;
+
+// ---------------------------------------------------------------------------
+// v0.4/D2 内置文件工具 + workspace jail（DR-013 §3/§8；00 §0.5 append-only）
+// ---------------------------------------------------------------------------
+
+/// 内置工具 LLM 名前缀（命名空间保留；DR-013 §1.1）。
+pub const BUILTIN_TOOL_PREFIX: &str = "builtin__";
+
+/// `builtin__read` 文件/扫描字节上限（`BUILTIN_READ_MAX_BYTES` = 1 MiB）。
+pub const BUILTIN_READ_MAX_BYTES: u64 = 1_048_576;
+
+/// `builtin__read` 行数上限（`BUILTIN_READ_MAX_LINES` = 10000）。
+pub const BUILTIN_READ_MAX_LINES: usize = 10_000;
+
+/// `builtin__read` 缺省返回行数（DR-013 §3.1 / §8）。
+pub const BUILTIN_READ_DEFAULT_LINES: usize = 2_000;
+
+/// `builtin__write`/`edit`/`apply_patch` 输入上限（`BUILTIN_WRITE_MAX_BYTES` = 1 MiB）。
+pub const BUILTIN_WRITE_MAX_BYTES: usize = 1_048_576;
+
+/// 内置工具结果对 LLM/trace 的统一上限（`BUILTIN_RESULT_MAX_BYTES` = 32 KiB）。
+pub const BUILTIN_RESULT_MAX_BYTES: usize = 32_768;
+
+/// 内置工具 path 参数长度上限（DR-013 §10 第 6 项：v7 path 4 KiB）。
+pub const BUILTIN_PATH_MAX_BYTES: usize = 4_096;
+
+/// `builtin__read` 二进制探测前缀字节数（前 8 KiB 含 NUL → 二进制）。
+pub const BUILTIN_READ_BINARY_PROBE_BYTES: usize = 8_192;
+
+/// `builtin__diff` 上下文行数上限（DR-013 §3.5）。
+pub const BUILTIN_DIFF_CONTEXT_MAX_LINES: usize = 20;
+
+/// 内置文件工具单次调用超时（毫秒；进程内 Rust，给统一 ToolDef 用）。
+pub const BUILTIN_TOOL_TIMEOUT_MS: u64 = 30_000;

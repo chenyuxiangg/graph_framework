@@ -50,6 +50,7 @@
 mod agent_loop;
 mod assemble;
 mod budget;
+mod builtin;
 mod config;
 mod constants;
 mod ctx;
@@ -72,9 +73,10 @@ pub use budget::{
     check_and_trim, estimate_message_tokens, estimate_messages_tokens, estimate_tokens,
     prompt_budget, BudgetSegments,
 };
+pub use builtin::BuiltinToolSet;
 pub use config::{
-    agent_index, agent_uses_mcp, load_agent, AgentConfig, HarnessConfig, HarnessKind, LoadedAgent,
-    ModelConfig,
+    agent_index, agent_uses_mcp, load_agent, load_agent_with_load_options, AgentConfig,
+    AgentLoadOptions, HarnessConfig, HarnessKind, LoadedAgent, ModelConfig,
 };
 pub use constants::*;
 pub use ctx::{CancelToken, HarnessCtx};
@@ -98,8 +100,8 @@ pub use provider::{
 pub use record::{LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK};
 pub use skills::SkillEntry;
 pub use tools::{
-    FakeToolBehavior, FakeToolRunner, ToolCallRequest, ToolDef, ToolFailure, ToolRegistry,
-    ToolRunner, ToolSchema, WorkerToolRunner,
+    FakeToolBehavior, FakeToolRunner, ToolCallRecord, ToolCallRecordSink, ToolCallRequest, ToolDef,
+    ToolFailure, ToolRegistry, ToolRunner, ToolSchema, ToolSource, WorkerToolRunner,
 };
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ use crate::assemble::{
     effective_input_mapping,
 };
 use crate::budget::{check_and_trim, prompt_budget};
+use crate::builtin::BuiltinToolSet;
 use crate::config::LoadedAgent;
 use crate::constants::{
     BACKOFF_BASE_MS, BACKOFF_MAX_MS, DEFAULT_TOOL_TIMEOUT_MS, MAX_SKILL_VIEWS,
@@ -43,9 +44,9 @@ use crate::record::{
 };
 use crate::skills;
 use crate::tools::{
-    acquire_tool_permits, serialize_tool_result, summarize_args, summarize_result,
-    tool_error_content, validate_tool_arguments, ToolCallRequest, ToolDef, ToolFailure, ToolRunner,
-    ToolSchema,
+    acquire_tool_permits, record_tool_call_safely, serialize_tool_result, summarize_args,
+    summarize_result, tool_error_content, validate_tool_arguments, ToolCallRecord,
+    ToolCallRecordSink, ToolCallRequest, ToolDef, ToolFailure, ToolRunner, ToolSchema, ToolSource,
 };
 
 /// `agent_call` 节点的输出契约（05 §5.9.1 / §5.9.2）。
@@ -148,6 +149,10 @@ pub(crate) struct AgentRun<'a> {
     /// v0.3（DR-009 §5）：**run 级** `skill_view` 预算计数器（跨该 run 的全部
     /// agent_call 实例共享；由 [`crate::executor::HarnessExecutor`] 按 `run_id` 持有）。
     pub(crate) skill_view_budget: &'a Arc<AtomicU32>,
+    /// v0.4/D2：内置文件工具集合（`--allow-builtin-tools` 开启时 `Some`；默认 `None`）。
+    pub(crate) builtin: Option<&'a Arc<BuiltinToolSet>>,
+    /// v0.4/D2：工具调用记录 sink（D5 v7 预留；默认 `None` = no-op）。
+    pub(crate) tool_call_sink: Option<&'a Arc<dyn ToolCallRecordSink>>,
 }
 
 /// 执行一次 Agent（05 §5.5.4 语义；Loading 由 executor 预先完成）。
@@ -367,13 +372,30 @@ impl LoopState {
                 tool_name: call.name.clone(),
                 args_summary: summarize_args(&call.args),
             });
+            let started = std::time::Instant::now();
             // v0.3（DR-009 §4）：`skill_view` 是框架内置工具（进程内、不启动 worker），
             // 且 trace 只记字符数、不落正文。
-            let (ok, tool_content) = if tool.name == SKILL_VIEW_TOOL_NAME {
-                self.execute_skill_view(run, tool, call)
+            // v0.4/D2：`builtin__*` 为 Rust 内置文件工具（进程内、workspace jail 强制）。
+            let (source, (ok, tool_content)) = if tool.name == SKILL_VIEW_TOOL_NAME {
+                (
+                    ToolSource::Framework,
+                    self.execute_skill_view(run, tool, call),
+                )
+            } else if tool.name.starts_with("builtin__") {
+                let outcome = match run.builtin {
+                    Some(builtin) => execute_builtin_tool(builtin, tool, call),
+                    None => (
+                        false,
+                        tool_error_content(&ToolFailure::new(
+                            "builtin_unavailable",
+                            "builtin tool called but --allow-builtin-tools is not enabled",
+                        )),
+                    ),
+                };
+                (ToolSource::Builtin, outcome)
             } else if tool.name.starts_with("mcp__") {
                 // v0.3/V3：MCP 工具进程内桥接（不启动 worker；失败作为 TOOL_ERROR 喂回）。
-                match run.mcp {
+                let outcome = match run.mcp {
                     Some(mcp) => {
                         let future = mcp.execute_tool(&tool.name, &call.args);
                         tokio::select! {
@@ -390,10 +412,25 @@ impl LoopState {
                         );
                         (false, tool_error_content(&failure))
                     }
-                }
+                };
+                (ToolSource::Mcp, outcome)
             } else {
-                execute_tool(run, tool, call).await?
+                (ToolSource::Python, execute_tool(run, tool, call).await?)
             };
+            if let Some(sink) = run.tool_call_sink {
+                record_tool_call_safely(
+                    sink.as_ref(),
+                    &ToolCallRecord {
+                        call_id: &call.call_id,
+                        tool_name: &call.name,
+                        source,
+                        ok,
+                        duration_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                        result_bytes: tool_content.len(),
+                    },
+                );
+            }
             let result_summary = if tool.name == SKILL_VIEW_TOOL_NAME {
                 Some(json!({"chars": tool_content.chars().count()}))
             } else {
@@ -738,6 +775,23 @@ fn map_invoke_error(
     }
 }
 
+/// 执行内置 `builtin__*` 文件工具（进程内 Rust；参数 schema 先行校验）。
+///
+/// 返回 `(ok, 喂回 LLM 的 JSON 文本)`；工具级失败转 `TOOL_ERROR`，不终止 run。
+fn execute_builtin_tool(
+    builtin: &BuiltinToolSet,
+    tool: &ToolDef,
+    call: &ToolCall,
+) -> (bool, String) {
+    if let Err(failure) = validate_tool_arguments(tool, &call.args) {
+        return (false, tool_error_content(&failure));
+    }
+    match builtin.call(&tool.name, &call.args) {
+        Ok(content) => (true, content),
+        Err(failure) => (false, tool_error_content(&failure)),
+    }
+}
+
 /// 执行单个工具调用（参数校验 → 超时/取消 → 结果序列化；05 §5.6.4/§5.6.5）。
 ///
 /// 返回 `(ok, tool_message_content)`：任何工具级失败都转为错误 JSON 喂回 LLM，
@@ -1042,6 +1096,8 @@ mod tests {
             recorder,
             skill_view_budget,
             mcp: None,
+            builtin: None,
+            tool_call_sink: None,
         })
         .await
     }

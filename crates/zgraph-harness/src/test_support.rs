@@ -15,6 +15,7 @@ use zgraph_worker::WorkerLimits;
 
 use crate::ctx::HarnessCtx;
 use crate::record::{LlmCallRecorder, LlmCallSnapshot};
+use crate::tools::{ToolCallRecord, ToolCallRecordSink, ToolSource};
 
 /// 捕获到的一次 LLM 调用记录（拥有所有权的快照副本）。
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +96,47 @@ impl LlmCallRecorder for CapturingRecorder {
         match self.calls.lock() {
             Ok(mut guard) => guard.push(recorded),
             Err(poisoned) => poisoned.into_inner().push(recorded),
+        }
+    }
+}
+
+/// 捕获的工具调用记录：`(call_id, tool_name, source, ok, duration_ms, result_bytes)`。
+pub type CapturedToolCall = (String, String, ToolSource, bool, u64, usize);
+
+/// v0.4/D2：捕获 [`ToolCallRecordSink`] 回调（D5 v7 前置验证）。
+#[derive(Debug, Default)]
+pub struct CapturingToolCallSink {
+    records: Mutex<Vec<CapturedToolCall>>,
+}
+
+impl CapturingToolCallSink {
+    /// 空捕获器。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// 已捕获记录（按调用顺序）。
+    pub fn records(&self) -> Vec<CapturedToolCall> {
+        match self.records.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+impl ToolCallRecordSink for CapturingToolCallSink {
+    fn record_tool_call(&self, record: &ToolCallRecord<'_>) {
+        let entry = (
+            record.call_id.to_string(),
+            record.tool_name.to_string(),
+            record.source,
+            record.ok,
+            record.duration_ms,
+            record.result_bytes,
+        );
+        match self.records.lock() {
+            Ok(mut guard) => guard.push(entry),
+            Err(poisoned) => poisoned.into_inner().push(entry),
         }
     }
 }

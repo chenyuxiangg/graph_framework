@@ -1492,6 +1492,8 @@ if output:
                 recorder: self.recorder.as_ref(),
                 skill_view_budget: &self.budget,
                 mcp: None,
+                builtin: None,
+                tool_call_sink: None,
             }
         }
     }

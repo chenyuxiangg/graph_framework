@@ -277,6 +277,52 @@ pub trait ToolRunner: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// v0.4/D2：工具调用记录 seam（DR-014 D5 的 v7 `tool_calls` 预留；D2 默认 no-op）
+// ---------------------------------------------------------------------------
+
+/// 工具来源（跨源冲突/记录用；DR-013 §1.1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSource {
+    /// Rust 内置（`builtin__*`）。
+    Builtin,
+    /// MCP（`mcp__*`）。
+    Mcp,
+    /// Python `tools/`（05 §5.6）。
+    Python,
+    /// 框架内置（`skill_view` 等）。
+    Framework,
+}
+
+/// 一次工具调用的最小记录（D5 的 v7 `tool_calls` 子集；不落 DB 由 sink 决定）。
+pub struct ToolCallRecord<'a> {
+    /// 调用 ID（原生 `call_id`）。
+    pub call_id: &'a str,
+    /// LLM 工具名。
+    pub tool_name: &'a str,
+    /// 工具来源。
+    pub source: ToolSource,
+    /// 是否成功（失败 = `TOOL_ERROR` 结果）。
+    pub ok: bool,
+    /// 耗时（毫秒）。
+    pub duration_ms: u64,
+    /// 结果内容字节数（截断后）。
+    pub result_bytes: usize,
+}
+
+/// 工具调用记录 sink（v0.4/D5 v7；默认不注入 = no-op，不新增表）。
+pub trait ToolCallRecordSink: Send + Sync {
+    /// 记录一次工具调用终态（不得改变执行语义/不得 panic 影响调用方）。
+    fn record_tool_call(&self, record: &ToolCallRecord<'_>);
+}
+
+/// 安全调用 sink（panic 静默吞掉，观察者不改变语义）。
+pub(crate) fn record_tool_call_safely(sink: &dyn ToolCallRecordSink, record: &ToolCallRecord<'_>) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sink.record_tool_call(record);
+    }));
+}
+
+// ---------------------------------------------------------------------------
 // 参数校验、结果序列化与摘要（05 §5.6.4/§5.6.5、§5.8.5）
 // ---------------------------------------------------------------------------
 

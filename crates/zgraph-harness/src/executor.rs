@@ -24,7 +24,11 @@ use zgraph_worker::WorkerLimits;
 
 use crate::agent_loop::RunFailure;
 use crate::assemble::effective_input_mapping;
-use crate::config::{load_agent_with_options, peek_agent_node_timeout, HarnessKind, ModelConfig};
+use crate::builtin::{has_builtin_prefix, BuiltinToolSet};
+use crate::config::{
+    load_agent_with_load_options, peek_agent_node_timeout, AgentLoadOptions, HarnessKind,
+    ModelConfig,
+};
 use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
 use crate::ctx::HarnessCtx;
 use crate::error::HarnessError;
@@ -94,6 +98,10 @@ pub struct HarnessExecutor {
     ///
     /// 懒启动：无 `harness.kind="subprocess"` 配置时零进程/零 IO。
     subprocess_provider: SubprocessProvider,
+    /// v0.4/D2：内置文件工具（`--allow-builtin-tools`；`None` = 未开启、零副作用）。
+    builtin_tools: Option<Arc<BuiltinToolSet>>,
+    /// v0.4/D2：工具调用记录 sink（D5 v7 预留；默认 `None` = no-op）。
+    tool_call_sink: Option<Arc<dyn crate::tools::ToolCallRecordSink>>,
 }
 
 /// 单 run 的 MCP 会话状态（executor 内部）。
@@ -119,6 +127,8 @@ impl HarnessExecutor {
             mcp_run: tokio::sync::Mutex::new(None),
             builtin_provider: BuiltinProvider::new(),
             subprocess_provider: SubprocessProvider::new(),
+            builtin_tools: None,
+            tool_call_sink: None,
         }
     }
 
@@ -143,6 +153,8 @@ impl HarnessExecutor {
             mcp_run: tokio::sync::Mutex::new(None),
             builtin_provider: BuiltinProvider::new(),
             subprocess_provider: SubprocessProvider::new(),
+            builtin_tools: None,
+            tool_call_sink: None,
         }
     }
 
@@ -165,6 +177,8 @@ impl HarnessExecutor {
             mcp_run: tokio::sync::Mutex::new(None),
             builtin_provider: BuiltinProvider::new(),
             subprocess_provider: SubprocessProvider::new(),
+            builtin_tools: None,
+            tool_call_sink: None,
         }
     }
 
@@ -187,6 +201,8 @@ impl HarnessExecutor {
             mcp_run: tokio::sync::Mutex::new(None),
             builtin_provider: BuiltinProvider::new(),
             subprocess_provider: SubprocessProvider::new(),
+            builtin_tools: None,
+            tool_call_sink: None,
         }
     }
 
@@ -228,6 +244,23 @@ impl HarnessExecutor {
     /// 关 stdin → `SIGTERM` 2s → `SIGKILL` 进程组；不残留孤儿进程。
     pub async fn close_provider(&self) {
         self.subprocess_provider.close_provider().await;
+    }
+
+    /// v0.4/D2：注入内置文件工具集合（`--allow-builtin-tools`；additive）。
+    ///
+    /// 未注入 = 不注册任何 `builtin__*`（默认路径零副作用，兼容矩阵见 DR-012）。
+    pub fn with_builtin_tools(mut self, tools: Arc<BuiltinToolSet>) -> Self {
+        self.builtin_tools = Some(tools);
+        self
+    }
+
+    /// v0.4/D2：注入工具调用记录 sink（D5 v7 预留；默认 no-op）。
+    pub fn with_tool_call_record_sink(
+        mut self,
+        sink: Arc<dyn crate::tools::ToolCallRecordSink>,
+    ) -> Self {
+        self.tool_call_sink = Some(sink);
+        self
     }
 
     /// v0.3/V3：注入 MCP 客户端工厂（测试 seam；生产用默认 rmcp 工厂）。
@@ -310,13 +343,49 @@ impl HarnessExecutor {
                 failure.message,
             )
         })?;
-        let defs = self
+        let mut defs = self
             .settings
             .tool_runner
             .discover(&tools_dir, ctx.clone())
-            .await;
+            .await?;
         drop(permits);
-        let registry = Arc::new(ToolRegistry::new(defs?)?);
+        if let Some(builtin) = &self.builtin_tools {
+            // DR-013 §1.1：`builtin__` 前缀保留；跨源重名 fail-closed（无覆盖语义）。
+            for tool in &defs {
+                if has_builtin_prefix(&tool.name) {
+                    return Err(HarnessError::config_load(
+                        "reserved_prefix",
+                        Some(&tools_dir.display().to_string()),
+                        Some("$.tools[].name"),
+                        Some(serde_json::json!("non-'builtin__' prefix (reserved)")),
+                        Some(serde_json::json!(&tool.name)),
+                        format!(
+                            "python tool '{}' uses the reserved 'builtin__' prefix",
+                            tool.name
+                        ),
+                    ));
+                }
+            }
+            for tool in builtin.definitions() {
+                if let Some(existing) = defs.iter().find(|item| item.name == tool.name) {
+                    return Err(HarnessError::config_load(
+                        "tool_name_conflict",
+                        Some(&tools_dir.display().to_string()),
+                        Some("$.tools"),
+                        Some(serde_json::json!("globally unique tool name")),
+                        Some(
+                            serde_json::json!({"tool": tool.name, "sources": [existing.source, tool.source]}),
+                        ),
+                        format!(
+                            "tool name '{}' declared by '{}' and '{}'",
+                            tool.name, existing.source, tool.source
+                        ),
+                    ));
+                }
+                defs.push(tool.clone());
+            }
+        }
+        let registry = Arc::new(ToolRegistry::new(defs)?);
         cache.insert(tools_dir, registry.clone());
         Ok(registry)
     }
@@ -475,13 +544,16 @@ impl HarnessExecutor {
             .registry(&job.ctx)
             .await
             .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
-        let mut agent = load_agent_with_options(
+        let mut agent = load_agent_with_load_options(
             &self.settings.assets_dir,
             &job.agent_id,
             &registry,
             self.settings.fake_mode,
-            self.skills_dir.as_deref(),
-            self.mcp_allowed,
+            &AgentLoadOptions {
+                skills_dir: self.skills_dir.clone(),
+                mcp_allowed: self.mcp_allowed,
+                builtin_tools_allowed: self.builtin_tools.is_some(),
+            },
         )
         .map_err(|error| config_failure(error, &job.ctx, job.resolved_timeout_ms))?;
         // v0.3/V3：MCP 工具发现（async；每 run 每 server 懒连接 + run 级缓存）。
@@ -550,6 +622,8 @@ impl HarnessExecutor {
             recorder: self.recorder.as_ref(),
             skill_view_budget: &skill_view_budget,
             mcp: mcp_run.as_deref(),
+            builtin: self.builtin_tools.as_ref(),
+            tool_call_sink: self.tool_call_sink.as_ref(),
         };
         let provider: &dyn AgentProvider = match harness_kind {
             HarnessKind::Builtin => &self.builtin_provider,
@@ -2051,5 +2125,158 @@ mod tests {
             Some("HARNESS_CONFIG_LOAD")
         );
         executor.close_provider().await;
+    }
+    // ------------------------------------------------------------------
+    // v0.4/D2：内置文件工具 opt-in / 白名单 / 冲突 / streaming / sink
+    // ------------------------------------------------------------------
+
+    fn builtin_set(dir: &Path) -> Arc<crate::BuiltinToolSet> {
+        crate::BuiltinToolSet::new(&std::fs::canonicalize(dir).expect("canonical"), &[])
+            .expect("builtin set")
+    }
+
+    fn builtin_script(calls: Value) -> Value {
+        fake_script(calls)
+    }
+
+    #[tokio::test]
+    async fn builtin_tools_require_opt_in() {
+        let dir = assets(agent_config("parser", &["builtin__read"]), "role");
+        std::fs::write(dir.path().join("a.txt"), "hello").expect("file");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(builtin_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("HARNESS_CONFIG_LOAD")
+        );
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("builtin_tools_not_allowed")),
+            "{:?}",
+            outcome.error
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_file_tool_runs_through_agent_loop_with_streaming_and_sink() {
+        let dir = assets(agent_config("parser", &["builtin__read"]), "role");
+        std::fs::write(dir.path().join("a.txt"), "hello builtin").expect("file");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(builtin_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "c1", "name": "builtin__read", "args": {"path": "a.txt"}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let sink = crate::test_support::CapturingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(builtin_set(dir.path()))
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Completed);
+        let calls = trace.streaming_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                &call.event,
+                StreamingEvent::ToolCallStart { tool_name, .. } if tool_name == "builtin__read"
+            )),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                &call.event,
+                StreamingEvent::ToolCallEnd { tool_name, ok, .. }
+                    if tool_name == "builtin__read" && *ok
+            )),
+            "{calls:?}"
+        );
+        // 工具结果走既有 TOOL_ERROR/结果摘要路径（LLM 收到文件内容）。
+        let records = sink.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].0, "c1");
+        assert_eq!(records[0].1, "builtin__read");
+        assert_eq!(records[0].2, crate::tools::ToolSource::Builtin);
+        assert!(records[0].3, "ok");
+        assert!(records[0].5 > 0, "result bytes recorded");
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn builtin_tool_must_be_whitelisted_in_agent_tools() {
+        let dir = assets(agent_config("parser", &[]), "role");
+        std::fs::write(dir.path().join("a.txt"), "hello").expect("file");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(builtin_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "c1", "name": "builtin__read", "args": {"path": "a.txt"}}
+                ]},
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(builtin_set(dir.path())),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("HARNESS_UNKNOWN_TOOL")
+        );
+    }
+
+    #[tokio::test]
+    async fn python_tool_cannot_use_reserved_builtin_prefix() {
+        let dir = assets(agent_config("parser", &["builtin__read"]), "role");
+        std::fs::write(dir.path().join("a.txt"), "hello").expect("file");
+        let python_tool = ToolDef {
+            name: "builtin__read".to_string(),
+            description: "shadow".to_string(),
+            parameters: json!({"type": "object", "properties": {}}),
+            timeout_ms: 1_000,
+            source: "tools.legacy".to_string(),
+        };
+        let runner = Arc::new(FakeToolRunner::new().tool(python_tool));
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(builtin_script(json!([
+                {"kind": "text", "content": "never"}
+            ])))
+            .expect("script"),
+        );
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(builtin_set(dir.path())),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, zgraph_kernel::RunStatus::Failed);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("HARNESS_CONFIG_LOAD")
+        );
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("reserved")),
+            "{:?}",
+            outcome.error
+        );
     }
 }

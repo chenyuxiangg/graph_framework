@@ -18,11 +18,12 @@ use serde_json::Value;
 use zgraph_dsl::InputPort;
 
 use crate::agent_loop::{run_agent, AgentOutput, AgentRun, RunFailure};
+use crate::builtin::BuiltinToolSet;
 use crate::config::{AgentConfig, LoadedAgent};
 use crate::ctx::{CancelToken, HarnessCtx};
 use crate::llm::LlmProvider;
 use crate::record::LlmCallRecorder;
-use crate::tools::ToolRunner;
+use crate::tools::{ToolCallRecordSink, ToolRunner};
 
 /// Provider 类型（DR-011 §1；v0.3 实现值仅这两种）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +99,10 @@ pub struct ProviderRequest<'a> {
     pub skill_view_budget: &'a Arc<AtomicU32>,
     /// 本 run 的 MCP 状态（builtin 依赖；subprocess 恒 `None`）。
     pub mcp: Option<&'a crate::mcp::McpRun>,
+    /// v0.4/D2：内置文件工具集合（`--allow-builtin-tools`；`None` = 未开启）。
+    pub builtin: Option<&'a Arc<BuiltinToolSet>>,
+    /// v0.4/D2：工具调用记录 sink（D5 v7 预留；`None` = no-op）。
+    pub tool_call_sink: Option<&'a Arc<dyn ToolCallRecordSink>>,
 }
 
 /// Agent 执行后端抽象（DR-011 §1）。
@@ -147,6 +152,8 @@ impl AgentProvider for BuiltinProvider {
             recorder: request.recorder,
             mcp: request.mcp,
             skill_view_budget: request.skill_view_budget,
+            builtin: request.builtin,
+            tool_call_sink: request.tool_call_sink,
         };
         run_agent(run).await
     }
@@ -251,6 +258,8 @@ mod tests {
             recorder: None,
             skill_view_budget: &budget,
             mcp: None,
+            builtin: None,
+            tool_call_sink: None,
         };
         let output = provider.run(request).await.expect("builtin run");
         assert_eq!(output.content, "builtin-output");

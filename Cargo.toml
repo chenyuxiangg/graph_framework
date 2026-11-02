@@ -35,5 +35,8 @@ genai = "0.7.2"
 tokio-util = { version = "0.7", features = ["rt"] }
 blake3 = "1"
 futures-util = "0.3"
+# v0.4/D2（DR-013 §3/§8）：内置文件工具 sha256 与 unified diff。
+sha2 = "0.10"
+similar = "2"
 # nix 只在 Unix 提供；成员 crate 在 [target.'cfg(unix)'.dependencies] 里按需启用 feature。
 nix = "0.29"
