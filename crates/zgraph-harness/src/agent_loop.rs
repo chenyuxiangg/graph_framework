@@ -27,6 +27,7 @@ use crate::assemble::{
 };
 use crate::budget::{check_and_trim, prompt_budget};
 use crate::builtin::BuiltinToolSet;
+use crate::builtin::{BuiltinCallOutput, ToolCallMetadata};
 use crate::config::LoadedAgent;
 use crate::constants::{
     BACKOFF_BASE_MS, BACKOFF_MAX_MS, DEFAULT_TOOL_TIMEOUT_MS, MAX_SKILL_VIEWS,
@@ -46,7 +47,8 @@ use crate::skills;
 use crate::tools::{
     acquire_tool_permits, record_tool_call_safely, serialize_tool_result, summarize_args,
     summarize_result, tool_error_content, validate_tool_arguments, ToolCallRecord,
-    ToolCallRecordSink, ToolCallRequest, ToolDef, ToolFailure, ToolRunner, ToolSchema, ToolSource,
+    ToolCallRecordSink, ToolCallRequest, ToolCallSource, ToolCallStatus, ToolDef, ToolFailure,
+    ToolRunner, ToolSchema,
 };
 
 /// `agent_call` 节点的输出契约（05 §5.9.1 / §5.9.2）。
@@ -373,64 +375,86 @@ impl LoopState {
                 args_summary: summarize_args(&call.args),
             });
             let started = std::time::Instant::now();
+            let started_at = run.ctx.now_rfc3339_millis();
             // v0.3（DR-009 §4）：`skill_view` 是框架内置工具（进程内、不启动 worker），
-            // 且 trace 只记字符数、不落正文。
-            // v0.4/D2：`builtin__*` 为 Rust 内置文件工具（进程内、workspace jail 强制）。
-            let (source, (ok, tool_content)) = if tool.name == SKILL_VIEW_TOOL_NAME {
-                (
-                    ToolSource::Framework,
-                    self.execute_skill_view(run, tool, call),
-                )
+            // 且 trace 只记字符数、不落正文；D5b1：框架工具不写 `tool_calls`。
+            // v0.4/D2–D4：`builtin__*` 为 Rust 内置工具（进程内、jail/沙箱强制）。
+            let is_skill_view = tool.name == SKILL_VIEW_TOOL_NAME;
+            let source = if is_skill_view {
+                None
             } else if tool.name.starts_with("builtin__") {
-                let outcome = match run.builtin {
-                    Some(builtin) => execute_builtin_tool(run, builtin, tool, call).await?,
-                    None => (
-                        false,
-                        tool_error_content(&ToolFailure::new(
+                Some(ToolCallSource::Builtin)
+            } else if tool.name.starts_with("mcp__") {
+                Some(ToolCallSource::Mcp)
+            } else {
+                Some(ToolCallSource::Python)
+            };
+            let execution: Result<ToolOutcome, RunFailure> = if is_skill_view {
+                let (ok, content) = self.execute_skill_view(run, tool, call);
+                Ok(ToolOutcome {
+                    ok,
+                    content,
+                    metadata: None,
+                    failure_reason: None,
+                })
+            } else {
+                match source {
+                    Some(ToolCallSource::Builtin) => match run.builtin {
+                        Some(builtin) => execute_builtin_tool(run, builtin, tool, call).await,
+                        None => Ok(ToolOutcome::tool_error(ToolFailure::new(
                             "builtin_unavailable",
                             "builtin tool called but --allow-builtin-tools is not enabled",
-                        )),
-                    ),
-                };
-                (ToolSource::Builtin, outcome)
-            } else if tool.name.starts_with("mcp__") {
-                // v0.3/V3：MCP 工具进程内桥接（不启动 worker；失败作为 TOOL_ERROR 喂回）。
-                let outcome = match run.mcp {
-                    Some(mcp) => {
-                        let future = mcp.execute_tool(&tool.name, &call.args);
-                        tokio::select! {
-                            result = future => result,
-                            _ = wait_cancelled(&run.ctx) => {
-                                return Err(RunFailure::Cancelled);
+                        ))),
+                    },
+                    Some(ToolCallSource::Mcp) => match run.mcp {
+                        Some(mcp) => {
+                            let future = mcp.execute_tool(&tool.name, &call.args);
+                            tokio::select! {
+                                result = future => Ok(ToolOutcome::from_pair(result.0, result.1)),
+                                _ = wait_cancelled(&run.ctx) => Err(RunFailure::Cancelled),
                             }
                         }
-                    }
-                    None => {
-                        let failure = ToolFailure::new(
+                        None => Ok(ToolOutcome::tool_error(ToolFailure::new(
                             "mcp_unavailable",
                             "MCP tool called but no MCP run is active",
-                        );
-                        (false, tool_error_content(&failure))
-                    }
-                };
-                (ToolSource::Mcp, outcome)
-            } else {
-                (ToolSource::Python, execute_tool(run, tool, call).await?)
-            };
-            if let Some(sink) = run.tool_call_sink {
-                record_tool_call_safely(
-                    sink.as_ref(),
-                    &ToolCallRecord {
-                        call_id: &call.call_id,
-                        tool_name: &call.name,
-                        source,
-                        ok,
-                        duration_ms: u64::try_from(started.elapsed().as_millis())
-                            .unwrap_or(u64::MAX),
-                        result_bytes: tool_content.len(),
+                        ))),
                     },
+                    _ => execute_tool(run, tool, call)
+                        .await
+                        .map(|(ok, content)| ToolOutcome::from_pair(ok, content)),
+                }
+            };
+            let outcome = match execution {
+                Ok(outcome) => outcome,
+                Err(RunFailure::Cancelled) => {
+                    if let (Some(source), Some(sink)) = (source, run.tool_call_sink.as_ref()) {
+                        let record = cancelled_tool_call_record(
+                            call,
+                            source,
+                            started_at,
+                            run.ctx.now_rfc3339_millis(),
+                            started,
+                        );
+                        record_tool_call_safely(sink.as_ref(), &record);
+                    }
+                    return Err(RunFailure::Cancelled);
+                }
+                Err(other) => return Err(other),
+            };
+            let finished_at = run.ctx.now_rfc3339_millis();
+            if let (Some(source), Some(sink)) = (source, run.tool_call_sink.as_ref()) {
+                let record = build_tool_call_record(
+                    call,
+                    source,
+                    started_at,
+                    finished_at,
+                    started,
+                    &outcome,
                 );
+                record_tool_call_safely(sink.as_ref(), &record);
             }
+            let ok = outcome.ok;
+            let tool_content = outcome.content;
             let result_summary = if tool.name == SKILL_VIEW_TOOL_NAME {
                 Some(json!({"chars": tool_content.chars().count()}))
             } else {
@@ -775,17 +799,148 @@ fn map_invoke_error(
     }
 }
 
-/// 执行内置 `builtin__*` 文件工具（进程内 Rust；参数 schema 先行校验）。
+/// 一次工具执行（成功/TOOL_ERROR）与 D5b1 记录元数据。
+struct ToolOutcome {
+    ok: bool,
+    content: String,
+    metadata: Option<ToolCallMetadata>,
+    failure_reason: Option<String>,
+}
+
+impl ToolOutcome {
+    fn from_pair(ok: bool, content: String) -> Self {
+        let failure_reason = if ok {
+            None
+        } else {
+            failure_reason_from_content(&content)
+        };
+        Self {
+            ok,
+            content,
+            metadata: None,
+            failure_reason,
+        }
+    }
+
+    fn from_builtin(output: BuiltinCallOutput) -> Self {
+        Self {
+            ok: true,
+            content: output.content,
+            metadata: Some(output.metadata),
+            failure_reason: None,
+        }
+    }
+
+    fn tool_error(failure: ToolFailure) -> Self {
+        Self {
+            ok: false,
+            content: tool_error_content(&failure),
+            metadata: None,
+            failure_reason: Some(failure.reason),
+        }
+    }
+}
+
+/// 从 `TOOL_ERROR` JSON 提取 reason（`{"error":{"reason":...}}`）。
+fn failure_reason_from_content(content: &str) -> Option<String> {
+    serde_json::from_str::<Value>(content)
+        .ok()?
+        .get("error")?
+        .get("reason")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// 解析工具内容为 Value；非 JSON 时降级为字符串包装（保持可审计）。
+fn content_value(content: &str) -> Value {
+    serde_json::from_str::<Value>(content).unwrap_or_else(|_| Value::String(content.to_string()))
+}
+
+/// D5b1：构造成功/失败的 `ToolCallRecord`（trace 映射见 D5b2）。
+fn build_tool_call_record(
+    call: &ToolCall,
+    source: ToolCallSource,
+    started_at: String,
+    finished_at: String,
+    started: std::time::Instant,
+    outcome: &ToolOutcome,
+) -> ToolCallRecord {
+    let status = if outcome.ok {
+        ToolCallStatus::Ok
+    } else {
+        match outcome.failure_reason.as_deref() {
+            Some("timeout") => ToolCallStatus::Timeout,
+            Some("cancelled") => ToolCallStatus::Cancelled,
+            _ => ToolCallStatus::Error,
+        }
+    };
+    let result = outcome.ok.then(|| content_value(&outcome.content));
+    let error = (!outcome.ok).then(|| content_value(&outcome.content));
+    let metadata = outcome.metadata.as_ref();
+    let truncated = metadata.map(|meta| meta.truncated).unwrap_or(false)
+        || result
+            .as_ref()
+            .and_then(|value| value.get("truncated"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let (side_effect, bash) = match metadata {
+        Some(meta) => (meta.side_effect.clone(), meta.bash.clone()),
+        None => (None, None),
+    };
+    ToolCallRecord {
+        call_id: call.call_id.clone(),
+        tool_name: call.name.clone(),
+        source,
+        status,
+        started_at,
+        finished_at,
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        args: call.args.clone(),
+        result,
+        error,
+        truncated,
+        side_effect,
+        bash,
+    }
+}
+
+/// D5b1：run 取消时的记录（status=cancelled；无 result）。
+fn cancelled_tool_call_record(
+    call: &ToolCall,
+    source: ToolCallSource,
+    started_at: String,
+    finished_at: String,
+    started: std::time::Instant,
+) -> ToolCallRecord {
+    ToolCallRecord {
+        call_id: call.call_id.clone(),
+        tool_name: call.name.clone(),
+        source,
+        status: ToolCallStatus::Cancelled,
+        started_at,
+        finished_at,
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        args: call.args.clone(),
+        result: None,
+        // 与 TOOL_ERROR JSON 形状对齐（D5b2 直接映射 trace `error_json`）。
+        error: Some(json!({"error": {"reason": "cancelled"}})),
+        truncated: false,
+        side_effect: None,
+        bash: None,
+    }
+}
+
+/// 执行内置 `builtin__*` 工具（进程内 Rust；参数 schema 先行校验）。
 ///
-/// 返回 `(ok, 喂回 LLM 的 JSON 文本)`；工具级失败转 `TOOL_ERROR`，不终止 run。
+/// 返回 `ToolOutcome`（含 D5b1 记录元数据）；工具级失败转 `TOOL_ERROR`，不终止 run。
 async fn execute_builtin_tool(
     run: &AgentRun<'_>,
     builtin: &Arc<BuiltinToolSet>,
     tool: &ToolDef,
     call: &ToolCall,
-) -> Result<(bool, String), RunFailure> {
+) -> Result<ToolOutcome, RunFailure> {
     if let Err(failure) = validate_tool_arguments(tool, &call.args) {
-        return Ok((false, tool_error_content(&failure)));
+        return Ok(ToolOutcome::tool_error(failure));
     }
     // D4：bash 在 blocking 线程池执行（长命令不阻塞 tokio worker），取消时先回收
     // 进程组再向上传播 `RunFailure::Cancelled`（与既有工具取消语义一致）。
@@ -796,19 +951,16 @@ async fn execute_builtin_tool(
         let args = call.args.clone();
         let tool_name = tool.name.clone();
         let mut handle = tokio::task::spawn_blocking(move || {
-            set.call_with_control(&tool_name, &args, &kill_control)
+            set.call_with_metadata(&tool_name, &args, &kill_control)
         });
         return tokio::select! {
             result = &mut handle => match result {
-                Ok(Ok(content)) => Ok((true, content)),
-                Ok(Err(failure)) => Ok((false, tool_error_content(&failure))),
-                Err(error) => Ok((
-                    false,
-                    tool_error_content(&ToolFailure::new(
-                        "sandbox_failure",
-                        format!("bash task failed: {error}"),
-                    )),
-                )),
+                Ok(Ok(output)) => Ok(ToolOutcome::from_builtin(output)),
+                Ok(Err(failure)) => Ok(ToolOutcome::tool_error(failure)),
+                Err(error) => Ok(ToolOutcome::tool_error(ToolFailure::new(
+                    "sandbox_failure",
+                    format!("bash task failed: {error}"),
+                ))),
             },
             _ = wait_cancelled(&run.ctx) => {
                 control.request_kill();
@@ -821,9 +973,10 @@ async fn execute_builtin_tool(
             }
         };
     }
-    match builtin.call(&tool.name, &call.args) {
-        Ok(content) => Ok((true, content)),
-        Err(failure) => Ok((false, tool_error_content(&failure))),
+    let control = crate::builtin::sandbox::ProcessControl::new();
+    match builtin.call_with_metadata(&tool.name, &call.args, &control) {
+        Ok(output) => Ok(ToolOutcome::from_builtin(output)),
+        Err(failure) => Ok(ToolOutcome::tool_error(failure)),
     }
 }
 
@@ -1137,13 +1290,14 @@ mod tests {
         .await
     }
 
-    /// v0.4/D4：带内置工具集合执行一次 agent_call（取消/工具注册测试用）。
-    async fn execute_with_builtin(
+    /// v0.4/D4/D5b1：带内置工具集合/sink 执行一次 agent_call（取消/记录测试用）。
+    async fn execute_with_builtin_sink(
         agent: &LoadedAgent,
         fake: &Arc<FakeLlmProvider>,
         runner: &Arc<FakeToolRunner>,
         builtin: Arc<BuiltinToolSet>,
         ctx: &Arc<TestCtx>,
+        sink: Option<&Arc<dyn crate::tools::ToolCallRecordSink>>,
     ) -> Result<AgentOutput, RunFailure> {
         let provider: Arc<dyn LlmProvider> = fake.clone();
         let tool_runner: Arc<dyn ToolRunner> = runner.clone();
@@ -1168,7 +1322,7 @@ mod tests {
             skill_view_budget: &budget,
             mcp: None,
             builtin: Some(&builtin),
-            tool_call_sink: None,
+            tool_call_sink: sink,
         })
         .await
     }
@@ -2302,11 +2456,62 @@ STEP TWO",
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             canceller.request_cancel();
         });
-        let failure = execute_with_builtin(&agent, &fake, &runner, set, &ctx)
-            .await
-            .expect_err("cancelled");
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        let failure = execute_with_builtin_sink(
+            &agent,
+            &fake,
+            &runner,
+            set,
+            &ctx,
+            Some(&(sink.clone() as Arc<dyn crate::tools::ToolCallRecordSink>)),
+        )
+        .await
+        .expect_err("cancelled");
         assert_eq!(failure, RunFailure::Cancelled);
         assert!(sandbox.started(), "bash runner was dispatched");
+        let records = sink.records();
+        assert_eq!(records.len(), 1, "cancelled call recorded: {records:?}");
+        assert_eq!(records[0].status, crate::tools::ToolCallStatus::Cancelled);
+        assert_eq!(
+            records[0].error.as_ref().unwrap()["error"]["reason"],
+            json!("cancelled")
+        );
         let _ = handle.await;
+    }
+    /// D5b1：`skill_view`（framework）成功/失败都不写 `tool_calls`（source 闭集无 framework）。
+    #[tokio::test]
+    async fn skill_view_is_not_recorded_in_tool_call_sink() {
+        use crate::test_support::{FakeSandboxRunner, RecordingToolCallSink};
+
+        let skills = vec![skill_entry("alpha", "desc", "BODY")];
+        let agent = loaded_agent_with_skills(skills, 5, "role");
+        let fake = script(json!({"calls": [
+            tool_calls(json!([{"call_id": "s1", "name": "skill_view",
+                               "args": {"name": "alpha"}}])),
+            text("done")
+        ]}));
+        let runner = Arc::new(FakeToolRunner::new());
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let set = crate::BuiltinToolSet::new_with_runner(
+            &std::fs::canonicalize(workspace.path()).expect("canonical"),
+            &[],
+            false,
+            FakeSandboxRunner::new(),
+        )
+        .expect("set");
+        let sink = RecordingToolCallSink::new();
+        let ctx = TestCtx::new();
+        let output = execute_with_builtin_sink(
+            &agent,
+            &fake,
+            &runner,
+            set,
+            &ctx,
+            Some(&(sink.clone() as Arc<dyn crate::tools::ToolCallRecordSink>)),
+        )
+        .await
+        .expect("skill_view run");
+        assert_eq!(output.content, "done");
+        assert!(sink.records().is_empty(), "skill_view must not be recorded");
     }
 }

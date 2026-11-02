@@ -17,7 +17,7 @@ use crate::builtin::bash::{BashOutcome, BashRequest, SandboxRunner};
 use crate::builtin::sandbox::ProcessControl;
 use crate::ctx::HarnessCtx;
 use crate::record::{LlmCallRecorder, LlmCallSnapshot};
-use crate::tools::{ToolCallRecord, ToolCallRecordSink, ToolFailure, ToolSource};
+use crate::tools::ToolFailure;
 
 /// 捕获到的一次 LLM 调用记录（拥有所有权的快照副本）。
 #[derive(Debug, Clone, PartialEq)]
@@ -102,23 +102,20 @@ impl LlmCallRecorder for CapturingRecorder {
     }
 }
 
-/// 捕获的工具调用记录：`(call_id, tool_name, source, ok, duration_ms, result_bytes)`。
-pub type CapturedToolCall = (String, String, ToolSource, bool, u64, usize);
-
-/// v0.4/D2：捕获 [`ToolCallRecordSink`] 回调（D5 v7 前置验证）。
+/// v0.4/D5b1：捕获富化工具调用记录的测试 sink（每类工具断言用）。
 #[derive(Debug, Default)]
-pub struct CapturingToolCallSink {
-    records: Mutex<Vec<CapturedToolCall>>,
+pub struct RecordingToolCallSink {
+    records: Mutex<Vec<crate::tools::ToolCallRecord>>,
 }
 
-impl CapturingToolCallSink {
-    /// 空捕获器。
+impl RecordingToolCallSink {
+    /// 空记录器。
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
     /// 已捕获记录（按调用顺序）。
-    pub fn records(&self) -> Vec<CapturedToolCall> {
+    pub fn records(&self) -> Vec<crate::tools::ToolCallRecord> {
         match self.records.lock() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
@@ -126,19 +123,11 @@ impl CapturingToolCallSink {
     }
 }
 
-impl ToolCallRecordSink for CapturingToolCallSink {
-    fn record_tool_call(&self, record: &ToolCallRecord<'_>) {
-        let entry = (
-            record.call_id.to_string(),
-            record.tool_name.to_string(),
-            record.source,
-            record.ok,
-            record.duration_ms,
-            record.result_bytes,
-        );
+impl crate::tools::ToolCallRecordSink for RecordingToolCallSink {
+    fn record_tool_call(&self, record: &crate::tools::ToolCallRecord) {
         match self.records.lock() {
-            Ok(mut guard) => guard.push(entry),
-            Err(poisoned) => poisoned.into_inner().push(entry),
+            Ok(mut guard) => guard.push(record.clone()),
+            Err(poisoned) => poisoned.into_inner().push(record.clone()),
         }
     }
 }
@@ -404,5 +393,17 @@ impl SandboxRunner for BlockingSandboxRunner {
 
     fn profile_sha256(&self) -> &str {
         &self.profile_sha256
+    }
+}
+
+/// D5b1 测试辅助：大输出 bash 结果（触发 16 KiB head+tail 截断）。
+pub fn bash_outcome_with_large_output() -> BashOutcome {
+    BashOutcome {
+        exit_code: Some(0),
+        signal: None,
+        stdout: "a".repeat(100_000).into_bytes(),
+        stderr: "b".repeat(50_000).into_bytes(),
+        drain_truncated: false,
+        duration_ms: 1,
     }
 }

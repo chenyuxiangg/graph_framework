@@ -49,6 +49,14 @@ pub trait HarnessCtx: Send + Sync {
     fn tool_limits(&self) -> Option<Arc<WorkerLimits>> {
         None
     }
+
+    /// D5b1：当前墙钟时刻（RFC3339 毫秒 Z；工具调用记录 `started_at/finished_at`）。
+    ///
+    /// 上下文未提供可注入时钟（DR-014 §3 的 `ctx` 时钟）；默认实现取系统 UTC。
+    /// **无新增依赖**：RFC3339 由 std `SystemTime` + 公历换算生成（测试覆盖格式）。
+    fn now_rfc3339_millis(&self) -> String {
+        rfc3339_millis_now()
+    }
 }
 
 impl HarnessCtx for NodeContext {
@@ -165,5 +173,76 @@ impl LlmStreamSink for StreamSink {
             // tool_call 增量只供 adapter 内部聚合观察，不直接外发（05 §5.8.1）。
             LlmDelta::ToolCallStarted { .. } | LlmDelta::ToolCallArgs { .. } => {}
         }
+    }
+}
+
+/// 当前 UTC 时刻的 RFC3339 毫秒表示（`YYYY-MM-DDTHH:MM:SS.mmmZ`）。
+pub(crate) fn rfc3339_millis_now() -> String {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    rfc3339_millis_from_epoch(
+        i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        duration.subsec_millis(),
+    )
+}
+
+/// 由 Unix 秒 + 毫秒格式化 RFC3339（合入前系统时间早于 epoch 时按 0 处理）。
+pub(crate) fn rfc3339_millis_from_epoch(seconds: i64, millis: u32) -> String {
+    let seconds = seconds.max(0);
+    let millis = millis.min(999);
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
+/// Howard Hinnant `civil_from_days`：Unix 天数 → (year, month, day)。
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = (z - era * 146_097) as u64; // [0, 146096]
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    } as u32;
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day)
+}
+
+#[cfg(test)]
+mod rfc3339_tests {
+    use super::*;
+
+    #[test]
+    fn formats_epoch_and_known_dates() {
+        assert_eq!(rfc3339_millis_from_epoch(0, 0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            rfc3339_millis_from_epoch(1_709_164_800, 42), // 2024-02-29T00:00:00Z
+            "2024-02-29T00:00:00.042Z"
+        );
+        assert_eq!(
+            rfc3339_millis_from_epoch(1_700_000_000, 999),
+            "2023-11-14T22:13:20.999Z"
+        );
+    }
+
+    #[test]
+    fn now_is_rfc3339_millis_utc() {
+        let text = rfc3339_millis_now();
+        assert_eq!(text.len(), 24, "{text}");
+        assert!(text.ends_with('Z'));
+        assert_eq!(&text[10..11], "T");
+        assert_eq!(&text[19..20], ".");
     }
 }

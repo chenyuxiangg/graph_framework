@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::builtin::files::{optional_u64, required_str, BuiltinToolSet};
+use crate::builtin::files::{optional_u64, required_str, BuiltinToolSet, ToolCallMetadata};
 use crate::builtin::jail::Access;
 use crate::builtin::sandbox::{
     head_tail, preflight_with, render_profile, run_supervised, ProcessControl, SandboxExecProbe,
@@ -229,11 +229,14 @@ pub(crate) fn bash_tool_def() -> ToolDef {
 
 impl BuiltinToolSet {
     /// `builtin__bash` 执行入口（同步；agent_loop 在 blocking 线程池调用并支持取消）。
+    ///
+    /// D5b1：同时返回 [`ToolCallMetadata::bash`]（command/cwd/exit/signal/输出/
+    /// profile_sha256）用于 trace `tool_calls`。
     pub(crate) fn bash(
         &self,
         args: &Value,
         control: &ProcessControl,
-    ) -> Result<Value, ToolFailure> {
+    ) -> Result<(Value, ToolCallMetadata), ToolFailure> {
         let request = self.bash_request(args)?;
         let runner = self
             .bash_runner
@@ -243,15 +246,31 @@ impl BuiltinToolSet {
         let (stdout, stdout_capped) = head_tail(&outcome.stdout, BASH_STDOUT_MAX_BYTES);
         let (stderr, stderr_capped) = head_tail(&outcome.stderr, BASH_STDERR_MAX_BYTES);
         let truncated = outcome.drain_truncated || stdout_capped || stderr_capped;
-        Ok(json!({
-            "exit_code": outcome.exit_code,
-            "signal": outcome.signal,
-            "stdout": stdout,
-            "stderr": stderr,
-            "truncated": truncated,
-            "sandbox": runner.sandbox_name(),
-            "duration_ms": outcome.duration_ms,
-        }))
+        let metadata = ToolCallMetadata {
+            bash: Some(crate::tools::BashCallRecord {
+                command: request.command.clone(),
+                cwd: request.cwd.display().to_string(),
+                exit_code: outcome.exit_code,
+                signal: outcome.signal,
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+                sandbox_profile_sha256: Some(runner.profile_sha256().to_string()),
+            }),
+            truncated,
+            ..ToolCallMetadata::default()
+        };
+        Ok((
+            json!({
+                "exit_code": outcome.exit_code,
+                "signal": outcome.signal,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": truncated,
+                "sandbox": runner.sandbox_name(),
+                "duration_ms": outcome.duration_ms,
+            }),
+            metadata,
+        ))
     }
 
     /// 参数校验 + cwd jail + env 白名单（超时/取消由调度层负责）。

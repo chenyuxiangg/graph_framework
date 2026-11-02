@@ -56,6 +56,26 @@ impl std::fmt::Debug for BuiltinToolSet {
     }
 }
 
+/// 内置工具调用元数据（D5b1：映射 trace `tool_calls` 的 side_effect/bash/truncated）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolCallMetadata {
+    /// 单文件副作用（write/edit/apply_patch；多文件 apply_patch = None）。
+    pub side_effect: Option<crate::tools::ToolSideEffect>,
+    /// bash 元数据（仅 builtin__bash）。
+    pub bash: Option<crate::tools::BashCallRecord>,
+    /// 工具自身截断提示（bash 输出/结果超限）。
+    pub truncated: bool,
+}
+
+/// 一次内置工具调用的输出（喂回 LLM 的 JSON + 记录元数据）。
+#[derive(Debug, Clone)]
+pub(crate) struct BuiltinCallOutput {
+    /// 紧凑 JSON 内容（≤32 KiB；bash 例外 16 KiB×2）。
+    pub content: String,
+    /// D5b1 记录元数据。
+    pub metadata: ToolCallMetadata,
+}
+
 impl BuiltinToolSet {
     /// 构造（D2/D3 语义）：注册文件 5 + 搜索 2，无 bash。
     pub fn new(workspace_dir: &Path, allow_paths: &[PathBuf]) -> Result<Arc<Self>, HarnessError> {
@@ -142,14 +162,24 @@ impl BuiltinToolSet {
         args: &Value,
         control: &crate::builtin::sandbox::ProcessControl,
     ) -> Result<String, ToolFailure> {
-        let payload = match tool_name {
-            TOOL_READ => self.read(args)?,
+        Ok(self.call_with_metadata(tool_name, args, control)?.content)
+    }
+
+    /// D5b1：执行并返回（喂回 LLM 的 JSON, 记录元数据）。
+    pub(crate) fn call_with_metadata(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        control: &crate::builtin::sandbox::ProcessControl,
+    ) -> Result<BuiltinCallOutput, ToolFailure> {
+        let (payload, mut metadata) = match tool_name {
+            TOOL_READ => (self.read(args)?, ToolCallMetadata::default()),
             TOOL_WRITE => self.write(args)?,
             TOOL_EDIT => self.edit(args)?,
             TOOL_APPLY_PATCH => self.apply_patch(args)?,
-            TOOL_DIFF => self.diff(args)?,
-            crate::builtin::search::TOOL_GREP => self.grep(args)?,
-            crate::builtin::search::TOOL_GLOB => self.glob(args)?,
+            TOOL_DIFF => (self.diff(args)?, ToolCallMetadata::default()),
+            crate::builtin::search::TOOL_GREP => (self.grep(args)?, ToolCallMetadata::default()),
+            crate::builtin::search::TOOL_GLOB => (self.glob(args)?, ToolCallMetadata::default()),
             crate::builtin::bash::TOOL_BASH => self.bash(args, control)?,
             other => {
                 return Err(ToolFailure::new(
@@ -158,7 +188,13 @@ impl BuiltinToolSet {
                 ))
             }
         };
-        Ok(self.limit_result(payload))
+        let content = self.limit_result(payload);
+        let payload_truncated = serde_json::from_str::<Value>(&content)
+            .ok()
+            .and_then(|value| value.get("truncated").and_then(Value::as_bool))
+            .unwrap_or(false);
+        metadata.truncated |= payload_truncated;
+        Ok(BuiltinCallOutput { content, metadata })
     }
 
     /// 结果序列化 + 统一上限（`truncated:true` + 全量 sha256 由各工具提供）。
@@ -267,7 +303,7 @@ impl BuiltinToolSet {
         }))
     }
 
-    fn write(&self, args: &Value) -> Result<Value, ToolFailure> {
+    fn write(&self, args: &Value) -> Result<(Value, ToolCallMetadata), ToolFailure> {
         let path = required_str(args, "path")?;
         let content = required_str(args, "content")?;
         let overwrite = optional_bool(args, "overwrite", false)?;
@@ -282,11 +318,11 @@ impl BuiltinToolSet {
             self.jail.create_parents(path)?;
         }
         let resolved = self.jail.resolve(path, Access::Write)?;
-        let sha_before = if resolved.existed {
+        let (sha_before, bytes_before) = if resolved.existed {
             let bytes = read_bounded(&resolved.path, BUILTIN_WRITE_MAX_BYTES as u64)?;
-            Some(sha256_hex(&bytes))
+            (Some(sha256_hex(&bytes)), Some(bytes.len() as u64))
         } else {
-            None
+            (None, None)
         };
         if resolved.existed && !overwrite {
             let metadata = std::fs::metadata(&resolved.path).ok();
@@ -312,15 +348,29 @@ impl BuiltinToolSet {
         };
         atomic_write(&resolved.path, content.as_bytes(), previous_perms.as_ref())
             .map_err(|error| io_failure("write", path, &error))?;
-        Ok(json!({
-            "path": path,
-            "bytes_written": content.len(),
-            "sha256_before": sha_before,
-            "sha256_after": sha256_hex(content.as_bytes()),
-        }))
+        let sha_after = sha256_hex(content.as_bytes());
+        let metadata = ToolCallMetadata {
+            side_effect: Some(crate::tools::ToolSideEffect {
+                path: path.to_string(),
+                before_sha256: sha_before.clone(),
+                after_sha256: Some(sha_after.clone()),
+                bytes_before,
+                bytes_after: Some(content.len() as u64),
+            }),
+            ..ToolCallMetadata::default()
+        };
+        Ok((
+            json!({
+                "path": path,
+                "bytes_written": content.len(),
+                "sha256_before": sha_before,
+                "sha256_after": sha_after,
+            }),
+            metadata,
+        ))
     }
 
-    fn edit(&self, args: &Value) -> Result<Value, ToolFailure> {
+    fn edit(&self, args: &Value) -> Result<(Value, ToolCallMetadata), ToolFailure> {
         let path = required_str(args, "path")?;
         let old_string = required_str(args, "old_string")?;
         let new_string = required_str(args, "new_string")?;
@@ -373,15 +423,30 @@ impl BuiltinToolSet {
             .map(|meta| meta.permissions());
         atomic_write(&resolved.path, updated.as_bytes(), permissions.as_ref())
             .map_err(|error| io_failure("write", path, &error))?;
-        Ok(json!({
-            "path": path,
-            "replacements": if replace_all { count } else { 1 },
-            "sha256_before": sha256_hex(text.as_bytes()),
-            "sha256_after": sha256_hex(updated.as_bytes()),
-        }))
+        let before = sha256_hex(text.as_bytes());
+        let after = sha256_hex(updated.as_bytes());
+        let metadata = ToolCallMetadata {
+            side_effect: Some(crate::tools::ToolSideEffect {
+                path: path.to_string(),
+                before_sha256: Some(before.clone()),
+                after_sha256: Some(after.clone()),
+                bytes_before: Some(text.len() as u64),
+                bytes_after: Some(updated.len() as u64),
+            }),
+            ..ToolCallMetadata::default()
+        };
+        Ok((
+            json!({
+                "path": path,
+                "replacements": if replace_all { count } else { 1 },
+                "sha256_before": before,
+                "sha256_after": after,
+            }),
+            metadata,
+        ))
     }
 
-    fn apply_patch(&self, args: &Value) -> Result<Value, ToolFailure> {
+    fn apply_patch(&self, args: &Value) -> Result<(Value, ToolCallMetadata), ToolFailure> {
         let patch_text = required_str(args, "patch")?;
         let strip = optional_u64(args, "strip", 1)? as usize;
         if patch_text.len() > BUILTIN_WRITE_MAX_BYTES {
@@ -393,7 +458,27 @@ impl BuiltinToolSet {
         let patches = parse_patch(patch_text)?;
         let mut staged = self.stage_patches(&patches, strip)?;
         write_staged_atomically(&mut staged)?;
-        Ok(patch_result(&staged))
+        let result = patch_result(&staged);
+        // 多文件 apply_patch 仍一行；side_effect 仅单文件时填（DR-014 §1）。
+        let side_effect = if staged.len() == 1 {
+            let file = &staged[0];
+            Some(crate::tools::ToolSideEffect {
+                path: file.display_path.clone(),
+                before_sha256: Some(sha256_hex(file.original.as_bytes())),
+                after_sha256: Some(sha256_hex(file.updated.as_bytes())),
+                bytes_before: Some(file.original.len() as u64),
+                bytes_after: Some(file.updated.len() as u64),
+            })
+        } else {
+            None
+        };
+        Ok((
+            result,
+            ToolCallMetadata {
+                side_effect,
+                ..ToolCallMetadata::default()
+            },
+        ))
     }
 
     /// 阶段 1：全部补丁在内存解析/校验/应用（任一失败 → 零改动）。

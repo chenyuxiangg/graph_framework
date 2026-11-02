@@ -277,46 +277,136 @@ pub trait ToolRunner: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// v0.4/D2：工具调用记录 seam（DR-014 D5 的 v7 `tool_calls` 预留；D2 默认 no-op）
+// v0.4/D5b1：工具调用记录（可映射 trace v7 `tool_calls`；DR-014 §1/§3）
 // ---------------------------------------------------------------------------
 
-/// 工具来源（跨源冲突/记录用；DR-013 §1.1）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolSource {
+/// 工具来源（trace `source` CHECK 三值；**`skill_view` 等框架工具不记录**）。
+///
+/// 存储字符串与 `zgraph_trace::ToolCallSource` 对齐：`builtin`/`mcp`/`python`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolCallSource {
     /// Rust 内置（`builtin__*`）。
     Builtin,
     /// MCP（`mcp__*`）。
     Mcp,
     /// Python `tools/`（05 §5.6）。
     Python,
-    /// 框架内置（`skill_view` 等）。
-    Framework,
 }
 
-/// 一次工具调用的最小记录（D5 的 v7 `tool_calls` 子集；不落 DB 由 sink 决定）。
-pub struct ToolCallRecord<'a> {
-    /// 调用 ID（原生 `call_id`）。
-    pub call_id: &'a str,
-    /// LLM 工具名。
-    pub tool_name: &'a str,
-    /// 工具来源。
-    pub source: ToolSource,
-    /// 是否成功（失败 = `TOOL_ERROR` 结果）。
-    pub ok: bool,
+impl ToolCallSource {
+    /// 与 trace v7 `tool_calls.source` 一致的稳定字符串。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Mcp => "mcp",
+            Self::Python => "python",
+        }
+    }
+}
+
+/// 工具调用终态（trace `status` CHECK 四值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolCallStatus {
+    /// 成功。
+    Ok,
+    /// 工具错误（`TOOL_ERROR` 喂回 LLM，不 fail run）。
+    Error,
+    /// 被取消（run 取消传播）。
+    Cancelled,
+    /// 超时。
+    Timeout,
+}
+
+impl ToolCallStatus {
+    /// 与 trace v7 `tool_calls.status` 一致的稳定字符串。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+/// 工具副作用（单文件 write/edit/apply_patch；多文件 apply_patch 为 `None`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSideEffect {
+    /// 目标路径（用户/补丁中的路径原文；writer 按 4 KiB 防御性截断）。
+    pub path: String,
+    /// 修改前 sha256（文件不存在 = `None`）。
+    pub before_sha256: Option<String>,
+    /// 修改后 sha256（失败/回滚 = `None`）。
+    pub after_sha256: Option<String>,
+    /// 修改前字节数（不存在 = `None`）。
+    pub bytes_before: Option<u64>,
+    /// 修改后字节数（失败/回滚 = `None`）。
+    pub bytes_after: Option<u64>,
+}
+
+/// bash 工具调用元数据（仅 `builtin__bash`；与 trace `BashToolCall` 对齐）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashCallRecord {
+    /// 命令原文（可能含敏感信息；不写 env 值）。
+    pub command: String,
+    /// 执行 cwd（jail 内 canonical 路径）。
+    pub cwd: String,
+    /// 退出码（信号终止时 `None`）。
+    pub exit_code: Option<i32>,
+    /// 终止信号（正常退出时 `None`）。
+    pub signal: Option<i32>,
+    /// stdout（head+tail ≤16 KiB）。
+    pub stdout: String,
+    /// stderr（head+tail ≤16 KiB）。
+    pub stderr: String,
+    /// 渲染后 sandbox profile 的 sha256（含 allowlist/network 开关）。
+    pub sandbox_profile_sha256: Option<String>,
+}
+
+/// 一次工具调用的富化记录（可无损映射 trace v7 `ToolCallRecord`；不落 DB）。
+///
+/// - `args`/`result`/`error` 为完整 Value；trace writer 负责序列化 + 32 KiB cap +
+///   sha256 + `truncated` 落库。
+/// - `truncated` 是**工具自身**的截断提示（bash 输出截断 / 结果超限），供 D5b2
+///   映射时参考；writer 仍会独立计算最终 `truncated`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallRecord {
+    /// provider/工具原生 call id（不伪造）。
+    pub call_id: String,
+    /// 工具名。
+    pub tool_name: String,
+    /// 工具来源（`builtin`/`mcp`/`python`）。
+    pub source: ToolCallSource,
+    /// 终态。
+    pub status: ToolCallStatus,
+    /// 开始时刻（RFC3339 毫秒 Z）。
+    pub started_at: String,
+    /// 结束时刻（RFC3339 毫秒 Z）。
+    pub finished_at: String,
     /// 耗时（毫秒）。
     pub duration_ms: u64,
-    /// 结果内容字节数（截断后）。
-    pub result_bytes: usize,
+    /// 完整参数。
+    pub args: Value,
+    /// 成功结果（失败时为 `None`）。
+    pub result: Option<Value>,
+    /// `TOOL_ERROR` JSON（成功时为 `None`）。
+    pub error: Option<Value>,
+    /// 工具自身截断提示（bash 输出截断/结果超限）。
+    pub truncated: bool,
+    /// 副作用（单文件）。
+    pub side_effect: Option<ToolSideEffect>,
+    /// bash 元数据（仅 builtin__bash）。
+    pub bash: Option<BashCallRecord>,
 }
 
-/// 工具调用记录 sink（v0.4/D5 v7；默认不注入 = no-op，不新增表）。
+/// 工具调用记录 sink（v0.4 v7；默认无注入 = no-op，不新增表/不写 DB）。
 pub trait ToolCallRecordSink: Send + Sync {
     /// 记录一次工具调用终态（不得改变执行语义/不得 panic 影响调用方）。
-    fn record_tool_call(&self, record: &ToolCallRecord<'_>);
+    fn record_tool_call(&self, record: &ToolCallRecord);
 }
 
 /// 安全调用 sink（panic 静默吞掉，观察者不改变语义）。
-pub(crate) fn record_tool_call_safely(sink: &dyn ToolCallRecordSink, record: &ToolCallRecord<'_>) {
+pub(crate) fn record_tool_call_safely(sink: &dyn ToolCallRecordSink, record: &ToolCallRecord) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         sink.record_tool_call(record);
     }));

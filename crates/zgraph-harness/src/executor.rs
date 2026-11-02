@@ -2183,7 +2183,7 @@ mod tests {
             .expect("script"),
         );
         let runner = Arc::new(FakeToolRunner::new());
-        let sink = crate::test_support::CapturingToolCallSink::new();
+        let sink = crate::test_support::RecordingToolCallSink::new();
         let executor = Arc::new(
             HarnessExecutor::new(settings(dir.path(), &fake, &runner))
                 .with_builtin_tools(builtin_set(dir.path()))
@@ -2215,11 +2215,19 @@ mod tests {
         // 工具结果走既有 TOOL_ERROR/结果摘要路径（LLM 收到文件内容）。
         let records = sink.records();
         assert_eq!(records.len(), 1, "{records:?}");
-        assert_eq!(records[0].0, "c1");
-        assert_eq!(records[0].1, "builtin__read");
-        assert_eq!(records[0].2, crate::tools::ToolSource::Builtin);
-        assert!(records[0].3, "ok");
-        assert!(records[0].5 > 0, "result bytes recorded");
+        assert_eq!(records[0].call_id, "c1");
+        assert_eq!(records[0].tool_name, "builtin__read");
+        assert_eq!(records[0].source, crate::tools::ToolCallSource::Builtin);
+        assert_eq!(records[0].status, crate::tools::ToolCallStatus::Ok);
+        assert_eq!(
+            records[0]
+                .result
+                .as_ref()
+                .and_then(|value| value["content"].as_str()),
+            Some("hello builtin")
+        );
+        assert!(records[0].duration_ms < 60_000);
+        assert!(!records[0].truncated);
         executor.close_provider().await;
     }
 
@@ -2351,7 +2359,7 @@ mod tests {
             .expect("script"),
         );
         let runner = Arc::new(FakeToolRunner::new());
-        let sink = crate::test_support::CapturingToolCallSink::new();
+        let sink = crate::test_support::RecordingToolCallSink::new();
         let executor = Arc::new(
             HarnessExecutor::new(settings(dir.path(), &fake, &runner))
                 .with_builtin_tools(builtin_set(dir.path()))
@@ -2377,9 +2385,11 @@ mod tests {
         }
         let records = sink.records();
         assert_eq!(records.len(), 2, "{records:?}");
-        assert!(records
-            .iter()
-            .all(|record| record.2 == crate::tools::ToolSource::Builtin && record.3));
+        assert!(records.iter().all(|record| {
+            record.source == crate::tools::ToolCallSource::Builtin
+                && record.status == crate::tools::ToolCallStatus::Ok
+        }));
+        assert!(records.iter().all(|record| record.side_effect.is_none()));
         executor.close_provider().await;
     }
 
@@ -2434,7 +2444,7 @@ mod tests {
             sandbox.clone(),
         )
         .expect("bash-only set");
-        let sink = crate::test_support::CapturingToolCallSink::new();
+        let sink = crate::test_support::RecordingToolCallSink::new();
         let executor = Arc::new(
             HarnessExecutor::new(settings(dir.path(), &fake, &runner))
                 .with_builtin_tools(set)
@@ -2458,8 +2468,16 @@ mod tests {
         );
         let records = sink.records();
         assert_eq!(records.len(), 1, "{records:?}");
-        assert_eq!(records[0].1, "builtin__bash");
-        assert!(records[0].3);
+        assert_eq!(records[0].tool_name, "builtin__bash");
+        assert_eq!(records[0].status, crate::tools::ToolCallStatus::Ok);
+        let bash = records[0].bash.as_ref().expect("bash metadata");
+        assert_eq!(bash.command, "echo hi");
+        assert_eq!(bash.exit_code, Some(0));
+        assert_eq!(bash.stdout, "ok");
+        assert_eq!(
+            bash.sandbox_profile_sha256.as_deref().map(str::len),
+            Some(64)
+        );
         let requests = sandbox.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].command, "echo hi");
@@ -2518,5 +2536,354 @@ mod tests {
             "{:?}",
             outcome.error
         );
+    }
+    // ------------------------------------------------------------------
+    // v0.4/D5b1：工具调用记录富化（trace tool_calls 映射）
+    // ------------------------------------------------------------------
+
+    fn builtin_set_with_fake_bash(
+        dir: &Path,
+    ) -> (
+        Arc<crate::test_support::FakeSandboxRunner>,
+        Arc<crate::BuiltinToolSet>,
+    ) {
+        let sandbox = crate::test_support::FakeSandboxRunner::new();
+        let set = crate::BuiltinToolSet::new_with_runner(
+            &std::fs::canonicalize(dir).expect("canonical"),
+            &[],
+            true,
+            sandbox.clone(),
+        )
+        .expect("builtin set");
+        (sandbox, set)
+    }
+
+    fn assert_rfc3339_millis(value: &str) {
+        // 无 chrono 依赖：校验固定 24 字符 `YYYY-MM-DDTHH:MM:SS.mmmZ` 形状与字段范围。
+        assert_eq!(value.len(), 24, "RFC3339 millis length: {value}");
+        assert!(value.ends_with('Z'), "UTC Z suffix: {value}");
+        assert_eq!(&value[4..5], "-");
+        assert_eq!(&value[7..8], "-");
+        assert_eq!(&value[10..11], "T");
+        assert_eq!(&value[13..14], ":");
+        assert_eq!(&value[16..17], ":");
+        assert_eq!(&value[19..20], ".");
+        let parse = |range: std::ops::Range<usize>| -> u32 {
+            value[range]
+                .parse()
+                .unwrap_or_else(|_| panic!("non-numeric: {value}"))
+        };
+        let month = parse(5..7);
+        let day = parse(8..10);
+        let hour = parse(11..13);
+        let minute = parse(14..16);
+        let second = parse(17..19);
+        let _millis = parse(20..23);
+        assert!((1..=12).contains(&month), "{value}");
+        assert!((1..=31).contains(&day), "{value}");
+        assert!(hour < 24 && minute < 60 && second < 60, "{value}");
+    }
+
+    #[tokio::test]
+    async fn tool_call_records_cover_all_builtin_tools_with_effects_and_bash() {
+        let mut agent = agent_config(
+            "parser",
+            &[
+                "builtin__read",
+                "builtin__write",
+                "builtin__edit",
+                "builtin__diff",
+                "builtin__apply_patch",
+                "builtin__grep",
+                "builtin__glob",
+                "builtin__bash",
+            ],
+        );
+        agent["max_iterations"] = json!(16);
+        let dir = assets(agent, "role");
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "hello builtin").expect("a");
+        std::fs::write(root.join("c.txt"), "a needle\n").expect("c");
+        std::fs::write(root.join("a2.txt"), "x\n").expect("a2");
+        let single_patch = "--- a/w.txt\n+++ b/w.txt\n@@ -1 +1 @@\n-world\n+WORLD\n";
+        let multi_patch = "--- a/w.txt\n+++ b/w.txt\n@@ -1 +1 @@\n-WORLD\n+W\n--- a/a2.txt\n+++ b/a2.txt\n@@ -1 +1 @@\n-x\n+X\n";
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "r1", "name": "builtin__read", "args": {"path": "a.txt"}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "w1", "name": "builtin__write",
+                     "args": {"path": "w.txt", "content": "hello"}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "e1", "name": "builtin__edit",
+                     "args": {"path": "w.txt", "old_string": "hello", "new_string": "world"}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "d1", "name": "builtin__diff",
+                     "args": {"path": "c.txt", "old_string": "needle", "new_string": "NEEDLE"}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "p1", "name": "builtin__apply_patch",
+                     "args": {"patch": single_patch}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "p2", "name": "builtin__apply_patch",
+                     "args": {"patch": multi_patch}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "g1", "name": "builtin__grep", "args": {"pattern": "needle"}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "l1", "name": "builtin__glob", "args": {"pattern": "*.txt"}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "b1", "name": "builtin__bash", "args": {"command": "echo hi"}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let (_sandbox, set) = builtin_set_with_fake_bash(root);
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(root, &fake, &runner))
+                .with_builtin_tools(set)
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
+        let records = sink.records();
+        let ids: Vec<&str> = records
+            .iter()
+            .map(|record| record.call_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["r1", "w1", "e1", "d1", "p1", "p2", "g1", "l1", "b1"]
+        );
+        for record in &records {
+            assert_eq!(record.source, crate::tools::ToolCallSource::Builtin);
+            assert_eq!(record.status, crate::tools::ToolCallStatus::Ok);
+            assert_rfc3339_millis(&record.started_at);
+            assert_rfc3339_millis(&record.finished_at);
+            assert!(record.duration_ms < 60_000);
+            assert!(record.result.is_some(), "{record:?}");
+            assert!(record.error.is_none(), "{record:?}");
+        }
+        // 文件类 side_effect。
+        assert!(records[0].side_effect.is_none(), "read has no side effect");
+        let write = records[1].side_effect.as_ref().expect("write side effect");
+        assert_eq!(write.path, "w.txt");
+        assert_eq!(write.before_sha256, None);
+        assert_eq!(write.bytes_before, None);
+        assert_eq!(write.after_sha256.as_deref().map(str::len), Some(64));
+        assert_eq!(write.bytes_after, Some(5));
+        let edit = records[2].side_effect.as_ref().expect("edit side effect");
+        assert_eq!(edit.path, "w.txt");
+        assert_eq!(edit.bytes_before, Some(5));
+        assert_eq!(edit.bytes_after, Some(5));
+        assert!(edit.before_sha256.is_some() && edit.after_sha256.is_some());
+        assert_eq!(edit.before_sha256, write.after_sha256);
+        // diff 无 side effect。
+        assert!(records[3].side_effect.is_none());
+        // 单文件 apply_patch 有 side effect；多文件为 None（files[] 在 result）。
+        let patch_single = records[4].side_effect.as_ref().expect("single patch");
+        assert_eq!(patch_single.path, "w.txt");
+        assert_eq!(patch_single.bytes_before, Some(5));
+        // 手写 patch 无 `\ No newline` 标记：apply_file 在 EOF 处补换行（"WORLD\n"=6）。
+        assert_eq!(patch_single.bytes_after, Some(6));
+        assert!(records[5].side_effect.is_none(), "multi-file patch = None");
+        assert_eq!(
+            records[5].result.as_ref().unwrap()["files"]
+                .as_array()
+                .expect("files")
+                .len(),
+            2
+        );
+        // 搜索无 side effect。
+        assert!(records[6].side_effect.is_none() && records[7].side_effect.is_none());
+        // bash 全量元数据。
+        let bash = records[8].bash.as_ref().expect("bash record");
+        assert_eq!(bash.command, "echo hi");
+        assert_eq!(bash.exit_code, Some(0));
+        assert_eq!(bash.stdout, "ok");
+        assert_eq!(
+            bash.sandbox_profile_sha256.as_deref().map(str::len),
+            Some(64)
+        );
+        assert!(!records[8].truncated);
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn tool_call_records_mark_error_and_timeout_statuses() {
+        let dir = assets(
+            agent_config("parser", &["builtin__read", "builtin__bash"]),
+            "role",
+        );
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "r_err", "name": "builtin__read", "args": {"path": "missing.txt"}}
+                ]},
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "b_timeout", "name": "builtin__bash", "args": {"command": "sleep 9"}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let (sandbox, set) = builtin_set_with_fake_bash(dir.path());
+        sandbox.push_outcome(Err(crate::ToolFailure::new("timeout", "timed out")));
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(set)
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
+        let records = sink.records();
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[0].status, crate::tools::ToolCallStatus::Error);
+        assert!(records[0].result.is_none());
+        assert_eq!(
+            records[0].error.as_ref().unwrap()["error"]["reason"],
+            json!("not_found")
+        );
+        assert_eq!(records[1].status, crate::tools::ToolCallStatus::Timeout);
+        assert_eq!(
+            records[1].error.as_ref().unwrap()["error"]["reason"],
+            json!("timeout")
+        );
+        assert!(records[1].bash.is_none(), "failed bash has no metadata");
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_and_python_sources_are_recorded() {
+        // MCP：source=mcp。
+        let dir = assets_with_mcp();
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "m1", "name": "mcp__fake__echo", "args": {"q": 1}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_mcp_allow(true)
+                .with_mcp_factory(fake_mcp_factory())
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
+        let records = sink.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].source, crate::tools::ToolCallSource::Mcp);
+        assert_eq!(records[0].tool_name, "mcp__fake__echo");
+        assert_eq!(records[0].result, Some(json!("mcp-ok")));
+        assert!(records[0].side_effect.is_none() && records[0].bash.is_none());
+        executor.close_mcp().await;
+        executor.close_provider().await;
+
+        // Python：source=python。
+        let dir = assets(agent_config("parser", &["echo"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "p1", "name": "echo", "args": {"q": 2}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let python_tool = ToolDef {
+            name: "echo".to_string(),
+            description: "echo".to_string(),
+            parameters: json!({"type": "object", "properties": {"q": {"type": "integer"}}}),
+            timeout_ms: 1_000,
+            source: "tools.echo".to_string(),
+        };
+        let runner = Arc::new(FakeToolRunner::new().tool(python_tool));
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
+        let records = sink.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].source, crate::tools::ToolCallSource::Python);
+        assert_eq!(records[0].status, crate::tools::ToolCallStatus::Ok);
+        assert_eq!(records[0].result.as_ref().unwrap()["echo"]["q"], json!(2));
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn bash_record_reports_truncation() {
+        let dir = assets(agent_config("parser", &["builtin__bash"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "tool_calls", "content": null, "tool_calls": [
+                    {"call_id": "b1", "name": "builtin__bash", "args": {"command": "spam"}}
+                ]},
+                {"kind": "text", "content": "done"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let (sandbox, set) = builtin_set_with_fake_bash(dir.path());
+        sandbox.push_outcome(Ok(crate::test_support::bash_outcome_with_large_output()));
+        let sink = crate::test_support::RecordingToolCallSink::new();
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_builtin_tools(set)
+                .with_tool_call_record_sink(sink.clone()),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            zgraph_kernel::RunStatus::Completed,
+            "{:?}",
+            outcome.error
+        );
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].truncated, "bash truncation hint recorded");
+        let bash = records[0].bash.as_ref().expect("bash metadata");
+        assert!(bash.stdout.len() <= crate::constants::BASH_STDOUT_MAX_BYTES);
+        assert!(bash.stdout.contains("…[truncated]…"));
+        executor.close_provider().await;
     }
 }

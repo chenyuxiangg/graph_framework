@@ -18,5 +18,6 @@ mod search;
 pub use bash::BashOptions;
 pub(crate) use bash::TOOL_BASH;
 pub use files::BuiltinToolSet;
+pub(crate) use files::{BuiltinCallOutput, ToolCallMetadata};
 
 pub(crate) use files::has_builtin_prefix;
