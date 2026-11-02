@@ -51,7 +51,7 @@ uv run pytest -q
 | `python/zgraph_worker/` | worker SDK：握手、ctx、运行时；M4 `tool_runner`（discover/call） |
 | `python/workers/` | 示例 worker：echo/slow/parallel/cycle/software_team（M3） |
 | `schemas/` | worker 协议 v1（M0 冻结，M3 检查单闭环）；DSL JSON Schema 未实现（ISSUE-029） |
-| `tests/e2e/` | 真链路验收：AC-06/07/09/10 + 故障注入 + 并发（M3）；AC-08 fake LLM/tool/流式（M4）；AC-12 多 run 隔离（M5）；AC-14 defer/返工（W2a）；AC-15 max_fanout 静态反例/正例/运行期防御层（W2b） |
+| `tests/e2e/` | 真链路 e2e（真 CLI + 真 worker + SQLite）：W1–W4b + **v0.3 V5a** `skills_v03.rs`/`mcp_v03.rs`/`harness_v03.rs`/`v03_regression.rs`（AC-18/19/20 + 回归 31 用例） |
 | `tests/fixtures/` | 图与 worker fixture |
 | `doc/` | 决策/架构/规格/评审/进度/台账 |
 | `legacy/` | 旧 Python 实现（冻结只读，见 `legacy/README.md`） |

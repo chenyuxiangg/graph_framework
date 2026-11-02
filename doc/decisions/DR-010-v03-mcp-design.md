@@ -184,6 +184,6 @@
 ## 12. 实现执行记录（as-built，2026-11-02，REV-101；只追加）
 
 - **分支/提交**：`feat/harness-mcp`：`18bf405`（client/桥接）+ `815abea`（run 末关闭）+ `15f3d18`（C1/C2：per-agent plan/allow、错误码收敛、脱敏、函数名）+ `23fa568`（server 段归一化）；评审 REV-098（含跨模块 Lead 第二评审）；合并 `23fa568`。
-- **实测**：harness 默认 **226/0/1**、`--features mcp` **225/0/1**；workspace **996/0/3**；`--no-default-features` 构建通过；rmcp **3.8.0 feature-gated**（默认构建不引入，CLI release 默认开）；默认无 MCP 零进程/零 IO。
+- **实测**：harness **235/0/1**、`--features mcp` **235/0/1**；e2e 137/0/2；workspace **1037/0/3**；`--no-default-features` 构建通过；rmcp **3.8.0 feature-gated**（默认构建不引入，CLI release 默认开）；默认无 MCP 零进程/零 IO。
 - **实现口径/偏差**：`HARNESS_MCP_ERROR{reason}` 实现 `config_invalid`/`not_allowed`/`server_not_found`/`init_failed`/`protocol_version`/`tool_not_found`/`name_conflict`/`http_insecure`/`input_required_unsupported`（工具调用失败仍 `TOOL_ERROR`）；`--allow-mcp` 未开启 → run 启动前失败/不产生 run/exit 3；stdio server 每 run 常驻、进程组 kill、同 run 最多重启 1 次；`mcp__<server>__<tool>`、必须显式进 `tools`；`call_id` 保留原生；trace 不 v7；常量为 as-built 名单（00 §0.5）。
-- **已知限制**：真实 stdio/HTTP 传输/进程组/超时由 V5a 覆盖；cwd/assets-dir、allow 长度、`__` server 名、长函数名跳过、HTTP URL 脱敏等 P2/P3 入台账（ISSUE-156+）；AC-19 实测用例名/计数待 V5a 回写。
+- **已知限制**：真实 stdio/HTTP 传输/进程组/超时由 V5a 覆盖；cwd/assets-dir、allow 长度、`__` server 名、长函数名跳过、HTTP URL 脱敏等 P2/P3 入台账（ISSUE-156+）；AC-19 V5a 实测 11 用例已回写 07。

@@ -249,7 +249,7 @@
     - **00/02**：`HarnessErrorKind` 3 kind（`SkillInvalid`/`Mcp`/`Plugin`）与单码 `HARNESS_SKILL_INVALID`/`HARNESS_MCP_ERROR`/`HARNESS_PLUGIN_ERROR` 已落地；§0.5 补 V2–V4 实际常量（MCP/skills/plugin 全量）；DSL 仍 1.0/R1–R18/19 码；skills/MCP/harness 不参与 DSL/hash（as-built 确认）。
     - **05 §5.14.4**：skills/MCP/plugin 实现分支/评审/测试；V4 偏差——`AgentProvider::run→RunFailure`、`AgentProviderKind` 仅 Builtin|Subprocess、subprocess `protocol` 必填、reason 集合实现口径、能力冲突仅节点级 `max_iterations`、同 run 同 provider mutex 串行、`llm_calls` 每节点 1 条；`SKILL_BODY_MAX_CHARS` 字符口径等。
     - **06 §6.14.1**：trace 仍 **v6（不 v7）**；MCP/skill 复用既有 `streaming_events`/`llm_calls`；外部 harness 事件同 sink、不双写；默认 trace/replay 不变。
-    - **07**：AC-18/19/20 实现已合并（V2/V3/V4）；**实测用例名/计数/DoD 待 V5a e2e 合并后回写（本批只留占位，不编造）**；默认零配置回归由既有 golden 覆盖。
+    - **07**：AC-18/19/20 实现已合并（V2/V3/V4）；**V5a 实测（REV-101）：31 用例**（AC-18 10/AC-19 11/AC-20 7/回归 3），用例名/计数/DoD 已回写；e2e 137/0/2、workspace 1037/0/3、pytest 183、harness 235/0/1。
     - **08 §8.12.1**：3 kind/码、`Subprocess` enum、py-worker adapters、`rmcp` feature-gated、trace 不 v7 的 source-breaking as-built 确认。
     - **DR 执行记录**：DR-004 §10 + DR-008 §9 + DR-009 §11 + DR-010 §12 + DR-011 §13（分支/提交/REV/合并点/偏差/已知限制，只追加）。
     - **测试证据（已实测）**：harness **235/0/1**（`--features mcp` **235/0/1**）、e2e **137/0/2**、workspace **1037/0/3**、pytest **183**；`--no-default-features` 构建通过；V5a AC 31 用例已回写。
@@ -259,17 +259,17 @@
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | 1a218cfebb3820648f2973c647045a5b72bdb887d948c68d969e29821ed15ef5 | 384 |
+| `00-总纲.md` | ed96d15d4dd32f8d1571318041b13770f35a979cb713aaa99d5511dbd7afa433 | 384 |
 | `01-领域模型与状态机.md` | 8037a3c0b3dac86e73348c498e3b4a2f117347661f9dc42da8ca9776d17c74b3 | 447 |
 | `02-DSL与校验.md` | dc6211df39712b5945bd010c0c97a9370f4372447354823b82a26f35026a3f32 | 987 |
 | `03-调度器与生命周期.md` | fd132ad0dfbdba09d9852ac29b15d4ca5a1d510c84d752cd55d8f536b1b8d864 | 685 |
 | `04-节点接口与扩展点.md` | 63a788bbfe94c15716bed9160716ad3b0c50e4c4aea8d5ea5dbc9a637574e9bb | 940 |
-| `05-AgentHarness.md` | 6be3e1d59654d68d324e151a083486f631cf642e5a7fc40fb613211e67a1b6bb | 1489 |
-| `06-存储与可观测.md` | d9b3e4cfeb3f5e70d046e4e433a28cf4d51d16dfa0d35353796d30e18f293380 | 1306 |
+| `05-AgentHarness.md` | 9dd7e98f399f6e3989f0a6d4553d279e7a5b07e19cdb58c08ee8237ebc01c86c | 1489 |
+| `06-存储与可观测.md` | f2bde3566591629346745b16f1f9feef3a3b163c8d96576b71814f737d0711b8 | 1306 |
 | `07-验收用例.md` | 966353e5742e6ea613c3bcffedebf7b8feb4453035f164a41eb00341d55f9a6f | 552 |
-| `08-审计关闭矩阵.md` | 67ccd59f8814c5b7255ecb033d1187f94051fb36acb1ba6fa19c97b054fd6cae | 629 |
+| `08-审计关闭矩阵.md` | e690239faa12a2b0274af3ec724853e8784b7738724c21206afb2ab6fc2ca524 | 629 |
 
-> 00–08 合计 **7419 行**（`wc -l` 口径；2026-11-02 **v0.3（M8）实现回写批次后**实测（REV-101/102；**00–08 numstat +109/−40（净 +69）**；**全 spec 目录 numstat +135/−53（净 +82）**；见 §2 第 26 条）；此前 W4b as-built 批次 7154 行/§2 第 25 条；W4a 设计冻结 + REV-096 收口 7202 行/§2 第 24 条；W3a as-built 6886 行；W3a0 6815 行；W2b 6491 行；W2a 6385 行；W2a0 6308 行；W1 6051 行、M6 6038 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7822 行）。
+> 00–08 合计 **7419 行**（`wc -l` 口径；2026-11-02 **v0.3（M8）实现回写批次后**实测（REV-101/102；**00–08 numstat +109/−40（净 +69）**；**全 spec 目录 numstat +135/−53（净 +82）**；见 §2 第 26 条）；此前 W4b as-built 批次 7154 行/§2 第 25 条；W4a 设计冻结 + REV-096 收口 7202 行/§2 第 24 条；W3a as-built 6886 行；W3a0 6815 行；W2b 6491 行；W2a 6385 行；W2a0 6308 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 7822 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 

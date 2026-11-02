@@ -1468,9 +1468,9 @@ pub trait AgentProvider: Send + Sync {
 
 | 能力 | 实现分支/提交 | 评审 | 证据（实测） |
 |---|---|---|---|
-| skills | `feat/harness-skills`：`cfe6280` + `f286fe8`（run 级预算）+ `6844573`（wildcard） | REV-097（含跨模块 Lead 第二评审） | harness 默认 226/0/1；skills 18 例；catalog 4096/正文 32768 chars/`MAX_SKILL_VIEWS=5`/`MAX_SKILLS=16`；`skill_view` 仅 chars、无正文全文；默认无 skills system prompt 逐字节不变 |
-| MCP | `feat/harness-mcp`：`18bf405` + `815abea`（run 末关闭）+ `15f3d18`（per-agent plan/错误码/脱敏）+ `23fa568`（函数名归一化） | REV-098（含跨模块 Lead 第二评审） | harness 默认 226/0/1、`--features mcp` 225/0/1；workspace 996/0/3；rmcp 3.8.0（feature-gated）；默认证书/路径零进程 |
-| harness 插件 | `feat/harness-plugin`：`0584931` + `3bbe4b5`（C1–C3） | REV-099（含跨模块 Lead 第二评审） | harness 226/0/1；workspace 996/0/3；pytest 180；fake external 真链路 + Codex adapter；DSH ACP 骨架 |
+| skills | `feat/harness-skills`：`cfe6280` + `f286fe8`（run 级预算）+ `6844573`（wildcard） | REV-097（含跨模块 Lead 第二评审） | harness **235/0/1**；skills 18 例；catalog 4096/正文 32768 chars/`MAX_SKILL_VIEWS=5`/`MAX_SKILLS=16`；`skill_view` 仅 chars、无正文全文；默认无 skills system prompt 逐字节不变 |
+| MCP | `feat/harness-mcp`：`18bf405` + `815abea`（run 末关闭）+ `15f3d18`（per-agent plan/错误码/脱敏）+ `23fa568`（函数名归一化） | REV-098（含跨模块 Lead 第二评审） | harness **235/0/1**、`--features mcp` **235/0/1**；e2e 137/0/2；workspace **1037/0/3**；rmcp 3.8.0（feature-gated）；默认证书/路径零进程 |
+| harness 插件 | `feat/harness-plugin`：`0584931` + `3bbe4b5`（C1–C3） | REV-099（含跨模块 Lead 第二评审） | harness **235/0/1**；workspace **1037/0/3**；pytest **183**；fake external 真链路 + Codex adapter；DSH ACP 骨架 |
 
 **V4 实现偏差（as-built；均为评审已接受）**
 
@@ -1482,7 +1482,7 @@ pub trait AgentProvider: Send + Sync {
 6. **同 run 同 provider mutex 串行**：`SubprocessHarness` 对 `(run_id, provider)` 用 mutex 串行执行（adapter 每 run 每 provider 常驻）；不并行多节点。
 7. **`llm_calls` 外部节点口径**：每节点由框架写 **1 条** `llm_calls`（request=`provider/agent_id/session_key/inputs_hash`，response=四字段+`event_count`）；不写原始 JSONL/正文全文；不双重写（adapter 不写 trace/llm_calls）。
 8. **常数落地**：00 §0.5 已补 `MCP_TOOLS_LIST_MAX_BYTES`/`MCP_MRTR_MAX_ROUNDS`/`MCP_STDERR_MAX_BYTES`/`MCP_MAX_RESTARTS_PER_RUN`/`MAX_MCP_*`/`HARNESS_PLUGIN_PROTOCOL*`/`HARNESS_PLUGIN_MAX_INVALID_LINES`/skills 字段/资源上限；`SKILL_BODY_MAX_CHARS` 按**字符**口径（非 ASCII 可能略超 32 KiB，见 REV-097 P3）。
-9. **`plan`/`usage_update`**：实现把 `plan` 当未知 event 忽略+warn（REV-099 N1 建议改 progress）；`usage_update` 忽略（不新增 kind）；待 V4 后续/台账。
+9. **`plan`/`usage_update`**：实现把 `plan` → `Progress`、`usage_update` 折入最终 usage（REV-100 已验证）；不新增 StreamingEvent kind。
 
 **保留的已知限制（V5a/发布文档）**：真实 Codex/DSH 环境未验证（adapter 骨架，best-effort；release notes 标注）；MCP 真实 stdio/HTTP 传输与进程组 kill 由 V5a e2e 覆盖；skills L2 `llm_calls.request_json` 是否含正文待 AC-18 e 实测口径确认；`max_items`/8 MiB 总输出等边界见 ISSUE 台账。
 

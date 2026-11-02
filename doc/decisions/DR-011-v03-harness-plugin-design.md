@@ -165,6 +165,6 @@ pub trait AgentProvider: Send + Sync {
 ## 13. 实现执行记录（as-built，2026-11-02，REV-101；只追加）
 
 - **分支/提交**：`feat/harness-plugin`：`0584931`（trait seam/协议/fake external/Codex adapter）+ `3bbe4b5`（C1–C3：`llm_calls`/有界读取/Codex 取消无孤儿）；评审 REV-099（含跨模块 Lead 第二评审）；合并 `6515f12`。
-- **实测**：harness **226/0/1**（features mcp 225/0/1）；workspace **996/0/3**；pytest **180**；fake external 真链路、Codex adapter fake PATH、DSH ACP 骨架；无 harness 默认 builtin 行为不变。
+- **实测**：harness **235/0/1**（features mcp 235/0/1）；workspace **1037/0/3**；pytest **183**；fake external 真链路、Codex adapter fake PATH、DSH ACP 骨架；无 harness 默认 builtin 行为不变。
 - **实现口径/偏差**：`AgentProvider::run(ProviderRequest) -> Result<AgentOutput, RunFailure>`（非 `HarnessError`；保留 Cancelled/Timeout）；`AgentProviderKind` 仅 `Builtin|Subprocess`；subprocess `protocol` 必填且精确 `"zgraph-harness/1"`；reason 集合实现 `spawn_failed`/`handshake`/`version`/`protocol`/`result_invalid`/`line_too_large`/`output_limit`/`event_limit`/`exit_nonzero`/`timeout`；能力冲突含**节点级 `max_iterations`**；同 run 同 provider **mutex 串行**；外部每节点框架写 1 条 `llm_calls`（不双写）；`plan` 当未知 event 忽略+warn（REV-099 N1 待改）、`usage_update` 忽略；stderr 保留 head 8 KiB（N2 待改）。
-- **已知限制**：真实 Codex/DSH 环境未验证（adapter 骨架，best-effort；release notes 标注）；8 MiB/总输出/in-flight cancel 等 V5a 覆盖；P2/P3（N1–N14）入台账（ISSUE-156+）；AC-20 实测用例名/计数待 V5a 回写。
+- **已知限制**：真实 Codex/DSH 环境未验证（adapter 骨架，best-effort；release notes 标注）；8 MiB/总输出/in-flight cancel 等 V5a 覆盖；P2/P3（N1–N14）入台账（ISSUE-156+）；AC-20 V5a 实测 7 用例（+回归 3）已回写 07。
