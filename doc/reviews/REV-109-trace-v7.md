@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1 条件 C1–C2**（reader 排序/错误截断 sha256，D5a 内可小改或由 Lead 明确裁决）；P2 1 项（唯一键 node_id 口径）；P3 若干建议。DDL/迁移/备份/工具调用非事件路径/writer 同事务+幂等+10000 行上限/32 KiB+16 KiB 截断/无 blobs 主体全部成立；**但存在两处与 task-84/Lead 预裁决口径不一致的实现**，需关闭后再 merge D5a。
+> **结论历史**：首轮（基准 `ea6f657`）为「**有条件通过**」——P1 C1（reader 排序 `tool_call_id` vs `call_id`）、C2（`error_json` 无全量 sha256），P2 C3（唯一键是否含 node_id 待裁决）。作者 `90b6738` 关闭 C1/C2/P3，Lead 裁决 C3 以 **DR-014 §1** 为准（唯一键不含 node_id）；评审人复核 trace 113/0、migration 21/0、tool_calls 10/0、workspace 1151/0/3、clippy/fmt/check 全绿，C1–C3 全部 closed（§6/§8），结论改**通过**。
+>
+> 首轮意见（历史保留）：P0=0；P1 条件 C1–C2；P2 C3；P3 若干建议；DDL/迁移/非事件路径/writer 主体成立，但两处口径偏差需关闭。
 
 ### 1.1 已核对成立
 
@@ -93,13 +95,38 @@ bash scripts/dev/check.sh                     # CHECK PASSED
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 reader 排序 `(started_at,call_id)` | **open** | reader SQL + 测试改 call_id；复核同 started_at 乱序用例 |
-| C2 error_json 全量 sha256 | **open** | DDL/model/reader/writer/normalize/测试补 error_sha256；或 Lead 明确接受 DR 无 error sha（记录理由） |
-| C3 唯一键是否含 node_id | **open（待 Lead 裁决）** | 按 DR-014 §1 或 task-84 统一；若改同步 DDL/ON CONFLICT/测试 |
+| C1 reader 排序 `(started_at,call_id)` | **closed（90b6738）** | `reader.rs` `ORDER BY started_at ASC, call_id ASC`；测试改为同 started_at 乱序 z→a 插入、断言 call_id 升序；trace 113/0 |
+| C2 error_json 全量 sha256 | **closed（90b6738）** | 新增 `error_sha256 TEXT`（v7 DDL/model/reader/writer/normalize/测试；error 超 32 KiB 仍 prefix+`truncated`，sha 为全量）；fresh-vs-migrated 列清单补该列；roundtrip/超限测试 |
+| C3 唯一键是否含 node_id | **closed（Lead 裁决：DR-014 §1 优先）** | 唯一键保持 `(run_id,instance_id,attempt,call_id)` **不含 node_id**；`schema.rs` DDL 注释标注该裁决；幂等测试保留 |
 
 ## 7. 遗留问题
 
-- D5b（harness sink + cli trace/replay）依赖本条件关闭；`error_sha256`/call_id 排序/唯一键确定后再实现回放。
+- D5b（harness sink + cli trace/replay）可开（C1–C3 已关闭）；`error_sha256`/call_id 排序/唯一键口径已在 D5a 固化。
 - 跨模块 CLI/e2e 版本机械同步已核对无行为变更/无断言放宽；由 Lead 追加第二评审。
-- P3：writer 超限先归一化、截断 JSON 不可解析文档、无 FK 清理语义、D6 常量命名；均不阻塞。
+- P3：writer 超限先归一化已于 `90b6738` 修复（上限判定前移+跨 batch 测试）；截断 JSON 不可解析文档、无 FK 清理语义、D6 常量命名留 D6；均不阻塞。
 - 无 P0；无既有事件/旧 run golden 回归（workspace 全绿）。
+
+## 8. 条件关闭复核（2026-11-02）
+
+复核提交：`90b6738`（父 `4fb1c0c`；仅 trace 6 文件，`+98/−40`，无新增跨模块）。评审人执行：
+
+```bash
+git status --porcelain                       # 空
+git diff --stat 4fb1c0c..90b6738             # 6 files +98/−40（仅 crates/zgraph-trace；无 cli/e2e/kernel）
+cargo test -p zgraph-trace                   # 113 passed / 0 failed
+cargo test -p zgraph-trace --test migration  # 21 passed / 0 failed
+cargo test -p zgraph-trace --test tool_calls # 10 passed / 0 failed
+cargo test --workspace                       # 1151 passed / 0 failed / 3 ignored
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                   # exit 0
+bash scripts/dev/check.sh                    # CHECK PASSED
+```
+
+| 条件 | 复核结果 |
+|---|---|
+| C1 reader 排序 | ✅ `ORDER BY started_at ASC, call_id ASC`；同 started_at z→a 乱序测试断言 call-early/call-same-a/call-same-z/call-late |
+| C2 error sha | ✅ `error_sha256` 列入 v7 DDL（fresh/migrated 列清单测试）、model/reader/writer/normalize；error roundtrip 与超限全量 sha 测试 |
+| C3 唯一键 | ✅ Lead 裁决以 DR-014 §1 为准：`(run_id,instance_id,attempt,call_id)` 不含 node_id；DDL 注释已注明，幂等测试保留 |
+| P3 writer 上限前置 | ✅ 10000 行判定在 normalize 前；跨 batch 上限测试（flush 后继续计数） |
+
+**最终状态**：C1–C3 closed；P3 主要项 closed/留下 D6 文档；无 P0/P1；建议 Lead merge D5a → D5b。
