@@ -42,7 +42,7 @@
 {"currency":"USD","models":{"gpt-x":{"input_per_mtok":1.0,"output_per_mtok":2.0}}}
 ```
 
-- 不内置价格（价格随供应商/时间变化，硬编码易过期）；**缺文件/JSON 格式错 → 用法/配置错误（不启动 run）**；未知模型 → 该调用费用未知 + warning（不 fail run）。
+- 不内置价格（价格随供应商/时间变化，硬编码易过期）；**缺文件/JSON 格式错 → 用法/配置错误（不启动 run）**；**`--max-cost` 无 `--pricing` → 启动前配置错误（exit 3 类）**；**pricing 缺图中配置模型 / 外部 DSH 成本不可得 → 启动/加载期配置错误（fail-closed，不静默跳过）**；未知模型费用不伪造（按不可得处理）。
 - 价格表变更不影响 run 语义/hash；仅输出计算。
 - Lead 裁决（2026-11-03）：**不内置默认价**；价格仅配置文件。
 
@@ -82,7 +82,7 @@
 | a | run/node/agent 维度 token/耗时/调用数聚合正确（fake LLM 已知 usage） |
 | b | `--pricing` 有效 → cost 正确；**缺文件/格式错 → 用法/配置错误（不启动 run）**；未知模型 → 费用不可用 + warning，不 fail |
 | c | `--max-tokens` 超限 → 停止、Failed、`BUDGET_EXCEEDED`、`Other("budget_exceeded")`；不再发起调用 |
-| d | `--max-cost` 同 c（价格表可用时）；不可用费用 → 配置/警告口径 |
+| d | `--max-cost` 同 c；**无 `--pricing` → 启动前配置错误（exit 3 类，不产生 run）**；pricing 缺模型/外部 DSH 成本不可得 → 配置错误 fail-closed；未知模型费用不伪造 |
 | e | 默认无预算/无 pricing：run/trace/replay 输出与 v0.4 逐字节一致（无 v8） |
 | f | trace/CLI additive（metrics/--stats/人类行）；既有字段不变；不新增表/列 |
 

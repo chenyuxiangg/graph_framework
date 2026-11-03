@@ -89,10 +89,10 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 | 模式 | 行为 |
 |---|---|
 | `recorded`（默认） | **绝不执行任何工具**（含只读）；只从 `tool_calls` 还原 args/result；**副作用永不重跑**；无记录/截断 → fail-closed（`REPLAY_TOOL_RECORD_MISSING`/`REPLAY_TOOL_RECORD_TRUNCATED`） |
-| `reexec`（v0.4 仅接口，v0.5 落地） | 仅 `builtin__read`/`grep`/`glob`/`diff` 可重跑（同 args/jail；**pre_sha256 漂移检查**，不符 `REPLAY_TOOL_MISMATCH`）；`write`/`edit`/`apply_patch`/`bash` 永远 recorded-only；显式开关 + 文档警示 |
+| `reexec`（v0.4 仅接口，v0.5 落地） | 仅 `builtin__read`/`grep`/`glob`/`diff` 可重跑（同 args/jail；**pre_sha256 漂移检查**，不符 `REPLAY_TOOL_RECORD_MISMATCH`）；`write`/`edit`/`apply_patch`/`bash` 永远 recorded-only；显式开关 + 文档警示 |
 
 - **recorded 校验**：args hash/results 还原；若 `truncated=1` → **fail-closed**（`REPLAY_TOOL_RECORD_TRUNCATED`，新 CLI 码或既有 `REPLAY_RECORD_CORRUPT`；推荐新码 append-only）；不猜测/不重跑。
-- **reexec**：仍受 workspace/jail/沙箱约束；结果与记录不一致 → 告警/失败（推荐 `REPLAY_TOOL_MISMATCH` 或既有 `REPLAY_OUTPUT_MISMATCH` 口径）；不写新 trace。
+- **reexec**：仍受 workspace/jail/沙箱约束；结果与记录不一致 → 告警/失败（推荐 `REPLAY_TOOL_RECORD_MISMATCH` 或既有 `REPLAY_OUTPUT_MISMATCH` 口径）；不写新 trace。
 - **L2 关系**：节点级 `recorded_outputs` 仍是主回放（`--mode=outputs`）；`tool_calls` 供细粒度审计/工具级回放；`--mode=events` 不执行工具。
 - **外部 harness**：v0.3 外部 harness 工具不落 `tool_calls`（协议边界）；其 L2 用 `recorded_outputs` 不变。
 
@@ -120,7 +120,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 |---|---|
 | `REPLAY_TOOL_RECORD_MISSING`（CLI，append-only） | recorded 回放缺 `tool_calls` 记录 |
 | `REPLAY_TOOL_RECORD_TRUNCATED`（CLI） | 记录 truncated=1，不能安全回放 |
-| `REPLAY_TOOL_MISMATCH`（CLI） | reexec 结果与记录不一致 |
+| `REPLAY_TOOL_RECORD_MISMATCH`（CLI） | reexec 结果与记录不一致 |
 | `HARNESS_BUILTIN_TOOL_ERROR`（可选，不推荐） | 若 Lead 要求独立码；默认走 `TOOL_ERROR{reason}` |
 | `HARNESS_CONFIG_LOAD{reason:"sandbox_unavailable"}` / `TOOL_ERROR{reason:"sandbox_unavailable"}`（DR-013；不新增码） | bash 沙箱不可用（fail-closed） |
 
@@ -145,7 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name      ON tool_calls(run_id, tool_n
 
 | # | 事项 | 推荐 |
 |---|---|---|
-| 1 | 新 CLI 码命名 | `REPLAY_TOOL_RECORD_MISSING`/`REPLAY_TOOL_RECORD_TRUNCATED`/`REPLAY_TOOL_MISMATCH`（append-only） |
+| 1 | 新 CLI 码命名 | `REPLAY_TOOL_RECORD_MISSING`/`REPLAY_TOOL_RECORD_TRUNCATED`/`REPLAY_TOOL_RECORD_MISMATCH`（append-only） |
 | 2 | 截断回放策略 | **fail-closed**（不猜测） |
 | 3 | `reexec` | **v0.4 只做 recorded（绝不执行任何工具）**；reexec 接口保留、v0.5 落地；集合 read/grep/glob/diff + pre_sha256 漂移检查 |
 | 4 | 单 run tool_calls 行数/大小上限 | 10000 行；单字段 cap（32/32/16/16/8/4 KiB）；不引入 blobs/外部文件（v0.4） |

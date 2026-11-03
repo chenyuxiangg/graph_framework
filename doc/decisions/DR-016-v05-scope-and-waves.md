@@ -1,6 +1,6 @@
 # DR-016 · v0.5（M10）范围与波次（reexec / ISSUE 清理 / sandbox 增强 / 真实 Codex·DSH / 可观测成本；v0.6=W3b）
 
-> **状态**：V1 设计冻结（REV-115；Codex/DSH 真实验证细节待两个源码仓 spike 结论，DR-020 标「待 spike」）。
+> **状态**：V1 设计冻结（REV-115；**DSH FINAL 已落盘、Codex 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待**）。
 > **日期**：2026-11-03 · **作者**：docs-dev · **关联**：DR-017/018/019/020、DR-012/013/014/015、task-95/96
 > **用户决策（task-95）**：v0.5 六项全选，分 **v0.5.0（5 项）** + **v0.6.0（W3b durable resume）**；W5 已取消（DR-015）。
 
@@ -19,7 +19,7 @@
 
 ### 1.1 v0.5.0（5 项）
 
-1. **`reexec` 回放**（DR-017）：显式 `--replay-tools=reexec`；只读工具 read/grep/glob/diff；输入/结果漂移校验；副作用工具永远 recorded-only；`REPLAY_TOOL_MISMATCH` fail-closed；不升 v8。
+1. **`reexec` 回放**（DR-017）：显式 `--replay-tools=reexec`；只读工具 read/grep/glob/diff；输入/结果漂移校验；副作用工具永远 recorded-only；`REPLAY_TOOL_RECORD_MISMATCH` fail-closed；不升 v8。
 2. **ISSUE-176–181 清理**（F4）：
    - ISSUE-176 kernel_cancel 时序 flake、ISSUE-177 ac09 parallel timing flake、ISSUE-178 codex adapter e2e 并行 flake：加固/隔离/有界等待；
    - ISSUE-179 `tool_calls` 无 FK 清理：评估 `ON DELETE CASCADE` 或清理命令（v7 迁移兼容）；
@@ -65,7 +65,7 @@ F0 docs 设计冻结（本批，REV-115）
 
 ## 3. 发布条件（v0.5.0）
 
-1. AC-25（reexec）、AC-26（sandbox 增强）、AC-27（可观测/成本）、AC-28（真实 Codex/DSH：F5a–d 分层，环境允许时）全部实测；不可用环境如实标注不伪造。
+1. AC-25（reexec）、AC-26（sandbox 增强）、AC-27（可观测/成本）、AC-28（真实 Codex/DSH：F5a–f 分层，环境允许时）全部实测；不可用环境如实标注不伪造。
 2. 默认路径（无 reexec/预算/新开关/外部 harness）兼容矩阵无新增失败；DSL/hash 不变；trace v7 不升 v8。
 3. ISSUE-176–181 逐项 fixed/延后（不新增 P0/P1）。
 4. `cargo test --workspace`/e2e/pytest/clippy/fmt/check.sh 全绿；性能回退 ≤20%（默认路径，v0.4 基线）。
@@ -88,10 +88,10 @@ F0 docs 设计冻结（本批，REV-115）
 
 | AC | 内容 | 关键断言（摘要） | 波次 |
 |---|---|---|---|
-| AC-25 | reexec 回放 | 默认 recorded 不变；reexec 仅 read/grep/glob/diff；输入/结果漂移 → `REPLAY_TOOL_MISMATCH` fail-closed；副作用工具拒绝；无 v8 | F1 |
+| AC-25 | reexec 回放 | 默认 recorded 不变；reexec 仅 read/grep/glob/diff；输入/结果漂移 → `REPLAY_TOOL_RECORD_MISMATCH` fail-closed；副作用工具拒绝；无 v8 | F1 |
 | AC-26 | sandbox 增强 | `--allow-write-path` 目录级可写（profile+jail）；与 workspace/allow-path 组合；构建工具路径/`cc -isysroot` 文档；负例越界拒绝 | F2 |
 | AC-27 | 可观测/成本 | run/node/agent token/耗时/费用聚合；`--max-tokens/--max-cost` 默认关；超限停止语义（status/stop_reason/不可续）；trace/CLI additive；无配置不变 | F3 |
-| AC-28 | 真实 Codex/DSH | 源码构建/运行/认证占位；最小真链路（Codex exec --json / DSH ACP）；证据/限制；不可用环境门控 `#[ignore]`/env；不伪造 | F5 |
+| AC-28 | 真实 Codex/DSH | 源码/本机安装/构建/运行/认证占位；F5a–f 分层（fake/握手/全链路/Codex 三层/F5f 可选工具）；证据/限制；`#[ignore]`/env 门控；不伪造 | F5 |
 
 ## 6. 风险
 

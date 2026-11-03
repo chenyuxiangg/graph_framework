@@ -22,7 +22,8 @@
 | [`decisions/DR-017-v05-reexec.md`](decisions/DR-017-v05-reexec.md) | **v0.5 reexec 回放**：显式 `--replay-tools=reexec`（默认 recorded）、只读 read/grep/glob/diff、结果 sha256 漂移校验/mismatch fail-closed、副作用工具拒绝、不升 v8；AC-25 |
 | [`decisions/DR-018-v05-observability-cost.md`](decisions/DR-018-v05-observability-cost.md) | **v0.5 可观测/成本**：run/node/agent token/耗时/费用；`--pricing` 价格表；`--max-tokens`/`--max-cost` 默认关、超限 `BUDGET_EXCEEDED`/不可续；metrics/--stats additive、不升 v8；AC-27 |
 | [`decisions/DR-019-v05-sandbox-enhance.md`](decisions/DR-019-v05-sandbox-enhance.md) | **v0.5 sandbox 增强**：`--allow-write-path` 可写白名单（profile+jail）、构建工具链路径/TMPDIR/HOME/`cc -isysroot`；与 allow-path/workspace 组合；AC-26 |
-| [`decisions/DR-020-v05-codex-dsh-validation.md`](decisions/DR-020-v05-codex-dsh-validation.md) | **v0.5 真实 Codex/DSH 验证方案（待 spike）**：源码仓 clone/构建/运行/认证/入口/adapter 映射/证据/环境门控/不伪造；AC-28 || [`architecture-v2.md`](architecture-v2.md) | **架构蓝图 v2**：进程模型、NDJSON 协议、可复现分级、代码布局、里程碑 |
+| [`decisions/DR-020-v05-codex-dsh-validation.md`](decisions/DR-020-v05-codex-dsh-validation.md) | **v0.5 真实 Codex/DSH 验证方案（DSH FINAL、Codex 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待）**：源码仓/本机安装/构建/运行/认证/入口/adapter 映射/证据/环境门控/不伪造；AC-28
+| [`architecture-v2.md`](architecture-v2.md) | **架构蓝图 v2**：进程模型、NDJSON 协议、可复现分级、代码布局、里程碑 |
 | [`design/software-team-sop-v1.md`](design/software-team-sop-v1.md) | **software_team SOP 设计稿 v1.2**：设计角色依赖 DAG + 工作 agent + per-item 评审；**approved-only v1 / rework v1.1 / dynamic-N v1.2 三 profile**（`parse_verdict_rework` + defer 回边 + `max_attempts` 预算；dynamic-N 用 foreach 替代按 N 代码生成）；框架侧 W2a/W2b/W3a 已实现（REV-069/070/068/071、074–077、079–084）；**动态 N 已由 W4a 设计冻结（REV-086；W4b 实现）** |
 | [`spec-v1.2/`](spec-v1.2/README.md) | **语义基准**（9 分册）：DSL/状态机/调度/Harness/存储/验收/审计关闭（落地按 DR-001 替换 PyO3 为 worker 子进程） |
 | [`analysis/`](analysis/) | 冻结期归档材料：可行性评估、决策记录 01、v1.1 规格审计、spike 报告 + 源码、两份技术调研 |

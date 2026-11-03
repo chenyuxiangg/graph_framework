@@ -37,7 +37,7 @@ v7 `tool_calls` 已有 `args_sha256`/`result_sha256`，**无输入文件 pre_sha
 
 - **共同前提**：args_json 必须逐字节/规范化一致；记录 `truncated=1` → **fail-closed**（无法完整比对）；记录缺行 → `REPLAY_TOOL_RECORD_MISSING`。
 - **不做**：不因 grep/glob 无输入 hash 就静默跳过比对；不引入 `pre_sha256` 新列（**不升 v8**）。grep/glob 的 drift 语义为「结果与记录不一致」而非「输入文件已变」——文档必须写清。
-- **Lead 裁决（2026-11-03）**：**接受推荐**——read/grep/glob/diff 四种只读工具均可 reexec；以记录 `result_sha256` 与重跑结果比对，不一致 → `REPLAY_TOOL_MISMATCH` fail-closed；须同 workspace/allow-path 配置；**不升 v8**。
+- **Lead 裁决（2026-11-03）**：**接受推荐**——read/grep/glob/diff 四种只读工具均可 reexec；以记录 `result_sha256` 与重跑结果比对，不一致 → `REPLAY_TOOL_RECORD_MISMATCH` fail-closed；须同 workspace/allow-path 配置；**不升 v8**。
 
 ## 3. CLI/错误语义
 

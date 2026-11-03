@@ -25,7 +25,7 @@
   - 相同目录/嵌套在 workspace 内 → **允许（幂等）**；
   - workspace 嵌套在 allow-write-path 内 → 允许，但写授权仍按各自根；
   - 与只读 `--allow-path` 同一目录 → **写优先**（显式可写），文档警示；
-  - **不可 `/`**（配置错误 `allow_write_path_invalid`）；不可为系统目录白名单（推荐拒绝 `/System`/`/usr` 等，或至少 warning）。
+  - **不可 `/`**（配置错误 `allow_write_path_invalid`）；**系统目录（`/`、`/usr`、`/System`、`/Library` 等）→ 拒绝（`allow_write_path_invalid`）**，不做 warning 放行。
 - 安全：可写白名单是**用户显式信任**；文档警示（等于第二个 workspace）；profile + jail 双强制；bash 侧 `file-write*` 同步（若允许 bash）。
 
 ### 1.2 profile/jail
