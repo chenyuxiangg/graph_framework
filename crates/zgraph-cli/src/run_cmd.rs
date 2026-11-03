@@ -263,8 +263,9 @@ pub struct RunArgs {
     pub quiet: bool,
     /// `--pricing <file>`（v0.5/F3b；缺省读 `$ZGRAPH_PRICING`；默认关）。
     pub pricing: Option<PathBuf>,
-    /// `--max-tokens <N>`（run 总 token 预算；默认关）。
-    pub max_tokens: Option<u64>,
+    /// `--max-tokens <N>`（run 总 token 预算；默认关；**有符号原值**，`<=0` 由配置
+    /// 预检按 `budget_invalid` exit3 拒绝，语法错才 exit2）。
+    pub max_tokens: Option<i64>,
     /// `--max-cost <USD>`（run 总费用预算；默认关；需 `--pricing`）。
     pub max_cost: Option<f64>,
 }
@@ -321,7 +322,7 @@ struct ParseState {
     json: bool,
     quiet: bool,
     pricing: Option<PathBuf>,
-    max_tokens: Option<u64>,
+    max_tokens: Option<i64>,
     max_cost: Option<f64>,
 }
 
@@ -426,7 +427,7 @@ impl ParseState {
             }
             "--max-tokens" => {
                 let value = option_value(iter, "--max-tokens")?;
-                self.max_tokens = Some(parse_u64_option(&value, "--max-tokens")?);
+                self.max_tokens = Some(parse_i64_option(&value, "--max-tokens")?);
             }
             "--max-cost" => {
                 let value = option_value(iter, "--max-cost")?;
@@ -509,11 +510,14 @@ fn option_value<'a>(
         .ok_or_else(|| format!("{option} requires a value"))
 }
 
-/// 解析无符号整数值选项（语法错误 → 用法错误 exit 2；取值范围由配置预检负责）。
-fn parse_u64_option(value: &str, option: &str) -> Result<u64, String> {
+/// 解析有符号整数值选项（语法错误 → 用法错误 exit 2）。
+///
+/// REV-127 C1：`--max-tokens` 必须使用**有符号**解析，负数原值交给
+/// [`BudgetConfig::validate`]（`budget_invalid` exit3），不能当语法错误 exit2。
+fn parse_i64_option(value: &str, option: &str) -> Result<i64, String> {
     value
-        .parse::<u64>()
-        .map_err(|_| format!("{option} requires an unsigned integer (got '{value}')"))
+        .parse::<i64>()
+        .map_err(|_| format!("{option} requires an integer (got '{value}')"))
 }
 
 /// 解析浮点值选项（语法错误 → 用法错误 exit 2；`<=0`/NaN/Inf 由配置预检负责）。
@@ -1308,8 +1312,21 @@ fn resolve_observability(args: &RunArgs) -> Result<Observability, ExitCode> {
         },
         None => None,
     };
+    // REV-127 C1：`--max-tokens` 有符号原值；`<=0` → 与 `BudgetConfig.validate`
+    // 同口径的 `budget_invalid` exit3（保留真实负值 detail），语法错已在 parse 阶段
+    // exit2。`--max-cost` 的 `<=0`/NaN/Inf 同样交给 validate。
+    let max_tokens = match args.max_tokens {
+        Some(value) if value <= 0 => {
+            return Err(config_error(
+                "budget_invalid",
+                format!("--max-tokens must be > 0 (got {value})"),
+            ))
+        }
+        Some(value) => Some(value as u64),
+        None => None,
+    };
     let budget = BudgetConfig {
-        max_tokens: args.max_tokens,
+        max_tokens,
         max_cost: args.max_cost,
     };
     if let Err(error) = budget.validate() {
@@ -2706,16 +2723,20 @@ mod tests {
 
     #[test]
     fn parse_rejects_invalid_budget_syntax() {
-        for (flag, value) in [("--max-tokens", "abc"), ("--max-tokens", "-1")] {
-            let error = parse(&args(&["g.json", "--inputs", "{}", flag, value]))
-                .expect_err("invalid budget integer");
-            assert!(error.contains(flag), "{error}");
-        }
+        // 真正语法错 → 用法错误 exit2（负值不是语法错：REV-127 C1）。
+        let error = parse(&args(&["g.json", "--inputs", "{}", "--max-tokens", "abc"]))
+            .expect_err("invalid budget integer");
+        assert!(error.contains("--max-tokens"), "{error}");
         for (flag, value) in [("--max-cost", "x"), ("--max-cost", "--json")] {
             let error = parse(&args(&["g.json", "--inputs", "{}", flag, value]))
                 .expect_err("invalid budget float");
             assert!(error.contains(flag) || error.contains("number"), "{error}");
         }
+        // 有符号解析：负值进入配置预检（budget_invalid exit3），不在 parse 阶段拒绝。
+        let parsed = parse(&args(&["g.json", "--inputs", "{}", "--max-tokens", "-1"]))
+            .expect("parse")
+            .expect("not help");
+        assert_eq!(parsed.max_tokens, Some(-1));
     }
 
     #[test]

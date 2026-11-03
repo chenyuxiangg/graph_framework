@@ -56,6 +56,16 @@ fn run_cli(args: &[String], cwd: &Path) -> Output {
         .expect("zgraph binary")
 }
 
+/// 带显式环境变量的 CLI 调用（`$ZGRAPH_PRICING` 兜底用例）。
+fn run_cli_env(args: &[String], cwd: &Path, envs: &[(&str, String)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zgraph"));
+    command.args(args).current_dir(cwd);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("zgraph binary")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
@@ -187,6 +197,46 @@ fn pricing_and_budget_preflight_errors_do_not_create_db() {
             ],
             "budget_invalid",
         ),
+        (
+            "max-tokens-negative",
+            vec!["--max-tokens".to_string(), "-1".to_string()],
+            "budget_invalid",
+        ),
+        (
+            "max-tokens-large-negative",
+            vec!["--max-tokens".to_string(), "-987654".to_string()],
+            "budget_invalid",
+        ),
+        (
+            "max-cost-nan",
+            vec![
+                "--pricing".to_string(),
+                arg(&pricing),
+                "--max-cost".to_string(),
+                "NaN".to_string(),
+            ],
+            "budget_invalid",
+        ),
+        (
+            "max-cost-inf",
+            vec![
+                "--pricing".to_string(),
+                arg(&pricing),
+                "--max-cost".to_string(),
+                "inf".to_string(),
+            ],
+            "budget_invalid",
+        ),
+        (
+            "max-cost-neg-inf",
+            vec![
+                "--pricing".to_string(),
+                arg(&pricing),
+                "--max-cost".to_string(),
+                "-inf".to_string(),
+            ],
+            "budget_invalid",
+        ),
     ];
     for (name, extra, reason) in cases {
         let db = dir.path().join(format!("{name}.db"));
@@ -218,6 +268,46 @@ fn pricing_and_budget_preflight_errors_do_not_create_db() {
 // ---------------------------------------------------------------------------
 // 有效 pricing：run usage additive + trace --stats additive
 // ---------------------------------------------------------------------------
+/// `$ZGRAPH_PRICING` 兜底（DR-018 §2）：无 `--pricing` 时读 env；`--pricing` 优先；
+/// env 指向缺失文件且未给 flag → `pricing_file_not_found` exit3。
+#[test]
+fn pricing_env_fallback_and_flag_priority() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pricing = pricing_chat_only(dir.path());
+    let missing = dir.path().join("env-missing.json");
+    // env 有效 + 无 flag + --max-cost → run 正常，usage cost 可用。
+    let db = dir.path().join("env.db");
+    let mut args = ac08_args(&db, &["--json", "--max-cost", "1.0"]);
+    args.retain(|value| value != "--pricing");
+    let output = run_cli_env(&args, dir.path(), &[("ZGRAPH_PRICING", arg(&pricing))]);
+    assert_eq!(code(&output), 0, "stderr={}", stderr(&output));
+    let payload = json_stdout(&output);
+    assert!(
+        payload["usage"]["run"]["cost_usd"].as_f64().is_some(),
+        "env pricing 应参与计价: {}",
+        payload["usage"]
+    );
+    // flag 优先于 env：env 指向缺失文件，显式 --pricing 有效 → 成功。
+    let db = dir.path().join("flag_priority.db");
+    let args = ac08_args(
+        &db,
+        &["--json", "--pricing", &arg(&pricing), "--max-cost", "1.0"],
+    );
+    let output = run_cli_env(&args, dir.path(), &[("ZGRAPH_PRICING", arg(&missing))]);
+    assert_eq!(code(&output), 0, "stderr={}", stderr(&output));
+    // env 指向缺失文件、无 flag、--max-cost → pricing_file_not_found exit3（不建 DB）。
+    let db = dir.path().join("env_missing.db");
+    let mut args = ac08_args(&db, &["--max-cost", "1.0"]);
+    args.retain(|value| value != "--pricing");
+    let output = run_cli_env(&args, dir.path(), &[("ZGRAPH_PRICING", arg(&missing))]);
+    assert_eq!(code(&output), 3, "stderr={}", stderr(&output));
+    assert!(
+        stderr(&output).contains("pricing_file_not_found"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!db.exists(), "env pricing 缺失不得创建 DB");
+}
 
 #[test]
 fn valid_pricing_reports_usage_and_trace_stats() {
