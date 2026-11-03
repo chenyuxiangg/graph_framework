@@ -253,10 +253,11 @@ impl BuiltinToolSet {
         validate_tool_arguments(definition, args)?;
         // 复用只读实现：仅 4 个纯读工具；无写盘/spawn/sink/trace/budget 副作用。
         match tool_name {
-            TOOL_READ => self.read(args),
+            // REV-116 C1：read/diff 必须返回**完整未截断** Value（正常 call 仍 cap）。
+            TOOL_READ => self.read_full(args),
             crate::builtin::search::TOOL_GREP => self.grep(args),
             crate::builtin::search::TOOL_GLOB => self.glob(args),
-            TOOL_DIFF => self.diff(args),
+            TOOL_DIFF => self.diff_full(args),
             _ => unreachable!("whitelist checked above"),
         }
     }
@@ -345,6 +346,16 @@ impl BuiltinToolSet {
     }
 
     fn read(&self, args: &Value) -> Result<Value, ToolFailure> {
+        self.read_impl(args, true)
+    }
+
+    /// F1a/REV-116 C1：无结果 cap 的 read（reexec 用；语义/上限同 read，仅不做
+    /// 32 KiB 结果截断，返回完整 content 供 trace sha 比对）。
+    fn read_full(&self, args: &Value) -> Result<Value, ToolFailure> {
+        self.read_impl(args, false)
+    }
+
+    fn read_impl(&self, args: &Value, apply_result_cap: bool) -> Result<Value, ToolFailure> {
         let path = required_str(args, "path")?;
         let offset = optional_u64(args, "offset", 0)? as usize;
         let limit = optional_u64(args, "limit", BUILTIN_READ_DEFAULT_LINES as u64)? as usize;
@@ -379,11 +390,13 @@ impl BuiltinToolSet {
             .collect();
         let mut content = selected.join("\n");
         let mut truncated = false;
-        let budget = BUILTIN_RESULT_MAX_BYTES.saturating_sub(256);
-        if content.len() > budget {
-            let (shrunk, cut) = truncate_utf8(&content, budget);
-            content = shrunk;
-            truncated = cut;
+        if apply_result_cap {
+            let budget = BUILTIN_RESULT_MAX_BYTES.saturating_sub(256);
+            if content.len() > budget {
+                let (shrunk, cut) = truncate_utf8(&content, budget);
+                content = shrunk;
+                truncated = cut;
+            }
         }
         Ok(json!({
             "content": content,
@@ -620,6 +633,15 @@ impl BuiltinToolSet {
     }
 
     fn diff(&self, args: &Value) -> Result<Value, ToolFailure> {
+        self.diff_impl(args, true)
+    }
+
+    /// F1a/REV-116 C1：无结果 cap 的 diff（reexec 用；返回完整 diff 文本）。
+    fn diff_full(&self, args: &Value) -> Result<Value, ToolFailure> {
+        self.diff_impl(args, false)
+    }
+
+    fn diff_impl(&self, args: &Value, apply_result_cap: bool) -> Result<Value, ToolFailure> {
         let path = required_str(args, "path")?;
         let old_string = required_str(args, "old_string")?;
         let new_string = required_str(args, "new_string")?;
@@ -661,9 +683,13 @@ impl BuiltinToolSet {
             String::new()
         };
         let mut truncated = false;
-        let (diff_text, cut) =
-            truncate_utf8(&diff_text, BUILTIN_RESULT_MAX_BYTES.saturating_sub(256));
-        truncated |= cut;
+        let mut diff_text = diff_text;
+        if apply_result_cap {
+            let (shrunk, cut) =
+                truncate_utf8(&diff_text, BUILTIN_RESULT_MAX_BYTES.saturating_sub(256));
+            diff_text = shrunk;
+            truncated |= cut;
+        }
         Ok(json!({
             "diff": diff_text,
             "changed": changed,
@@ -1888,6 +1914,92 @@ mod tests {
                 .expect_err("write forbidden")
                 .reason,
             "reexec_side_effect_forbidden"
+        );
+    }
+    /// REV-116 C1：reexec read/diff 返回完整未截断 Value（>40 KiB），正常 call 仍 cap。
+    #[test]
+    fn reexec_read_and_diff_return_full_untruncated_values() {
+        let (workspace, set) = set();
+        let lines: Vec<String> = (0..300)
+            .map(|index| format!("{index:03}-{}", "x".repeat(200)))
+            .collect();
+        let original = lines.join("\n");
+        assert!(original.len() > 40 * 1024, "fixture >40 KiB");
+        std::fs::write(workspace.path().join("big.txt"), &original).expect("write");
+
+        let read_args = json!({"path": "big.txt"});
+        let full = set
+            .reexec_readonly(TOOL_READ, &read_args)
+            .expect("reexec read");
+        let content = full["content"].as_str().expect("content");
+        assert!(content.len() > 40 * 1024, "full content: {}", content.len());
+        assert_eq!(content, original, "complete content");
+        assert!(!content.contains("…[truncated]"), "no truncation marker");
+        assert_eq!(full["truncated"], json!(false));
+        let normal: Value =
+            serde_json::from_str(&set.call(TOOL_READ, &read_args).expect("normal read"))
+                .expect("normal json");
+        assert_eq!(normal["truncated"], json!(true), "normal read is capped");
+        assert!(normal["content"]
+            .as_str()
+            .expect("normal")
+            .contains("…[truncated]"));
+
+        let replaced: Vec<String> = (0..300)
+            .map(|index| format!("{index:03}-{}", "y".repeat(200)))
+            .collect();
+        let diff_args = json!({
+            "path": "big.txt",
+            "old_string": original,
+            "new_string": replaced.join("\n"),
+        });
+        let full_diff = set
+            .reexec_readonly(TOOL_DIFF, &diff_args)
+            .expect("reexec diff");
+        let diff_text = full_diff["diff"].as_str().expect("diff");
+        assert!(
+            diff_text.len() > 40 * 1024,
+            "full diff: {}",
+            diff_text.len()
+        );
+        assert!(!diff_text.contains("…[truncated]"), "no truncation marker");
+        assert_eq!(full_diff["truncated"], json!(false));
+        assert!(diff_text.contains("+000-"), "added lines present");
+        assert!(diff_text.contains("-000-"), "removed lines present");
+        let normal_diff: Value =
+            serde_json::from_str(&set.call(TOOL_DIFF, &diff_args).expect("normal diff"))
+                .expect("normal json");
+        assert_eq!(
+            normal_diff["truncated"],
+            json!(true),
+            "normal diff is capped"
+        );
+    }
+
+    /// REV-116 P2：reexec glob 返回完整路径列表（正常 call 32 KiB cap 时仍全量）。
+    #[test]
+    fn reexec_glob_returns_full_paths_beyond_result_cap() {
+        let (workspace, set) = set();
+        for index in 0..500 {
+            let name = format!("f{index:03}-{}.rs", "n".repeat(70));
+            std::fs::write(workspace.path().join(name), "").expect("write");
+        }
+        let args = json!({"pattern": "*.rs", "max_results": 5000});
+        let full = set
+            .reexec_readonly(crate::builtin::search::TOOL_GLOB, &args)
+            .expect("reexec glob");
+        assert_eq!(full["paths"].as_array().expect("paths").len(), 500);
+        assert_eq!(full["total"], json!(500));
+        assert_eq!(full["truncated"], json!(false));
+        let normal: Value = serde_json::from_str(
+            &set.call(crate::builtin::search::TOOL_GLOB, &args)
+                .expect("normal glob"),
+        )
+        .expect("normal json");
+        assert_eq!(normal["truncated"], json!(true), "normal glob capped");
+        assert!(
+            normal["paths"].as_array().expect("paths").len() < 500,
+            "normal result truncated"
         );
     }
 }
