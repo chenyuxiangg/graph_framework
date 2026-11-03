@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0、**P1=0**；**P2 条件 C1**（`doc/index.md` 的 DR-015 行与 architecture 行粘连、DR-008/DR-012 行仍无「已取消」注记，入口索引与 DR-015 矛盾/表格损坏）；P3 若干（DR-004 §5/§10 历史行可选注记、DR-015 状态措辞）。DR-015 内容、README/progress/spec00/DR-007/008/012/SOP/issues 状态注记、范围与约束主体成立；C1 为 docs 小修，关闭后 merge。
+> **结论历史**：首轮（基准 `5d68cc0`）为「**有条件通过**」——P2 C1：`doc/index.md` DR-015 行与 architecture 行粘连、DR-008/DR-012 入口行未标取消。作者 `a632806` 关闭 C1 + P3 后，评审人复核 index 三处/check.sh 绿（§8），C1 closed，结论改**通过**。
+>
+> 首轮意见（历史保留）：P0=0/P1=0；DR-015 内容/引用状态注记/历史保留主体成立；C1 index 入口；P3 历史行/状态措辞。
 
 ### 1.1 已核对成立
 
@@ -78,10 +80,31 @@ grep -rn "W5" ...                          # 正文/README/progress/spec00/DR-00
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 index 入口 DR-015 行拆分 + DR-008/DR-012 取消注记 | **open** | `doc/index.md` 三处修正；check.sh；复核无入口矛盾 |
+| C1 index 入口 DR-015 行拆分 + DR-008/DR-012 取消注记 | **closed（a632806）** | `doc/index.md:13/:17` 追加「W5 已取消（DR-015）」；`:20–21` DR-015 与 architecture 行拆开、表格恢复；check.sh PASSED |
+| P3 ①–③ | **closed（a632806）** | DR-004 §5:221/§10 v0.3 行追加取消注记；DR-015 状态改「已裁决…REV-114 通过」；历史表补 DR-007 §9 行 |
 
 ## 7. 遗留问题
 
-- C1 关闭前不 merge；P3-1/P3-2/P3-3 文档细节可同批或发布后修；P3-4 reviews 行由本次评审补。
+- C1 与 P3 ①–③ 已关闭；P3-4 reviews README REV-114 已由本次评审补；P3-5 ISSUE-155 只追加注记正确。
 - 无代码/测试影响；W5 从未实现，DR-015 仅为路线图/文档；无需 workspace 测试（docs-only）。
 - 历史保留：DR-004/007/008/012/SOP 既有延期表述未改写；取消注记只追加。
+
+## 8. 条件关闭复核（2026-11-03）
+
+复核提交：`a632806`（父 `53bf940`；docs-only 3 文件 `doc/index.md`/`DR-004`/`DR-015`）。评审人执行：
+
+```bash
+git status --porcelain                       # 空
+git diff --stat 53bf940..a632806             # 3 files +8/−7（docs-only）
+bash scripts/dev/check.sh                    # CHECK PASSED
+grep -n "W5" doc/index.md                    # :13/:17 均有「W5 已取消（DR-015）」；:20 DR-015 行独立
+git diff 53bf940..a632806 -- doc/index.md    # DR-015 与 architecture 拆行/表格恢复
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C1 index 三处 | ✅ DR-008/DR-012 入口行追加取消注记；DR-015 行与 architecture 行拆开、原粘连 `\|\|` 消失、空行移除；表格渲染恢复 |
+| P3 ①–③ | ✅ DR-004 §5:221 与 §10 v0.3 行追加取消注记；DR-015 状态「REV-114 通过」；历史表补 DR-007 §9 |
+| 范围/门禁 | ✅ 仅 3 个 docs 文件；无代码/测试/既有评审/spec 冻结正文；无 token/dist；check.sh PASSED |
+
+**最终状态**：C1/P3 closed；建议 Lead merge（可选同步 GitHub Release body/notes 的 W5 句）。
