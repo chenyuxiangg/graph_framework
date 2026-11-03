@@ -89,6 +89,12 @@ impl PricingTable {
             .and_then(Value::as_str)
             .filter(|currency| !currency.trim().is_empty())
             .ok_or_else(|| pricing_invalid("pricing.currency must be a non-empty string"))?;
+        // REV-123 C1：仅接受 USD（不做「静默按数值当 USD」）；预算按 USD 计。
+        if !currency.eq_ignore_ascii_case("USD") {
+            return Err(pricing_invalid(format!(
+                "pricing.currency must be \"USD\" (got '{currency}'); cost budgets are USD-only"
+            )));
+        }
         let Some(models) = object.get("models").and_then(Value::as_object) else {
             return Err(pricing_invalid("pricing.models must be an object"));
         };
@@ -118,11 +124,6 @@ impl PricingTable {
     /// 货币（DR-018 口径：`USD`；`--max-cost` 仅 USD）。
     pub fn currency(&self) -> &str {
         &self.currency
-    }
-
-    /// 是否为 USD 价格表（`max_cost` 预算要求）。
-    pub fn is_usd(&self) -> bool {
-        self.currency.eq_ignore_ascii_case("USD")
     }
 
     /// 是否含该模型价格。
@@ -186,18 +187,30 @@ impl BudgetConfig {
         self.max_tokens.is_some() || self.max_cost.is_some()
     }
 
-    /// 校验非法值（负数/NaN；CLI 用法错误由 F3b 映射）。
+    /// 校验非法值（REV-123 P2：`max_tokens`/`max_cost` 必须 **> 0**；0/NaN/负值 →
+    /// `HARNESS_CONFIG_LOAD{reason:"budget_invalid"}`，不视为立即超限）。
     pub fn validate(&self) -> Result<(), HarnessError> {
-        // `max_tokens = 0` 合法（立即超限）；负值在 u64 不可表达。
+        if let Some(limit) = self.max_tokens {
+            if limit == 0 {
+                return Err(HarnessError::config_load(
+                    "budget_invalid",
+                    None,
+                    Some("$.max_tokens"),
+                    Some(Value::from("integer > 0")),
+                    Some(Value::from(limit)),
+                    "--max-tokens must be > 0",
+                ));
+            }
+        }
         if let Some(limit) = self.max_cost {
-            if !limit.is_finite() || limit < 0.0 {
+            if !limit.is_finite() || limit <= 0.0 {
                 return Err(HarnessError::config_load(
                     "budget_invalid",
                     None,
                     Some("$.max_cost"),
-                    Some(Value::from("finite USD >= 0")),
+                    Some(Value::from("finite USD > 0")),
                     Some(Value::from(limit)),
-                    "--max-cost must be a finite non-negative USD amount",
+                    "--max-cost must be a finite USD amount > 0",
                 ));
             }
         }
@@ -579,7 +592,6 @@ mod tests {
     fn parses_pricing_and_computes_cost() {
         let table = pricing();
         assert_eq!(table.currency(), "USD");
-        assert!(table.is_usd());
         assert!(table.has_model("m"));
         // 1M input + 0.5M output = 1.0 + 1.0 = 2.0 USD。
         assert_eq!(table.cost_usd("m", 1_000_000, 500_000), Some(2.0));
@@ -738,35 +750,41 @@ mod tests {
         let obs = RunObservability::new(None, BudgetConfig::default());
         obs.record_llm_call(node("i1", 0), agent(), &usage(10, 5), 1);
         obs.check_before_call().expect("no budget never stops");
-        assert!(BudgetConfig {
-            max_tokens: Some(10),
-            max_cost: Some(f64::NAN),
-        }
-        .validate()
-        .is_err());
-        // max_tokens=0 不得短路 max_cost 校验；0 本身合法（立即超限）。
-        assert!(BudgetConfig {
-            max_tokens: Some(0),
-            max_cost: Some(f64::NAN),
-        }
-        .validate()
-        .is_err());
-        BudgetConfig {
-            max_tokens: Some(0),
-            max_cost: None,
-        }
-        .validate()
-        .expect("zero budget is legal");
-        let obs = RunObservability::new(
-            None,
+        // REV-123 P2：0/NaN/负值均为配置错误（不视为立即超限）。
+        for budget in [
             BudgetConfig {
                 max_tokens: Some(0),
                 max_cost: None,
             },
-        );
-        assert_eq!(
-            obs.check_before_call().expect_err("zero budget stops").kind,
-            BudgetStopKind::Tokens
-        );
+            BudgetConfig {
+                max_tokens: None,
+                max_cost: Some(0.0),
+            },
+            BudgetConfig {
+                max_tokens: None,
+                max_cost: Some(-1.0),
+            },
+            BudgetConfig {
+                max_tokens: Some(10),
+                max_cost: Some(f64::NAN),
+            },
+            BudgetConfig {
+                max_tokens: Some(0),
+                max_cost: Some(f64::NAN),
+            },
+        ] {
+            let error = budget.validate().expect_err("invalid budget");
+            assert_eq!(
+                error.detail["reason"],
+                serde_json::json!("budget_invalid"),
+                "{budget:?}"
+            );
+        }
+        BudgetConfig {
+            max_tokens: Some(1),
+            max_cost: Some(0.000001),
+        }
+        .validate()
+        .expect("positive budget is legal");
     }
 }

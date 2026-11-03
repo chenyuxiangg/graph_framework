@@ -337,6 +337,7 @@ impl HarnessExecutor {
     fn observability_for_job(
         &self,
         job: &AgentCallJob,
+        model: &str,
     ) -> Result<Arc<RunObservability>, NodeError> {
         self.budget
             .validate()
@@ -353,14 +354,18 @@ impl HarnessExecutor {
                 )
                 .into_node_error());
             };
-            if !pricing.is_usd() {
+            // REV-123 C2：`max_cost` 下 Agent 模型必须在价格表中（加载后、首次 LLM
+            // 请求前 fail-closed；pricing 缺模型不静默按 0/未知继续）。
+            if !pricing.has_model(model) {
                 return Err(HarnessError::config_load(
-                    "pricing_currency_mismatch",
+                    "pricing_missing_model",
                     Some("<pricing>"),
-                    Some("$.currency"),
-                    Some(serde_json::json!("USD")),
+                    Some("$.models"),
+                    Some(serde_json::json!(model)),
                     Some(serde_json::json!(pricing.currency())),
-                    "--max-cost requires a USD pricing table",
+                    format!(
+                        "--max-cost requires pricing for agent model '{model}'; add it to --pricing"
+                    ),
                 )
                 .into_node_error());
             }
@@ -713,7 +718,7 @@ impl HarnessExecutor {
                 job.resolved_timeout_ms,
             ));
         }
-        let observability = self.observability_for_job(&job)?;
+        let observability = self.observability_for_job(&job, &agent.model_ref().name)?;
         let request = ProviderRequest {
             agent: &agent.config,
             inputs: mapped_agent_inputs(&job, &agent.config),
@@ -3171,6 +3176,88 @@ mod tests {
         assert!(
             fake.requests().is_empty(),
             "config error before any LLM call"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_budget_values_are_config_errors_before_requests() {
+        // REV-123 P2：max_tokens/max_cost 必须 > 0；0/NaN/负值 → budget_invalid。
+        for budget in [
+            crate::BudgetConfig {
+                max_tokens: Some(0),
+                max_cost: None,
+            },
+            crate::BudgetConfig {
+                max_tokens: None,
+                max_cost: Some(0.0),
+            },
+            crate::BudgetConfig {
+                max_tokens: None,
+                max_cost: Some(f64::NAN),
+            },
+        ] {
+            let dir = assets(agent_config("parser", &[]), "role");
+            let fake = Arc::new(
+                FakeLlmProvider::from_script(fake_script(
+                    json!([{"kind": "text", "content": "never"}]),
+                ))
+                .expect("script"),
+            );
+            let runner = Arc::new(FakeToolRunner::new());
+            let executor = Arc::new(
+                HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_budget(budget),
+            );
+            let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+            assert_eq!(outcome.status, RunStatus::Failed, "{budget:?}");
+            let error = outcome.error.expect("error");
+            assert_eq!(error.code, "HARNESS_CONFIG_LOAD", "{budget:?}");
+            assert!(
+                error.message.contains("budget_invalid"),
+                "{}",
+                error.message
+            );
+            assert!(fake.requests().is_empty(), "{budget:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn max_cost_missing_agent_model_is_config_error_before_requests() {
+        // REV-123 C2：pricing 缺 Agent 模型 → 加载后、首次 LLM 请求前 fail-closed。
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(
+                json!([{"kind": "text", "content": "never"}]),
+            ))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let other_model_pricing = Arc::new(
+            crate::PricingTable::parse_json(
+                r#"{"currency":"USD","models":{"other-model":{"input_per_mtok":1.0,"output_per_mtok":1.0}}}"#,
+            )
+            .expect("pricing"),
+        );
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_pricing(other_model_pricing)
+                .with_budget(crate::BudgetConfig {
+                    max_tokens: None,
+                    max_cost: Some(1.0),
+                }),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Failed);
+        let error = outcome.error.expect("error");
+        assert_eq!(error.code, "HARNESS_CONFIG_LOAD");
+        assert!(
+            error.message.contains("pricing_missing_model"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("deepseek-chat"), "{}", error.message);
+        assert!(
+            fake.requests().is_empty(),
+            "no LLM request before pricing check"
         );
     }
 
