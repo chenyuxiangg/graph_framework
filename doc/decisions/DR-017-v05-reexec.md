@@ -1,6 +1,6 @@
 # DR-017 · v0.5 reexec 工具回放
 
-> **状态**：V1 设计冻结（REV-115；REV-119 对齐 F1b 实现口径）。
+> **状态**：V1 设计冻结（REV-115；REV-122 对齐 F1c 实测：**行存在但字段缺失/损坏 → MISMATCH；MISSING 仅行缺失/streaming 多于记录**）。
 > **日期**：2026-11-03 · **作者**：docs-dev · **关联**：DR-014（v7 `tool_calls`）、06 §6.15、07 AC-24/25、task-95/105
 > **合同**：`--replay-tools=reexec` **显式**（默认 `recorded` 不变）；仅只读 builtin 候选重跑；**副作用/MCP/Python/失败行复用记录、绝不执行、不报 exit2**；不升 trace v8。
 
@@ -36,12 +36,13 @@ v7 `tool_calls` 已有 `args_sha256`/`result_sha256`，无输入文件 pre_sha25
 |---|---|
 | 候选行重跑成功且 result sha256 一致 | 该行 `replay_mode=reexec`；exit 0 |
 | 候选行重跑结果 ≠ 记录 | `REPLAY_TOOL_RECORD_MISMATCH` exit 3（**不输出 drift=true**） |
-| 候选行记录 `result_sha256` 缺失 | **`REPLAY_TOOL_RECORD_MISSING`（exit 3；记录不完整，非结果漂移）**（REV-119 裁决） |
+| 候选行记录 `result_sha256` 缺失/字段损坏 | **`REPLAY_TOOL_RECORD_MISMATCH`（exit 3；记录损坏/不可复核）**（REV-122 裁决） |
 | 记录行缺失 / streaming `tool_call_start` 多于记录 | `REPLAY_TOOL_RECORD_MISSING` exit 3 |
 | 任一记录 `truncated=1` | `REPLAY_TOOL_RECORD_TRUNCATED` exit 3 |
 | `args_json` 非法 / result JSON 不可解析 / sha 不符 | `REPLAY_TOOL_RECORD_MISMATCH` exit 3 |
 
 - **公共 API**：重跑结果 sha256 经 `zgraph_trace::tool_result_sha256`（公共 API，与记录同口径）；**不新增列/表、不升 v8**。
+- **错误码区分（REV-122 裁决）**：**行缺失**（无记录 / streaming `tool_call_start` 多于记录行）→ `REPLAY_TOOL_RECORD_MISSING`；**行存在但字段缺失/损坏**（缺 `result_sha256`、JSON 不可解析、sha 不符）→ `REPLAY_TOOL_RECORD_MISMATCH`；`truncated=1` → `REPLAY_TOOL_RECORD_TRUNCATED`。
 - **不做**：不因 grep/glob 无输入 hash 就跳过比对；不引入 pre_sha 新列。
 
 ## 3. CLI/输出语义
@@ -79,13 +80,13 @@ v7 `tool_calls` 已有 `args_sha256`/`result_sha256`，无输入文件 pre_sha25
 | c | 文件/结果漂移：reexec 结果 ≠ 记录 → `REPLAY_TOOL_RECORD_MISMATCH` exit 3（不写 runs.error_code；不输出 drift=true） |
 | d | **非候选复用**：副作用/MCP/Python/失败行 → 复用记录、**绝不执行、不报 exit2**；仅缺 `--allow-builtin-tools`/显式 `--workspace-dir` → exit 2；非法 workspace → CONFIG_LOAD exit 3 |
 | e | truncated/缺行/streaming 多于记录 → `REPLAY_TOOL_RECORD_TRUNCATED`/`MISSING` fail-closed |
-| f | 缺 `result_sha256` → `REPLAY_TOOL_RECORD_MISSING`（记录不完整，非漂移）；无 v8 迁移；完整 e2e 由 F1c 覆盖 |
+| f | 行存在但字段缺失/损坏（缺 `result_sha256`/JSON 坏/sha 不符）→ `REPLAY_TOOL_RECORD_MISMATCH`；**MISSING 仅用于行缺失/streaming 多于记录**；无 v8 迁移；完整 e2e 由 F1c 覆盖 |
 
 ## 7. Lead 裁决项
 
 | # | 事项 | 推荐/状态 |
 |---|---|---|
-| 1 | 候选行缺 `result_sha256` 的码 | **已裁决（REV-119）：`REPLAY_TOOL_RECORD_MISSING`（记录不完整，不是结果漂移）**；实现一致，不改代码 |
+| 1 | 候选行缺 `result_sha256` 的码 | **已裁决（REV-122）：`REPLAY_TOOL_RECORD_MISMATCH`（行存在但字段缺失/损坏，记录不可复核）；MISSING 仅行缺失/streaming 多于记录** |
 | 2 | 非候选行退出行为 | **复用记录、绝不执行、不报 exit2**（已实现） |
 | 3 | exit2 范围 | 仅缺 `--allow-builtin-tools`/显式 `--workspace-dir` |
 | 4 | 输出 additive | reexec 模式加 `replay_mode`/`drift=false`；recorded 不变；mismatch 不输出 drift=true |
