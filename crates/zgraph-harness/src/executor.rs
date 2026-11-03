@@ -109,6 +109,9 @@ pub struct HarnessExecutor {
     budget: BudgetConfig,
     /// v0.5/F3a1：`run_id` → run 级计费/用量/预算状态（跨 agent_call 累计）。
     run_observability: Mutex<HashMap<String, Arc<RunObservability>>>,
+    /// v0.5/F3a1（REV-123 C2）：`max_cost` 下 run 全部 Agent 模型（F3b CLI 从 graph
+    /// AgentConfig 收集后传入）；未提供 → 加载期 fail-closed（零请求）。
+    required_models: Option<BTreeSet<String>>,
 }
 
 /// 单 run 的 MCP 会话状态（executor 内部）。
@@ -139,6 +142,7 @@ impl HarnessExecutor {
             pricing: None,
             budget: BudgetConfig::default(),
             run_observability: Mutex::new(HashMap::new()),
+            required_models: None,
         }
     }
 
@@ -168,6 +172,7 @@ impl HarnessExecutor {
             pricing: None,
             budget: BudgetConfig::default(),
             run_observability: Mutex::new(HashMap::new()),
+            required_models: None,
         }
     }
 
@@ -195,6 +200,7 @@ impl HarnessExecutor {
             pricing: None,
             budget: BudgetConfig::default(),
             run_observability: Mutex::new(HashMap::new()),
+            required_models: None,
         }
     }
 
@@ -222,6 +228,7 @@ impl HarnessExecutor {
             pricing: None,
             budget: BudgetConfig::default(),
             run_observability: Mutex::new(HashMap::new()),
+            required_models: None,
         }
     }
 
@@ -300,6 +307,21 @@ impl HarnessExecutor {
         self
     }
 
+    /// v0.5/F3a1（REV-123 C2）：声明本 run 全部 Agent 模型（`max_cost` 必需）。
+    ///
+    /// F3b CLI 从 graph 的 AgentConfig 收集后传入；`max_cost` 下本执行器在**首次
+    /// LLM 请求前**整体校验这些模型都有价格（缺 → `pricing_missing_model`）；未提供
+    /// → `pricing_models_required`（fail-closed，零请求）。无 `max_cost` 时忽略。
+    pub fn with_required_models(mut self, models: impl IntoIterator<Item = String>) -> Self {
+        self.required_models = Some(models.into_iter().collect());
+        self
+    }
+
+    /// [`Self::with_required_models`] 的别名（语义同）。
+    pub fn with_agent_models(self, models: impl IntoIterator<Item = String>) -> Self {
+        self.with_required_models(models)
+    }
+
     /// v0.5/F3a1：本 run 的统计快照（run/node/agent token/耗时/调用数/费用）。
     ///
     /// addditive API（F3b trace/`--stats` 消费）；未知 run = `None`。
@@ -331,6 +353,53 @@ impl HarnessExecutor {
         runs.entry(run_id.to_string())
             .or_insert_with(|| RunObservability::new(self.pricing.clone(), self.budget))
             .clone()
+    }
+
+    /// v0.5/F3a1（REV-123 C2）：run 级预算/价格整体预检（首次 LLM 请求前）。
+    ///
+    /// `max_cost` 下必须：预算合法 → 有 USD 价格表 → 已提供 required models →
+    /// required models 全部有价；任一不满足 → `HARNESS_CONFIG_LOAD`（fail-closed，
+    /// 零 LLM 请求）。无 `max_cost` 时不做任何额外要求（默认路径不变）。
+    fn validate_run_pricing(&self) -> Result<(), HarnessError> {
+        self.budget.validate()?;
+        if self.budget.max_cost.is_none() {
+            return Ok(());
+        }
+        let Some(pricing) = self.pricing.as_ref() else {
+            return Err(HarnessError::config_load(
+                "pricing_required_for_max_cost",
+                Some("<pricing>"),
+                Some("$.max_cost"),
+                Some(serde_json::json!("--pricing <file> (USD)")),
+                None,
+                "--max-cost requires --pricing (no built-in prices)",
+            ));
+        };
+        let Some(required) = self.required_models.as_ref() else {
+            return Err(HarnessError::config_load(
+                "pricing_models_required",
+                Some("<pricing>"),
+                Some("$.required_models"),
+                Some(serde_json::json!("all AgentConfig models in this run")),
+                None,
+                "--max-cost requires the run's Agent models (with_required_models) for pricing validation",
+            ));
+        };
+        for model in required {
+            if !pricing.has_model(model) {
+                return Err(HarnessError::config_load(
+                    "pricing_missing_model",
+                    Some("<pricing>"),
+                    Some("$.models"),
+                    Some(serde_json::json!(model)),
+                    Some(serde_json::json!(pricing.currency())),
+                    format!(
+                        "--max-cost requires pricing for agent model '{model}'; add it to --pricing"
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// v0.5/F3a1：预算配置前置校验（`max_cost` 需要 USD 价格表；F3b 也会启动前预检）。
@@ -549,6 +618,11 @@ impl NodeExecutor for HarnessExecutor {
             declared_ports: execution.node.inputs.clone(),
             declared_timeout_ms,
         };
+        // REV-123 C2：run 级价格/预算整体预检在**任何 Agent 加载/LLM 请求之前**。
+        if let Err(error) = self.validate_run_pricing() {
+            let node_error = config_failure(error, &job.ctx, job.resolved_timeout_ms);
+            return Box::pin(async move { Err(node_error) });
+        }
         Box::pin(async move { self.run_agent_call(job).await })
     }
 
@@ -1005,6 +1079,30 @@ mod tests {
         {"id": "worker2", "type": "agent_call",
          "inputs": [{"name": "message", "type": "any", "required": true}],
          "config": {"agent_id": "parser"}},
+        {"id": "end", "type": "end",
+         "inputs": [{"name": "result", "type": "any", "required": true}], "config": {}}
+      ],
+      "edges": [
+        {"from": "start", "to_node": "worker1", "to_input_port": "message"},
+        {"from": "worker1", "to_node": "worker2", "to_input_port": "message"},
+        {"from": "worker2", "to_node": "end", "to_input_port": "result"}
+      ]
+    }"#;
+
+    /// 两个串行 agent_call、不同 Agent（不同 model）——REV-123 C2 多模型预检。
+    const TWO_MODEL_GRAPH: &str = r#"{
+      "version": "1.0",
+      "metadata": {"name": "harness-two-models"},
+      "entry_points": ["start"],
+      "nodes": [
+        {"id": "start", "type": "start",
+         "inputs": [{"name": "message", "type": "any", "required": true}], "config": {}},
+        {"id": "worker1", "type": "agent_call",
+         "inputs": [{"name": "message", "type": "any", "required": true}],
+         "config": {"agent_id": "parser"}},
+        {"id": "worker2", "type": "agent_call",
+         "inputs": [{"name": "message", "type": "any", "required": true}],
+         "config": {"agent_id": "parser2"}},
         {"id": "end", "type": "end",
          "inputs": [{"name": "result", "type": "any", "required": true}], "config": {}}
       ],
@@ -3134,6 +3232,7 @@ mod tests {
         let executor = Arc::new(
             HarnessExecutor::new(settings(dir.path(), &fake, &runner))
                 .with_pricing(pricing_table())
+                .with_required_models(vec!["deepseek-chat".to_string()])
                 .with_budget(crate::BudgetConfig {
                     max_tokens: None,
                     max_cost: Some(0.5),
@@ -3240,6 +3339,7 @@ mod tests {
         let executor = Arc::new(
             HarnessExecutor::new(settings(dir.path(), &fake, &runner))
                 .with_pricing(other_model_pricing)
+                .with_required_models(vec!["deepseek-chat".to_string()])
                 .with_budget(crate::BudgetConfig {
                     max_tokens: None,
                     max_cost: Some(1.0),
@@ -3259,6 +3359,159 @@ mod tests {
             fake.requests().is_empty(),
             "no LLM request before pricing check"
         );
+    }
+
+    fn assets_two_agent_models(second_model: &str) -> TempDir {
+        let dir = assets(agent_config("parser", &[]), "role");
+        let mut agent2 = agent_config("parser2", &[]);
+        agent2["model"]["name"] = json!(second_model);
+        write_agent_file(&dir, agent2);
+        dir
+    }
+
+    #[tokio::test]
+    async fn multi_model_requires_all_models_priced_before_any_request() {
+        // REV-123 C2：max_cost 下 required models 中任一缺价 → 首次请求前 fail-closed。
+        let dir = assets_two_agent_models("second-model");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "one"},
+                {"kind": "text", "content": "two"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_pricing(pricing_table()) // 仅 deepseek-chat
+                .with_required_models(vec![
+                    "deepseek-chat".to_string(),
+                    "second-model".to_string(),
+                ])
+                .with_budget(crate::BudgetConfig {
+                    max_tokens: None,
+                    max_cost: Some(1.0),
+                }),
+        );
+        let (outcome, _trace) = run_graph(TWO_MODEL_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Failed, "{:?}", outcome.error);
+        let error = outcome.error.expect("error");
+        assert_eq!(error.code, "HARNESS_CONFIG_LOAD");
+        assert!(
+            error.message.contains("pricing_missing_model"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("second-model"), "{}", error.message);
+        assert!(
+            fake.requests().is_empty(),
+            "zero LLM requests before pricing check"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_cost_without_required_models_is_config_error_before_requests() {
+        // REV-123 C2：max_cost 但未提供 required models → pricing_models_required（零请求）。
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(
+                json!([{"kind": "text", "content": "never"}]),
+            ))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_pricing(pricing_table())
+                .with_budget(crate::BudgetConfig {
+                    max_tokens: None,
+                    max_cost: Some(1.0),
+                }),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Failed);
+        let error = outcome.error.expect("error");
+        assert_eq!(error.code, "HARNESS_CONFIG_LOAD");
+        assert!(
+            error.message.contains("pricing_models_required"),
+            "{}",
+            error.message
+        );
+        assert!(fake.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn max_cost_all_models_priced_runs_normally() {
+        let dir = assets_two_agent_models("second-model");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "one"},
+                {"kind": "text", "content": "two"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let pricing = Arc::new(
+            crate::PricingTable::parse_json(
+                r#"{"currency":"USD","models":{"deepseek-chat":{"input_per_mtok":1.0,"output_per_mtok":2.0},"second-model":{"input_per_mtok":1.0,"output_per_mtok":2.0}}}"#,
+            )
+            .expect("pricing"),
+        );
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_pricing(pricing)
+                .with_required_models(vec![
+                    "deepseek-chat".to_string(),
+                    "second-model".to_string(),
+                ])
+                .with_budget(crate::BudgetConfig {
+                    max_tokens: None,
+                    max_cost: Some(1.0),
+                }),
+        );
+        let (outcome, _trace) = run_graph(TWO_MODEL_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
+        assert_eq!(fake.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn required_models_not_enforced_without_max_cost() {
+        // 无 max_cost：不要求 required models（默认路径不变）；提供也被忽略。
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([{"kind": "text", "content": "ok"}])))
+                .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_budget(
+                crate::BudgetConfig {
+                    max_tokens: Some(100),
+                    max_cost: None,
+                },
+            ),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
+        assert_eq!(fake.requests().len(), 1);
+
+        // 提供 required models 但无 max_cost：不校验/不影响默认路径。
+        let dir = assets_two_agent_models("second-model");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "one"},
+                {"kind": "text", "content": "two"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_required_models(vec!["missing-model".to_string()])
+                .with_pricing(pricing_table()),
+        );
+        let (outcome, _trace) = run_graph(TWO_MODEL_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
     }
 
     #[tokio::test]
