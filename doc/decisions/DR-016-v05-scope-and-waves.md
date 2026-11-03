@@ -78,7 +78,7 @@ F0 docs 设计冻结（本批，REV-115）
 |---|---|
 | 默认（无 reexec/预算/新开关） | 行为/trace/replay 逐字节不变；trace v7 |
 | `--replay-tools=recorded` | 与 v0.4 完全一致（默认） |
-| `--replay-tools=reexec` 但工具为副作用 | 用法错误/拒绝（exit 2） |
+| 非候选行（副作用/MCP/Python/失败行） | 复用记录、不执行、不报 exit2；exit2 仅缺 `--allow-builtin-tools`/显式 `--workspace-dir`；非法 workspace → `HARNESS_CONFIG_LOAD` exit3 |
 | 预算未配置 | 不计算/不停止；输出不变 |
 | `--allow-write-path` 未配置 | 写目标仅 workspace；默认不变 |
 | 外部 harness 未配置 | 不启动进程；默认不变 |
@@ -88,7 +88,7 @@ F0 docs 设计冻结（本批，REV-115）
 
 | AC | 内容 | 关键断言（摘要） | 波次 |
 |---|---|---|---|
-| AC-25 | reexec 回放 | 默认 recorded 不变；reexec 仅 read/grep/glob/diff；输入/结果漂移 → `REPLAY_TOOL_RECORD_MISMATCH` fail-closed；副作用工具拒绝；无 v8 | F1 |
+| AC-25 | reexec 回放 | 默认 recorded 不变；仅候选 builtin read/grep/glob/diff+ok 重跑；非候选复用记录/不执行/不报 exit2；exit2 仅缺 flags；非法 workspace CONFIG_LOAD exit3；漂移 → RECORD_MISMATCH；无 v8 | F1 |
 | AC-26 | sandbox 增强 | `--allow-write-path` 目录级可写（profile+jail）；与 workspace/allow-path 组合；构建工具路径/`cc -isysroot` 文档；负例越界拒绝 | F2 |
 | AC-27 | 可观测/成本 | run/node/agent token/耗时/费用聚合；`--max-tokens/--max-cost` 默认关；超限停止语义（status/stop_reason/不可续）；trace/CLI additive；无配置不变 | F3 |
 | AC-28 | 真实 Codex/DSH | 源码/本机安装/构建/运行/认证占位；F5a–f 分层（fake/握手/全链路/Codex 三层/F5f 可选工具）；证据/限制；`#[ignore]`/env 门控；不伪造 | F5 |

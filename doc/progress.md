@@ -12,4 +12,3 @@
 
 **阻塞**
 - 发布 tag/GitHub Release 需用户授权与新 token；v0.5 不升 trace v8；bash 用户终端证据 ISSUE-180 发布前补。
-- DR-017 缺 `result_sha256` 码：REV-119 期望 MISMATCH，F1b 实现为 MISSING（待 F1c/评审确认）。
