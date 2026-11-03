@@ -1019,6 +1019,10 @@ pub fn node_error_json(error: &kernel::NodeError) -> Value {
             object.insert("limit".to_string(), json!(limit));
             object.insert("actual".to_string(), json!(actual));
         }
+        // kernel additive API 编译适配（Lead 批准，非 F3b 功能接线；v0.5 F3a2）。
+        kernel::NodeError::BudgetExceeded { .. } => {
+            object.insert("kind".to_string(), json!("BudgetExceeded"));
+        }
     }
     Value::Object(object)
 }
@@ -1581,6 +1585,8 @@ mod tests {
             output_summary: Some(serde_json::json!({"r": 1})),
             error: None,
             metrics: zgraph_kernel::RunMetrics::default(),
+            // kernel additive API 编译适配（Lead 批准；F3a2 stop_reason）。
+            stop_reason: None,
             at: "2026-10-28T09:12:04.104Z".to_string(),
         }
     }

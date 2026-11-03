@@ -2179,6 +2179,8 @@ mod tests {
                 trace_backpressure: 0,
                 killed_workers: 0,
             },
+            // kernel additive API 编译适配（Lead 批准；F3a2 stop_reason）。
+            stop_reason: None,
             started_at: "2026-10-30T00:00:00.000Z".to_string(),
             finished_at: "2026-10-30T00:00:01.000Z".to_string(),
         }
