@@ -124,3 +124,7 @@ path = "trace_tools_v04.rs"
 [[test]]
 name = "v04_regression"
 path = "v04_regression.rs"
+
+[[test]]
+name = "reexec_v05"
+path = "reexec_v05.rs"
