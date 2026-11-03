@@ -9,11 +9,13 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（首轮有条件通过 → C1 由 `14fc449` 关闭；见 §7）
 
-P0=0；**P1=1**；P2=5；P3=4。jail 写授权/只读 `--allow-path`/重叠写优先/系统目录拒绝/create_parents、profile `file-write*`/只读保留/系统拒绝、CLI 解析/依赖/预检 exit3 不建 DB、工具写入矩阵/reexec/cargo 缓存均通过；harness **361/0/1** 默认与 features、workspace **1245/0/3**（2 次通过）、cli **257/0**（全量重跑）、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。jail 写授权/只读 `--allow-path`/重叠写优先/系统目录拒绝/create_parents、profile `file-write*`/只读保留/系统拒绝、CLI 解析/依赖/预检 exit3 不建 DB、工具写入矩阵/reexec/cargo 缓存均通过；最终 harness **363/0/1** 默认与 features、workspace **1247/0/3**、cli **257/0**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
-需关闭：
+> **首轮历史（保留）**：`0415531` 首轮为有条件通过——C1 无 `--allow-write-path` 时模板注释/空块改变默认 profile 文本/sha。`14fc449` 已关闭 C1（见 §7）。
+
+首轮条件：
 
 - **C1 无 `--allow-write-path` 时 profile 不再逐字节不变**：`PROFILE_TEMPLATE` 在只读白名单注释处把 `;;;` 改为 `;`，并新增「可写白名单」注释块 + `@WRITE_PATHS@` 行；即使 `write_paths=[]`（`new_with_options`/旧 `new` 路径），`fill_template` 仍输出该注释/空行。结果默认 bash profile 文本与 sha256 均变化，违反任务「无 flag 默认 profile/行为逐字节不变」，并会改变既有 `bash` trace 的 `sandbox_profile_sha256`。
 
@@ -21,7 +23,7 @@ P0=0；**P1=1**；P2=5；P3=4。jail 写授权/只读 `--allow-path`/重叠写�
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C1） | 写授权/profile/CLI/构建组合主语义成立；默认 profile 字节回归 |
+| 功能正确性 | ✅ | 写授权/profile/CLI/构建组合成立；C1 默认 profile 字节由 `14fc449` 关闭并加 golden |
 | 结构合理性 | ✅ | jail 新增 write paths；profile 模板参数化；CLI additive；无新 Cargo |
 | 逻辑性 | ✅（P2） | 写读矩阵、重叠优先、系统拒绝、预检不建 DB、create_parents 符合 DR-019 |
 | 可读性 | ✅（P3） | 注释/错误闭集/构建提示清楚；P3 测试/文档补齐 |
@@ -87,3 +89,36 @@ bash scripts/dev/check.sh                    # PASSED
 - **P2 N1–N5**：系统目录扩充、workspace 嵌套/symlink/`..`、CLI 组合、default profile golden、真实构建工具链 D6。
 - **P3 N6–N9**：apply_patch UX、真 bash 隔离、既有 timing flake、profile sha 文档。
 - 无 P0；C1 未关闭前不可 merge。
+
+## 7. 条件关闭复核（2026-11-03，`14fc449`，parent `2189ec7`）
+
+**复核结论：通过**。`14fc449` 仅 `builtin/sandbox.rs` +125/−6；工作区干净；无 Cargo/其它模块。
+
+### C1（默认 profile 逐字节）
+- `PROFILE_TEMPLATE` 恢复 v0.4 冻结字节：`;;; ---------- 只读白名单`、无 `@WRITE_PATHS@` 常驻块/空行；与 `d3da745` 旧模板人工逐字对比一致。
+- 可写块改为**条件拼接**：仅 `write_lines` 非空时在 allow 行后追加 `;;; 可写白名单` + `(allow file-read* file-write* ...)`；空 write_paths 时 `@ALLOW_PATHS@` 仅替换原 allow 段。
+- 测试：
+  - `empty_write_paths_profile_matches_v04_golden_sha`：`V04_PROFILE_GOLDEN_SHA=a6ea5e…` 硬编码校验；无 write 块/`@WRITE_PATHS@`；真实路径 render 与 v0.4 参考逐字节相等；重复渲染 sha 稳定。
+  - `write_paths_add_block_once_and_change_profile_sha`：非空时 sha 变化、可写块恰 1 次、`;;;` 注释保留、先只读后可写顺序。
+- **C1 关闭**；默认 trace `sandbox_profile_sha256` 不漂移（render 层；真沙箱留 F6/普通终端）。
+
+### 残余 P2（不阻断）
+- 系统目录集合 7 类（`/private/var` 等未拒）D6 评估。
+- jail 测试仍缺 workspace 嵌套在 write-path 内、write-path 内 symlink/`..`、`--allow-bash` only 组合（DR 允许；D6 补）。
+- golden 辅助使用当前 `fill_template` + 硬编码 v0.4 SHA，且只覆盖单配置；建议 F6 增加真实 `MacOsSandbox`/trace sha 快照（嵌套环境不可执行，已接受）。
+- 构建工具链仍为 profile/文件工具缓存模拟；真实 cargo/cc 执行留 D6/普通终端。
+
+### 最终门禁（`14fc449`）
+```bash
+cargo test -p zgraph-harness                 # 364 tests：363 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp  # 364 tests：363 passed / 0 failed / 1 ignored
+cargo test --workspace                       # 90 targets：1247 passed / 0 failed / 3 ignored
+cargo test -p zgraph-cli                     # 257 passed / 0 failed
+pytest -q                                    # exit 0；183 passed
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                   # clean
+cargo check -p zgraph-harness --no-default-features  # clean
+bash scripts/dev/check.sh                    # PASSED
+```
+- 仅 1 file；无 Cargo；默认路径无回归；`git status` 空。
+- 稳定性：本轮 workspace/cli 均全绿；上一轮首次 `ac07_watchdog`/`ac09_parallel` timing flake 未复现（既有 flake，D6 登记）。
