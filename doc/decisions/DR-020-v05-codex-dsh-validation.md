@@ -13,7 +13,7 @@
 | 入口 | **`dsh --profile acp`**（ACP v1 stdio 首选）；`--profile headless "job"`（one-shot 无流式）；`--profile sdk`（非 ACP） | 待 spike |
 | 传输 | **JSON-RPC 2.0 NDJSON**（每行一条；**无 Content-Length**） | 待 spike |
 | 实测（无 key，隔离 DSH_HOME） | initialize/session/new/close/EOF/unknown session 均通过；prompt → **-32603 no API key**（无模型请求） | 待 spike |
-| 验证 | **分层 F5a CI fake ACP / F5b 真实握手无 key / F5c 全链路需 key；F5d Codex 同构三层** | 待 spike |
+| 验证 | **分层 F5a CI fake ACP / F5b 真实握手无 key / F5c 全链路需 key；F5d Codex 三层（CI mock 零密钥/真 key/取消）+ F5f 可选工具执行** | **中期已通（零密钥 e2e）** |
 | AC-28 | a–f（§5） | 待补 |
 
 ## 1. DSH FINAL 事实（spike 2026-11-03）
@@ -67,10 +67,59 @@ export DEEPSEEK_API_KEY=...            # 仅 F5c 需要；用户授权，不写�
 dsh --profile acp                      # 本机 0.2.1-rc.3；或 npx @deepseek-ai/dsh@0.2.1-rc.5
 ```
 
-## 4. Codex（待第二个 spike）
+## 4. Codex（中期结论：零密钥 e2e 已通）
 
-- 待补：源码 clone/构建（Rust workspace）、`codex exec --json`/`--output-last-message`、认证/env、事件样例、取消/退出码、adapter 映射差异、可复现命令。
-- F5d 沿用 DSH 三层结构（fake/真实握手/全链路 key 门控）。
+### 4.1 构建/安装
+
+- 本机源码构建不可行（网络 clone/依赖带宽问题，非代码）；改用 **npm 预编译 `npm i @openai/codex@0.166.0`**（约 4min）；源码等价命令 `codex-rs && cargo build --release -p codex-cli --bin codex`。
+- 版本锁定 **0.166.0**；二进制/行为以该版本为准。
+
+### 4.2 零密钥端到端（CI 可跑，F5d-a）
+
+- `$CODEX_HOME/config.toml` 配自定义 provider：
+
+  ```toml
+  model_provider = "mock"
+  [model_providers.mock]
+  base_url = "http://127.0.0.1:<PORT>/v1"
+  wire_api = "responses"
+  env_key = "MOCK_API_KEY"   # 只要求有值，不校验真实密钥
+  ```
+
+- 本地 **mock Responses SSE 服务**；`codex exec --json` 正常 `turn.completed`。
+- **adapter 不传 `-c`**：必须走 `CODEX_HOME/config.toml`（唯一干净路径）。
+- 实测：`hello_ok` + `result{content:"hello from mock", stop_reason:EndTurn, usage:{11,7,18,2}}`；**cached_input_tokens=4 丢弃**。
+- 零密钥 CI 不需要工具执行（mock provider 无 command execution），规避嵌套 sandbox 风险。
+
+### 4.3 取消/生命周期
+
+- SIGTERM → killpg → pid 消失、无孤儿；stdin 关闭后 exit0（符合 `plugin.rs` 契约）。
+- 取消宽限沿用 2s→SIGKILL（DR-011）。
+
+### 4.4 adapter 缺口（F5d 修）
+
+| # | 级别 | 问题 | 修法 |
+|---|---|---|---|
+| 1 | 中 | 任一顶层 `{"type":"error"}` 置 failed 且 `turn.completed` 不重置 → 重连后成功也误报（真机见 5 次 Reconnecting） | **`turn.completed` 清 failed** |
+| 2 | 中 | 未传 `--ephemeral` → CODEX_HOME 写 sessions/rollout + 4 sqlite（6 run 5.6MB） | **加 `--ephemeral`** |
+| 3 | 低 | prompt 走 argv（ARG_MAX 1MB；900KB 可过，>1MB E2BIG） | 文档标注（或临时文件，若 codex 支持） |
+| 4 | 低 | `iterations=1` 与 codex 内部多轮不符；usage 累计（22/14） | 文档口径（iterations 降级；usage 累计按 v0.3 字段） |
+| 5 | 低 | `exec --json` 无 `command_execution` item → tool_start/tool_end 不可得（codex 限制，非 adapter bug） | 文档标注；不伪造 tool 事件 |
+| 6 | 低 | reasoning 可得但 adapter 丢弃，与 `capabilities.reasoning=false` 一致 | 文档/保持 |
+
+### 4.5 嵌套 sandbox 风险
+
+- codex 自带 `sandbox-exec` 在嵌套环境 **exit 71**；验证「codex 改代码」需 `-s danger-full-access` 或容器外跑。
+- **CI mock provider 不需要工具执行**；真实工具执行验证列为 **F5f 可选**（非嵌套用户终端/容器，文档/手动，不伪造）。
+
+### 4.6 F5d/F5f 分层
+
+| 层 | 内容 | 门控 | CI |
+|---|---|---|---|
+| **F5d-a** | CI mock provider 零密钥确定性 e2e（CODEX_HOME config + 本地 mock SSE；断言 hello_ok/result/usage/cached 丢弃） | 默认 CI（无需 key） | 是 |
+| **F5d-b** | 真实 key 全链路（`#[ignore]` + `OPENAI_API_KEY` 或 `codex login`；可选，不阻塞发布） | `#[ignore]` + env | 需 key |
+| **F5d-c** | 取消 pid/无孤儿（CI 可跑） | 默认 CI | 是 |
+| **F5f**（可选） | 非嵌套环境 `-s danger-full-access` 验证 codex 工具执行 | 手动/用户终端 | 否 |
 
 ## 5. AC-28（设计冻结；F5 实测；Codex 待补）
 
@@ -82,6 +131,19 @@ dsh --profile acp                      # 本机 0.2.1-rc.3；或 npx @deepseek-a
 | d | F5b 无 key 降级：prompt → -32603 no API key（**无模型请求**）；不伪造成功；adapter 缺口/映射文档化 |
 | e | F5c 全链路（需 `DEEPSEEK_API_KEY`，用户授权）：prompt "Reply with exactly: ok" → ≥1 agent_message_chunk、stopReason=end_turn、`result.content="ok"`、run/trace/replay；不可用如实标注 |
 | f | 门控：`#[ignore]` + `ZGRAPH_REAL_DSH=1`/`ZGRAPH_REAL_CODEX=1`；CI 不 clone；发布材料证据齐全；**usage_update 不伪造 token/成本** |
+| g | **F5d-a Codex 零密钥 CI**：`CODEX_HOME/config.toml` mock provider + 本地 mock Responses SSE；`codex exec --json` 正常 turn.completed；断言 hello_ok/result `hello from mock`/stop_reason EndTurn/usage(11,7,18,2)/cached=4 丢弃；**无需 key** |
+| h | **F5d-b 真实 key 全链路**（`#[ignore]`+`OPENAI_API_KEY`/`codex login`，可选不阻塞发布）；不可用如实标注 |
+| i | **F5d-c 取消**：SIGTERM→killpg→pid 消失/无孤儿；stdin close exit0 |
+| j | **F5f 可选**：非嵌套环境 `-s danger-full-access` 验证 codex 工具执行（文档/手动，不伪造；CI mock 不需要） |
+
+**可复现命令（Codex 零密钥 CI；F5d-a）**：
+
+```bash
+npm i @openai/codex@0.166.0            # 预编译；源码等价 codex-rs && cargo build --release -p codex-cli --bin codex
+export CODEX_HOME=/tmp/codex-home     # config.toml 配 mock provider（base_url=http://127.0.0.1:PORT/v1, wire_api=responses, env_key=MOCK_API_KEY）
+export MOCK_API_KEY=dummy              # 只要求有值
+codex exec --json                      # 本地 mock Responses SSE 服务；断言 hello_ok/result/usage
+```
 
 ## 6. 风险（写入 DR/台账）
 

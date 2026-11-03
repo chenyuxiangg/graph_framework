@@ -60,7 +60,7 @@ F0 docs 设计冻结（本批，REV-115）
 | F2 | `feat/harness-sandbox-enhance` | harness-dev / reviewer-a | `--allow-write-path`、构建工具链、profile/jail、AC-26 负例 | F0；与 F1 串行 |
 | F3 | `feat/observability-cost` | harness/trace/cli-dev / reviewer-b（跨模块 Lead 批准） | usage/token/费用/耗时聚合、预算 flags/停止语义、trace additive | F0 |
 | F4 | `fix/issue-cleanup-v05` | 各模块作者 / reviewer-a/b | ISSUE-176–181 清理/复核 | F0 |
-| F5 | `test/real-codex-dsh`：**F5a** adapter+fake ACP → **F5b** 真实 DSH 握手 → **F5c** 全链路（key）→ **F5d** Codex 同构三层 | e2e-dev/research / reviewer-a | 源码/本机验证、证据、环境门控、不伪造（每层独立提交） | F0 + DSH spike（Codex 待） |
+| F5 | `test/real-codex-dsh`：**F5a** adapter+fake ACP → **F5b** 真实 DSH 握手 → **F5c** 全链路（key）→ **F5d** Codex 三层（CI mock 零密钥/真 key/取消）+ **F5f** 可选工具执行（非嵌套） | e2e-dev/research / reviewer-a | 源码/本机验证、证据、环境门控、不伪造（每层独立提交） | F0 + DSH spike（Codex 中期已通） |
 | F6 | `chore/process-v05-release` + `docs/docs-v05-spec` | docs-dev / reviewer-b | 版本/基线/README/progress/as-built/REV 发布 | F1–F5 |
 
 ## 3. 发布条件（v0.5.0）
