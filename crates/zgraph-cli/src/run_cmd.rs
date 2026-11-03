@@ -122,12 +122,20 @@ options:
                          default: off)
   --workspace-dir <dir>  workspace jail root for builtin file tools (default: .; canonicalized)
   --allow-path <dir>     extra read-only directory for builtin file tools; repeatable
+  --allow-write-path <dir>
+                         extra writable directory for builtin file tools/bash; repeatable
+                         (independent of read-only --allow-path; '/' and system dirs are
+                         rejected; requires --allow-builtin-tools or --allow-bash)
   --allow-bash           allow builtin__bash under the macOS OS sandbox (fail-closed when
                          the sandbox is unavailable/nested)
   --allow-exec-path <dir>
                          extra executable directory for builtin__bash; repeatable
                          (requires --allow-bash)
   --allow-network        allow network from builtin__bash (default: deny; requires --allow-bash)
+
+build toolchains (cargo/node/uv): pass --allow-exec-path <toolchain bin dir>, expose SDKs
+  read-only via --allow-path, put caches/CARGO_HOME under --allow-write-path (or the
+  workspace); cc needs -isysroot '$(xcrun --show-sdk-path)'. Nothing is enabled by default.
   --python <exe>         Python interpreter (default: $PYO3_PYTHON > $ZGRAPH_PYTHON > python3)
   --python-path <dir>    prepend a module search path; repeatable (PYTHONPATH)
   --fake-llm[=<script>]  scripted LLM provider (bare flag = built-in default script)
@@ -222,6 +230,8 @@ pub struct RunArgs {
     pub workspace_dir: Option<PathBuf>,
     /// `--allow-path`（可重复）：额外**只读**目录（canonicalize）。
     pub allow_paths: Vec<PathBuf>,
+    /// `--allow-write-path`（可重复）：额外**可写**目录（canonicalize；v0.5/F2）。
+    pub allow_write_paths: Vec<PathBuf>,
     /// `--allow-bash`：注册 `builtin__bash`（需 macOS OS 沙箱可用；fail-closed）。
     pub allow_bash: bool,
     /// `--allow-exec-path`（可重复）：bash 额外可执行目录。
@@ -285,6 +295,7 @@ struct ParseState {
     allow_builtin_tools: bool,
     workspace_dir: Option<PathBuf>,
     allow_paths: Vec<PathBuf>,
+    allow_write_paths: Vec<PathBuf>,
     allow_bash: bool,
     exec_paths: Vec<PathBuf>,
     allow_network: bool,
@@ -312,6 +323,7 @@ impl Default for ParseState {
             allow_builtin_tools: false,
             workspace_dir: None,
             allow_paths: Vec::new(),
+            allow_write_paths: Vec::new(),
             allow_bash: false,
             exec_paths: Vec::new(),
             allow_network: false,
@@ -368,6 +380,10 @@ impl ParseState {
                 self.allow_paths
                     .push(PathBuf::from(option_value(iter, "--allow-path")?));
             }
+            "--allow-write-path" => {
+                self.allow_write_paths
+                    .push(PathBuf::from(option_value(iter, "--allow-write-path")?));
+            }
             "--allow-bash" => {
                 self.allow_bash = true;
             }
@@ -412,6 +428,11 @@ impl ParseState {
         if (self.allow_network || !self.exec_paths.is_empty()) && !self.allow_bash {
             return Err("--allow-network/--allow-exec-path require --allow-bash".to_string());
         }
+        if !self.allow_write_paths.is_empty() && !(self.allow_builtin_tools || self.allow_bash) {
+            return Err(
+                "--allow-write-path requires --allow-builtin-tools or --allow-bash".to_string(),
+            );
+        }
         let graph = self
             .graph
             .ok_or_else(|| "run requires <graph.json>".to_string())?;
@@ -430,6 +451,7 @@ impl ParseState {
             allow_builtin_tools: self.allow_builtin_tools,
             workspace_dir: self.workspace_dir,
             allow_paths: self.allow_paths,
+            allow_write_paths: self.allow_write_paths,
             allow_bash: self.allow_bash,
             exec_paths: self.exec_paths,
             allow_network: self.allow_network,
@@ -936,9 +958,10 @@ fn resolve_builtin_tools(
         exec_paths: args.exec_paths.clone(),
         allow_network: args.allow_network,
     });
-    match zgraph_harness::BuiltinToolSet::new_with_options(
+    match zgraph_harness::BuiltinToolSet::new_with_paths(
         &workspace,
         &args.allow_paths,
+        &args.allow_write_paths,
         args.allow_builtin_tools,
         bash,
     ) {
@@ -2250,6 +2273,7 @@ mod tests {
         assert!(!parsed.allow_builtin_tools);
         assert_eq!(parsed.workspace_dir, None);
         assert!(parsed.allow_paths.is_empty());
+        assert!(parsed.allow_write_paths.is_empty());
         assert!(!parsed.allow_bash);
         assert!(parsed.exec_paths.is_empty());
         assert!(!parsed.allow_network);
@@ -2287,6 +2311,10 @@ mod tests {
             "ro1",
             "--allow-path",
             "ro2",
+            "--allow-write-path",
+            "wp1",
+            "--allow-write-path",
+            "wp2",
             "--allow-bash",
             "--allow-exec-path",
             "exec1",
@@ -2319,6 +2347,10 @@ mod tests {
         assert_eq!(
             parsed.allow_paths,
             vec![PathBuf::from("ro1"), PathBuf::from("ro2")]
+        );
+        assert_eq!(
+            parsed.allow_write_paths,
+            vec![PathBuf::from("wp1"), PathBuf::from("wp2")]
         );
         assert!(parsed.allow_bash);
         assert_eq!(
@@ -2475,6 +2507,7 @@ mod tests {
             allow_builtin_tools: false,
             workspace_dir: None,
             allow_paths: Vec::new(),
+            allow_write_paths: Vec::new(),
             allow_bash: false,
             exec_paths: Vec::new(),
             allow_network: false,
@@ -2861,6 +2894,7 @@ mod tests {
             allow_builtin_tools: false,
             workspace_dir: None,
             allow_paths: Vec::new(),
+            allow_write_paths: Vec::new(),
             allow_bash: false,
             exec_paths: Vec::new(),
             allow_network: false,
@@ -2939,6 +2973,7 @@ mod tests {
             allow_builtin_tools: false,
             workspace_dir: Some(dir.path().to_path_buf()),
             allow_paths: Vec::new(),
+            allow_write_paths: Vec::new(),
             allow_bash: true,
             // 不存在的 exec-path → 渲染期 sandbox_profile_invalid（确定性预检失败）。
             exec_paths: vec![dir.path().join("missing-exec")],
@@ -2958,5 +2993,100 @@ mod tests {
             !db.exists(),
             "preflight failure must not create the trace DB"
         );
+    }
+    /// v0.5/F2：`--allow-write-path` 需要内置工具或 bash opt-in。
+    #[test]
+    fn allow_write_path_requires_builtin_opt_in() {
+        let error = parse(&args(&[
+            "g.json",
+            "--inputs",
+            "{}",
+            "--allow-write-path",
+            "/tmp/w",
+        ]))
+        .expect_err("write path without opt-in");
+        assert!(error.contains("--allow-write-path"), "{error}");
+        let parsed = parse(&args(&[
+            "g.json",
+            "--inputs",
+            "{}",
+            "--allow-builtin-tools",
+            "--allow-write-path",
+            "/tmp/w",
+        ]))
+        .expect("parse")
+        .expect("not help");
+        assert_eq!(parsed.allow_write_paths, vec![PathBuf::from("/tmp/w")]);
+    }
+
+    /// v0.5/F2：非法可写白名单（`/`、不存在、系统目录）→ 预检 exit 3，且**不创建 DB**。
+    #[tokio::test]
+    async fn allow_write_path_invalid_exits_3_without_creating_db() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        for (index, bad) in ["/", "/usr", "/System"].iter().enumerate() {
+            let db = dir.path().join(format!("trace-{index}.db"));
+            let args = RunArgs {
+                graph: dir.path().join("missing-graph.json"),
+                inputs: "{}".to_string(),
+                user_id: DEFAULT_USER_ID.to_string(),
+                db: Some(db.clone()),
+                assets_dir: Some(dir.path().to_path_buf()),
+                tools_dir: None,
+                skills_dir: None,
+                allow_mcp: false,
+                allow_builtin_tools: true,
+                workspace_dir: Some(dir.path().to_path_buf()),
+                allow_paths: Vec::new(),
+                allow_write_paths: vec![PathBuf::from(bad)],
+                allow_bash: false,
+                exec_paths: Vec::new(),
+                allow_network: false,
+                python: None,
+                python_paths: Vec::new(),
+                fake_llm: FakeLlmMode::Off,
+                real: false,
+                record: RecordMode::Hash,
+                stream: false,
+                json: false,
+                quiet: true,
+            };
+            let code = run_in_runtime(&args).await;
+            assert_eq!(
+                code,
+                ExitCode::from(EXIT_ENTRY_INPUT),
+                "bad write path {bad}"
+            );
+            assert!(!db.exists(), "bad write path {bad} must not create DB");
+        }
+        // 不存在的目录同样拒绝。
+        let db = dir.path().join("trace-missing.db");
+        let args = RunArgs {
+            graph: dir.path().join("missing-graph.json"),
+            inputs: "{}".to_string(),
+            user_id: DEFAULT_USER_ID.to_string(),
+            db: Some(db.clone()),
+            assets_dir: Some(dir.path().to_path_buf()),
+            tools_dir: None,
+            skills_dir: None,
+            allow_mcp: false,
+            allow_builtin_tools: true,
+            workspace_dir: Some(dir.path().to_path_buf()),
+            allow_paths: Vec::new(),
+            allow_write_paths: vec![dir.path().join("missing-dir")],
+            allow_bash: false,
+            exec_paths: Vec::new(),
+            allow_network: false,
+            python: None,
+            python_paths: Vec::new(),
+            fake_llm: FakeLlmMode::Off,
+            real: false,
+            record: RecordMode::Hash,
+            stream: false,
+            json: false,
+            quiet: true,
+        };
+        let code = run_in_runtime(&args).await;
+        assert_eq!(code, ExitCode::from(EXIT_ENTRY_INPUT));
+        assert!(!db.exists());
     }
 }

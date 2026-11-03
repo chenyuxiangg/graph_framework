@@ -147,11 +147,13 @@ impl MacOsSandbox {
     pub(crate) fn new(
         workspace: &Path,
         allow_paths: &[PathBuf],
+        write_paths: &[PathBuf],
         options: &BashOptions,
     ) -> Result<Arc<dyn SandboxRunner>, HarnessError> {
         let rendered = render_profile(&SandboxProfileConfig {
             workspace: workspace.to_path_buf(),
             allow_paths: allow_paths.to_vec(),
+            write_paths: write_paths.to_vec(),
             exec_paths: options.exec_paths.clone(),
             allow_network: options.allow_network,
         })?;

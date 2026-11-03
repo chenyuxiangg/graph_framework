@@ -5,7 +5,9 @@
 //! （`Path::starts_with`，避免字符串前缀漏洞）。越界 → `path_escape`；写 allow-path
 //! → `path_read_only`；特殊文件 → `not_regular_file`。
 //!
-//! 安全边界：`--allow-path` 是**目录级只读**白名单；写目标只能是 workspace。
+//! 安全边界：`--allow-path` 是**目录级只读**白名单；`--allow-write-path` 是 v0.5/F2
+//! 新增的**目录级可写**白名单（读+写，独立于只读 allow-path；与 workspace 相同/嵌套
+//! 幂等；系统目录与 `/` 拒绝）。写目标 = workspace + allow-write-paths。
 //! hardlink 到 jail 外 inode 的残余风险按 DR-013 §2.1 接受并文档化（ISSUE-167）。
 
 use std::path::{Component, Path, PathBuf};
@@ -30,6 +32,8 @@ pub(crate) enum PathScope {
     Workspace,
     /// 只读白名单目录（仅读）。
     AllowPath,
+    /// v0.5/F2：可写白名单目录（读+写）。
+    AllowWritePath,
 }
 
 /// 解析后的真实路径。
@@ -64,6 +68,8 @@ impl ResolvedPath {
 pub(crate) struct WorkspaceJail {
     root: PathBuf,
     allow_paths: Vec<PathBuf>,
+    /// v0.5/F2（DR-019 §1）：目录级可写白名单（读+写；独立于只读 allow-paths）。
+    allow_write_paths: Vec<PathBuf>,
 }
 
 impl WorkspaceJail {
@@ -71,7 +77,22 @@ impl WorkspaceJail {
     ///
     /// reason 闭集：`workspace_invalid`（`--workspace-dir` 非法）/`allow_path_invalid`
     /// （`--allow-path` 非法）。
+    #[allow(dead_code)] // 兼容 v0.4 API（生产路径统一走 new_with_write_paths）。
     pub fn new(workspace_dir: &Path, allow_paths: &[PathBuf]) -> Result<Self, HarnessError> {
+        Self::new_with_write_paths(workspace_dir, allow_paths, &[])
+    }
+
+    /// v0.5/F2（DR-019 §1）：构造 workspace + 只读 allow-paths + **可写**白名单。
+    ///
+    /// reason 闭集：`workspace_invalid`/`allow_path_invalid`/**`allow_write_path_invalid`**。
+    /// 可写白名单校验：必须存在且为目录、canonicalize、**不可 `/`**、**系统目录拒绝**
+    /// （`/usr`、`/bin`、`/sbin`、`/System`、`/Library`、`/private/etc` 及其子路径）；
+    /// 与 workspace/allow-path 相同/嵌套允许（幂等），同目录时**写优先**。
+    pub fn new_with_write_paths(
+        workspace_dir: &Path,
+        allow_paths: &[PathBuf],
+        allow_write_paths: &[PathBuf],
+    ) -> Result<Self, HarnessError> {
         let root = canonicalize_dir(workspace_dir, "workspace_invalid", "workspace")?;
         let mut canonical_allow = Vec::with_capacity(allow_paths.len());
         for allow in allow_paths {
@@ -81,9 +102,32 @@ impl WorkspaceJail {
             }
             canonical_allow.push(canonical);
         }
+        let mut canonical_write = Vec::with_capacity(allow_write_paths.len());
+        for write in allow_write_paths {
+            let canonical =
+                canonicalize_dir(write, "allow_write_path_invalid", "allow-write-path")?;
+            if let Some(reason) = forbidden_write_root(&canonical) {
+                return Err(HarnessError::config_load(
+                    "allow_write_path_invalid",
+                    Some(&write.display().to_string()),
+                    None,
+                    Some(serde_json::json!("existing non-system writable directory")),
+                    Some(serde_json::json!(canonical.display().to_string())),
+                    format!(
+                        "allow-write-path '{}' is not allowed: {reason}",
+                        write.display()
+                    ),
+                ));
+            }
+            if canonical_write.contains(&canonical) {
+                continue;
+            }
+            canonical_write.push(canonical);
+        }
         Ok(Self {
             root,
             allow_paths: canonical_allow,
+            allow_write_paths: canonical_write,
         })
     }
 
@@ -95,6 +139,11 @@ impl WorkspaceJail {
     /// 只读 allow-path 根（canonicalize；搜索/沙箱 profile 用）。
     pub fn allow_paths(&self) -> &[PathBuf] {
         &self.allow_paths
+    }
+
+    /// v0.5/F2：可写白名单根（canonicalize；`--allow-write-path`）。
+    pub fn allow_write_paths(&self) -> &[PathBuf] {
+        &self.allow_write_paths
     }
 
     /// 解析工具参数 `path`（相对 workspace 或绝对）为真实路径并校验访问意图。
@@ -146,11 +195,18 @@ impl WorkspaceJail {
             ));
         }
         let scope = self.scope_of(&path, raw)?;
-        if access == Access::Write && scope == PathScope::AllowPath {
-            return Err(ToolFailure::new(
-                "path_read_only",
-                format!("path '{raw}' is inside a read-only --allow-path (writes only in --workspace-dir)"),
-            ));
+        if access == Access::Write {
+            // v0.5/F2：可写 = workspace + allow-write-paths；allow-paths 仍只读；
+            // 同目录同时出现在 allow-path 与 allow-write-path 时写优先。
+            let writable = matches!(scope, PathScope::Workspace | PathScope::AllowWritePath);
+            if !writable {
+                return Err(ToolFailure::new(
+                    "path_read_only",
+                    format!(
+                        "path '{raw}' is inside a read-only --allow-path (writes allowed in --workspace-dir or --allow-write-path)"
+                    ),
+                ));
+            }
         }
         let is_dir = check_file_kind(&path, access, raw, allow_dir)?;
         Ok(ResolvedPath {
@@ -209,7 +265,11 @@ impl WorkspaceJail {
                 format!("cannot resolve parent of '{raw}': {error}"),
             )
         })?;
-        if !canonical.starts_with(&self.root) {
+        let in_write_path = self
+            .allow_write_paths
+            .iter()
+            .any(|write| canonical.starts_with(write));
+        if !canonical.starts_with(&self.root) && !in_write_path {
             if self
                 .allow_paths
                 .iter()
@@ -231,10 +291,18 @@ impl WorkspaceJail {
         Ok(parent.to_path_buf())
     }
 
-    /// 只读范围内的根：workspace 根或命中的 allow-path 根（展示相对路径用）。
+    /// 只读范围内的根：workspace 根或命中的 allow-path/allow-write-path 根
+    /// （展示相对路径用；allow-write-path 授予读+写，故也可读）。
     pub fn read_scope_root(&self, canonical: &Path) -> Option<&Path> {
         if canonical.starts_with(&self.root) {
             return Some(&self.root);
+        }
+        if let Some(write) = self
+            .allow_write_paths
+            .iter()
+            .find(|write| canonical.starts_with(write))
+        {
+            return Some(write.as_path());
         }
         self.allow_paths
             .iter()
@@ -246,6 +314,13 @@ impl WorkspaceJail {
     pub fn read_scope_of(&self, canonical: &Path) -> Option<PathScope> {
         if canonical.starts_with(&self.root) {
             return Some(PathScope::Workspace);
+        }
+        if self
+            .allow_write_paths
+            .iter()
+            .any(|write| canonical.starts_with(write))
+        {
+            return Some(PathScope::AllowWritePath);
         }
         if self
             .allow_paths
@@ -261,11 +336,46 @@ impl WorkspaceJail {
         if path.starts_with(&self.root) {
             return Ok(PathScope::Workspace);
         }
+        if self
+            .allow_write_paths
+            .iter()
+            .any(|write| path.starts_with(write))
+        {
+            return Ok(PathScope::AllowWritePath);
+        }
         if self.allow_paths.iter().any(|allow| path.starts_with(allow)) {
             return Ok(PathScope::AllowPath);
         }
         Err(escape_failure(raw, &self.root))
     }
+}
+
+/// v0.5/F2（DR-019 §1）：禁止作为可写白名单的系统目录（canonical 前缀）。
+const FORBIDDEN_WRITE_ROOTS: [&str; 6] = [
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/System",
+    "/Library",
+    "/private/etc",
+];
+
+/// 判定可写白名单是否命中系统目录/`/`；命中返回原因（`allow_write_path_invalid`）。
+pub(crate) fn forbidden_write_root(canonical: &Path) -> Option<&'static str> {
+    if canonical == Path::new("/") {
+        return Some("the filesystem root '/' cannot be writable");
+    }
+    FORBIDDEN_WRITE_ROOTS
+        .iter()
+        .find(|root| canonical.starts_with(root))
+        .map(|root| match *root {
+            "/usr" => "system directory /usr",
+            "/bin" => "system directory /bin",
+            "/sbin" => "system directory /sbin",
+            "/System" => "system directory /System",
+            "/Library" => "system directory /Library",
+            _ => "system directory /private/etc",
+        })
 }
 
 /// 逃逸失败（`TOOL_ERROR{reason:"path_escape"}`，附 path/root）。
@@ -574,5 +684,153 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("socket");
         let error = jail.resolve("sock", Access::Read).expect_err("socket");
         assert_eq!(error.reason, "not_regular_file");
+    }
+    // ------------------------------------------------------------------
+    // v0.5/F2：allow-write-path（DR-019 §1）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn allow_write_path_grants_read_and_write_but_not_system_dirs() {
+        let workspace = TempDir::new().expect("workspace");
+        let write_dir = TempDir::new().expect("write dir");
+        let workspace_canonical = canonical(workspace.path());
+        let write_canonical = canonical(write_dir.path());
+        let jail = WorkspaceJail::new_with_write_paths(
+            &workspace_canonical,
+            &[],
+            std::slice::from_ref(&write_canonical),
+        )
+        .expect("jail");
+        let target = write_canonical.join("cache.txt");
+        let resolved = jail
+            .resolve(&target.display().to_string(), Access::Write)
+            .expect("write path writable");
+        assert_eq!(resolved.scope, PathScope::AllowWritePath);
+        std::fs::write(&target, "x").expect("write file");
+        assert!(jail
+            .resolve(&target.display().to_string(), Access::Read)
+            .is_ok());
+        // 系统目录 / `/` / 不存在 / 非目录 → allow_write_path_invalid。
+        for bad in [
+            PathBuf::from("/"),
+            PathBuf::from("/usr"),
+            PathBuf::from("/System"),
+            write_dir.path().join("missing"),
+        ] {
+            let error = WorkspaceJail::new_with_write_paths(
+                &workspace_canonical,
+                &[],
+                std::slice::from_ref(&bad),
+            )
+            .expect_err("bad write path");
+            assert_eq!(
+                error.detail["reason"],
+                serde_json::json!("allow_write_path_invalid")
+            );
+        }
+        let file = write_dir.path().join("plain.txt");
+        std::fs::write(&file, "x").expect("file");
+        let error = WorkspaceJail::new_with_write_paths(&workspace_canonical, &[], &[file])
+            .expect_err("file not dir");
+        assert_eq!(
+            error.detail["reason"],
+            serde_json::json!("allow_write_path_invalid")
+        );
+    }
+
+    #[test]
+    fn write_path_overrides_read_only_allow_path_and_is_idempotent_when_nested() {
+        let workspace = TempDir::new().expect("workspace");
+        let shared = TempDir::new().expect("shared");
+        let workspace_canonical = canonical(workspace.path());
+        let shared_canonical = canonical(shared.path());
+        let jail = WorkspaceJail::new_with_write_paths(
+            &workspace_canonical,
+            std::slice::from_ref(&shared_canonical),
+            std::slice::from_ref(&shared_canonical),
+        )
+        .expect("jail");
+        // 同目录同时给只读与可写 → 写优先。
+        let shared_file = shared_canonical.join("x.txt");
+        assert_eq!(
+            jail.resolve(&shared_file.display().to_string(), Access::Write)
+                .expect("write wins")
+                .scope,
+            PathScope::AllowWritePath
+        );
+        // 可写白名单嵌套在 workspace 内（幂等，仍视为 workspace 写）。
+        let nested = workspace_canonical.join("target");
+        std::fs::create_dir_all(&nested).expect("nested");
+        let jail = WorkspaceJail::new_with_write_paths(
+            &workspace_canonical,
+            &[],
+            std::slice::from_ref(&nested),
+        )
+        .expect("jail");
+        let nested_file = nested.join("out.txt");
+        let resolved = jail
+            .resolve(&nested_file.display().to_string(), Access::Write)
+            .expect("nested write");
+        assert_eq!(resolved.scope, PathScope::Workspace);
+        // 只读 allow-path（非可写）仍 path_read_only。
+        let readonly = TempDir::new().expect("readonly");
+        let readonly_canonical = canonical(readonly.path());
+        let jail = WorkspaceJail::new_with_write_paths(
+            &workspace_canonical,
+            std::slice::from_ref(&readonly_canonical),
+            &[],
+        )
+        .expect("jail");
+        let ro_file = readonly_canonical.join("r.txt");
+        assert_eq!(
+            jail.resolve(&ro_file.display().to_string(), Access::Write)
+                .expect_err("read only")
+                .reason,
+            "path_read_only"
+        );
+    }
+
+    #[test]
+    fn create_parents_allows_write_path_but_not_read_only_path() {
+        let workspace = TempDir::new().expect("workspace");
+        let write_dir = TempDir::new().expect("write dir");
+        let readonly = TempDir::new().expect("readonly");
+        let workspace_canonical = canonical(workspace.path());
+        let write_canonical = canonical(write_dir.path());
+        let readonly_canonical = canonical(readonly.path());
+        let jail = WorkspaceJail::new_with_write_paths(
+            &workspace_canonical,
+            std::slice::from_ref(&readonly_canonical),
+            std::slice::from_ref(&write_canonical),
+        )
+        .expect("jail");
+        let target = write_canonical.join("a/b/c.txt");
+        jail.create_parents(&target.display().to_string())
+            .expect("create parents in write path");
+        assert!(write_canonical.join("a/b").is_dir());
+        let readonly_target = readonly_canonical.join("x/y.txt");
+        assert_eq!(
+            jail.create_parents(&readonly_target.display().to_string())
+                .expect_err("readonly parents")
+                .reason,
+            "path_read_only"
+        );
+    }
+
+    #[test]
+    fn writes_outside_workspace_and_write_paths_still_escape() {
+        let workspace = TempDir::new().expect("workspace");
+        let outside = TempDir::new().expect("outside");
+        let workspace_canonical = canonical(workspace.path());
+        let outside_canonical = canonical(outside.path());
+        let jail =
+            WorkspaceJail::new_with_write_paths(&workspace_canonical, &[], &[]).expect("jail");
+        let outside_file = outside_canonical.join("evil.txt");
+        assert_eq!(
+            jail.resolve(&outside_file.display().to_string(), Access::Write)
+                .expect_err("outside")
+                .reason,
+            "path_escape"
+        );
     }
 }

@@ -92,11 +92,28 @@ impl BuiltinToolSet {
         enable_file_tools: bool,
         bash: Option<crate::builtin::bash::BashOptions>,
     ) -> Result<Arc<Self>, HarnessError> {
-        let jail = WorkspaceJail::new(workspace_dir, allow_paths)?;
+        Self::new_with_paths(workspace_dir, allow_paths, &[], enable_file_tools, bash)
+    }
+
+    /// v0.5/F2（DR-019 §1）：构造 workspace + 只读 allow-paths + **可写**白名单，
+    /// 并按 opt-in 注册文件/搜索工具与 bash（profile 同步写白名单）。
+    ///
+    /// `allow_write_paths` 非法（不存在/非目录/`/`/系统目录）→ `HARNESS_CONFIG_LOAD`
+    /// `{reason:"allow_write_path_invalid"}`；与 workspace/allow-path 重叠幂等。
+    pub fn new_with_paths(
+        workspace_dir: &Path,
+        allow_paths: &[PathBuf],
+        allow_write_paths: &[PathBuf],
+        enable_file_tools: bool,
+        bash: Option<crate::builtin::bash::BashOptions>,
+    ) -> Result<Arc<Self>, HarnessError> {
+        let jail =
+            WorkspaceJail::new_with_write_paths(workspace_dir, allow_paths, allow_write_paths)?;
         let runner = match bash {
             Some(options) => Some(crate::builtin::bash::MacOsSandbox::new(
                 jail.root(),
                 jail.allow_paths(),
+                jail.allow_write_paths(),
                 &options,
             )?),
             None => None,
@@ -112,7 +129,20 @@ impl BuiltinToolSet {
         enable_file_tools: bool,
         runner: Arc<dyn crate::builtin::bash::SandboxRunner>,
     ) -> Result<Arc<Self>, HarnessError> {
-        let jail = WorkspaceJail::new(workspace_dir, allow_paths)?;
+        Self::new_with_runner_and_paths(workspace_dir, allow_paths, &[], enable_file_tools, runner)
+    }
+
+    /// 测试 seam：带可写白名单 + 注入 Fake [`SandboxRunner`]。
+    #[cfg(test)]
+    pub(crate) fn new_with_runner_and_paths(
+        workspace_dir: &Path,
+        allow_paths: &[PathBuf],
+        allow_write_paths: &[PathBuf],
+        enable_file_tools: bool,
+        runner: Arc<dyn crate::builtin::bash::SandboxRunner>,
+    ) -> Result<Arc<Self>, HarnessError> {
+        let jail =
+            WorkspaceJail::new_with_write_paths(workspace_dir, allow_paths, allow_write_paths)?;
         Ok(Self::assemble(jail, enable_file_tools, Some(runner)))
     }
 
@@ -2001,5 +2031,121 @@ mod tests {
             normal["paths"].as_array().expect("paths").len() < 500,
             "normal result truncated"
         );
+    }
+    // ------------------------------------------------------------------
+    // v0.5/F2：allow-write-path 工具矩阵 + 构建工具链缓存示例（DR-019 §1/§2）
+    // ------------------------------------------------------------------
+
+    fn set_with_write_path(
+        workspace: &Path,
+        write_paths: &[PathBuf],
+    ) -> (TempDir, Arc<BuiltinToolSet>) {
+        let dir = TempDir::new().expect("workspace");
+        let jail = std::fs::canonicalize(dir.path()).expect("canonical");
+        let set = BuiltinToolSet::new_with_paths(&jail, &[], write_paths, true, None).expect("set");
+        let _ = workspace;
+        (dir, set)
+    }
+
+    #[test]
+    fn allow_write_path_supports_write_edit_patch_and_reexec_read() {
+        let (workspace, _default_set) = set();
+        let cache = TempDir::new().expect("cache");
+        let cache_canonical = std::fs::canonicalize(cache.path()).expect("canonical");
+        let (_, set) =
+            set_with_write_path(workspace.path(), std::slice::from_ref(&cache_canonical));
+        let target = cache_canonical.join("out.txt");
+        let target_text = target.display().to_string();
+
+        call_ok(
+            &set,
+            TOOL_WRITE,
+            json!({"path": target_text, "content": "hello cache"}),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read"),
+            "hello cache"
+        );
+        call_ok(
+            &set,
+            TOOL_EDIT,
+            json!({"path": target_text, "old_string": "cache", "new_string": "CACHE"}),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read"),
+            "hello CACHE"
+        );
+        // apply_patch 目标为 allow-write-path 内绝对路径（strip=0 直用 +++ 路径）。
+        let patch =
+            format!("--- a/out.txt\n+++ {target_text}\n@@ -1 +1 @@\n-hello CACHE\n+patched\n");
+        call_ok(&set, TOOL_APPLY_PATCH, json!({"patch": patch, "strip": 0}));
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "patched\n");
+        // allow-write-path 授予读+写：read / reexec_read 均可读。
+        let read = call_ok(&set, TOOL_READ, json!({"path": target_text}));
+        assert_eq!(read["content"], json!("patched"));
+        let reexec = set
+            .reexec_readonly(TOOL_READ, &json!({"path": target_text}))
+            .expect("reexec read write path");
+        assert_eq!(reexec["content"], json!("patched"));
+
+        // 默认（无 --allow-write-path）仍拒绝写入 write 目录。
+        let default_set = BuiltinToolSet::new(
+            &std::fs::canonicalize(workspace.path()).expect("canonical"),
+            &[],
+        )
+        .expect("default set");
+        assert_eq!(
+            call_err(
+                &default_set,
+                TOOL_WRITE,
+                json!({"path": target_text, "content": "x"})
+            )
+            .reason,
+            "path_escape"
+        );
+    }
+
+    #[test]
+    fn build_toolchain_cache_can_live_in_allow_write_path() {
+        let (workspace, _default_set) = set();
+        let cache = TempDir::new().expect("cache");
+        let cache_canonical = std::fs::canonicalize(cache.path()).expect("canonical");
+        let (_, set) =
+            set_with_write_path(workspace.path(), std::slice::from_ref(&cache_canonical));
+        // 模拟 CARGO_HOME/缓存位于 --allow-write-path：可创建子目录并写缓存文件。
+        let cargo_home = cache_canonical.join("cargo-home");
+        let config = cargo_home.join("config.toml");
+        call_ok(
+            &set,
+            TOOL_WRITE,
+            json!({
+                "path": config.display().to_string(),
+                "content": "[build]\ntarget-dir = \"/tmp\"\n",
+                "create_parents": true
+            }),
+        );
+        let registry = cargo_home.join("registry/index/.cache");
+        call_ok(
+            &set,
+            TOOL_WRITE,
+            json!({"path": registry.display().to_string(), "content": "cache", "create_parents": true}),
+        );
+        assert!(config.is_file() && registry.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config"),
+            "[build]\ntarget-dir = \"/tmp\"\n"
+        );
+        // workspace 未被写（缓存只落在 allow-write-path）。
+        let workspace_entries: Vec<String> = std::fs::read_dir(workspace.path())
+            .expect("read workspace")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert!(workspace_entries.is_empty(), "{workspace_entries:?}");
     }
 }

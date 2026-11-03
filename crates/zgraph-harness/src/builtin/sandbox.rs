@@ -106,8 +106,11 @@ const PROFILE_TEMPLATE: &str = r#"(version 1)
 ;;; ---------- workspace: 读写 ----------
 (allow file-read* file-write* file-test-existence (subpath "@WORKSPACE@"))
 
-;;; ---------- 只读白名单（--allow-path） ----------
+; ---------- 只读白名单（--allow-path） ----------
 @ALLOW_PATHS@
+
+;;; ---------- 可写白名单（--allow-write-path；读+写） ----------
+@WRITE_PATHS@
 
 ;;; ---------- exec 目录读取（--allow-exec-path 同步授予该目录只读） ----------
 @EXEC_READS@
@@ -142,6 +145,8 @@ pub(crate) struct SandboxProfileConfig {
     pub workspace: PathBuf,
     /// 额外只读白名单目录。
     pub allow_paths: Vec<PathBuf>,
+    /// v0.5/F2：额外**可写**白名单目录（`--allow-write-path`；读+写）。
+    pub write_paths: Vec<PathBuf>,
     /// 额外可执行目录（`--allow-exec-path`，opt-in）。
     pub exec_paths: Vec<PathBuf>,
     /// 是否放开网络（`--allow-network`；默认 deny）。
@@ -174,6 +179,22 @@ pub(crate) fn render_profile(
             render_path(path, "allow_path")?
         ));
     }
+    // v0.5/F2（DR-019 §1/§1.2）：可写白名单加入 file-write*（读+写）；仍做
+    // realpath/防注入与系统目录拒绝（与 jail 双层强制）。
+    let mut write_lines = Vec::new();
+    for path in &config.write_paths {
+        let rendered = render_path(path, "write_path")?;
+        let canonical = Path::new(&rendered);
+        if let Some(reason) = crate::builtin::jail::forbidden_write_root(canonical) {
+            return Err(profile_error(format!(
+                "allow-write-path '{}' is not allowed: {reason}",
+                path.display()
+            )));
+        }
+        write_lines.push(format!(
+            "(allow file-read* file-write* file-test-existence (subpath \"{rendered}\"))"
+        ));
+    }
     let mut exec_lines = String::new();
     let mut exec_reads = Vec::new();
     for path in &config.exec_paths {
@@ -193,6 +214,7 @@ pub(crate) fn render_profile(
         ("@WORKSPACE@", workspace.as_str()),
         ("@EXEC_PATHS@", exec_lines.as_str()),
         ("@ALLOW_PATHS@", allow_lines.join("\n").as_str()),
+        ("@WRITE_PATHS@", write_lines.join("\n").as_str()),
         ("@EXEC_READS@", exec_reads.join("\n").as_str()),
         ("@NETWORK@", network),
     ]);
@@ -819,6 +841,7 @@ mod tests {
         let rendered = render_profile(&SandboxProfileConfig {
             workspace: workspace.clone(),
             allow_paths: vec![allow.clone()],
+            write_paths: Vec::new(),
             exec_paths: vec![exec.clone()],
             allow_network: false,
         })
@@ -875,6 +898,7 @@ mod tests {
         let rendered = render_profile(&SandboxProfileConfig {
             workspace,
             allow_paths: Vec::new(),
+            write_paths: Vec::new(),
             exec_paths: Vec::new(),
             allow_network: true,
         })
@@ -893,6 +917,7 @@ mod tests {
         let error = render_profile(&SandboxProfileConfig {
             workspace: bad,
             allow_paths: Vec::new(),
+            write_paths: Vec::new(),
             exec_paths: Vec::new(),
             allow_network: false,
         })
@@ -910,6 +935,7 @@ mod tests {
         let error = render_profile(&SandboxProfileConfig {
             workspace: dir.path().join("missing"),
             allow_paths: Vec::new(),
+            write_paths: Vec::new(),
             exec_paths: Vec::new(),
             allow_network: false,
         })
@@ -1109,6 +1135,7 @@ mod tests {
         let profile = render_profile(&SandboxProfileConfig {
             workspace: workspace.clone(),
             allow_paths: Vec::new(),
+            write_paths: Vec::new(),
             exec_paths: Vec::new(),
             allow_network: false,
         })
@@ -1138,7 +1165,7 @@ mod tests {
                 );
             }
             Ok(_) => {
-                let runner = MacOsSandbox::new(&workspace, &[], &BashOptions::default())
+                let runner = MacOsSandbox::new(&workspace, &[], &[], &BashOptions::default())
                     .expect("preflight already succeeded");
                 let tmpdir = workspace.join(".tmp");
                 std::fs::create_dir_all(&tmpdir).expect("tmpdir");
@@ -1199,6 +1226,7 @@ mod tests {
             let error = render_profile(&SandboxProfileConfig {
                 workspace,
                 allow_paths: Vec::new(),
+                write_paths: Vec::new(),
                 exec_paths: Vec::new(),
                 allow_network: false,
             })
@@ -1222,6 +1250,7 @@ mod tests {
         let error = render_profile(&SandboxProfileConfig {
             workspace: workspace.clone(),
             allow_paths: vec![bad_allow],
+            write_paths: Vec::new(),
             exec_paths: Vec::new(),
             allow_network: false,
         })
@@ -1235,6 +1264,7 @@ mod tests {
         let error = render_profile(&SandboxProfileConfig {
             workspace,
             allow_paths: Vec::new(),
+            write_paths: Vec::new(),
             exec_paths: vec![bad_exec],
             allow_network: false,
         })
@@ -1253,6 +1283,7 @@ mod tests {
         let error = render_profile(&SandboxProfileConfig {
             workspace: backslash,
             allow_paths: Vec::new(),
+            write_paths: Vec::new(),
             exec_paths: Vec::new(),
             allow_network: false,
         })
@@ -1267,6 +1298,7 @@ mod tests {
         let error = render_profile(&SandboxProfileConfig {
             workspace: newline,
             allow_paths: Vec::new(),
+            write_paths: Vec::new(),
             exec_paths: Vec::new(),
             allow_network: false,
         })
@@ -1288,5 +1320,109 @@ mod tests {
             .expect("drain thread finished");
         assert_eq!(text.len(), 64 * 1024, "only first 64 KiB retained");
         assert!(text.bytes().all(|byte| byte == b'x'));
+    }
+    // ------------------------------------------------------------------
+    // v0.5/F2：allow-write-path + 构建工具链 profile（DR-019 §1/§2）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn renders_write_paths_with_file_write_and_keeps_allow_paths_readonly() {
+        let (_workspace_dir, workspace) = temp_canonical();
+        let (_allow_dir, allow) = temp_canonical();
+        let (_write_dir, write) = temp_canonical();
+        let without_write = render_profile(&SandboxProfileConfig {
+            workspace: workspace.clone(),
+            allow_paths: vec![allow.clone()],
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect("render without write path");
+        let rendered = render_profile(&SandboxProfileConfig {
+            workspace,
+            allow_paths: vec![allow.clone()],
+            write_paths: vec![write.clone()],
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect("render with write path");
+        let write_text = write.to_string_lossy().to_string();
+        assert!(
+            rendered.text.contains(&format!(
+                "(allow file-read* file-write* file-test-existence (subpath \"{write_text}\"))"
+            )),
+            "{}",
+            rendered.text
+        );
+        // 只读 allow-path 仍不进 file-write*。
+        let allow_text = allow.to_string_lossy().to_string();
+        assert!(rendered.text.contains(&format!(
+            "(allow file-read* file-test-existence (subpath \"{allow_text}\"))"
+        )));
+        assert!(!rendered.text.contains(&format!(
+            "(allow file-read* file-write* file-test-existence (subpath \"{allow_text}\"))"
+        )));
+        assert!(!rendered.text.contains("@WRITE_PATHS@"));
+        // 可写白名单改变 profile 哈希（trace `sandbox_profile_sha256` 会变化，预期）。
+        assert_ne!(rendered.sha256, without_write.sha256);
+    }
+
+    #[test]
+    fn rejects_root_and_system_write_paths_in_profile() {
+        let (_dir, workspace) = temp_canonical();
+        for bad in ["/", "/usr", "/System", "/private/etc"] {
+            let error = render_profile(&SandboxProfileConfig {
+                workspace: workspace.clone(),
+                allow_paths: Vec::new(),
+                write_paths: vec![PathBuf::from(bad)],
+                exec_paths: Vec::new(),
+                allow_network: false,
+            })
+            .expect_err(bad);
+            assert_eq!(
+                error.detail["reason"],
+                serde_json::json!("sandbox_profile_invalid"),
+                "{bad}"
+            );
+            assert!(
+                error.message.contains("not allowed"),
+                "{bad}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn renders_build_toolchain_combination() {
+        let (_workspace_dir, workspace) = temp_canonical();
+        let (_exec_dir, exec) = temp_canonical();
+        let (_sdk_dir, sdk) = temp_canonical();
+        let (_cache_dir, cache) = temp_canonical();
+        let rendered = render_profile(&SandboxProfileConfig {
+            workspace,
+            allow_paths: vec![sdk.clone()],
+            write_paths: vec![cache.clone()],
+            exec_paths: vec![exec.clone()],
+            allow_network: true,
+        })
+        .expect("render toolchain");
+        let exec_text = exec.to_string_lossy().to_string();
+        let cache_text = cache.to_string_lossy().to_string();
+        let sdk_text = sdk.to_string_lossy().to_string();
+        // exec-path：process-exec + file-read（构建工具二进制/库）。
+        assert!(rendered
+            .text
+            .contains(&format!("(subpath \"{exec_text}\")")));
+        assert!(rendered.text.contains(&format!(
+            "(allow file-read* file-test-existence (subpath \"{exec_text}\"))"
+        )));
+        // SDK 只读；cache 读写。
+        assert!(rendered.text.contains(&format!(
+            "(allow file-read* file-test-existence (subpath \"{sdk_text}\"))"
+        )));
+        assert!(rendered.text.contains(&format!(
+            "(allow file-read* file-write* file-test-existence (subpath \"{cache_text}\"))"
+        )));
+        assert!(rendered.text.contains("(allow network*)"));
     }
 }
