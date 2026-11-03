@@ -1556,10 +1556,12 @@ read 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB；write
 - 构建工具：`--allow-exec-path`（process-exec+file-read）显式；cargo/node/uv 需路径/HOME/TMPDIR/缓存；`cc -isysroot` 文档；不改变默认系统只读集合。
 - 预检非法 → `HARNESS_CONFIG_LOAD{reason:"allow_write_path_invalid"}`（exit 3）；默认无新开关行为与 v0.4 一致。
 
-### 5.16.4 真实 Codex/DSH 验证（DR-020；DSH spike 已出，Codex 待 spike）
+### 5.16.4 真实 Codex/DSH 验证（DR-020；DSH FINAL，Codex 待 spike）
 
-- **DSH**：公开 MIT TS/pnpm monorepo（master ~350MB）；本环境 clone 带宽不可行；本机 dsh CLI + ACP 包 **0.2.1-rc.3**（npm `@deepseek-ai/dsh@0.2.1-rc.5`）；源码构建 Node ≥24.9 + pnpm 11.28.5。入口 **`dsh --profile acp`**（ACP v1 JSON-RPC 2.0 newline-delimited stdio；`@agentclientprotocol/sdk` 1.4.0）；另有 headless（one-shot 无流式）/sdk（非 ACP）。
-- **实测（隔离 `DSH_HOME=/tmp/dsh-home`，无凭据）**：initialize → protocolVersion 1/agentInfo/authMethods[]（1.44s cold）；session/new → sessionId + model deepseek-official/deepseek-v4-flash/reasoning high；session/prompt → -32603 no API key（**无模型请求**）；unknown session -32602；close → {}；EOF exit 0。
-- **F5 adapter gap**：`python/zgraph_worker/adapters/dsh_acp.py` 当前无 ACP transport（只发协议错误）→ F5 实现 ACP JSON-RPC NDJSON client（initialize/session/new/prompt/cancel/close；处理 `session/update`；应答 `session/request_permission` 否则挂起）。映射：agent_message_chunk→delta（committed/coarse）、agent_thought_chunk→reasoning、tool_call→tool_start、tool_call_update→tool_end、progress 无对应、usage_update(used/size) 不填 input/output tokens、stopReason end_turn/max_tokens/cancelled→EndTurn/MaxTokens/Other("cancelled")。
-- **验证分层**：(a) CI fake ACP（transport/映射）；(b) 真实 DSH 握手（无 key，`#[ignore]` + `ZGRAPH_REAL_DSH=1`）；(c) 全链路 prompt（需 `DEEPSEEK_API_KEY`，用户授权）；CI 不 clone；证据如实记录、不伪造。
-- **Codex**：待第二个源码仓 spike（入口/构建/事件/映射/命令）。
+- **DSH（FINAL）**：public/MIT TS/pnpm monorepo（~349MB **developer preview**）；本机带宽无法 clone/build（不阻塞）；本机 Desktop **0.2.1-rc.3** 自带同一套 `dsh`+`dsh-acp`+ACP SDK **1.4.0**，rc.5 形状一致（`npx @deepseek-ai/dsh@0.2.1-rc.5 --profile acp`）；源码构建 Node ≥24.9 + pnpm 11.28.5。
+- **入口**：`dsh --profile acp`（ACP v1 stdio 首选）、`--profile headless "job"`、`--profile sdk`（非 ACP）；传输 **JSON-RPC 2.0 NDJSON**（每行一条，**无 Content-Length**）。
+- **实测（无 key，隔离 DSH_HOME）**：initialize v1/agentInfo/authMethods[]（1.44s）；session/new（cwd 绝对路径/mcpServers=[]）→ sessionId+configOptions（model deepseek-official/deepseek-v4-flash/reasoning high，0.06s）；prompt → -32603 no API key（无模型请求）；unknown session -32602；close `{}`；EOF exit0。
+- **F5a adapter**：`dsh_acp.py` 仅 hello/error 骨架 → **~200–300 行 + 单测**：initialize/session/new/prompt、`session/update`、`session/cancel`、`session/close`、**应答 `session/request_permission`**（否则挂起）；映射 message_chunk→delta（committed/coarse）/thought→reasoning/tool_call→tool_start/tool_call_update→tool_end；**progress 无对应**；`usage_update` 仅 used/size **不能伪造 token/成本**；stopReason→EndTurn/MaxTokens/Other("cancelled")。
+- **取消**：zgraph cancel → ACP `session/cancel`，等 prompt 返回 cancelled、不发 result；**2s 宽限**内退出，否则 SIGKILL 进程组；hello_ok 立即回、ACP init 懒执行；cwd 用一次性 scratch（DSH 工具会写文件/执行命令）；`DSH_HOME` 首次启动需可写。
+- **验证分层**：**F5a** fake ACP CI；**F5b** 真实 DSH 握手（无 key，`#[ignore]`+`ZGRAPH_REAL_DSH=1`）；**F5c** 全链路（需 `DEEPSEEK_API_KEY`，用户授权）；**F5d** Codex 同构三层（待 spike）。CI 不 clone；证据如实、不伪造。
+- **成本口径**：外部 DSH token/成本不可得（usage_update 仅 used/size）→ F3 统计标注 unavailable，不伪造/不计预算。
