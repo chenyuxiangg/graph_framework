@@ -21,7 +21,7 @@
 //! 无工具调用的 run 输出逐字节不变。`--stats` 追加 `tool_calls` 计数（仅 >0 时，
 //! 保持无工具 run 的输出兼容）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -738,10 +738,21 @@ fn run_stats(
         Ok(tool_calls) => tool_calls.len(),
         Err(error) => return report_storage_error(&error),
     };
+    // v0.5/F3b（DR-018 §4 / AC-27 f）：`--stats` additive token/耗时/调用数/费用。
+    // token/llm_calls 仅在有 `llm_calls` 记录（`--record=full`）时可得；费用依赖
+    // F3a2 写入的 `RunFinished` additive metrics（缺失则不输出，不伪造）。
+    let usage = match summarize_llm_usage(reader, &run.run_id) {
+        Ok(usage) => usage,
+        Err(error) => return report_storage_error(&error),
+    };
+    let cost_usd = match finished_cost_usd(reader, &run.run_id) {
+        Ok(cost) => cost,
+        Err(error) => return report_storage_error(&error),
+    };
     if options.json {
-        print_stats_json(&stats, tool_calls);
+        print_stats_json(&stats, tool_calls, &usage, cost_usd);
     } else {
-        print_stats_human(&stats, tool_calls);
+        print_stats_human(&stats, tool_calls, &usage, cost_usd);
         if truncated {
             println!();
             println!("{}", truncation_note(run));
@@ -750,8 +761,111 @@ fn run_stats(
     exit_code(run.status, truncated)
 }
 
-/// `--stats` 人类可读输出（06 §6.11.2；v0.4 追加 `tool_calls` 计数，仅 >0 时）。
-fn print_stats_human(stats: &RunStats, tool_calls: usize) {
+/// v0.5/F3b：从 `llm_calls` 聚合的 usage 摘要（`trace --stats` additive）。
+#[derive(Debug, Default)]
+struct LlmUsage {
+    /// LLM 调用数。
+    calls: u64,
+    /// prompt token 合计。
+    prompt_tokens: u64,
+    /// completion token 合计。
+    completion_tokens: u64,
+    /// total token 合计。
+    total_tokens: u64,
+    /// usage 不可得的调用数（外部 harness 等；不臆造 0）。
+    unknown_usage_calls: u64,
+    /// 成功响应 latency 合计（毫秒）。
+    duration_ms: u64,
+    /// 涉及的模型（去重排序）。
+    models: BTreeSet<String>,
+}
+
+/// 聚合 run 的 `llm_calls`（token/耗时/调用数/模型；无记录 → 全 0）。
+fn summarize_llm_usage(reader: &TraceReader, run_id: &str) -> Result<LlmUsage, TraceError> {
+    let mut usage = LlmUsage::default();
+    for call in reader.llm_calls(run_id)? {
+        usage.calls += 1;
+        if let Some(model) = call
+            .request_json
+            .get("model")
+            .and_then(|model| model.get("name"))
+            .and_then(Value::as_str)
+        {
+            usage.models.insert(model.to_string());
+        }
+        let Some(response) = &call.response_json else {
+            usage.unknown_usage_calls += 1;
+            continue;
+        };
+        if let Some(latency_ms) = response.get("latency_ms").and_then(Value::as_u64) {
+            usage.duration_ms = usage.duration_ms.saturating_add(latency_ms);
+        }
+        let Some(record) = response.get("usage").and_then(Value::as_object) else {
+            usage.unknown_usage_calls += 1;
+            continue;
+        };
+        let source = record
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("unavailable");
+        if source == "unavailable" {
+            usage.unknown_usage_calls += 1;
+            continue;
+        }
+        usage.prompt_tokens = usage.prompt_tokens.saturating_add(
+            record
+                .get("prompt_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        );
+        usage.completion_tokens = usage.completion_tokens.saturating_add(
+            record
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        );
+        usage.total_tokens = usage.total_tokens.saturating_add(
+            record
+                .get("total_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        );
+    }
+    Ok(usage)
+}
+
+/// 从 `RunFinished` 事件的可选 additive metrics 读取 `cost_usd`（F3a2 写入；缺失 = None）。
+fn finished_cost_usd(reader: &TraceReader, run_id: &str) -> Result<Option<f64>, TraceError> {
+    let query = EventQuery {
+        limit: 1,
+        kinds: Some(vec!["RunFinished".to_string()]),
+        ..EventQuery::default()
+    };
+    let events = reader.events(run_id, &query)?;
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+    let payload = &event.payload;
+    for candidate in [
+        payload.get("cost_usd"),
+        payload
+            .get("metrics")
+            .and_then(|metrics| metrics.get("cost_usd")),
+        payload
+            .get("record")
+            .and_then(|record| record.get("metrics"))
+            .and_then(|metrics| metrics.get("cost_usd")),
+    ] {
+        if let Some(cost) = candidate.and_then(Value::as_f64) {
+            return Ok(Some(cost));
+        }
+    }
+    Ok(None)
+}
+
+/// `--stats` 人类可读输出（06 §6.11.2；v0.4 追加 `tool_calls` 计数，v0.5 追加
+/// token/LLM 耗时/调用数/费用；**仅在有数据时输出**，默认无数据输出不变）。
+fn print_stats_human(stats: &RunStats, tool_calls: usize, usage: &LlmUsage, cost_usd: Option<f64>) {
     println!(
         "run {} status={} duration={}",
         stats.run_id,
@@ -781,10 +895,32 @@ fn print_stats_human(stats: &RunStats, tool_calls: usize) {
     if tool_calls > 0 {
         println!("tool_calls {tool_calls}");
     }
+    if usage.calls > 0 {
+        println!(
+            "llm_calls {}  duration {}ms{}",
+            usage.calls,
+            usage.duration_ms,
+            if usage.unknown_usage_calls > 0 {
+                format!("  unknown_usage {}", usage.unknown_usage_calls)
+            } else {
+                String::new()
+            }
+        );
+        if usage.total_tokens > 0 {
+            println!(
+                "tokens prompt={} completion={} total={}",
+                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+            );
+        }
+    }
+    if let Some(cost) = cost_usd {
+        println!("cost {cost:.6} USD");
+    }
 }
 
-/// `--stats --json` 输出对象（06 §6.11.2；v0.4 追加 `"tool_calls"` 键，仅 >0 时）。
-fn print_stats_json(stats: &RunStats, tool_calls: usize) {
+/// `--stats --json` 输出对象（06 §6.11.2；v0.4 追加 `tool_calls`，v0.5 追加
+/// llm/token/费用键；**仅在有数据时输出**）。
+fn print_stats_json(stats: &RunStats, tool_calls: usize, usage: &LlmUsage, cost_usd: Option<f64>) {
     let kinds: serde_json::Map<String, Value> = stats
         .kinds
         .iter()
@@ -814,6 +950,20 @@ fn print_stats_json(stats: &RunStats, tool_calls: usize) {
     let mut value = value;
     if tool_calls > 0 {
         value["tool_calls"] = serde_json::json!(tool_calls);
+    }
+    if usage.calls > 0 {
+        value["llm_calls"] = serde_json::json!(usage.calls);
+        value["llm_duration_ms"] = serde_json::json!(usage.duration_ms);
+        value["token_usage"] = serde_json::json!({
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+            "unknown_usage_calls": usage.unknown_usage_calls,
+        });
+        value["llm_models"] = serde_json::json!(usage.models.iter().collect::<Vec<_>>());
+    }
+    if let Some(cost) = cost_usd {
+        value["cost_usd"] = serde_json::json!(cost);
     }
     println!("{value}");
 }

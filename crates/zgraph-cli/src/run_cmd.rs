@@ -79,8 +79,9 @@ use serde_json::{json, Map, Value};
 
 use zgraph_dsl::{load_graph_with_options, LoadOptions, LoadedGraph, ValidationReport};
 use zgraph_harness::{
-    FakeLlmProvider, GenaiLlmProvider, HarnessExecutor, HarnessSettings, LlmCallRecorder,
-    LlmCallSnapshot, LlmProvider, WorkerToolRunner,
+    BudgetConfig, FakeLlmProvider, GenaiLlmProvider, HarnessError, HarnessExecutor,
+    HarnessSettings, LlmCallRecorder, LlmCallSnapshot, LlmProvider, PricingTable, RunUsageStats,
+    UsageTotals, WorkerToolRunner,
 };
 use zgraph_kernel::{
     CompiledGraph, CompiledHandler, CompiledNode, HumanDecision, HumanDecisionRecord, NodeError,
@@ -141,6 +142,9 @@ build toolchains (cargo/node/uv): pass --allow-exec-path <toolchain bin dir>, ex
   --fake-llm[=<script>]  scripted LLM provider (bare flag = built-in default script)
   --real                 real LLM provider (mutually exclusive with --fake-llm)
   --record <mode>        recorded output mode: none|hash|full (default: hash)
+  --pricing <file>       USD price table (JSON; default: $ZGRAPH_PRICING; off)
+  --max-tokens <N>       run token budget (integer > 0; off by default)
+  --max-cost <USD>       run cost budget (requires --pricing; off by default)
   --stream               stream token text to stderr while the run is executing
   --json                 emit machine-readable JSON on stdout (06 §6.10.6)
   -q, --quiet            suppress human-readable progress on stderr
@@ -169,6 +173,9 @@ pub const PYO3_PYTHON_ENV: &str = "PYO3_PYTHON";
 
 /// Python 解释器环境变量（M3+ 任务口径，`PYO3_PYTHON` 之后、`python3` 之前）。
 pub const PYTHON_ENV: &str = "ZGRAPH_PYTHON";
+
+/// 价格表环境变量（v0.5/F3b；`--pricing` 优先于 `$ZGRAPH_PRICING`；DR-018 §2）。
+pub const PRICING_ENV: &str = "ZGRAPH_PRICING";
 
 /// 进程内 SQLite 库（06 §6.9.1：接受但跨进程不可读，`run` 用 outcome 直接输出）。
 pub const MEMORY_DB: &str = ":memory:";
@@ -205,7 +212,7 @@ pub enum FakeLlmMode {
 }
 
 /// `run` 的参数（解析后；路径/env 在运行时解析，便于单测）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RunArgs {
     /// 图定义文件。
     pub graph: PathBuf,
@@ -254,6 +261,12 @@ pub struct RunArgs {
     pub json: bool,
     /// `-q/--quiet`：抑制 stderr 人类可读进度（不抑制错误/流式文本）。
     pub quiet: bool,
+    /// `--pricing <file>`（v0.5/F3b；缺省读 `$ZGRAPH_PRICING`；默认关）。
+    pub pricing: Option<PathBuf>,
+    /// `--max-tokens <N>`（run 总 token 预算；默认关）。
+    pub max_tokens: Option<u64>,
+    /// `--max-cost <USD>`（run 总费用预算；默认关；需 `--pricing`）。
+    pub max_cost: Option<f64>,
 }
 
 /// 解析 `run` 之后的参数；`--help`/`-h` 返回 `Ok(None)`。
@@ -307,6 +320,9 @@ struct ParseState {
     stream: bool,
     json: bool,
     quiet: bool,
+    pricing: Option<PathBuf>,
+    max_tokens: Option<u64>,
+    max_cost: Option<f64>,
 }
 
 impl Default for ParseState {
@@ -335,6 +351,9 @@ impl Default for ParseState {
             stream: false,
             json: false,
             quiet: false,
+            pricing: None,
+            max_tokens: None,
+            max_cost: None,
         }
     }
 }
@@ -402,6 +421,17 @@ impl ParseState {
             "--fake-llm" => self.fake_llm = FakeLlmMode::DefaultScript,
             "--real" => self.real = true,
             "--record" => self.record = parse_record(&option_value(iter, "--record")?)?,
+            "--pricing" => {
+                self.pricing = Some(PathBuf::from(option_value(iter, "--pricing")?));
+            }
+            "--max-tokens" => {
+                let value = option_value(iter, "--max-tokens")?;
+                self.max_tokens = Some(parse_u64_option(&value, "--max-tokens")?);
+            }
+            "--max-cost" => {
+                let value = option_value(iter, "--max-cost")?;
+                self.max_cost = Some(parse_f64_option(&value, "--max-cost")?);
+            }
             "--stream" => self.stream = true,
             "--json" => self.json = true,
             "-q" | "--quiet" => self.quiet = true,
@@ -463,6 +493,9 @@ impl ParseState {
             stream: self.stream,
             json: self.json,
             quiet: self.quiet,
+            pricing: self.pricing,
+            max_tokens: self.max_tokens,
+            max_cost: self.max_cost,
         }))
     }
 }
@@ -474,6 +507,20 @@ fn option_value<'a>(
     iter.next()
         .cloned()
         .ok_or_else(|| format!("{option} requires a value"))
+}
+
+/// 解析无符号整数值选项（语法错误 → 用法错误 exit 2；取值范围由配置预检负责）。
+fn parse_u64_option(value: &str, option: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("{option} requires an unsigned integer (got '{value}')"))
+}
+
+/// 解析浮点值选项（语法错误 → 用法错误 exit 2；`<=0`/NaN/Inf 由配置预检负责）。
+fn parse_f64_option(value: &str, option: &str) -> Result<f64, String> {
+    value
+        .parse::<f64>()
+        .map_err(|_| format!("{option} requires a number (got '{value}')"))
 }
 
 /// `--fake-llm=<path>` 的路径不能为空。
@@ -990,6 +1037,12 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         Ok(tools) => tools,
         Err(code) => return code,
     };
+    // v0.5/F3b（DR-018 §2/§3）：pricing/budget 纯 flag 预检同样放在打开 trace/storage
+    // **之前**——配置错误 → exit 3、不创建 DB、不产生 run。
+    let observability = match resolve_observability(args) {
+        Ok(observability) => observability,
+        Err(code) => return code,
+    };
     let db_path = resolve_db_path(args.db.as_deref());
     let memory_db = is_memory_db(&db_path);
     if memory_db {
@@ -1004,6 +1057,16 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
     let skills_dir = resolve_skills_dir(args);
     let (graph, entry_inputs) = match load_graph_and_inputs(args, &assets_dir) {
         Ok(loaded) => loaded,
+        Err(code) => {
+            close_quietly(writer);
+            return code;
+        }
+    };
+    // v0.5/F3b（DR-018 §2 / AC-27 d）：`--max-cost` 需收集 graph 全部 agent_call 的
+    // AgentConfig model 并校验价格覆盖（外部 subprocess harness 成本不可得 →
+    // fail-closed）；任何不满足 → 配置错误 exit 3、不产生 run。
+    let observability = match prepare_graph_observability(&graph, &assets_dir, observability) {
+        Ok(observability) => observability,
         Err(code) => {
             close_quietly(writer);
             return code;
@@ -1052,6 +1115,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         builtin_tools,
         &trace_handle,
         &run_id,
+        &observability,
     ) {
         Ok(built) => built,
         Err(code) => {
@@ -1060,6 +1124,7 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
         }
     };
     let run_metadata = run_metadata_hook(memory_db, &built, &run_id);
+    let harness_handle = Arc::clone(&built.harness);
     let (traced, lifecycle) = match start_run(
         args,
         writer,
@@ -1092,6 +1157,8 @@ async fn run_in_runtime(args: &RunArgs) -> ExitCode {
             run_metadata,
             db_path: &db_path,
             recovery: &recovery,
+            harness: harness_handle,
+            observability,
         },
     )
     .await;
@@ -1187,7 +1254,202 @@ fn load_graph_and_inputs(
     Ok((graph, entry_inputs))
 }
 
+/// v0.5/F3b（DR-018 §2/§3）：可观测/预算运行时配置（启动前预检结果；默认全关）。
+#[derive(Clone)]
+struct Observability {
+    /// 价格表（`--pricing`/`$ZGRAPH_PRICING`；未配置 = `None`）。
+    pricing: Option<Arc<PricingTable>>,
+    /// 预算上限（默认关）。
+    budget: BudgetConfig,
+    /// `--max-cost` 时从 graph 收集的 Agent 模型（去重；`with_required_models` 必需）。
+    models: Option<BTreeSet<String>>,
+    /// graph 中是否含外部 subprocess harness（DSH/Codex：usage/成本不可统计）。
+    external_harness: bool,
+}
+
+impl Observability {
+    /// 是否显式启用可观测/预算输出（无配置时既有输出逐字节不变）。
+    fn enabled(&self) -> bool {
+        self.pricing.is_some() || self.budget.is_enabled()
+    }
+}
+
+/// Harness 配置错误 → `error[HARNESS_CONFIG_LOAD] (reason: …)` + exit 3（不产生 run）。
+fn report_harness_config_error(error: &HarnessError) -> ExitCode {
+    let reason = error
+        .detail
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("config_invalid");
+    eprintln!(
+        "error[{}]: {} (reason: {reason})",
+        error.code, error.message
+    );
+    ExitCode::from(EXIT_ENTRY_INPUT)
+}
+
+/// 构造一条 `HARNESS_CONFIG_LOAD` 配置错误并输出 + exit 3（不产生 run）。
+fn config_error(reason: &str, message: impl Into<String>) -> ExitCode {
+    let error = HarnessError::config_load(reason, None, None, None, None, message);
+    report_harness_config_error(&error)
+}
+
+/// 启动前**纯 flag** 预检（不触碰 trace storage / 不产生 run；DR-018 §2/§3）。
+///
+/// - pricing 缺文件/坏 JSON/非 USD → `pricing_file_not_found`/`pricing_invalid` exit3；
+/// - `--max-cost` 无 pricing → `pricing_required_for_max_cost` exit3；
+/// - budget 非法（`<=0`/NaN/Inf）→ `budget_invalid` exit3。
+fn resolve_observability(args: &RunArgs) -> Result<Observability, ExitCode> {
+    let pricing_path = args.pricing.clone().or_else(|| env_path(PRICING_ENV));
+    let pricing = match pricing_path {
+        Some(path) => match PricingTable::load_file(&path) {
+            Ok(pricing) => Some(Arc::new(pricing)),
+            Err(error) => return Err(report_harness_config_error(&error)),
+        },
+        None => None,
+    };
+    let budget = BudgetConfig {
+        max_tokens: args.max_tokens,
+        max_cost: args.max_cost,
+    };
+    if let Err(error) = budget.validate() {
+        return Err(report_harness_config_error(&error));
+    }
+    if budget.max_cost.is_some() && pricing.is_none() {
+        return Err(config_error(
+            "pricing_required_for_max_cost",
+            "--max-cost requires --pricing (no built-in prices)",
+        ));
+    }
+    Ok(Observability {
+        pricing,
+        budget,
+        models: None,
+        external_harness: false,
+    })
+}
+
+/// graph 级预检（`--max-cost`）：收集全部 agent_call 的 AgentConfig model 去重并验证
+/// 价格表覆盖；外部 subprocess harness（DSH/Codex）成本不可得 → fail-closed。
+///
+/// 只在 `--max-cost` 时做 IO/解析（无该 flag 时默认路径零额外读取）。
+fn prepare_graph_observability(
+    graph: &CompiledGraph,
+    assets_dir: &Path,
+    mut observability: Observability,
+) -> Result<Observability, ExitCode> {
+    if !observability.enabled() {
+        return Ok(observability);
+    }
+    // 仅 pricing（无 max-cost）：best-effort 检测外部 harness 以标注 usage unavailable
+    // （不因 agent 配置读取失败改变默认错误路径）；`--max-cost` 下则 fail-closed。
+    let max_cost = observability.budget.max_cost.is_some();
+    match collect_agent_models(graph, assets_dir) {
+        Ok((models, external)) => {
+            observability.external_harness = external;
+            if max_cost {
+                if external {
+                    return Err(config_error(
+                        "cost_unavailable_external_harness",
+                        "--max-cost is unavailable with a subprocess (DSH/Codex) harness: external usage/cost is not provided",
+                    ));
+                }
+                let pricing = observability
+                    .pricing
+                    .as_ref()
+                    .expect("max_cost requires pricing (checked before graph load)");
+                for model in &models {
+                    if !pricing.has_model(model) {
+                        return Err(config_error(
+                            "pricing_missing_model",
+                            format!(
+                                "--max-cost requires pricing for agent model '{model}'; add it to --pricing"
+                            ),
+                        ));
+                    }
+                }
+                observability.models = Some(models);
+            }
+        }
+        Err(code) => {
+            if max_cost {
+                return Err(code);
+            }
+        }
+    }
+    Ok(observability)
+}
+
+/// 收集 graph 内全部 `agent_call` 的 `AgentConfig.model.name`（去重）与外部 harness 标记。
+///
+/// 直接读取 `agents/*.json`（`agent_index` + model/harness 字段），**不加载** Agent/tools、
+/// 不 spawn worker（启动前 fail-closed 预检；DR-018 §2）。
+fn collect_agent_models(
+    graph: &CompiledGraph,
+    assets_dir: &Path,
+) -> Result<(BTreeSet<String>, bool), ExitCode> {
+    let index = match zgraph_harness::agent_index(assets_dir) {
+        Ok(index) => index,
+        Err(error) => return Err(report_harness_config_error(&error)),
+    };
+    let mut models = BTreeSet::new();
+    let mut external = false;
+    for node in graph.nodes.values() {
+        let CompiledHandler::Agent { agent_id, .. } = &node.handler else {
+            continue;
+        };
+        let Some(path) = index.get(agent_id) else {
+            return Err(config_error(
+                "agent_not_indexed",
+                format!(
+                    "agent '{agent_id}' is not indexed under {}",
+                    assets_dir.display()
+                ),
+            ));
+        };
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                return Err(config_error(
+                    "agent_config_invalid",
+                    format!("cannot read agent config '{}': {error}", path.display()),
+                ))
+            }
+        };
+        let value: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(config_error(
+                    "agent_config_invalid",
+                    format!("agent config '{}' is invalid JSON: {error}", path.display()),
+                ))
+            }
+        };
+        let Some(model) = value
+            .get("model")
+            .and_then(|model| model.get("name"))
+            .and_then(Value::as_str)
+        else {
+            return Err(config_error(
+                "agent_config_invalid",
+                format!("agent config '{}' has no model.name", path.display()),
+            ));
+        };
+        models.insert(model.to_string());
+        if value
+            .get("harness")
+            .and_then(|harness| harness.get("kind"))
+            .and_then(Value::as_str)
+            == Some("subprocess")
+        {
+            external = true;
+        }
+    }
+    Ok((models, external))
+}
+
 /// 组合执行器（provider 错误 → 2/4；记录器与并发上限按 CLI 口径接线）。
+#[allow(clippy::too_many_arguments)]
 fn prepare_executor(
     args: &RunArgs,
     assets_dir: &Path,
@@ -1196,6 +1458,7 @@ fn prepare_executor(
     builtin_tools: Option<Arc<zgraph_harness::BuiltinToolSet>>,
     trace_handle: &TraceHandle,
     run_id: &str,
+    observability: &Observability,
 ) -> Result<BuiltExecutors, ExitCode> {
     let (provider, fake_mode) = match build_provider(args) {
         Ok(built) => built,
@@ -1212,6 +1475,7 @@ fn prepare_executor(
         fake_mode,
         trace_handle,
         recorder,
+        observability,
     ))
 }
 
@@ -1301,6 +1565,10 @@ struct RunFinishContext<'a> {
     db_path: &'a Path,
     /// 启动中止标定结果（recovered/warnings 进输出）。
     recovery: &'a recovery::Recovery,
+    /// Harness 句柄（v0.5/F3b：run 结束时读取 usage 统计）。
+    harness: Arc<HarnessExecutor>,
+    /// v0.5/F3b 可观测/预算运行时配置（默认关 → 输出不变）。
+    observability: Observability,
 }
 
 /// 等待 run 结束并输出结果（先收尾实时生命周期行，再输出 run_output/摘要）。
@@ -1324,6 +1592,12 @@ async fn wait_and_report(
         Ok(outcome) => outcome,
         Err(code) => return code,
     };
+    let run_id = match &outcome {
+        RunCompletion::WithReader(outcome, _) | RunCompletion::OutcomeOnly(outcome) => {
+            outcome.run_id.clone()
+        }
+    };
+    let usage = context.harness.run_usage_stats(&run_id);
     finish(
         args,
         outcome,
@@ -1331,6 +1605,8 @@ async fn wait_and_report(
         context.db_path,
         &context.recovery.recovered,
         &context.recovery.warnings,
+        &context.observability,
+        usage.as_ref(),
     )
 }
 /// 加载并编译图；失败时打印 stderr 并返回退出码 2（不产生 run）。
@@ -1414,6 +1690,7 @@ fn build_executor(
     fake_mode: bool,
     trace_handle: &TraceHandle,
     recorder: Option<Arc<dyn LlmCallRecorder>>,
+    observability: &Observability,
 ) -> BuiltExecutors {
     let config = worker_config(args);
     // ISSUE-079（DR-003 D7）：工具调用与节点执行共享**同一**并发上限实例
@@ -1441,6 +1718,22 @@ fn build_executor(
     let harness = harness.with_tool_call_record_sink(Arc::new(
         crate::bridge::ToolCallTraceSink::new(trace_handle.clone()),
     ));
+    // v0.5/F3b（DR-018 §2/§3）：价格表/预算/必需模型注入（默认全关 → 零行为变化）。
+    // `with_required_models` 在 `--max-cost` 时由 CLI 从 graph 收集（空集合也显式传入，
+    // 防止 harness 侧 `pricing_models_required` fail-closed 被绕过）。
+    let harness = match observability.pricing.clone() {
+        Some(pricing) => harness.with_pricing(pricing),
+        None => harness,
+    };
+    let harness = if observability.budget.is_enabled() {
+        harness.with_budget(observability.budget)
+    } else {
+        harness
+    };
+    let harness = match &observability.models {
+        Some(models) => harness.with_required_models(models.iter().cloned()),
+        None => harness,
+    };
     // v0.3（DR-009 §1）：`--skills-dir`/env 显式覆盖；None 时 harness 回退资产默认。
     // v0.3（DR-010 §2.2）：`--allow-mcp` 显式开关（默认关；未开启且配置 MCP → 预检 exit 3）。
     // v0.4/D2：`--allow-builtin-tools` 注册 5 个 Rust 内置文件工具（additive）。
@@ -1796,6 +2089,7 @@ fn duration_millis(started: Instant) -> u64 {
 ///
 /// `:memory:` 没有可回读的 reader：`event_count` 记 0（trace 跨进程不可读，
 /// 06 §6.9.1），其余字段全部来自内核 outcome。
+#[allow(clippy::too_many_arguments)]
 fn finish(
     args: &RunArgs,
     completion: RunCompletion,
@@ -1803,6 +2097,8 @@ fn finish(
     db_path: &Path,
     recovered: &[recovery::Recovered],
     warnings: &[String],
+    observability: &Observability,
+    usage: Option<&RunUsageStats>,
 ) -> ExitCode {
     let (outcome, reader) = match completion {
         RunCompletion::WithReader(outcome, reader) => (outcome, Some(reader)),
@@ -1824,6 +2120,8 @@ fn finish(
                 db_path,
                 recovered,
                 warnings,
+                observability,
+                usage,
             )
         );
     } else {
@@ -1834,12 +2132,124 @@ fn finish(
                 "{}",
                 summary_line(&outcome, duration_ms, event_count, exit_code)
             );
+            // v0.5/F3b（DR-018 §4）：显式配置可观测/预算时追加 usage 行（无配置输出不变）。
+            if observability.enabled() {
+                eprintln!("{}", usage_human_line(usage, observability));
+            }
         }
         if let Some(error) = &outcome.error {
             eprintln!("error[{}]: {}", error.code, error.message);
         }
+        // 未知 usage/价格 warning（不 fail run；`-q` 不抑制诊断告警）。
+        if observability.enabled() {
+            if let Some(usage) = usage {
+                for warning in &usage.warnings {
+                    eprintln!("warning: {warning}");
+                }
+            }
+        }
     }
     ExitCode::from(exit_code)
+}
+
+/// v0.5/F3b：单维度 usage 合计 → JSON（`UsageTotals`）。
+fn usage_totals_json(totals: &UsageTotals) -> Value {
+    json!({
+        "prompt_tokens": totals.prompt_tokens,
+        "completion_tokens": totals.completion_tokens,
+        "total_tokens": totals.total_tokens,
+        "reasoning_tokens": totals.reasoning_tokens,
+        "llm_calls": totals.llm_calls,
+        "unknown_usage_calls": totals.unknown_usage_calls,
+        "unpriced_calls": totals.unpriced_calls,
+        "duration_ms": totals.duration_ms,
+        "cost_usd": totals.cost_usd,
+    })
+}
+
+/// v0.5/F3b：run 结束 usage → `--json.usage`（additive；无配置不插入）。
+///
+/// `run`/`by_node`/`by_agent` 三维（DR-018 §1）；外部 subprocess harness 的
+/// usage/成本不可得 → `unavailable` 标注（不伪造 0）。
+fn usage_json(usage: Option<&RunUsageStats>, observability: &Observability) -> Value {
+    let Some(stats) = usage else {
+        return json!({
+            "available": false,
+            "reason": if observability.external_harness {
+                "external_harness_usage_unavailable"
+            } else {
+                "no_agent_calls"
+            },
+        });
+    };
+    let by_node: Vec<Value> = stats
+        .by_node
+        .iter()
+        .map(|(key, totals)| {
+            json!({
+                "instance_id": key.instance_id,
+                "attempt": key.attempt,
+                "usage": usage_totals_json(totals),
+            })
+        })
+        .collect();
+    let by_agent: Vec<Value> = stats
+        .by_agent
+        .iter()
+        .map(|(key, totals)| {
+            json!({
+                "agent_id": key.agent_id,
+                "model": key.model,
+                "usage": usage_totals_json(totals),
+            })
+        })
+        .collect();
+    let mut value = json!({
+        "run": usage_totals_json(&stats.run),
+        "by_node": by_node,
+        "by_agent": by_agent,
+        "warnings": stats.warnings,
+        "budget_stop": stats
+            .budget_stop
+            .as_ref()
+            .map(zgraph_harness::BudgetStop::to_detail)
+            .unwrap_or(Value::Null),
+    });
+    if observability.external_harness {
+        value["unavailable"] = json!("external_harness_usage_unavailable");
+    }
+    value
+}
+
+/// v0.5/F3b：人类可读 usage 行（`-q` 抑制；仅在显式配置时输出）。
+fn usage_human_line(usage: Option<&RunUsageStats>, observability: &Observability) -> String {
+    let Some(stats) = usage else {
+        return if observability.external_harness {
+            "usage unavailable (external harness usage is not provided; not counted)".to_string()
+        } else {
+            "usage unavailable (no agent LLM calls)".to_string()
+        };
+    };
+    let totals = &stats.run;
+    let cost = totals
+        .cost_usd
+        .map(|cost| format!("{cost:.6}"))
+        .unwrap_or_else(|| "unavailable".to_string());
+    let mut line = format!(
+        "usage tokens prompt={} completion={} total={} llm_calls={} duration={}ms cost={cost}",
+        totals.prompt_tokens,
+        totals.completion_tokens,
+        totals.total_tokens,
+        totals.llm_calls,
+        totals.duration_ms,
+    );
+    if totals.unknown_usage_calls > 0 {
+        line.push_str(&format!(" unknown_usage={}", totals.unknown_usage_calls));
+    }
+    if observability.external_harness {
+        line.push_str(" (external harness usage unavailable; not counted)");
+    }
+    line
 }
 
 /// run 终态 → 退出码（06 §6.10.5）。
@@ -1865,6 +2275,7 @@ fn exit_code_for(outcome: &RunOutcome) -> u8 {
 }
 
 /// `--json` 结构（06 §6.10.6）。
+#[allow(clippy::too_many_arguments)]
 fn json_payload(
     outcome: &RunOutcome,
     event_count: i64,
@@ -1872,6 +2283,8 @@ fn json_payload(
     db_path: &Path,
     recovered: &[recovery::Recovered],
     warnings: &[String],
+    observability: &Observability,
+    usage: Option<&RunUsageStats>,
 ) -> Value {
     let mut object = Map::new();
     object.insert(
@@ -1909,6 +2322,10 @@ fn json_payload(
         Value::Array(recovered.iter().map(recovered_json).collect()),
     );
     object.insert("warnings".to_string(), json!(warnings));
+    // v0.5/F3b（DR-018 §4）：显式配置可观测/预算时追加 additive `usage`（默认不输出）。
+    if observability.enabled() {
+        object.insert("usage".to_string(), usage_json(usage, observability));
+    }
     if let Some(error) = &outcome.error {
         object.insert("error".to_string(), run_error_json(error));
     }
@@ -2139,8 +2556,9 @@ mod tests {
     use super::{
         exit_code_for, graph_agent_using_mcp, graph_has_human, human_recording, is_memory_db,
         lifecycle_detail, llm_call_recorder, output_hash, parse, resolve_builtin_tools,
-        resolve_entry_inputs, run_in_runtime, Consumed, FakeLlmMode, ParseState, RecordingExecutor,
-        RunArgs, DEFAULT_USER_ID,
+        resolve_entry_inputs, run_in_runtime, usage_human_line, usage_json, BudgetConfig, Consumed,
+        FakeLlmMode, Observability, ParseState, RecordingExecutor, RunArgs, RunUsageStats,
+        UsageTotals, DEFAULT_USER_ID,
     };
     use crate::EXIT_ENTRY_INPUT;
     use serde_json::json;
@@ -2257,6 +2675,97 @@ mod tests {
             None
         );
         assert_eq!(human_recording(RecordMode::None, &human), None);
+    }
+
+    #[test]
+    fn parse_accepts_observability_flags() {
+        let parsed = parse(&args(&[
+            "g.json",
+            "--inputs",
+            "{}",
+            "--pricing",
+            "/tmp/pricing.json",
+            "--max-tokens",
+            "1000",
+            "--max-cost",
+            "2.5",
+        ]))
+        .expect("parse")
+        .expect("not help");
+        assert_eq!(parsed.pricing, Some(PathBuf::from("/tmp/pricing.json")));
+        assert_eq!(parsed.max_tokens, Some(1000));
+        assert_eq!(parsed.max_cost, Some(2.5));
+        // 默认关。
+        let parsed = parse(&args(&["g.json", "--inputs", "{}"]))
+            .expect("parse")
+            .expect("not help");
+        assert_eq!(parsed.pricing, None);
+        assert_eq!(parsed.max_tokens, None);
+        assert_eq!(parsed.max_cost, None);
+    }
+
+    #[test]
+    fn parse_rejects_invalid_budget_syntax() {
+        for (flag, value) in [("--max-tokens", "abc"), ("--max-tokens", "-1")] {
+            let error = parse(&args(&["g.json", "--inputs", "{}", flag, value]))
+                .expect_err("invalid budget integer");
+            assert!(error.contains(flag), "{error}");
+        }
+        for (flag, value) in [("--max-cost", "x"), ("--max-cost", "--json")] {
+            let error = parse(&args(&["g.json", "--inputs", "{}", flag, value]))
+                .expect_err("invalid budget float");
+            assert!(error.contains(flag) || error.contains("number"), "{error}");
+        }
+    }
+
+    #[test]
+    fn usage_output_marks_external_harness_unavailable() {
+        let external = Observability {
+            pricing: None,
+            budget: BudgetConfig {
+                max_tokens: Some(10),
+                max_cost: None,
+            },
+            models: None,
+            external_harness: true,
+        };
+        let line = usage_human_line(None, &external);
+        assert!(line.contains("unavailable"), "{line}");
+        assert!(line.contains("external harness"), "{line}");
+        let json = usage_json(None, &external);
+        assert_eq!(
+            json["reason"],
+            json!("external_harness_usage_unavailable"),
+            "{json}"
+        );
+
+        let stats = RunUsageStats {
+            run: UsageTotals {
+                prompt_tokens: 30,
+                completion_tokens: 3,
+                total_tokens: 33,
+                llm_calls: 2,
+                unknown_usage_calls: 1,
+                duration_ms: 12,
+                cost_usd: Some(0.5),
+                ..UsageTotals::default()
+            },
+            ..RunUsageStats::default()
+        };
+        let line = usage_human_line(Some(&stats), &external);
+        assert!(line.contains("prompt=30"), "{line}");
+        assert!(line.contains("cost=0.500000"), "{line}");
+        assert!(line.contains("unknown_usage=1"), "{line}");
+        assert!(
+            line.contains("external harness usage unavailable"),
+            "{line}"
+        );
+        let json = usage_json(Some(&stats), &external);
+        assert_eq!(json["run"]["llm_calls"], json!(2));
+        assert_eq!(
+            json["unavailable"],
+            json!("external_harness_usage_unavailable")
+        );
     }
 
     #[test]
@@ -2521,6 +3030,9 @@ mod tests {
             stream: false,
             json: false,
             quiet: false,
+            pricing: None,
+            max_tokens: None,
+            max_cost: None,
         };
         assert_eq!(args.clone(), args);
     }
@@ -2908,6 +3420,9 @@ mod tests {
             stream: false,
             json: false,
             quiet: false,
+            pricing: None,
+            max_tokens: None,
+            max_cost: None,
         };
         assert!(resolve_builtin_tools(&args)
             .expect("not opted in")
@@ -2988,6 +3503,9 @@ mod tests {
             stream: false,
             json: false,
             quiet: true,
+            pricing: None,
+            max_tokens: None,
+            max_cost: None,
         };
         let code = run_in_runtime(&args).await;
         assert_eq!(code, ExitCode::from(EXIT_ENTRY_INPUT));
@@ -3051,6 +3569,9 @@ mod tests {
                 stream: false,
                 json: false,
                 quiet: true,
+                pricing: None,
+                max_tokens: None,
+                max_cost: None,
             };
             let code = run_in_runtime(&args).await;
             assert_eq!(
@@ -3086,6 +3607,9 @@ mod tests {
             stream: false,
             json: false,
             quiet: true,
+            pricing: None,
+            max_tokens: None,
+            max_cost: None,
         };
         let code = run_in_runtime(&args).await;
         assert_eq!(code, ExitCode::from(EXIT_ENTRY_INPUT));
