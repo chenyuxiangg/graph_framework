@@ -69,6 +69,7 @@ v7 `tool_calls` 已有 `args_sha256`/`result_sha256`，无输入文件 pre_sha25
 - reexec 仅重跑只读 builtin；非候选一律复用记录、绝不执行（含 MCP/Python/外部 harness/副作用工具）。
 - 默认 recorded 逐字节不变；无 reexec flag 零额外进程/IO。
 - trace v7 不变；不新增表/列/事件；无 v8。
+- **F6 文档注记**：`crates/zgraph-cli/src/tool_reexec.rs` 注释仍为旧措辞（代码文件，本批不改）；F6 as-built/发布材料注明，避免文档同步时误改代码。
 - `REPLAY_TOOL_RECORD_MISMATCH` 扩展语义：recorded JSON/sha 不符 + reexec 结果漂移（同码）。
 
 ## 6. AC-25（设计冻结；F1b 已实现，完整 e2e 由 F1c 覆盖）
