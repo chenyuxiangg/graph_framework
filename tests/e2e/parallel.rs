@@ -52,6 +52,18 @@ const SERIAL_RATIO_PERCENT: u128 = 80;
 /// 确定性回归的 run 次数（07 AC-09：连续 5 次）。
 const DETERMINISM_RUNS: usize = 5;
 
+/// D8 计时加固（ISSUE-177）：预热 1 对 + 交错测量 3 轮，取**每轮最优**（最小）作为
+/// 「无负载噪声」的能力估计。
+///
+/// 依据：并行/串行总耗时均含「真 CLI/Python worker 冷启动」固定成本；共享机器负载
+/// 只会**单向加长**某一次测量（观测到 425–566ms vs 501–596ms、比例 82–97% 的误报），
+/// 不会缩短。best-of-3 是标准的抗单边噪声估计，**阈值与语义不变**：仍要求
+/// `min(parallel) < 600ms` 且 `min(parallel/round-serial) < 80%`；诊断输出全部样本。
+const TIMING_WARMUP_PAIRS: usize = 1;
+
+/// D8 交错测量轮数（parallel 与 serial 相邻采样，负载条件可比）。
+const TIMING_ROUNDS: usize = 3;
+
 // ---------------------------------------------------------------------------
 // trace 时序与摘要
 // ---------------------------------------------------------------------------
@@ -199,8 +211,8 @@ async fn run_serial_baseline(dir: &tempfile::TempDir, name: &str) -> Duration {
 #[tokio::test]
 async fn ac09_parallel_branches_overlap_and_total_elapsed_within_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (bridge, parallel_elapsed) = run_parallel_once(&dir, "ac09_parallel.db").await;
-    let serial_elapsed = run_serial_baseline(&dir, "ac09_serial.db").await;
+    let samples = measure_parallel_serial(&dir).await;
+    let bridge = samples.bridge;
 
     assert_eq!(
         bridge.outcome.status,
@@ -219,7 +231,7 @@ async fn ac09_parallel_branches_overlap_and_total_elapsed_within_budget() {
         );
     }
 
-    // 07 AC-09：Running 区间重叠 + 进入 Running 时间差 < 50ms（冻结口径）。
+    // 07 AC-09：Running 区间重叠 + 进入 Running 时间差 < 50ms（冻结口径，不随计时加固改变）。
     let (a_start, a_end) = running_interval(bridge.reader(), &run_id, "a");
     let (b_start, b_end) = running_interval(bridge.reader(), &run_id, "b");
     assert!(
@@ -232,16 +244,101 @@ async fn ac09_parallel_branches_overlap_and_total_elapsed_within_budget() {
         "07 AC-09: a/b 进入 Running 的时间差 {skew}ms 应 < {BRANCH_START_SKEW_LIMIT:?}（实测 0ms）"
     );
 
-    // D8：总耗时实测重标定（绝对值上界 + 串行对照，双重可证伪）。
-    assert!(
-        parallel_elapsed < PARALLEL_TOTAL_BUDGET,
-        "D8: 并行总耗时 {parallel_elapsed:?} 应 < {PARALLEL_TOTAL_BUDGET:?}（实测 252–292ms；\
-         串行对照 {serial_elapsed:?}）"
+    // D8（ISSUE-177 加固）：交错采样 3 轮，负载噪声单向加长 → 取每轮最优值作为
+    // 能力估计；绝对预算与「并行 < 串行 × 80%」语义均保持原阈值不变。
+    let parallel_min = samples
+        .parallel
+        .iter()
+        .copied()
+        .min()
+        .expect("parallel samples");
+    let serial_min = samples
+        .serial
+        .iter()
+        .copied()
+        .min()
+        .expect("serial samples");
+    let ratios: Vec<f64> = samples
+        .parallel
+        .iter()
+        .zip(&samples.serial)
+        .map(|(parallel, serial)| parallel.as_secs_f64() / serial.as_secs_f64())
+        .collect();
+    let best_ratio = ratios.iter().copied().fold(f64::INFINITY, f64::min);
+    eprintln!(
+        "ac09 D8 timing (warmup {TIMING_WARMUP_PAIRS} pair + {TIMING_ROUNDS} interleaved rounds):\n\
+         parallel={:?}\n  serial={:?}\n  ratios={:?} (best={best_ratio:.3}, parallel_min={parallel_min:?}, serial_min={serial_min:?})",
+        samples.parallel, samples.serial, ratios
     );
     assert!(
-        parallel_elapsed.as_micros() * 100 < serial_elapsed.as_micros() * SERIAL_RATIO_PERCENT,
-        "D8: 并行总耗时 {parallel_elapsed:?} 应显著小于串行对照 {serial_elapsed:?}（<80%）"
+        parallel_min < PARALLEL_TOTAL_BUDGET,
+        "D8: 并行总耗时(3 轮最优) {parallel_min:?} 应 < {PARALLEL_TOTAL_BUDGET:?}\
+         （全部样本 {:?}；串行对照 {:?}）",
+        samples.parallel,
+        samples.serial
     );
+    assert!(
+        parallel_min.as_micros() * 100 < serial_min.as_micros() * SERIAL_RATIO_PERCENT,
+        "D8: 并行最少耗时 {parallel_min:?} 应 < 串行最少耗时 {serial_min:?} × \
+         {SERIAL_RATIO_PERCENT}%（每轮 parallel/serial={ratios:?}，best_ratio={best_ratio:.3}；\
+         阈值与语义不变，best-of-3 仅抑制共享机器单向负载噪声）"
+    );
+    // 预算/语义附加可证伪检查：并行最少耗时必须优于串行最少耗时（非仅噪声）。
+    assert!(
+        parallel_min < serial_min,
+        "D8: 并行最少耗时 {parallel_min:?} 必须小于串行最少耗时 {serial_min:?}"
+    );
+}
+
+/// D8 计时采样结果（AC-09 主用例用；ISSUE-177 加固）。
+struct TimingSamples {
+    /// 首轮 parallel run 的 bridge（用于 trace 断言；计时样本另行收集）。
+    bridge: BridgeOutcome,
+    /// 每轮并行耗时。
+    parallel: Vec<Duration>,
+    /// 每轮串行对照耗时（与 parallel 相邻采样）。
+    serial: Vec<Duration>,
+}
+
+/// 预热 1 对后，交错测量 `TIMING_ROUNDS` 轮 parallel/serial。
+///
+/// 预热仅用于消除首次 page-cache/解释器缓存冷启动的**系统性**偏差；随后每轮仍串行
+/// 执行独立的真 CLI + 真 Python worker（不会把并行执行变成「复用进程」）。
+async fn measure_parallel_serial(dir: &tempfile::TempDir) -> TimingSamples {
+    for warmup in 0..TIMING_WARMUP_PAIRS {
+        let (bridge, _) =
+            run_parallel_once(dir, &format!("ac09_warmup_parallel_{warmup}.db")).await;
+        assert_eq!(
+            bridge.outcome.status,
+            RunStatus::Completed,
+            "warmup parallel should complete: {:?}",
+            bridge.outcome.error
+        );
+        let _ = run_serial_baseline(dir, &format!("ac09_warmup_serial_{warmup}.db")).await;
+    }
+    let mut bridge = None;
+    let mut parallel = Vec::with_capacity(TIMING_ROUNDS);
+    let mut serial = Vec::with_capacity(TIMING_ROUNDS);
+    for round in 0..TIMING_ROUNDS {
+        let (round_bridge, elapsed) =
+            run_parallel_once(dir, &format!("ac09_parallel_{round}.db")).await;
+        assert_eq!(
+            round_bridge.outcome.status,
+            RunStatus::Completed,
+            "parallel graph round {round} should complete: {:?}",
+            round_bridge.outcome.error
+        );
+        parallel.push(elapsed);
+        if bridge.is_none() {
+            bridge = Some(round_bridge);
+        }
+        serial.push(run_serial_baseline(dir, &format!("ac09_serial_{round}.db")).await);
+    }
+    TimingSamples {
+        bridge: bridge.expect("at least one round"),
+        parallel,
+        serial,
+    }
 }
 
 // ---------------------------------------------------------------------------

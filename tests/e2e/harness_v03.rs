@@ -22,6 +22,7 @@ mod v03;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -30,6 +31,24 @@ use cli_support::{assert_exit, json_stdout};
 use v03::{
     agent, assets, fake_llm, llm_call_count, llm_requests, run, run_row, tool_events, write_agent,
 };
+
+// ---------------------------------------------------------------------------
+// ISSUE-178：真子进程 harness 用例串行化（降低同二进制内进程风暴）
+// ---------------------------------------------------------------------------
+
+/// 同一 test binary 的 7 个用例默认并行；每个都会 spawn 真 CLI + Python worker +
+/// fake adapter/codex。共享 8 核机器上 7 路进程风暴会把单条 codex 链路从 ~1s 拉到
+/// ~30s（实测：6 路并发时 35s，触发默认 30s NODE_TIMEOUT）。用进程内全局锁让本
+/// binary 的重子进程用例**串行**执行，消除同二进制自我竞争；跨 binary/跨 agent 的
+/// 外部负载仍由环境预算（codex 用例 node_timeout=120s）兜底。断言语义不变。
+static SUBPROCESS_SERIAL: Mutex<()> = Mutex::new(());
+
+/// 获取本 binary 的重子进程用例串行锁（锁中毒时仍继续，避免掩盖真实失败）。
+fn serial_guard() -> MutexGuard<'static, ()> {
+    SUBPROCESS_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // ---------------------------------------------------------------------------
 // 辅助
@@ -175,6 +194,7 @@ fn adapter_frames(markers: &Markers) -> Vec<Value> {
 
 #[test]
 fn ac20a_builtin_default_and_explicit_builtin_unchanged() {
+    let _serial = serial_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     // 无 harness 配置（默认 builtin）。
     let baseline_dir = dir.path().join("baseline");
@@ -240,6 +260,7 @@ fn ac20a_builtin_default_and_explicit_builtin_unchanged() {
 
 #[test]
 fn ac20b_subprocess_protocol_runs_and_records_four_fields() {
+    let _serial = serial_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let markers = Markers::new();
     let (output, db, _) = harness_run(
@@ -319,6 +340,7 @@ fn ac20b_subprocess_protocol_runs_and_records_four_fields() {
 
 #[test]
 fn ac20b_capability_conflict_and_frame_errors_are_fail_closed() {
+    let _serial = serial_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     // ① 能力冲突：subprocess + tools 非空 → HARNESS_CONFIG_LOAD{provider_capability_conflict}。
     let conflict_dir = dir.path().join("conflict");
@@ -398,6 +420,7 @@ fn ac20b_capability_conflict_and_frame_errors_are_fail_closed() {
 
 #[test]
 fn ac20c_streaming_false_ignores_delta_events() {
+    let _serial = serial_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let markers = Markers::new();
     let (output, db, _) = harness_run(
@@ -431,6 +454,7 @@ fn ac20c_streaming_false_ignores_delta_events() {
 
 #[test]
 fn ac20d_timeout_and_cancel_leave_no_adapter_process() {
+    let _serial = serial_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     // ① 节点超时（agent_timeout.json：timeout_ms=1200）→ NODE_TIMEOUT，adapter 被 kill。
     let timeout_dir = dir.path().join("timeout");
@@ -493,6 +517,7 @@ fn ac20d_timeout_and_cancel_leave_no_adapter_process() {
 
 #[test]
 fn ac20f_l2_replay_never_spawns_adapter() {
+    let _serial = serial_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let markers = Markers::new();
     let (output, db, _) = harness_run(
@@ -542,29 +567,46 @@ fn ac20f_l2_replay_never_spawns_adapter() {
 
 #[test]
 fn ac20h_codex_adapter_via_fake_binary_and_dsh_structure() {
+    let _serial = serial_guard();
     let dir = tempfile::tempdir().expect("tempdir");
-    // 假 codex：fixture 拷贝到 bin/ 并 chmod 0755，PATH 注入。
+    // ISSUE-178 加固：每用例独立 PATH/CODEX_HOME/TMPDIR，不继承调用者 PATH
+    //（避免并行用例/宿主环境影响 fake codex 解析）；`python3` 用本测试 python 的
+    // 符号链接放进 bin/，保证 fake codex 的 `#!/usr/bin/env python3` 确定性解析。
     let bin_dir = dir.path().join("bin");
+    let codex_home = dir.path().join("codex-home");
+    let tmp_dir = dir.path().join("tmp");
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    std::fs::create_dir_all(&codex_home).expect("codex home");
+    std::fs::create_dir_all(&tmp_dir).expect("tmp dir");
     let codex = bin_dir.join("codex");
     std::fs::copy(v03::fixture("py/fake_codex.py"), &codex).expect("copy fake codex");
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755))
         .expect("chmod fake codex");
+    std::os::unix::fs::symlink(python_program(), bin_dir.join("python3"))
+        .expect("link python3 into isolated PATH bin");
     let pid_file = dir.path().join("codex.pid");
-    let existing_path = std::env::var("PATH").unwrap_or_default();
+    // 只含隔离 bin + 系统只读目录：不泄漏宿主/其它用例 PATH（ISSUE-178 隔离）。
+    let isolated_path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin_dir.display());
     let harness = json!({
         "kind": "subprocess",
         "command": python_program(),
         "args": [codex_adapter().display().to_string()],
         "protocol": "zgraph-harness/1",
         "env": {
-            "PATH": format!("{}:{existing_path}", bin_dir.display()),
+            "PATH": isolated_path,
+            "CODEX_HOME": codex_home.display().to_string(),
+            "TMPDIR": tmp_dir.display().to_string(),
             "ZGRAPH_FAKE_CODEX_PID_FILE": pid_file.display().to_string(),
         },
     });
+    // 环境预算：codex adapter 链路会 spawn 2 个 Python + fake codex；并行负载下
+    // 实测 25–35s（6 路并发 35s），默认 30s node timeout 会误报 NODE_TIMEOUT
+    //（ISSUE-178）。本用例只放宽**环境预算**到 120s，仍断言必须成功（不跳过/不伪造）。
+    let mut codex_agent = agent_with_harness(&[], harness);
+    codex_agent["node_timeout_ms"] = json!(120_000);
     let (output, db, _) = harness_run(
         dir.path(),
-        &agent_with_harness(&[], harness),
+        &codex_agent,
         json!([text_call("unused")]),
         "agent_one.json",
     );
@@ -593,15 +635,12 @@ fn ac20h_codex_adapter_via_fake_binary_and_dsh_structure() {
         "Codex 无 token delta: {kinds:?}"
     );
     assert_eq!(llm_call_count(&db, &run_id), 1, "不双重写 llm_calls");
-    // 进程回收。
-    let codex_pid: i32 = std::fs::read_to_string(&pid_file)
-        .expect("codex pid")
-        .trim()
-        .parse()
-        .expect("pid");
+    // 进程回收（有界等待 15s：并行负载下 Python/codex 退出可能排队；仍断言已回收）。
+    let pid_text = v03::wait_file(&pid_file, Duration::from_secs(15), "codex pid file");
+    let codex_pid: i32 = pid_text.trim().parse().expect("codex pid");
     assert!(
-        v03::wait_pid_gone(codex_pid, Duration::from_secs(5)),
-        "codex 子进程应被回收"
+        v03::wait_pid_gone(codex_pid, Duration::from_secs(15)),
+        "codex 子进程应被回收（pid {codex_pid}）"
     );
 
     // DSH ACP 结构：无真实 dsh 环境 → 命令不存在时 fail-closed spawn_failed
