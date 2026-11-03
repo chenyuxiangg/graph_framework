@@ -331,4 +331,4 @@
 - **分支/提交**：D2 `b8ab337`+`4b093fc`（REV-106）、D3 `5b4e899`（REV-107）、D4 `60aff67`+`31a4593`（REV-108）；D5c e2e `598ccff`（REV-112）。合并点 `8897053`。
 - **as-built**：8 工具最终语义（read 1MiB/10000 行/结果32KiB；write overwrite/create_parents/原子；edit 唯一/CAS；apply_patch 两阶段严格原子；diff 不写；grep/glob ignore/globset/regex；bash `/bin/bash --noprofile --norc -c`/env 白名单/stdin null/setsid+killpg/drain 2MiB/16KiB head+tail）；`--allow-path` 只读、写 `path_read_only`；预检 exit3；嵌套 exit71 `sandbox_nested`；profile sha256 落 trace；`--allow-exec-path`/`--allow-network`。
 - **实现差异（评审已接受）**：预检沙箱探测在 CLI 层（run 启动前）而非 harness 单测；文件工具错误统一 `TOOL_ERROR{reason}`；bash 真实隔离在嵌套 CI 仅覆盖 fail-closed 分支，非嵌套/用户终端由 `verify-sandbox.sh` 覆盖（不伪造）。
-- 测试：harness 339/0/1；e2e 166/0/2（29 v0.4 用例）；pytest 183。
+- 测试：harness **340/0/1**（默认与 `--features mcp`）；e2e 166/0/2（29 v0.4 用例）；pytest 183。

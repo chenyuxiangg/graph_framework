@@ -264,21 +264,21 @@
     - **07**：AC-21–24 + 回归 **29 用例/5 target** 实测（D5c 28 + REV-112 补 1；e2e 166=137+29，23 target、2 ignored）；AC-23 嵌套 fail-closed 实测 + 用户终端脚本分工；AC-24 f 由 D4 单测/终端脚本覆盖。
     - **08 §8.13**：final source-breaking（sha2/similar/ignore/globset/regex 依赖；CLI flags；v7；reasons/CLI 码；`--replay-tools`；无新 kind；错误码闭集只追加）。
     - **版本/发布**：Cargo.toml/lock `0.4.0`；release `--locked`+`--version`=`zgraph 0.4.0 (DSL 1.0)`；性能 [`perf-baseline-v0.4.txt`](../perf-baseline-v0.4.txt)（5-trial 门禁通过）；产物/标签待发布流程（用户授权）。
-    - **测试证据**：harness **339/0/1**、workspace **1216/0/3**、e2e **166/0/2（23 target）**、pytest **183**；AC-21–24 29 用例。
+    - **测试证据**：harness **340/0/1**、workspace **1216/0/3**、e2e **166/0/2（23 target）**、pytest **183**；AC-21–24 29 用例。
     - **台账**：issues ISSUE-176–181（kernel_cancel/ac09 parallel/codex adapter flake、trace 无 FK 清理、真实终端沙箱证据、v0.3 残余复核）。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **7640 行**；00–08 numstat **161/129（净 32）**；全 spec 目录 numstat **186/142（净 44）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 8055 行））。
 
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | 5eaec52cf69a2f1339d2a33521c5ee1ffedfe14dae7dac59e90d12b7afe0650e | 399 |
+| `00-总纲.md` | f10b3ad7fac42438c64e3ae21bceea2113fea34df6c9f7eab3b855915f09b7f3 | 399 |
 | `01-领域模型与状态机.md` | 8037a3c0b3dac86e73348c498e3b4a2f117347661f9dc42da8ca9776d17c74b3 | 447 |
 | `02-DSL与校验.md` | b81770c67614cc4521046032437709e102213412abe003c5de18f3e8abf5d6b5 | 988 |
 | `03-调度器与生命周期.md` | fd132ad0dfbdba09d9852ac29b15d4ca5a1d510c84d752cd55d8f536b1b8d864 | 685 |
 | `04-节点接口与扩展点.md` | 63a788bbfe94c15716bed9160716ad3b0c50e4c4aea8d5ea5dbc9a637574e9bb | 940 |
 | `05-AgentHarness.md` | ae31265d7abaae4099da43a11f8850995840c1adaa4dfeff3a8097b77547e650 | 1532 |
 | `06-存储与可观测.md` | 652faf15acbb0277798a148819a50d5bdf86b8cdf9e9064069ae2d1fc01810ce | 1385 |
-| `07-验收用例.md` | 86c8bb697d0a51c707b80969d517dd045e5293446e9cd2908de83871ad539998 | 617 |
+| `07-验收用例.md` | a5e436bb03224a5265ca6519aded735eb86bc89da8dc1652a2dee31d29a1620a | 617 |
 | `08-审计关闭矩阵.md` | cb0d99c94cd07be3b25d3b64e06f75c44cc91f13b3230666f39e8870a1d4afc1 | 647 |
 
 > 00–08 合计 **7640 行**（`wc -l` 口径；2026-11-03 **v0.4（M9）实现回写批次后**实测（REV-113；**00–08 numstat +161/−129（净 +32）**；**全 spec 目录 numstat +186/−142（净 +44）**；见 §2 第 27 条）；此前 v0.3 实现回写 7419 行/§2 第 26 条；W4b as-built 7154 行/§2 第 25 条；W4a 设计冻结 + REV-096 收口 7202 行/§2 第 24 条；W3a as-built 6886 行；W3a0 6815 行；W2b 6491 行；W2a 6385 行；W2a0 6308 行；W1 6051 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 8055 行）。
