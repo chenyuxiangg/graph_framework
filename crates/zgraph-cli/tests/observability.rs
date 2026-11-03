@@ -655,6 +655,160 @@ fn multi_model_price_missing_fails_before_any_run() {
     assert!(agents.iter().any(|agent| agent["model"] == "second-model"));
 }
 
+/// v0.5/F5e：外部 subprocess result 缺 usage → CLI 标 unavailable（不显示 0 token）。
+#[test]
+fn external_subprocess_without_usage_reports_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let assets = dir.path().join("assets");
+    std::fs::create_dir_all(assets.join("agents")).expect("agents");
+    std::fs::create_dir_all(assets.join("tools")).expect("tools");
+    write_text(&assets.join("agents"), "prompt.md", "你是外部 harness。");
+    let script = dir.path().join("fake_harness.sh");
+    write_text(
+        dir.path(),
+        "fake_harness.sh",
+        "#!/bin/sh\nread hello\nprintf '%s\\n' '{\"v\":1,\"type\":\"hello_ok\",\"protocol\":\"zgraph-harness/1\",\"provider\":\"fake\",\"capabilities\":{\"streaming\":false}}'\nread run\nprintf '%s\\n' '{\"v\":1,\"type\":\"result\",\"content\":\"external-ok\",\"iterations\":1,\"stop_reason\":\"EndTurn\"}'\n",
+    );
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod adapter");
+    let config = json!({
+        "id": "external",
+        "name": "external",
+        "schema_version": 1,
+        "model": {
+            "provider": "deepseek",
+            "name": "deepseek-chat",
+            "base_url": null,
+            "api_key_env": "HARNESS_TEST_KEY",
+            "temperature": 0.0,
+            "max_tokens": 256,
+            "context_window_tokens": 65536
+        },
+        "role_prompt_file": "prompt.md",
+        "constraints_file": null,
+        "tools": [],
+        "input_mapping": {"message": "user_message"},
+        "max_iterations": 2,
+        "harness": {
+            "kind": "subprocess",
+            "command": script.display().to_string(),
+            "protocol": "zgraph-harness/1"
+        }
+    });
+    write_text(&assets.join("agents"), "external.json", &config.to_string());
+    let graph = write_text(
+        dir.path(),
+        "external.json",
+        &json!({
+            "version": "1.0",
+            "metadata": {"name": "external"},
+            "entry_points": ["start"],
+            "nodes": [
+                {"id": "start", "type": "start",
+                 "inputs": [{"name": "message", "type": "any", "required": true}], "config": {}},
+                {"id": "w", "type": "agent_call",
+                 "inputs": [{"name": "message", "type": "any", "required": true}],
+                 "config": {"agent_id": "external"}},
+                {"id": "end", "type": "end",
+                 "inputs": [{"name": "result", "type": "any", "required": true}], "config": {}}
+            ],
+            "edges": [
+                {"from": "start", "to_node": "w", "to_input_port": "message"},
+                {"from": "w", "to_node": "end", "to_input_port": "result"}
+            ]
+        })
+        .to_string(),
+    );
+    let pricing = pricing_chat_only(dir.path());
+    let db = dir.path().join("external-usage.db");
+    let args = vec![
+        "run".to_string(),
+        arg(&graph),
+        "--db".to_string(),
+        arg(&db),
+        "--assets-dir".to_string(),
+        arg(&assets),
+        "--inputs".to_string(),
+        r#"{"start":{"message":"hi"}}"#.to_string(),
+        "--pricing".to_string(),
+        arg(&pricing),
+        "--python".to_string(),
+        python_program(),
+        "--python-path".to_string(),
+        arg(&repo_root().join("python")),
+        "--json".to_string(),
+    ];
+    let output = run_cli(&args, dir.path());
+    assert_eq!(
+        code(&output),
+        0,
+        "stdout={} stderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let payload = json_stdout(&output);
+    assert_eq!(payload["status"], json!("Completed"));
+    let usage = &payload["usage"];
+    assert_eq!(usage["run"]["llm_calls"], json!(1));
+    assert_eq!(usage["run"]["unknown_usage_calls"], json!(1));
+    assert_eq!(usage["run"]["available"], json!(false));
+    assert_eq!(
+        usage["unavailable"],
+        json!("external_harness_usage_unavailable")
+    );
+
+    // trace --stats：外部 harness 不写 llm_calls → 不伪造 token_usage/llm_calls。
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+    let stats = run_cli(
+        &[
+            "trace".to_string(),
+            run_id,
+            "--db".to_string(),
+            arg(&db),
+            "--stats".to_string(),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    assert_eq!(code(&stats), 0, "stderr={}", stderr(&stats));
+    let stats_json = json_stdout(&stats);
+    assert!(stats_json.get("llm_calls").is_none(), "{stats_json}");
+    assert!(stats_json.get("token_usage").is_none(), "{stats_json}");
+
+    // 人类行：不显示伪 0，明确 unavailable。
+    let human_db = dir.path().join("external-usage-human.db");
+    let human_args = vec![
+        "run".to_string(),
+        arg(&graph),
+        "--db".to_string(),
+        arg(&human_db),
+        "--assets-dir".to_string(),
+        arg(&assets),
+        "--inputs".to_string(),
+        r#"{"start":{"message":"hi"}}"#.to_string(),
+        "--pricing".to_string(),
+        arg(&pricing),
+        "--python".to_string(),
+        python_program(),
+        "--python-path".to_string(),
+        arg(&repo_root().join("python")),
+    ];
+    let human = run_cli(&human_args, dir.path());
+    assert_eq!(
+        code(&human),
+        0,
+        "stdout={} stderr={}",
+        stdout(&human),
+        stderr(&human)
+    );
+    let err = stderr(&human);
+    assert!(err.contains("usage unavailable"), "{err}");
+    assert!(err.contains("external harness"), "{err}");
+    assert!(!err.contains("prompt=0"), "{err}");
+}
+
 /// 外部 subprocess harness + `--max-cost` → 成本不可得 fail-closed（不产生 run）。
 #[test]
 fn external_subprocess_harness_max_cost_is_config_error() {

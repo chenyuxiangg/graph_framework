@@ -22,7 +22,6 @@ use zgraph_kernel::{
 };
 use zgraph_worker::WorkerLimits;
 
-use crate::agent_loop::RunFailure;
 use crate::assemble::effective_input_mapping;
 use crate::builtin::{has_builtin_prefix, BuiltinToolSet};
 use crate::config::{
@@ -33,7 +32,9 @@ use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
 use crate::ctx::HarnessCtx;
 use crate::error::HarnessError;
 use crate::llm::LlmProvider;
-use crate::observability::{BudgetConfig, PricingTable, RunObservability, RunUsageStats};
+use crate::observability::{
+    AgentUsageKey, BudgetConfig, NodeUsageKey, PricingTable, RunObservability, RunUsageStats,
+};
 use crate::plugin::SubprocessProvider;
 use crate::provider::{AgentProvider, BuiltinProvider, ProviderRequest, ProviderTrace};
 use crate::record::LlmCallRecorder;
@@ -819,17 +820,38 @@ impl HarnessExecutor {
             mcp: mcp_run.as_deref(),
             builtin: self.builtin_tools.as_ref(),
             tool_call_sink: self.tool_call_sink.as_ref(),
-            observability: Some(observability),
+            observability: Some(observability.clone()),
         };
         let provider: &dyn AgentProvider = match harness_kind {
             HarnessKind::Builtin => &self.builtin_provider,
             HarnessKind::Subprocess => &self.subprocess_provider,
         };
-        provider
-            .run(request)
-            .await
-            .map(|output| output.to_json())
-            .map_err(RunFailure::into_node_error)
+        let started = std::time::Instant::now();
+        match provider.run(request).await {
+            Ok(output) => {
+                // v0.5/F5e：外部 subprocess harness 的 usage 由 plugin 解析（缺失 =
+                // `UsageSource::Unavailable`）；在此记录进 run 统计（不伪造 0、不计预算）。
+                // builtin 路径已在 `run_agent` 内记录，避免重复计数。
+                if harness_kind == HarnessKind::Subprocess {
+                    let duration_ms =
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    observability.record_llm_call(
+                        NodeUsageKey {
+                            instance_id: job.ctx.instance_id().to_string(),
+                            attempt: job.attempt,
+                        },
+                        AgentUsageKey {
+                            agent_id: agent.config.id.clone(),
+                            model: agent.model_ref().name.clone(),
+                        },
+                        &output.usage,
+                        duration_ms,
+                    );
+                }
+                Ok(output.to_json())
+            }
+            Err(failure) => Err(failure.into_node_error()),
+        }
     }
 }
 
@@ -2316,6 +2338,78 @@ mod tests {
             "streaming event sequence must be identical"
         );
         builtin_executor.close_provider().await;
+    }
+
+    /// v0.5/F5e：外部 subprocess result 缺 usage → Unavailable 记入 run 统计
+    /// （unknown_usage_calls/warnings；不计 token 预算、不伪造 0）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subprocess_usage_unavailable_is_recorded_and_not_counted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = assets(agent_config("parser", &[]), "role");
+        let script = dir.path().join("fake_harness.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nread hello\nprintf '%s\\n' '{\"v\":1,\"type\":\"hello_ok\",\"protocol\":\"zgraph-harness/1\",\"provider\":\"fake\",\"capabilities\":{\"streaming\":false}}'\nread run\nprintf '%s\\n' '{\"v\":1,\"type\":\"result\",\"content\":\"external-ok\",\"iterations\":1,\"stop_reason\":\"EndTurn\"}'\n",
+        )
+        .expect("adapter script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod adapter");
+        let mut agent = agent_config("parser", &[]);
+        agent["harness"] = json!({
+            "kind": "subprocess",
+            "command": script.display().to_string(),
+            "protocol": "zgraph-harness/1",
+        });
+        write_agent_file(&dir, agent);
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                {"kind": "text", "content": "unused"}
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_budget(
+                crate::BudgetConfig {
+                    max_tokens: Some(1),
+                    max_cost: None,
+                },
+            ),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
+        let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
+        assert_eq!(stats.run.llm_calls, 1);
+        assert_eq!(stats.run.unknown_usage_calls, 1);
+        assert_eq!(stats.run.prompt_tokens, 0);
+        assert_eq!(stats.run.completion_tokens, 0);
+        assert_eq!(stats.run.total_tokens, 0);
+        assert!(
+            stats.budget_stop.is_none(),
+            "unavailable usage must not count toward budget"
+        );
+        assert!(
+            stats
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("usage unavailable")),
+            "{:?}",
+            stats.warnings
+        );
+        assert_eq!(stats.by_node.len(), 1);
+        assert_eq!(stats.by_agent.len(), 1);
+        assert_eq!(
+            stats
+                .by_node
+                .values()
+                .next()
+                .expect("node")
+                .unknown_usage_calls,
+            1
+        );
+        executor.close_provider().await;
     }
 
     /// v0.3/V4：subprocess harness + 节点级 `max_iterations` → 能力冲突

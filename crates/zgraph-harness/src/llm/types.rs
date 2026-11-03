@@ -322,6 +322,17 @@ impl Usage {
         }
     }
 
+    /// usage 不可得（外部 subprocess 未提供 token；**不伪造 0**）。
+    pub const fn unavailable() -> Self {
+        Self {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            reasoning_tokens: None,
+            source: UsageSource::Unavailable,
+        }
+    }
+
     /// 构造 provider 计量。
     pub fn provider(
         prompt_tokens: u32,

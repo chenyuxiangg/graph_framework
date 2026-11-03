@@ -1101,7 +1101,9 @@ fn parse_result(frame: &Value) -> Result<AgentOutput, HarnessError> {
 /// `cached_input_tokens`/`cache_write_input_tokens` 丢弃（DR-011 §3.1）。
 fn parse_usage(value: Option<&Value>) -> Usage {
     let Some(usage) = value.and_then(Value::as_object) else {
-        return Usage::zero();
+        // v0.5/F5e（DR-018 §1.2 / DR-020）：外部 subprocess 未提供 usage → Unavailable，
+        // 不再回退 `Usage::zero()/Provider`（避免把“不可得”伪造成 0）。
+        return Usage::unavailable();
     };
     let field = |names: &[&str]| -> Option<u32> {
         names
@@ -1109,6 +1111,19 @@ fn parse_usage(value: Option<&Value>) -> Usage {
             .find_map(|name| usage.get(*name).and_then(Value::as_u64))
             .and_then(|value| u32::try_from(value).ok())
     };
+    // 空对象/无任何可识别字段 = 未提供（不按 0 计），与缺省同义。
+    let recognized = [
+        "prompt_tokens",
+        "input_tokens",
+        "completion_tokens",
+        "output_tokens",
+        "total_tokens",
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+    ];
+    if !recognized.iter().any(|name| usage.contains_key(*name)) {
+        return Usage::unavailable();
+    }
     let prompt = field(&["prompt_tokens", "input_tokens"]).unwrap_or(0);
     let completion = field(&["completion_tokens", "output_tokens"]).unwrap_or(0);
     let total = field(&["total_tokens"]);
@@ -1169,6 +1184,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, LoadedAgent, ModelConfig};
     use crate::ctx::HarnessCtx;
+    use crate::llm::UsageSource;
     use crate::llm::{FakeLlmProvider, LlmProvider, ProviderKind, SecretString};
     use crate::test_support::TestCtx;
     use crate::tools::{FakeToolRunner, ToolRunner};
@@ -1236,6 +1252,9 @@ while True:
     elif mode == "mystery_event":
         send({"v": 1, "type": "event", "kind": "mystery", "text": "future"})
         send_result()
+    elif mode == "no_usage":
+        send({"v": 1, "type": "result", "content": "final-text",
+              "stop_reason": "EndTurn", "iterations": 1})
     elif mode == "plan_and_usage":
         send({"v": 1, "type": "event", "kind": "plan", "message": "step 1", "percent": 25})
         send({"v": 1, "type": "event", "kind": "usage_update",
@@ -1755,6 +1774,38 @@ if output:
             StreamingEvent::Progress { percent, message } if *percent == 25 && message == "step 1"
         ));
         provider.close_provider().await;
+    }
+
+    /// v0.5/F5e：外部 subprocess result 缺 usage → `Unavailable`（不伪造 0/Provider）。
+    #[tokio::test]
+    async fn result_without_usage_is_unavailable_not_zero() {
+        let fixture = fixture("no_usage");
+        let ctx = TestCtx::new();
+        let provider = SubprocessProvider::new();
+        let output = AgentProvider::run(&provider, fixture.request(ctx, 5_000))
+            .await
+            .expect("run");
+        assert_eq!(output.usage.source, UsageSource::Unavailable);
+        assert_eq!(output.usage.prompt_tokens, 0);
+        assert_eq!(output.usage.completion_tokens, 0);
+        assert_eq!(output.usage.total_tokens, 0);
+        assert_eq!(output.usage.reasoning_tokens, None);
+        provider.close_provider().await;
+    }
+
+    /// v0.5/F5e：`parse_usage(None)` 直接映射 Unavailable（不返回 Provider 零值）。
+    #[test]
+    fn parse_usage_missing_is_unavailable() {
+        let usage = parse_usage(None);
+        assert_eq!(usage.source, UsageSource::Unavailable);
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(
+            parse_usage(Some(&json!({}))).source,
+            UsageSource::Unavailable
+        );
+        let explicit = parse_usage(Some(&json!({"input_tokens": 1, "output_tokens": 2})));
+        assert_eq!(explicit.source, UsageSource::Provider);
+        assert_eq!(explicit.total_tokens, 3);
     }
 
     /// REV-099 C2：无换行巨行（2 MiB）必须被**有界读取**立即拦截（不缓存整行）。

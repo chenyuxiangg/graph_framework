@@ -2170,8 +2170,13 @@ fn finish(
 }
 
 /// v0.5/F3b：单维度 usage 合计 → JSON（`UsageTotals`）。
+///
+/// v0.5/F5e：追加 `available`（至少一次调用有已知 usage）；全不可得维度
+/// `available=false`，由调用方/人类行显示 unavailable，不把 0 当真实值。
 fn usage_totals_json(totals: &UsageTotals) -> Value {
+    let available = totals.llm_calls > 0 && totals.unknown_usage_calls < totals.llm_calls;
     json!({
+        "available": available,
         "prompt_tokens": totals.prompt_tokens,
         "completion_tokens": totals.completion_tokens,
         "total_tokens": totals.total_tokens,
@@ -2182,6 +2187,11 @@ fn usage_totals_json(totals: &UsageTotals) -> Value {
         "duration_ms": totals.duration_ms,
         "cost_usd": totals.cost_usd,
     })
+}
+
+/// 全部已知 usage 都不可得（不伪造 token；外部/external harness 常见情形）。
+fn usage_all_unavailable(totals: &UsageTotals) -> bool {
+    totals.llm_calls > 0 && totals.unknown_usage_calls == totals.llm_calls
 }
 
 /// v0.5/F3b：run 结束 usage → `--json.usage`（additive；无配置不插入）。
@@ -2234,6 +2244,10 @@ fn usage_json(usage: Option<&RunUsageStats>, observability: &Observability) -> V
     });
     if observability.external_harness {
         value["unavailable"] = json!("external_harness_usage_unavailable");
+    } else if usage_all_unavailable(&stats.run) {
+        // v0.5/F5e：内置/其他 provider 全部调用都无 usage（如 transport 未回填）→
+        // 明确标 unavailable，不把 0 当真实 token。
+        value["unavailable"] = json!("usage_unavailable");
     }
     value
 }
@@ -2248,6 +2262,18 @@ fn usage_human_line(usage: Option<&RunUsageStats>, observability: &Observability
         };
     };
     let totals = &stats.run;
+    if usage_all_unavailable(totals) {
+        // v0.5/F5e：全不可得 → 不显示 0 token；明确 unavailable。
+        let suffix = if observability.external_harness {
+            " (external harness usage unavailable; not counted)"
+        } else {
+            ""
+        };
+        return format!(
+            "usage unavailable (all {} LLM calls have no usage; not counted){suffix}",
+            totals.llm_calls
+        );
+    }
     let cost = totals
         .cost_usd
         .map(|cost| format!("{cost:.6}"))
@@ -2792,6 +2818,52 @@ mod tests {
             json["unavailable"],
             json!("external_harness_usage_unavailable")
         );
+    }
+
+    #[test]
+    fn usage_output_all_unavailable_is_not_displayed_as_zero() {
+        let observability = Observability {
+            pricing: None,
+            budget: BudgetConfig::default(),
+            models: None,
+            external_harness: false,
+        };
+        let stats = RunUsageStats {
+            run: UsageTotals {
+                llm_calls: 2,
+                unknown_usage_calls: 2,
+                duration_ms: 7,
+                ..UsageTotals::default()
+            },
+            ..RunUsageStats::default()
+        };
+        let line = usage_human_line(Some(&stats), &observability);
+        assert!(line.contains("usage unavailable"), "{line}");
+        assert!(!line.contains("prompt=0"), "{line}");
+        let json = usage_json(Some(&stats), &observability);
+        assert_eq!(json["run"]["available"], json!(false));
+        assert_eq!(json["run"]["unknown_usage_calls"], json!(2));
+        assert_eq!(json["unavailable"], json!("usage_unavailable"));
+
+        // 混合（部分已知）→ 显示已知值 + unknown_usage，不整体标 unavailable。
+        let mixed = RunUsageStats {
+            run: UsageTotals {
+                prompt_tokens: 5,
+                total_tokens: 5,
+                llm_calls: 2,
+                unknown_usage_calls: 1,
+                ..UsageTotals::default()
+            },
+            ..RunUsageStats::default()
+        };
+        let line = usage_human_line(Some(&mixed), &observability);
+        assert!(
+            line.contains("prompt=5") && line.contains("unknown_usage=1"),
+            "{line}"
+        );
+        let json = usage_json(Some(&mixed), &observability);
+        assert_eq!(json["run"]["available"], json!(true));
+        assert!(json.get("unavailable").is_none(), "{json}");
     }
 
     #[test]
