@@ -10,7 +10,7 @@
 | 目标 | 从**源码仓** clone/构建/运行真实 Codex CLI 与 DSH，验证 `zgraph-harness/1` adapter 真链路（非 fake） |
 | 源码 | Codex：https://github.com/openai/codex ；DSH：https://github.com/deepseek-ai/deepseek-harness |
 | 证据 | 构建命令/版本、运行命令、最小图/AgentConfig、trace/llm_calls 片段、成功/失败日志；**不伪造**；不可用环境如实标注 |
-| 门控 | e2e `#[ignore]` + env（如 `ZGRAPH_REAL_CODEX=1`/`ZGRAPH_REAL_DSH=1`）；CI 默认跳过；本地/发布材料手跑 |
+| 门控 | e2e `#[ignore]` + env **`ZGRAPH_REAL_CODEX=1`/`ZGRAPH_REAL_DSH=1`**；CI 默认跳过；本地/发布材料手跑；可复现命令（spike 结论补） |
 | AC-28 | a–f（设计待 spike 补全） |
 
 ## 1. 计划步骤（待 spike 定稿）

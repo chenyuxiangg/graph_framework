@@ -1,6 +1,6 @@
 # DR-017 · v0.5 reexec 工具回放
 
-> **状态**：V1 设计冻结（REV-115；grep/glob 漂移口径为 Lead 裁决项）。
+> **状态**：V1 设计冻结（REV-115；**Lead 裁决 2026-11-03：接受推荐——read/grep/glob/diff 均可 reexec，结果 sha256 比对**）。
 > **日期**：2026-11-03 · **作者**：docs-dev · **关联**：DR-014（v7 `tool_calls`）、06 §6.15、07 AC-24/25、task-95
 > **合同**：`--replay-tools=reexec` **显式**（默认 `recorded` 不变）；只读白名单 `read`/`grep`/`glob`/`diff`；**副作用工具永远 recorded-only**；不升 trace v8。
 
@@ -37,7 +37,7 @@ v7 `tool_calls` 已有 `args_sha256`/`result_sha256`，**无输入文件 pre_sha
 
 - **共同前提**：args_json 必须逐字节/规范化一致；记录 `truncated=1` → **fail-closed**（无法完整比对）；记录缺行 → `REPLAY_TOOL_RECORD_MISSING`。
 - **不做**：不因 grep/glob 无输入 hash 就静默跳过比对；不引入 `pre_sha256` 新列（**不升 v8**）。grep/glob 的 drift 语义为「结果与记录不一致」而非「输入文件已变」——文档必须写清。
-- **裁决项**：是否允许 grep/glob 在结果一致时通过（推荐：是，以结果 sha 为准）；是否改为仅 read/diff 可 reexec（备选，更保守）。**推荐前者**。
+- **Lead 裁决（2026-11-03）**：**接受推荐**——read/grep/glob/diff 四种只读工具均可 reexec；以记录 `result_sha256` 与重跑结果比对，不一致 → `REPLAY_TOOL_MISMATCH` fail-closed；须同 workspace/allow-path 配置；**不升 v8**。
 
 ## 3. CLI/错误语义
 
@@ -80,7 +80,7 @@ v7 `tool_calls` 已有 `args_sha256`/`result_sha256`，**无输入文件 pre_sha
 
 | # | 事项 | 推荐 |
 |---|---|---|
-| 1 | grep/glob 漂移口径 | **结果 sha256 比对，mismatch fail-closed**（不升 v8）；备选：仅 read/diff 可 reexec |
+| 1 | grep/glob 漂移口径 | **已裁决（2026-11-03）：结果 sha256 比对，mismatch fail-closed（不升 v8）；read/grep/glob/diff 均可 reexec** |
 | 2 | reexec 环境一致性 | 要求显式同 workspace/allow-path；不做 trace 自动恢复（避免 v8） |
 | 3 | 拒绝面 exit 码 | 副作用工具/未 opt-in → **exit 2**；记录/mismatch → **exit 3** |
 | 4 | 输出标注 | additive `replay_mode`/`drift`，不改既有字段 |

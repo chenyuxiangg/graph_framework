@@ -1,6 +1,6 @@
 # DR-019 · v0.5 sandbox 增强（可写白名单 + 构建工具链）
 
-> **状态**：V1 设计冻结（REV-115；重叠/嵌套规则为 Lead 裁决项）。
+> **状态**：V1 设计冻结（REV-115；**Lead 裁决 2026-11-03：与 workspace 相同/嵌套允许、不可 `/`、同目录写优先、独立于只读 allow-path**）。
 > **日期**：2026-11-03 · **作者**：docs-dev · **关联**：DR-013（v0.4 jail/OS 沙箱）、DR-012、05 §5.15、07 AC-23/26、task-95
 > **合同**：`--allow-write-path` 独立可写白名单；构建工具链可用性；默认（无新开关）行为不变。
 
@@ -68,8 +68,8 @@
 
 | # | 事项 | 推荐 |
 |---|---|---|
-| 1 | 与 workspace 重叠/嵌套 | 相同/嵌套**允许（幂等）**；不可为 `/`；系统目录拒绝/警示 |
-| 2 | 与只读 allow-path 同目录 | **写优先**（显式可写）+ 文档警示 |
-| 3 | 构建工具聚合开关 | **不新增**；显式 `--allow-exec-path`+`--allow-path`+`--allow-write-path` |
+| 1 | 与 workspace 重叠/嵌套 | **已裁决：相同/嵌套允许（幂等）；不可 `/`；系统目录拒绝/警示；负例 `/`/不存在/symlink 出根** |
+| 2 | 与只读 allow-path 同目录 | **已裁决：写优先（显式可写）+ 文档警示；独立于只读 allow-path** |
+| 3 | 构建工具聚合开关 | **已裁决：不新增**；显式 `--allow-exec-path`+`--allow-path`+`--allow-write-path` |
 | 4 | 默认系统集合 | **不变**（spike profile 冻结） |
 | 5 | 预检错误面 | `HARNESS_CONFIG_LOAD{reason:"allow_write_path_invalid"}`；exit 3 |

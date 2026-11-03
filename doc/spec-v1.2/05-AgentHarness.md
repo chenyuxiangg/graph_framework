@@ -1541,17 +1541,17 @@ read 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB；write
 
 - `--mode=tools --replay-tools=reexec` **显式**；缺省 `recorded`（v0.4 行为不变，绝不执行工具）。
 - 只读白名单 `builtin__read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **拒绝**（exit 2）；MCP/Python/外部 harness 仍 recorded。
-- 漂移：重跑结果 vs 记录 `result_sha256`，不符 → `REPLAY_TOOL_RECORD_MISMATCH`（exit 3）；truncated/缺记录 fail-closed；**不升 v8**（不新增 pre_sha 列）。
+- 漂移（Lead 裁决 2026-11-03）：read/grep/glob/diff **均可 reexec**；重跑结果 vs 记录 `result_sha256`，不符 → `REPLAY_TOOL_RECORD_MISMATCH`（exit 3）；truncated/缺记录 fail-closed；须同 workspace/allow-path；**不升 v8**（不新增 pre_sha 列）。
 - 回放使用同 `--workspace-dir`/`--allow-path`/`--allow-builtin-tools`；不同配置预期 mismatch。
 
 ### 5.16.2 可观测/成本（DR-018）
 
 - 维度 run/node/agent；数据源既有 `llm_calls.usage` + 时间戳；费用需可选 `--pricing <file>`（不内置价格）。
-- 预算 `--max-tokens`/`--max-cost`（默认关）；每次 LLM 调用后检查；超限立即停止，run `Failed` + `BUDGET_EXCEEDED` + `Other("budget_exceeded")`；v0.5 不可续。
-- 输出 additive（`RunFinished.metrics`/`trace --stats`/人类行）；不新增表/列、不升 v8；无配置默认不变。
+- 预算 `--max-tokens`/`--max-cost`（默认关）；**每次 LLM 请求前 + run 结束汇总**检查；超限立即停止，run `Failed` + `BUDGET_EXCEEDED` + `Other("budget_exceeded")`、trace/instances 终态一致；v0.5 不可续。
+- 价格仅 `--pricing <file>`（缺文件/格式错 → 用法/配置错误；不内置价）；输出 additive（`RunFinished.metrics`/`trace --stats`/人类行）；不新增表/列、不升 v8；无配置默认不变。
 
 ### 5.16.3 sandbox 增强（DR-019）
 
-- `--allow-write-path <dir>`（可重复、目录级、canonicalize）独立于只读 `--allow-path`；profile `file-write*` + jail 写授权；不可 `/`；与 workspace 重叠/嵌套允许（幂等）；写优先于同目录只读。
+- `--allow-write-path <dir>`（可重复、目录级、canonicalize）**独立于只读 `--allow-path`**；profile `file-write*` + jail 写授权；**与 workspace 相同/嵌套允许（幂等）；不可 `/`；同目录写优先**；负例 `/`/不存在/symlink 出根/allow-path 写仍拒绝。
 - 构建工具：`--allow-exec-path`（process-exec+file-read）显式；cargo/node/uv 需路径/HOME/TMPDIR/缓存；`cc -isysroot` 文档；不改变默认系统只读集合。
 - 预检非法 → `HARNESS_CONFIG_LOAD{reason:"allow_write_path_invalid"}`（exit 3）；默认无新开关行为与 v0.4 一致。

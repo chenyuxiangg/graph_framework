@@ -1,6 +1,6 @@
 # DR-018 · v0.5 可观测性与成本预算
 
-> **状态**：V1 设计冻结（REV-115；价格来源/预算停止语义/字段位置为 Lead 裁决项）。
+> **状态**：V1 设计冻结（REV-115；**Lead 裁决 2026-11-03：价格仅配置文件、预算默认关、超限立即停止/不可续、字段复用 metrics/llm_calls**）。
 > **日期**：2026-11-03 · **作者**：docs-dev · **关联**：05 §5.3/§5.4、06 §6.2/§6.11、07 AC-27、task-95
 > **合同**：token/费用/耗时统计（run/node/agent）；预算上限默认关；trace/CLI additive、**不升 v8**；无配置默认路径不变。
 
@@ -10,9 +10,9 @@
 |---|---|
 | 统计维度 | run 汇总 / node（instance+attempt）/ agent（agent_id+model）；token（prompt/completion/total）、耗时、调用次数 |
 | 数据源 | 既有 `llm_calls.usage`（token）+ `events`/trace 时间戳；**不新增表/列**（不升 v8） |
-| 费用 | 可选 **价格表文件**（`--pricing <file>`，JSON：model → input/output USD per 1M tokens）；缺文件/未知模型 → 费用不可用 + warning（不 fail） |
+| 费用 | 可选 **价格表文件**（`--pricing <file>`，JSON：model → input/output USD per 1M tokens）；**缺文件/格式错 → 用法/配置错误**；未知模型 → 该调用费用不可用 + warning（不 fail） |
 | 预算 | `--max-tokens <N>`（run 总 token）/`--max-cost <USD>`（run 总费用）；**默认关**；超限停止 |
-| 停止语义 | 检查点：每次 LLM 调用完成后（下一轮/下一工具前）；超限 → run `Failed` + error_code **`BUDGET_EXCEEDED`**（append-only）+ stop_reason `Other("budget_exceeded")`；**v0.5 不可续**（v0.6 durable resume 另议） |
+| 停止语义 | 检查点：**每次 LLM 请求前 + run 结束汇总**；超限 → run `Failed` + error_code **`BUDGET_EXCEEDED`**（append-only）+ stop_reason `Other("budget_exceeded")`；**v0.5 不可续**；trace/instances 终态一致 |
 | 输出 | `RunFinished.metrics` JSON additive 键 + `trace --stats` additive + 人类摘要行；既有字段/输出不变 |
 | AC-27 | a–f |
 
@@ -40,9 +40,9 @@
 {"currency":"USD","models":{"gpt-x":{"input_per_mtok":1.0,"output_per_mtok":2.0}}}
 ```
 
-- 不内置价格（价格随供应商/时间变化，硬编码易过期）；缺文件 → 仅 token/耗时，费用字段缺失 + warning；未知模型 → 该调用费用未知 + warning（不 fail run）。
+- 不内置价格（价格随供应商/时间变化，硬编码易过期）；**缺文件/JSON 格式错 → 用法/配置错误（不启动 run）**；未知模型 → 该调用费用未知 + warning（不 fail run）。
 - 价格表变更不影响 run 语义/hash；仅输出计算。
-- 裁决项：是否允许内置默认价（推荐**否**）。
+- Lead 裁决（2026-11-03）：**不内置默认价**；价格仅配置文件。
 
 ## 3. 预算上限与停止语义
 
@@ -50,13 +50,13 @@
 |---|---|
 | CLI 命名 | `--max-tokens <N>`（run 总 tokens）/`--max-cost <USD>`（run 总费用）；二者可单用/并用 |
 | 默认 | **关**（不配置不计算预算、不停止；输出不变） |
-| 检查点 | 每次 LLM 调用完成后、下一次 LLM/工具调用前；run 结束时最终检查 |
+| 检查点 | **每次 LLM 请求前**（发起前检查累计是否已超限）+ **run 结束汇总**最终检查；超限立即停止，不发起该次请求 |
 | 超限动作 | **立即停止**：不再发起 LLM/工具；run `Failed`，`error_code = BUDGET_EXCEEDED`（新域码，append-only）；`RunFinished.stop_reason = Other("budget_exceeded")`；已产生的 trace/metrics 保留 |
 | 是否可续 | **v0.5 不可续**；用户需新 run（v0.6 durable resume 再评估） |
 | 精度 | tokens 整数；cost 小数（USD，保留 6 位）；超限判定用 `>=` 上限 |
 | 负值/非法 | 配置错误（Crashed(Config)） |
 
-> `BUDGET_EXCEEDED` 为新 domain error code（append-only；不新增 `HarnessErrorKind`）；不写 `runs.error_code` 之外的语义变更。裁决项：是否复用 `RUN_*`/`NODE_*` 现有码 vs 新码（推荐新码，语义明确）。
+> `BUDGET_EXCEEDED` 为新 domain error code（append-only；不新增 `HarnessErrorKind`）；run 终态 `Failed` + `instances` 终态一致（无 Running 残留）。Lead 裁决（2026-11-03）：**采用新码**，不复用 `RUN_*`/`NODE_*`。
 
 ## 4. trace/CLI 输出（additive，不升 v8）
 
@@ -64,7 +64,7 @@
 - **`trace --stats`**：追加 token/费用/耗时汇总（仅当有数据；无配置/无调用输出不变）。
 - **人类可读**：run 结束摘要可加一行 tokens/cost/duration（可 `-q` 抑制）；`--json` additive。
 - **不新增表/列**：统计从 `llm_calls`+events 聚合；`tool_calls` 已有。**trace v7 不变，不升 v8**。
-- 裁决项：是否新建 `run_metrics` 表（推荐**否**，v0.5 聚合即可；若查询性能不足 v0.6 评估）。
+- Lead 裁决（2026-11-03）：**不新建表**；复用 `RunFinished.metrics`/`llm_calls`/`--stats`（additive；无预算/无 pricing 输出不变）。
 
 ## 5. 兼容/安全
 
@@ -78,7 +78,7 @@
 | # | 断言 |
 |---|---|
 | a | run/node/agent 维度 token/耗时/调用数聚合正确（fake LLM 已知 usage） |
-| b | `--pricing` 有效 → cost 计算正确；缺文件/未知模型 → 费用不可用 + warning，不 fail |
+| b | `--pricing` 有效 → cost 正确；**缺文件/格式错 → 用法/配置错误（不启动 run）**；未知模型 → 费用不可用 + warning，不 fail |
 | c | `--max-tokens` 超限 → 停止、Failed、`BUDGET_EXCEEDED`、`Other("budget_exceeded")`；不再发起调用 |
 | d | `--max-cost` 同 c（价格表可用时）；不可用费用 → 配置/警告口径 |
 | e | 默认无预算/无 pricing：run/trace/replay 输出与 v0.4 逐字节一致（无 v8） |
@@ -88,8 +88,8 @@
 
 | # | 事项 | 推荐 |
 |---|---|---|
-| 1 | 价格来源 | **配置文件**（`--pricing`/env），不内置默认价 |
+| 1 | 价格来源 | **已裁决：配置文件**（`--pricing`/env），不内置默认价；缺文件/格式错为配置错误 |
 | 2 | 预算命名/单位 | `--max-tokens`（tokens）/`--max-cost`（USD）；默认关 |
-| 3 | 停止语义 | 每次 LLM 调用后检查；立即停止；Failed + `BUDGET_EXCEEDED` + `Other("budget_exceeded")`；v0.5 不可续 |
-| 4 | 字段位置 | 复用 `RunFinished.metrics`/`llm_calls`/`--stats`；**不新建表**、不升 v8 |
+| 3 | 停止语义 | **已裁决：每次 LLM 请求前 + run 结束汇总检查**；立即停止；Failed + `BUDGET_EXCEEDED` + `Other("budget_exceeded")`；v0.5 不可续、trace/instances 终态一致 |
+| 4 | 字段位置 | **已裁决：复用 `RunFinished.metrics`/`llm_calls`/`--stats`；不新建表、不升 v8**（无预算/无 pricing 输出不变） |
 | 5 | 未知 usage/价格 | warning + 不臆造；不 fail run |
