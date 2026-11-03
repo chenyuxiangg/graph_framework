@@ -1541,7 +1541,7 @@ read 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB；write
 
 - `--mode=tools --replay-tools=reexec` **显式**；缺省 `recorded`（v0.4 行为不变，绝不执行工具）。
 - **候选行**：`source=builtin` + `read`/`grep`/`glob`/`diff` + `status=ok` → 重跑比对；**非候选行**（副作用 write/edit/apply_patch/bash、MCP、Python、`status!=ok`）**复用记录、绝不执行、不报 exit2**。exit2 仅缺 `--allow-builtin-tools`/显式 `--workspace-dir`；非法 workspace → `HARNESS_CONFIG_LOAD` exit3。
-- 漂移：候选行重跑结果 vs 记录 `result_sha256`，不符 → `REPLAY_TOOL_RECORD_MISMATCH`（exit 3，**不输出 drift=true**）；truncated → `REPLAY_TOOL_RECORD_TRUNCATED`；缺行/streaming 多于记录 → `REPLAY_TOOL_RECORD_MISSING`；缺 `result_sha256` 预检（实现 MISSING，裁决期望 MISMATCH 待定）；**不升 v8**。
+- 漂移：候选行重跑结果 vs 记录 `result_sha256`，不符 → `REPLAY_TOOL_RECORD_MISMATCH`（exit 3，**不输出 drift=true**）；truncated → `REPLAY_TOOL_RECORD_TRUNCATED`；缺行/streaming 多于记录 → `REPLAY_TOOL_RECORD_MISSING`；缺 `result_sha256` → `REPLAY_TOOL_RECORD_MISSING`（记录不完整，非漂移）；**不升 v8**。
 - 输出：recorded 逐字节不变；reexec additive `replay_mode`（逐行 reexec/recorded）+ `drift=false`（人类行尾 + `--json` 键）；完整 e2e 由 F1c 覆盖。
 - 回放使用同 `--workspace-dir`/`--allow-path`/`--allow-builtin-tools`；不同配置预期 mismatch。
 
