@@ -84,7 +84,8 @@ commands:
   run <graph.json> --inputs <json|@file> [options]       run a graph (M5)
   decide <run_id> --instance <id> --decision approved|rejected --approver <id> [options]
                                                          record a human decision (W3a)
-  replay --run <run_id> [--mode=events|outputs]          replay a run (L1 events / L2 outputs)
+  replay --run <run_id> [--mode=events|outputs|tools]    replay a run (L1 / L2 / tool calls;
+                                                         --replay-tools=recorded|reexec)
   validate <graph.json> [--json] [--assets-dir <dir>]   validate a graph definition
   trace <run_id> [options]                               replay a run trace (L1)
   -v, --verbose                                          map verbosity to RUST_LOG (debug/trace)

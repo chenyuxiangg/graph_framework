@@ -57,7 +57,7 @@ pub(crate) fn normalize(record: &ToolCallRecord) -> Result<NormalizedToolCall, T
     let (result_json, result_sha256) = match &record.result {
         Some(value) => {
             let text = json_text(value)?;
-            let sha = sha256_hex(text.as_bytes());
+            let sha = tool_result_sha256(value)?;
             let (stored, cut) = truncate_prefix(&text, TOOL_CALL_RESULT_MAX_BYTES);
             truncated |= cut;
             (Some(stored), Some(sha))
@@ -68,7 +68,7 @@ pub(crate) fn normalize(record: &ToolCallRecord) -> Result<NormalizedToolCall, T
     let (error_json, error_sha256) = match &record.error {
         Some(value) => {
             let text = json_text(value)?;
-            let sha = sha256_hex(text.as_bytes());
+            let sha = tool_result_sha256(value)?;
             let (stored, cut) = truncate_prefix(&text, TOOL_CALL_RESULT_MAX_BYTES);
             truncated |= cut;
             (Some(stored), Some(sha))
@@ -126,6 +126,15 @@ pub(crate) fn normalize(record: &ToolCallRecord) -> Result<NormalizedToolCall, T
 /// 序列化为 JSON 文本（与既有 trace TEXT 列同口径：非 canonical，仅审计）。
 fn json_text(value: &Value) -> Result<String, TraceError> {
     serde_json::to_string(value).map_err(|err| TraceError::Serialize(err.to_string()))
+}
+
+/// v0.5/F1b（DR-017 §2）：Value 的完整 JSON 结果 sha256。
+///
+/// **与 writer 落库口径完全相同**：`serde_json::to_string(value)`（compact，键序按
+/// serde_json 现状）→ sha256 小写 hex；`tool_calls.result_sha256`/`error_sha256`
+/// 由本函数生成，CLI reexec 用同一 API 比对漂移（不另立哈希口径、不升 v8）。
+pub fn tool_result_sha256(value: &Value) -> Result<String, TraceError> {
+    Ok(sha256_hex(json_text(value)?.as_bytes()))
 }
 
 /// 全量内容 sha256（小写 hex，64 字符）。

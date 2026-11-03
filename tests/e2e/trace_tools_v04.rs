@@ -665,7 +665,10 @@ fn ac24g_recorded_replay_fail_closed_on_corruption() {
 }
 
 // ---------------------------------------------------------------------------
-// AC-24 h：reexec（v0.4 未实现 → 用法错误）；events/outputs 不变
+// AC-24 h：reexec 前置/用法错误；events/outputs 不变
+//
+// v0.5/F1b（DR-017）起 reexec 已实现：本用例保留「缺前置 flag → 用法错误 exit2」
+// 与 events/outputs 不变断言；reexec 匹配/漂移/无副作用完整验收见 v0.5 AC-25（F1c e2e）。
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -673,14 +676,15 @@ fn ac24h_reexec_is_usage_error_and_events_outputs_unchanged() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (outcome, run_id, _ws) = tool_run(dir.path());
     let db = &outcome.db;
-    // `--mode=tools --replay-tools=reexec` → exit 2（v0.4 recorded-only）。
+    // `--mode=tools --replay-tools=reexec` 缺 `--allow-builtin-tools`/`--workspace-dir`
+    // → 用法错误 exit 2（v0.5 reexec 已实现，用法错误来自显式前置，不默认 cwd）。
     let output = replay_mode(db, &run_id, "tools", &["--replay-tools=reexec"]);
-    assert_exit(&output, 2, "reexec 未实现");
+    assert_exit(&output, 2, "reexec 缺前置 flag");
     let stderr = v03::err(&output);
     assert!(stderr.contains("reexec"), "{stderr}");
     assert!(
-        stderr.contains("not implemented") && stderr.contains("recorded"),
-        "{stderr}"
+        stderr.contains("--allow-builtin-tools"),
+        "必须提示显式 opt-in: {stderr}"
     );
     // 非法 --replay-tools 值 → exit 2。
     let output = replay_mode(db, &run_id, "tools", &["--replay-tools=bogus"]);

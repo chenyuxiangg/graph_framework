@@ -142,4 +142,5 @@ pub use schema::{
     TRACE_BATCH_ROWS, TRACE_CHANNEL_CAP, TRACE_PAYLOAD_MAX_BYTES, TRACE_SCHEMA_VERSION,
     WAL_CHECKPOINT_INTERVAL_MS,
 };
+pub use toolcall::tool_result_sha256;
 pub use writer::{TraceHandle, TraceWriter};

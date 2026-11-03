@@ -608,17 +608,15 @@ fn unknown_replay_tools_value_is_usage_error_in_any_mode() {
     }
 }
 
+/// v0.5/F1b：`--mode=tools --replay-tools=reexec` 在缺前置 flag 时是用法错误 exit2
+/// （v0.4 的「未实现」已由 reexec 实现取代；完整 reexec 用例见 `tool_reexec.rs`）。
 #[test]
-fn replay_tools_reexec_is_usage_error_not_implemented() {
+fn replay_tools_reexec_requires_prerequisites_usage_error() {
     let fx = fixture();
     let output = replay_tools(&fx, &["--replay-tools=reexec"]);
     assert_eq!(code(&output), 2, "stderr={}", stderr(&output));
     let text = stderr(&output);
-    assert!(text.contains("reexec"), "{text}");
-    assert!(
-        text.contains("not implemented in v0.4") || text.contains("v0.4"),
-        "must state v0.4 not implemented: {text}"
-    );
+    assert!(text.contains("--allow-builtin-tools"), "{text}");
 }
 
 #[test]

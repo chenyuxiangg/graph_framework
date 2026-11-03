@@ -51,13 +51,15 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value};
 
 use zgraph_dsl::load_graph;
+use zgraph_harness::BuiltinToolSet;
 use zgraph_kernel::{
     run_to_completion, CompiledGraph, CompiledHandler, MemoryTraceSink, NodeError, NodeExecution,
     NodeExecutor, NodeId, PortName, RunOptions, RunOutcome, RunSpec, RunStatus,
 };
 use zgraph_trace::{
     ForeachExpansionRow, InstanceRow, InstanceStatus as TraceInstanceStatus, RecordedOutputRow,
-    RunRow, RunStatus as TraceRunStatus, StreamingRow, ToolCallRow, TraceError, TraceReader,
+    RunRow, RunStatus as TraceRunStatus, StreamingRow, ToolCallRow, ToolCallSource, ToolCallStatus,
+    TraceError, TraceReader,
 };
 
 use crate::run_cmd::output_hash;
@@ -70,9 +72,12 @@ usage: zgraph replay --run <run_id> [options]
 
 options:
   --run <run_id>        run to replay
-  --mode <mode>         events (L1, default) | outputs (L2) | tools (recorded tool calls)
-  --replay-tools <mode> recorded (default) | reexec (--mode=tools: v0.4 未实现；
+  --mode <mode>         events (L1, default) | outputs (L2) | tools (tool calls)
+  --replay-tools <mode> recorded (default) | reexec (v0.5; --mode=tools only;
                         --mode=events|outputs: ignored)
+  --allow-builtin-tools required by --replay-tools=reexec (no default cwd)
+  --workspace-dir <dir> required by --replay-tools=reexec (explicit; no default)
+  --allow-path <dir>    additional read-only jail path (repeatable; reexec)
   --db <path>           trace database (default: $ZGRAPH_DB or .zgraph/trace.db)
   --json                machine-readable output (events/tools: NDJSON; outputs: JSON object)
   --help, -h            print this help";
@@ -125,6 +130,14 @@ pub struct ReplayArgs {
     pub run_id: String,
     /// 重放模式。
     pub mode: ReplayMode,
+    /// `--replay-tools`（仅 `mode=Tools` 生效；events/outputs 忽略）。
+    pub replay_tools: ReplayTools,
+    /// `--allow-builtin-tools`（reexec 必需）。
+    pub allow_builtin_tools: bool,
+    /// `--workspace-dir`（reexec 必需；**不默认 cwd**）。
+    pub workspace_dir: Option<PathBuf>,
+    /// `--allow-path`（reexec 可选；repeatable）。
+    pub allow_paths: Vec<PathBuf>,
     /// `--db` 显式库路径。
     pub db: Option<PathBuf>,
     /// `--json`。
@@ -139,6 +152,9 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
     let mut run_id = None;
     let mut mode = ReplayMode::Events;
     let mut replay_tools: Option<ReplayTools> = None;
+    let mut allow_builtin_tools = false;
+    let mut workspace_dir: Option<PathBuf> = None;
+    let mut allow_paths: Vec<PathBuf> = Vec::new();
     let mut db = None;
     let mut json = false;
     let mut iter = args.iter();
@@ -162,6 +178,13 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
                 let value = option_value(&mut iter, "--replay-tools")?;
                 replay_tools = Some(parse_replay_tools(&value)?);
             }
+            "--allow-builtin-tools" => allow_builtin_tools = true,
+            "--workspace-dir" => {
+                workspace_dir = Some(PathBuf::from(option_value(&mut iter, "--workspace-dir")?));
+            }
+            "--allow-path" => {
+                allow_paths.push(PathBuf::from(option_value(&mut iter, "--allow-path")?));
+            }
             "--db" => db = Some(PathBuf::from(option_value(&mut iter, "--db")?)),
             "--json" => json = true,
             flag if flag.starts_with('-') => return Err(format!("unknown option: {flag}")),
@@ -170,14 +193,33 @@ pub fn parse(args: &[String]) -> Result<Option<ReplayArgs>, String> {
     }
     let run_id = run_id.ok_or_else(|| "replay requires --run <run_id>".to_string())?;
     // C1（REV-111）：`--replay-tools` 仅对 `--mode=tools` 有意义；events/outputs 下
-    // 按 Lead 裁决**忽略** recorded/reexec（不报错、无副作用）。bogus 值在解析阶段
-    // 已是用法错误（与 mode 无关）。reexec 是 v0.5 接口 → tools 模式下 exit 2。
-    if mode == ReplayMode::Tools && replay_tools == Some(ReplayTools::Reexec) {
-        return Err(REPLAY_TOOLS_REEXEC_UNIMPLEMENTED.to_string());
+    // 按裁决**忽略** recorded/reexec（不报错、无副作用）。bogus 值在解析阶段即是用法
+    // 错误（与 mode 无关）。
+    let replay_tools = if mode == ReplayMode::Tools {
+        replay_tools.unwrap_or(ReplayTools::Recorded)
+    } else {
+        ReplayTools::Recorded
+    };
+    // v0.5/F1b（DR-017 §4 / AC-25 f）：reexec 必须显式 opt-in 且显式指定 workspace
+    // （**不默认 cwd**）；缺任一 → 用法错误 exit 2（由 dispatch 映射）。
+    if mode == ReplayMode::Tools && replay_tools == ReplayTools::Reexec {
+        if !allow_builtin_tools {
+            return Err("--replay-tools=reexec requires --allow-builtin-tools".to_string());
+        }
+        if workspace_dir.is_none() {
+            return Err(
+                "--replay-tools=reexec requires an explicit --workspace-dir (no default cwd)"
+                    .to_string(),
+            );
+        }
     }
     Ok(Some(ReplayArgs {
         run_id,
         mode,
+        replay_tools,
+        allow_builtin_tools,
+        workspace_dir,
+        allow_paths,
         db,
         json,
     }))
@@ -213,18 +255,24 @@ fn parse_mode(value: &str) -> Result<ReplayMode, String> {
     }
 }
 
-/// `--replay-tools` 取值（v0.4 只实现 `recorded`；`reexec` 为 v0.5 接口）。
+/// `--replay-tools` 取值（v0.4: recorded-only；v0.5: reexec 显式 opt-in）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplayTools {
+pub enum ReplayTools {
     /// recorded-only（默认；绝不执行工具）。
     Recorded,
-    /// 重执行只读工具（v0.5；v0.4 仅保留接口）。
+    /// 重执行**只读** builtin 工具并用记录 `result_sha256` 比对漂移（v0.5）。
     Reexec,
 }
 
-/// `--replay-tools=reexec` 的用法错误（仅 `--mode=tools` 时报告）。
-const REPLAY_TOOLS_REEXEC_UNIMPLEMENTED: &str =
-    "--replay-tools=reexec is not implemented in v0.4 (recorded-only replay); use --replay-tools=recorded";
+impl ReplayTools {
+    /// 稳定字符串（人类/JSON 可选 additive 字段用）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Reexec => "reexec",
+        }
+    }
+}
 
 /// 解析 `--replay-tools` 取值（闭集；bogus 值 → 用法错误，与 mode 无关）。
 fn parse_replay_tools(value: &str) -> Result<ReplayTools, String> {
@@ -290,9 +338,27 @@ fn run_tools(args: &ReplayArgs) -> ExitCode {
     if let Err(error) = validate_tool_calls(&calls, &streaming) {
         return report(error);
     }
+    // v0.5/F1b（DR-017 §1/§2）：仅 `--replay-tools=reexec` 时重跑**只读** builtin 工具
+    // 并比对记录 `result_sha256`；其余（副作用/非 builtin/失败行）一律复用记录结果。
+    let replay_tools = args.replay_tools;
+    let modes = if replay_tools == ReplayTools::Reexec {
+        match reexec_tool_modes(args, &calls) {
+            Ok(modes) => modes,
+            Err(code) => return code,
+        }
+    } else {
+        vec![ReplayTools::Recorded; calls.len()]
+    };
     if args.json {
-        for call in &calls {
-            println!("{}", trace_cmd::tool_call_json_value(call));
+        for (call, mode) in calls.iter().zip(&modes) {
+            let mut value = trace_cmd::tool_call_json_value(call);
+            if replay_tools == ReplayTools::Reexec {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("replay_mode".to_string(), json!(mode.as_str()));
+                    object.insert("drift".to_string(), json!(false));
+                }
+            }
+            println!("{value}");
         }
     } else {
         println!(
@@ -302,12 +368,134 @@ fn run_tools(args: &ReplayArgs) -> ExitCode {
             run.graph_name.as_deref().unwrap_or("-"),
             run.graph_hash
         );
-        println!("tool_calls: {} (recorded; no tools executed)", calls.len());
-        for call in &calls {
-            println!("  {}", trace_cmd::tool_call_human_line(call));
+        if replay_tools == ReplayTools::Reexec {
+            println!(
+                "tool_calls: {} (mode=reexec; read-only builtin re-executed, side-effect/non-builtin reused)",
+                calls.len()
+            );
+        } else {
+            println!("tool_calls: {} (recorded; no tools executed)", calls.len());
+        }
+        for (call, mode) in calls.iter().zip(&modes) {
+            let mut line = trace_cmd::tool_call_human_line(call);
+            if replay_tools == ReplayTools::Reexec {
+                line.push_str(&format!(" replay_mode={} drift=false", mode.as_str()));
+            }
+            println!("  {line}");
         }
     }
     ExitCode::from(EXIT_SUCCESS)
+}
+
+/// reexec 前置：用**显式** `--workspace-dir`/`--allow-path` 构造只读 BuiltinToolSet。
+///
+/// 配置非法沿用 run 的既有错误语义（`error[HARNESS_CONFIG_LOAD] (reason: …)`，
+/// exit 3、不降级 recorded）；缺 flag 已在 [`parse`] 阶段按用法错误 exit 2 拒绝。
+fn build_reexec_tool_set(args: &ReplayArgs) -> Result<Arc<BuiltinToolSet>, ExitCode> {
+    let workspace = args
+        .workspace_dir
+        .as_deref()
+        .expect("parse enforces explicit --workspace-dir for reexec");
+    match BuiltinToolSet::new_with_options(workspace, &args.allow_paths, true, None) {
+        Ok(set) => Ok(set),
+        Err(error) => {
+            let reason = error
+                .detail
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("workspace_invalid");
+            eprintln!(
+                "error[{}]: {} (reason: {reason})",
+                error.code, error.message
+            );
+            Err(ExitCode::from(crate::EXIT_ENTRY_INPUT))
+        }
+    }
+}
+
+/// 为每条记录决定回放方式并执行 reexec 漂移校验（DR-017 §1/§2）。
+///
+/// - `source=builtin` + read/grep/glob/diff 白名单 + `status=ok` → 用记录 args 调
+///   [`BuiltinToolSet::reexec_readonly`]（不写盘/不 spawn），结果经
+///   [`zgraph_trace::tool_result_sha256`] 与记录 `result_sha256` 比对；
+/// - 副作用工具（write/edit/apply_patch/bash）/MCP/Python/失败行 → **不执行**，
+///   复用记录结果（`ReplayTools::Recorded`），输出保持既有字段；
+/// - 结果漂移/reexec 失败 → `REPLAY_TOOL_RECORD_MISMATCH` exit 3；
+///   缺 `result_sha256` → `REPLAY_TOOL_RECORD_MISSING` exit 3。
+fn reexec_tool_modes(
+    args: &ReplayArgs,
+    calls: &[ToolCallRow],
+) -> Result<Vec<ReplayTools>, ExitCode> {
+    let set = build_reexec_tool_set(args)?;
+    let mut modes = Vec::with_capacity(calls.len());
+    for call in calls {
+        let reexecutable = call.source == ToolCallSource::Builtin
+            && BuiltinToolSet::is_reexec_readonly_tool(&call.tool_name)
+            && call.status == ToolCallStatus::Ok;
+        if !reexecutable {
+            modes.push(ReplayTools::Recorded);
+            continue;
+        }
+        let Some(expected) = call.result_sha256.as_deref() else {
+            return Err(report(ReplayError::record(
+                CODE_REPLAY_TOOL_RECORD_MISSING,
+                format!(
+                    "tool_calls row call_id='{}' tool='{}' is missing result_sha256; \
+                     reexec cannot verify drift",
+                    call.call_id, call.tool_name
+                ),
+            )));
+        };
+        let args_value: Value = match serde_json::from_str(&call.args_json) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(report(ReplayError::record(
+                    CODE_REPLAY_TOOL_RECORD_MISMATCH,
+                    format!(
+                        "tool_calls row call_id='{}' args_json is not valid JSON: {error}",
+                        call.call_id
+                    ),
+                )))
+            }
+        };
+        match set.reexec_readonly(&call.tool_name, &args_value) {
+            Ok(value) => {
+                let actual = match zgraph_trace::tool_result_sha256(&value) {
+                    Ok(sha) => sha,
+                    Err(error) => {
+                        return Err(report(ReplayError::record(
+                            CODE_REPLAY_TOOL_RECORD_MISMATCH,
+                            format!(
+                                "reexec result for call_id='{}' cannot be serialized: {error}",
+                                call.call_id
+                            ),
+                        )))
+                    }
+                };
+                if actual != expected {
+                    return Err(report(ReplayError::record(
+                        CODE_REPLAY_TOOL_RECORD_MISMATCH,
+                        format!(
+                            "reexec result drift for call_id='{}' tool='{}' node='{}': \
+                             recorded={expected} recomputed={actual}",
+                            call.call_id, call.tool_name, call.node_id
+                        ),
+                    )));
+                }
+                modes.push(ReplayTools::Reexec);
+            }
+            Err(failure) => {
+                return Err(report(ReplayError::record(
+                    CODE_REPLAY_TOOL_RECORD_MISMATCH,
+                    format!(
+                        "reexec failed for call_id='{}' tool='{}': {} ({})",
+                        call.call_id, call.tool_name, failure.reason, failure.message
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(modes)
 }
 
 /// `--mode=tools` 的 fail-closed 校验（顺序：missing → truncated → mismatch）。
@@ -1089,7 +1277,7 @@ fn json_text(value: Option<&Value>) -> String {
 mod tests {
     use super::{
         build_spec, ensure_replayable, index_recorded_outputs, parse, replay_recorded_human_graph,
-        validate_foreach_records, ReplayArgs, ReplayMode, CODE_REPLAY_RECORD_CORRUPT,
+        validate_foreach_records, ReplayArgs, ReplayMode, ReplayTools, CODE_REPLAY_RECORD_CORRUPT,
         CODE_REPLAY_RECORD_MISSING, CODE_REPLAY_RUN_NOT_COMPLETED,
     };
     use crate::run_cmd::output_hash;
@@ -1293,6 +1481,10 @@ mod tests {
             ReplayArgs {
                 run_id: "run-1".to_string(),
                 mode: ReplayMode::Events,
+                replay_tools: ReplayTools::Recorded,
+                allow_builtin_tools: false,
+                workspace_dir: None,
+                allow_paths: Vec::new(),
                 db: None,
                 json: false,
             }
@@ -1331,6 +1523,7 @@ mod tests {
             .expect("parse")
             .expect("not help");
         assert_eq!(parsed.mode, ReplayMode::Tools);
+        assert_eq!(parsed.replay_tools, ReplayTools::Recorded);
         let parsed = parse(&args(&[
             "--run",
             "r",
@@ -1353,18 +1546,49 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_reexec_only_for_tools_mode() {
-        // C1（REV-111）：reexec 仅 `--mode=tools` 报「v0.4 未实现」（exit 2）。
+    fn parse_reexec_requires_allow_builtin_tools_and_explicit_workspace() {
+        // v0.5/F1b（DR-017 §4 / AC-25 f）：reexec 缺 --allow-builtin-tools → usage 错。
         let error = parse(&args(&[
             "--run",
             "r",
             "--mode=tools",
             "--replay-tools=reexec",
         ]))
-        .expect_err("reexec not implemented for tools mode");
-        assert!(error.contains("not implemented in v0.4"), "{error}");
-        // tools + recorded（显式/缺省）合法。
-        assert!(parse(&args(&["--run", "r", "--mode=tools"])).is_ok());
+        .expect_err("missing --allow-builtin-tools");
+        assert!(error.contains("requires --allow-builtin-tools"), "{error}");
+        // 有 allow、无显式 --workspace-dir → usage 错（不默认 cwd）。
+        let error = parse(&args(&[
+            "--run",
+            "r",
+            "--mode=tools",
+            "--replay-tools=reexec",
+            "--allow-builtin-tools",
+        ]))
+        .expect_err("missing --workspace-dir");
+        assert!(error.contains("explicit --workspace-dir"), "{error}");
+        // 两者齐备 → Ok，参数保存供 reexec 使用。
+        let parsed = parse(&args(&[
+            "--run",
+            "r",
+            "--mode=tools",
+            "--replay-tools=reexec",
+            "--allow-builtin-tools",
+            "--workspace-dir",
+            "ws",
+            "--allow-path",
+            "extra",
+        ]))
+        .expect("parse")
+        .expect("not help");
+        assert_eq!(parsed.replay_tools, ReplayTools::Reexec);
+        assert!(parsed.allow_builtin_tools);
+        assert_eq!(parsed.workspace_dir, Some(PathBuf::from("ws")));
+        assert_eq!(parsed.allow_paths, vec![PathBuf::from("extra")]);
+        // tools + recorded（显式/缺省）仍合法且不需要 flags。
+        let parsed = parse(&args(&["--run", "r", "--mode=tools"]))
+            .expect("parse")
+            .expect("not help");
+        assert_eq!(parsed.replay_tools, ReplayTools::Recorded);
         assert!(parse(&args(&[
             "--run",
             "r",
@@ -1372,7 +1596,7 @@ mod tests {
             "--replay-tools=recorded"
         ]))
         .is_ok());
-        // events/outputs：recorded/reexec 均按裁决**忽略**（不报错）。
+        // events/outputs：该参数（及 reexec 前置 flag）被忽略，replay_tools=recorded。
         for mode in ["events", "outputs"] {
             for tools in ["recorded", "reexec"] {
                 let parsed = parse(&args(&[
@@ -1391,6 +1615,7 @@ mod tests {
                         ReplayMode::Outputs
                     }
                 );
+                assert_eq!(parsed.replay_tools, ReplayTools::Recorded);
             }
         }
     }
