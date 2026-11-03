@@ -15,7 +15,7 @@
 | 依赖 | **V2→V3→V4 串行**（同模块 `crates/zgraph-harness` 单写入者；e2e/docs 准备可并行）；V5 依赖 V2–V4 全部合并 |
 | 兼容红线 | 默认（无 skills/MCP/外部 harness）的图 hash/validate/run/trace/replay **逐字节不变**；`events.kind` 不变；DSL 规则/hash 不变；既有错误码/退出码不变（新增码只追加） |
 | 发布条件 | 兼容矩阵无新增失败；workspace/e2e/pytest 全绿；性能回退 ≤20%（同 v0.2 门禁）；AC-18/19/20 全过；文档 as-built（V5） |
-| 与 W5 关系 | **W5 共享评审队列延至 v0.4（M9）**；v0.3 不包含（**已裁决，§8 #1**） |
+| 与 W5 关系 | **W5 共享评审队列延至 v0.4（M9）**；v0.3 不包含（**已裁决，§8 #1**）；**W5 后于 2026-11-03 取消（DR-015）** |
 
 ## 1. 目标与非目标
 
@@ -28,7 +28,7 @@
 
 ### 1.2 非目标（v0.3 明确不做）
 
-- W5 共享评审队列（v0.4）；持久化/断点续跑（W3b 已不做）；多模态；prompt 模板引擎；工具并行执行；provider 多路由/fallback；输出 JSON Schema 强校验；skills 脚本执行；MCP 资源/提示（resources/prompts）与 sampling；动态子图/嵌套 foreach；外部 harness 的「双重状态机/双重 trace」。
+- W5 共享评审队列（v0.4；**已取消，2026-11-03，DR-015**）；持久化/断点续跑（W3b 已不做）；多模态；prompt 模板引擎；工具并行执行；provider 多路由/fallback；输出 JSON Schema 强校验；skills 脚本执行；MCP 资源/提示（resources/prompts）与 sampling；动态子图/嵌套 foreach；外部 harness 的「双重状态机/双重 trace」。
 - 不改变 DSL 1.0/R1–R18；skills/MCP/harness 均属 **Harness Loading/AgentConfig**，不参与 `graph_hash`。
 - 不引入 trace v7（默认）；MCP/工具审计如需 v7 另立 DR（候选见 DR-010 §8）。
 
@@ -95,12 +95,12 @@ V1 docs 设计冻结（本批，REV-096）
 | 外部 harness 协议不稳定 | 兼容/性能 | 薄 adapter、版本协商、fake external 契约测试、L2 不重跑 |
 | trace 膨胀/审计缺失 | 可观测性 | 默认沿用既有 streaming/tool 事件；v7 另立 DR |
 | 默认路径回归 | 兼容红线 | 每波 golden/兼容矩阵；默认分支零配置、代码路径隔离 |
-| W5 排期挤压 | v0.3 范围 | W5 明确延至 v0.4 |
+| W5 排期挤压 | v0.3 范围 | W5 明确延至 v0.4；**后于 2026-11-03 取消（DR-015）** |
 
 ## 7. 与 DR-004/W5 的关系
 
 - DR-004 的 v0.2（M7）范围已交付（W1–W4b）；本 DR 定义 **v0.3（M8）**，不修改 v0.2 决策（只追加）。
-- DR-004 §5 的 W5（共享评审队列）原为 v0.3 候选；因 v0.3 已由三项能力占满，**W5 延至 v0.4（M9）**（**已裁决，§8 #1**）。
+- DR-004 §5 的 W5（共享评审队列）原为 v0.3 候选；因 v0.3 已由三项能力占满，**W5 延至 v0.4（M9）**（**已裁决，§8 #1**）；**W5 后于 2026-11-03 取消（DR-015）**。
 - DR-004 §10 追加 v0.3 设计冻结执行记录（本批，REV-096）。
 
 ## 8. Lead 裁决（REV-096 A–D 范围；2026-11-01 已确认）
@@ -109,7 +109,7 @@ V1 docs 设计冻结（本批，REV-096）
 
 | # | 事项 | 裁决 |
 |---|---|---|
-| 1 | W5 共享评审队列排期 | **延至 v0.4（M9）**；v0.3 不含 |
+| 1 | W5 共享评审队列排期 | **延至 v0.4（M9）**；v0.3 不含；**后于 2026-11-03 取消（DR-015）** |
 | 2 | v0.3 发布范围 | **要求三能力全部实现**（V2–V4 全部合并后才允许 V5 发布） |
 | 3 | MCP trace | **默认不新增 schema（不 v7）**：沿用 `llm_calls` + `streaming_events` 的 `tool_call_*`；server 身份由 `mcp__<server>__<tool>` 工具名表达；审计增强另立 DR，v0.3 不做 |
 | 4 | skills frontmatter 未知顶层字段 | **拒绝**（`$schema` 允许忽略；`metadata` 为自由 map）；错误 `HARNESS_SKILL_INVALID{reason:"unknown_field"}` |
@@ -125,7 +125,7 @@ V1 docs 设计冻结（本批，REV-096）
 | 14 | StopReason / cached tokens | **StopReason 不新增枚举**（`Other{raw}`）；`cached_input_tokens`/`cache_write_input_tokens` **v0.3 丢弃**（文档注明） |
 | 15 | 适配器顺序 | **Codex 先**（exec --json）；**DSH ACP best-effort 后**（`dsh --profile acp`；headless/sdk 不可依赖） |
 
-> 本表取代原「待确认」状态；W5/v0.3 范围已按裁决固定。
+> 本表取代原「待确认」状态；W5/v0.3 范围已按裁决固定。**W5 后于 2026-11-03 取消（DR-015）**。
 
 ## 9. 实现执行记录（as-built，2026-11-02，REV-101；只追加）
 

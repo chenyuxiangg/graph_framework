@@ -23,7 +23,7 @@
 
 - API 服务 / 前端 / Agent 资产平台 / 多租户。
 - 多 provider 路由/fallback、多模态、MCP、工具并行执行。
-- 共享评审队列（v0.3 候选，见 §3 的 W5）。
+- 共享评审队列（v0.3 候选，见 §3 的 W5；**已取消，用户 2026-11-03，DR-015**）。
 - 框架级 artifact 存储（SOP v1 以数据值传递）。
 - 历史 trace 重写（只做 forward-only 迁移，见 D5）。
 - **durable run（崩溃后恢复）**：作为 W3b 可选范围，默认不纳入 v0.2 发布条件（需用户确认，见 §9）。
@@ -123,10 +123,11 @@
 - 模块：`dsl` + `kernel` + `trace` + `e2e` + `docs`；spec 01/03/06；第二评审。
 - DoD：N 由 entry input/上游列表决定；item 独立实例/trace；join 正确；失败/取消/上限符合 W4a；回放可复现；e2e。
 
-### W5（候选，v0.3）· 共享评审队列
+### W5（候选，v0.3）· 共享评审队列（**已取消**：用户 2026-11-03，DR-015）
 
 - 一个评审节点按到达顺序排队处理多份投递、评完一个放行一个；需要节点邮箱/多次激活/按 item 路由，依赖 W4。
 - **v0.2 不做**；W4 完成后评估 v0.3。
+- **后续状态**：历次延期 v0.3→v0.4→v0.5 后，**用户 2026-11-03 决定取消**（不做，不是延期；见 [`DR-015`](DR-015-v05-roadmap-and-w5-removal.md)）；本条保留历史。
 
 ---
 
@@ -281,4 +282,4 @@
 
   - **v0.3.0 发布收口（2026-11-02，REV-104）**：分支 `chore/process-v03-release`（基于 main 含 V5a/V5b）；`Cargo.toml [workspace.package] version = "0.3.0"` + `Cargo.lock` 7 个本地 crate 同步；release 构建 `cargo build --release -p zgraph-cli --bin zgraph --locked`，`--version` = `zgraph 0.3.0 (DSL 1.0)`；新增 [`doc/perf-baseline-v0.3.txt`](../perf-baseline-v0.3.txt)（AC-01 +0.0%、AC-12 −4.0%、SOP smoke −7.3%，门禁通过；full-60 运行期 ISSUE-112 发布例外）；README v0.3.0（M0–M8）/progress 最终态；产物 `dist/zgraph-v0.3.0-*.tar.gz` + sha256 + `dist/RELEASE_NOTES-v0.3.0.md` 由 Lead/发布流程构建；tag `v0.3.0`（发布流程执行中）；GitHub Release `chenyuxiangg/graph_framework`。兼容矩阵：默认（无 skills/MCP/外部 harness）路径与 v0.2.0 逐字节一致（V5b AC-18/19/20 回归），DSL 1.0/19 码不变。下一步 v0.4（M9）W5 + ISSUE 清理。
 
-  - **v0.4.0 发布收口（2026-11-03，REV-113）**：分支 `chore/process-v04-release`（基于 main `8897053`，含 D2–D5c）；`Cargo.toml [workspace.package] version="0.4.0"` + `Cargo.lock` 7 个本地 crate 同步；release `--locked` 构建成功，`--version`=`zgraph 0.4.0 (DSL 1.0)`；新增 [`doc/perf-baseline-v0.4.txt`](../perf-baseline-v0.4.txt)（5-trial：AC-01 +0.0%、AC-12 −0.7%、SOP smoke +0.0%，门禁通过；full-60 validate +6.7%、运行期 ISSUE-112 例外；首轮 3-trial warm 噪声 AC-01 +17.6% 已注明）；README v0.4.0（M0–M9）/progress 最终态；spec as-built 00/02/05 §5.15/06 §6.15/07 AC-21–24/08 §8.13 + PROVENANCE 第 27 条；产物 `dist/zgraph-v0.4.0-*.tar.gz` + sha256 + `dist/RELEASE_NOTES-v0.4.0.md` 由 Lead/发布流程构建；tag `v0.4.0`（发布流程执行中，用户授权后创建）；GitHub Release `chenyuxiangg/graph_framework`。兼容矩阵：默认（无 opt-in/无工具）路径与 v0.3.0 逐字节一致（v04_regression），DSL 1.0/19 码不变；trace v6→v7 只新增 `tool_calls`。已知限制：bash 仅 macOS/嵌套 fail-closed、真实隔离需用户终端、cargo/node 默认不可执行、hardlink/TOCTOU 残余、trace 无 FK 清理、reexec v0.5、W5→v0.5。下一步 v0.5。
+  - **v0.4.0 发布收口（2026-11-03，REV-113）**：分支 `chore/process-v04-release`（基于 main `8897053`，含 D2–D5c）；`Cargo.toml [workspace.package] version="0.4.0"` + `Cargo.lock` 7 个本地 crate 同步；release `--locked` 构建成功，`--version`=`zgraph 0.4.0 (DSL 1.0)`；新增 [`doc/perf-baseline-v0.4.txt`](../perf-baseline-v0.4.txt)（5-trial：AC-01 +0.0%、AC-12 −0.7%、SOP smoke +0.0%，门禁通过；full-60 validate +6.7%、运行期 ISSUE-112 例外；首轮 3-trial warm 噪声 AC-01 +17.6% 已注明）；README v0.4.0（M0–M9）/progress 最终态；spec as-built 00/02/05 §5.15/06 §6.15/07 AC-21–24/08 §8.13 + PROVENANCE 第 27 条；产物 `dist/zgraph-v0.4.0-*.tar.gz` + sha256 + `dist/RELEASE_NOTES-v0.4.0.md` 由 Lead/发布流程构建；tag `v0.4.0`（发布流程执行中，用户授权后创建）；GitHub Release `chenyuxiangg/graph_framework`。兼容矩阵：默认（无 opt-in/无工具）路径与 v0.3.0 逐字节一致（v04_regression），DSL 1.0/19 码不变；trace v6→v7 只新增 `tool_calls`。已知限制：bash 仅 macOS/嵌套 fail-closed、真实隔离需用户终端、cargo/node 默认不可执行、hardlink/TOCTOU 残余、trace 无 FK 清理、reexec v0.5、W5→v0.5。下一步 v0.5。**后于 2026-11-03 用户取消 W5（见 DR-015）**。

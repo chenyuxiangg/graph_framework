@@ -48,7 +48,7 @@
 
 ### 1.3 非目标（W4a 明确）
 
-- W5 共享评审队列；动态子图；**嵌套 foreach**；`on_item_error` 非 `fail`（v0.2 闭集仅 fail）；dynamic port routing（join 单端口有序数组，不动态加端口）；durable/checkpoint（W3b 已决定不做）；item 级独立重试策略（仅 attempt/max_attempts）；foreach 用于 `start`/`end`/`subgraph`；子图内 foreach。
+- W5 共享评审队列（**已取消，2026-11-03，DR-015**）；动态子图；**嵌套 foreach**；`on_item_error` 非 `fail`（v0.2 闭集仅 fail）；dynamic port routing（join 单端口有序数组，不动态加端口）；durable/checkpoint（W3b 已决定不做）；item 级独立重试策略（仅 attempt/max_attempts）；foreach 用于 `start`/`end`/`subgraph`；子图内 foreach。
 - 不做「按 item 并行度上限」配置（沿用全局/每 run worker 名额；N 只由 `max_items` 约束）。
 - 不改 `NodeHandler`/worker 协议（per-item 仍是同一 handler 被多次调用）。
 
@@ -416,7 +416,7 @@ CREATE INDEX IF NOT EXISTS idx_foreach_expansions_run ON foreach_expansions(run_
   `foreach: {items_port, key_field, join}` → per-item W（工作）/R（评审）/P（解析）链 → join 到下一设计角色（有序 artifact 列表）。
 - **静态 v1/v1.1 profile 保留兼容**（approved-only / rework）；dynamic-N 是第三个 profile，不替换静态。
 - §7 codegen：dynamic profile **不再按 N codegen**（同一张图跑任意 N）；静态 profile 的 codegen `--mode` 保留。
-- §9 延期项移除「动态 N」；W5 共享评审队列仍延期。
+- §9 延期项移除「动态 N」；W5 共享评审队列仍延期。**后于 2026-11-03 取消（DR-015）**。
 - 只写设计，不写 as-built（W4b-docs 回写）。
 
 ---

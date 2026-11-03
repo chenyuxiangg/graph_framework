@@ -27,8 +27,8 @@
 - **测试（已实测）**：`cargo test -p zgraph-harness` **340/0/1**；`cargo test --workspace` **1216/0/3**；pytest **183**；e2e **23 target / 166/0/2**（v0.4 29 用例/5 target = D5c 28 + REV-112 补 1；v0.3 137 + v0.4 29 = 166）。
 - **性能**：[`doc/perf-baseline-v0.4.txt`](doc/perf-baseline-v0.4.txt)（5-trial：AC-01 +0.0%、AC-12 −0.7%、SOP smoke +0.0%，门禁通过；full-60 validate +6.7%、运行期 ISSUE-112 例外）。
 - **发布产物/状态**：`dist/zgraph-v0.4.0-*.tar.gz` + sha256、`dist/RELEASE_NOTES-v0.4.0.md` 由 Lead/发布流程构建；tag `v0.4.0`（**发布流程执行中**，用户授权后创建）；GitHub Release 由发布流程创建。
-- **已知限制**：bash 仅 macOS（嵌套/不可用 fail-closed；真实隔离证据需用户普通终端 `crates/zgraph-harness/scripts/verify-sandbox.sh`）；cargo/node 等构建工具默认不可执行；hardlink/TOCTOU 残余风险；trace 无 FK 删除清理；`reexec` v0.5；W5 共享评审队列延至 v0.5；ISSUE-176+ 台账见 [issues](doc/issues.md)。
-- **下一步**：v0.5（W5 + 真实 Codex/DSH 验证 + ISSUE 清理）；详见 [DR-012](doc/decisions/DR-012-v04-scope-and-waves.md) / [progress](doc/progress.md)。
+- **已知限制**：bash 仅 macOS（嵌套/不可用 fail-closed；真实隔离证据需用户普通终端 `crates/zgraph-harness/scripts/verify-sandbox.sh`）；cargo/node 等构建工具默认不可执行；hardlink/TOCTOU 残余风险；trace 无 FK 删除清理；`reexec` v0.5；**W5 共享评审队列已取消**（用户 2026-11-03，[DR-015](doc/decisions/DR-015-v05-roadmap-and-w5-removal.md)）；ISSUE-176+ 台账见 [issues](doc/issues.md)。
+- **下一步**：v0.5 候选（真实 Codex/DSH 验证 + ISSUE 清理 + `reexec` 等，**不含 W5**；W5 已取消见 [DR-015](doc/decisions/DR-015-v05-roadmap-and-w5-removal.md)）；详见 [DR-012](doc/decisions/DR-012-v04-scope-and-waves.md) / [progress](doc/progress.md)。
 
 ## 快速开始
 

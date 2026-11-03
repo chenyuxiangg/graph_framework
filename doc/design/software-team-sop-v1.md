@@ -3,7 +3,7 @@
 > **状态**：设计稿 **v1.2**（W4a 动态 N 设计冻结；REV-086）· 2026-11-01
 > **作者**：lead（v1）/ docs-writer（v1.1 升级，W2a0）/ docs-dev（v1.2 升级，W4a）· **分支**：`docs/docs-dynamic-fanout-design`
 > **关联**：DR-001（技术路线）、[`DR-005-w2a-defer-gate-freeze.md`](../decisions/DR-005-w2a-defer-gate-freeze.md)（返工语义冻结）、[`DR-007-w4a-dynamic-fanout-freeze.md`](../decisions/DR-007-w4a-dynamic-fanout-freeze.md)（动态 N 语义冻结）、spec v1.2 分册 00/01/02/03/04/05/06/07、`legacy/config/software_team_graph.json`（SOP 语义来源，冻结只读）、ISSUE-011/ISSUE-062/ISSUE-100
-> **版本约定（v1.2）**：本稿定义**三个 profile**——**approved-only v1**（框架 v0.1.x 能力内、语义不变）、**rework v1.1**（框架 v0.2 / W2a 的 opt-in deferrable gate + attempt-per-activation）、**dynamic-N v1.2**（框架 v0.2 / W4a 设计冻结的节点级 `foreach` 展开，§3.3/§7.3）。人工评审已由 W3a 实现（REV-079–084）；每节点最大扇出限制已由 W2b 实现（REV-074–077）；共享评审队列仍在延期项（§9，对应框架 W5）。
+> **版本约定（v1.2）**：本稿定义**三个 profile**——**approved-only v1**（框架 v0.1.x 能力内、语义不变）、**rework v1.1**（框架 v0.2 / W2a 的 opt-in deferrable gate + attempt-per-activation）、**dynamic-N v1.2**（框架 v0.2 / W4a 设计冻结的节点级 `foreach` 展开，§3.3/§7.3）。人工评审已由 W3a 实现（REV-079–084）；每节点最大扇出限制已由 W2b 实现（REV-074–077）；共享评审队列仍在延期项（§9，对应框架 W5）——**W5 已取消（用户 2026-11-03，DR-015）**。
 > **v1.2 增量（相对 v1.1）**：新增 dynamic-N profile（§3.3 topological 展开 + §7.3 codegen 规则 + §11.3 验收）；§9 移除「动态 N」延期项；§10 的「N 静态」限制在 dynamic-N profile 下被 `foreach` 取代（静态 profile 不受影响）。approved-only v1 / rework v1.1 的图结构/语义/`graph_hash` 完全不变。
 > **v1.1 增量（相对 v1）**：两个 profile 与环上 defer 边统一规则（§3.2）、`parse_verdict_rework` 契约（§5.2）、`max_attempts` 预算（§6/§7.3）、codegen `--mode`（§7）、有限返工验收（§11）。approved-only v1 的**图结构/语义/`graph_hash` 不变**（DR-005 §6.1）。
 > **范围**：只定义新 DSL（schema 1.0 / v1.2 语义）下的软件团队 SOP 图设计；**不含代码改动**。
@@ -33,7 +33,7 @@
 | 评审 | 5 条 manual 边 + 人工 `trigger-edge` | **评审 agent 节点**（共享 `design_reviewer` 资产），无人工等待 |
 | 文件端口 | `iport/oport` 文件存在性 | 端口是类型化数据值；产物内容随 agent output 传递 |
 | 返工 | 自环重跑 | **approved-only v1**：评审不通过 → `P` 抛错 → run `Failed`；**rework v1.1**：`parse_verdict_rework` 的 `rework` 是正常输出 → 回边重入 → 有限返工（`max_attempts` 兜底） |
-| 共享评审队列 | 无 | v1/v1.1 不做（每个工作 agent 配独立评审节点）；共享队列框架 v0.3（W5） |
+| 共享评审队列 | 无 | v1/v1.1 不做（每个工作 agent 配独立评审节点）；共享队列框架 v0.3（W5）——**W5 已取消（用户 2026-11-03，DR-015）** |
 
 > 依据：用户 2026-10-31 确认的设计方向——设计角色为主链关键节点、设计角色派发工作 agent、评审由共享 `design_reviewer` 资产的评审节点执行（设计角色定义评审标准并对结论负责，而非由设计 agent 亲自评审）；人工评审/图级有限返工/每节点最大扇出限制/动态 N 另起版本。
 
@@ -375,7 +375,7 @@ E -> D_next.<port>                                     # region 唯一出口、�
 
 1. **人工评审**：`WaitingHuman` + 外部 decide/resume + durable run（W3a/W3b；无人工等待；`manual` gate 仅静态值）。
 2. **每节点最大扇出限制**：无每节点 fan-out 上限；框架 W2b 增加加载期静态 + 运行期每激活上限。
-3. **共享评审队列**：一个评审节点按到达顺序排队处理多份投递，评完一个放行一个（需要节点邮箱/多次激活/按 item 路由，内核级改动；框架 W5/v0.3 候选）。
+3. **共享评审队列**：一个评审节点按到达顺序排队处理多份投递，评完一个放行一个（需要节点邮箱/多次激活/按 item 路由，内核级改动；框架 W5/v0.3 候选）——**W5 已取消（用户 2026-11-03，DR-015）**，SOP 以 per-item 评审节点为准。
 
 > **已移出延期项**：图级有限返工 —— v1.1 rework profile 落地（框架 W2a；语义冻结见 DR-005，验收见 §11.2 / spec 07 AC-14）；**动态 N** —— v1.2 dynamic-N profile（框架 W4a 设计冻结，DR-007；验收见 §11.3 / spec 07 AC-17），W4b 实现。
 >

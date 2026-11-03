@@ -8,7 +8,7 @@
 - 无。
 
 **下一步**
-- v0.5 规划：**W5 共享评审队列** + 真实 Codex/DSH 环境验证 + ISSUE 清理；REV-113 通过 → merge → dist/tag/GitHub Release（用户授权后）。
+- v0.5 候选：真实 Codex/DSH 验证 + ISSUE 清理 + `reexec` 等（**W5 已取消**，用户 2026-11-03，DR-015；不含 W5）；REV-113 通过 → merge → dist/tag/GitHub Release（用户授权后）。
 
 **阻塞**
 - 无硬阻塞；tag/GitHub Release 需用户发布前最终授权 + 新 token；bash 真实隔离证据需用户普通终端运行 `verify-sandbox.sh`（嵌套环境仅覆盖 fail-closed）。

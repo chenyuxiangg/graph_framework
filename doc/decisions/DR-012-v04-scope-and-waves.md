@@ -2,14 +2,14 @@
 
 > **状态**：V1 设计冻结（REV-105 已评审；沙箱 spike 结论已合入）。
 > **日期**：2026-11-02 · **作者**：docs-dev · **关联**：DR-013、DR-014、task-74 合同、05 §5.6/§5.14、06 §6.2/§6.14、07 AC-21–24
-> **用户决策（task-74）**：文件/搜索/bash 工具 + **严格 workspace jail** + **OS 沙箱**，全部 **opt-in**；工具命名 **`builtin__<tool>`**；trace **schema v7 + `tool_calls` + 默认 recorded 回放**；W5 顺延 **v0.5**。
+> **用户决策（task-74）**：文件/搜索/bash 工具 + **严格 workspace jail** + **OS 沙箱**，全部 **opt-in**；工具命名 **`builtin__<tool>`**；trace **schema v7 + `tool_calls` + 默认 recorded 回放**；W5 顺延 **v0.5**；**W5 后于 2026-11-03 取消（DR-015）**。
 
 ## 0. 摘要
 
 | 项 | 冻结 |
 |---|---|
 | 范围 | **内置工具 8 个**：`builtin__read`/`write`/`edit`/`apply_patch`/`diff`/`grep`/`glob`/`bash`；严格 workspace jail；bash OS 沙箱；trace v7 + 工具级回放 |
-| 非目标 | W5 共享评审队列（→v0.5）；多模态；工具并行；无沙箱 bash fallback；Windows 沙箱（v0.4 只保证 macOS，Linux 备选文档化）；skill 脚本执行；网络代理 |
+| 非目标 | W5 共享评审队列（→v0.5；**已取消，DR-015**）；多模态；工具并行；无沙箱 bash fallback；Windows 沙箱（v0.4 只保证 macOS，Linux 备选文档化）；skill 脚本执行；网络代理 |
 | 默认不变 | 无 `--allow-builtin-tools` / 无 workspace 配置：图 hash/validate/run/trace/replay 逐字节不变；DSL 1.0/R1–R18/19 码不变 |
 | 工具命名 | `builtin__<tool>`（双下划线命名空间；与 `mcp__<server>__<tool>` 并列） |
 | opt-in | `--allow-builtin-tools`（文件/搜索）+ `--allow-bash`（bash 额外）；二者缺省关 |
@@ -31,7 +31,7 @@
 
 ### 1.2 非目标
 
-- **W5 共享评审队列 → v0.5**（用户/Lead 决策；v0.4 不含）。
+- **W5 共享评审队列 → v0.5**（用户/Lead 决策；v0.4 不含）；**W5 后于 2026-11-03 取消（DR-015）**。
 - 工具并行执行（沿用串行）；多模态；skill 脚本执行；MCP resources/prompts；OAuth/DCR。
 - Windows 沙箱/完整跨平台：v0.4 **只保证 macOS**；Linux 用 `bwrap`/`landlock` 作备选文档化（spike 结论，未实测不承诺）。
 - 不做「无沙箱 bash」逃生门；不做网络代理/域名白名单（v0.4 仅 `--allow-network` 全开）。
@@ -119,7 +119,7 @@ D1 docs 设计冻结（本批，REV-105）
 | 5 | apply_patch 多文件原子性 | **已裁决：严格原子**：全成功或全不改；跨文件事务用「暂存+回滚」；不做部分应用 |
 | 6 | v7 字段上限 | **已裁决**：args/result **32 KiB**、bash stdout/stderr **16 KiB head+tail**、command **8 KiB**、path **4 KiB**、单 run **10000 行**；超限 truncated + 全量 sha256；副作用回放遇截断 **fail-closed**；reexec v0.5 |
 | 7 | 只读工具 reexec 集合 | **已裁决**：`read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **永不** reexec |
-| 8 | W5 | 顺延 v0.5（已裁决） |
+| 8 | W5 | 顺延 v0.5（已裁决）；**后于 2026-11-03 取消（DR-015）** |
 
 ## 9. 实现执行记录（as-built，2026-11-03，REV-113；只追加）
 
