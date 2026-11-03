@@ -18,6 +18,14 @@
   scratch；`session/request_permission` 默认 **取消并上报**（不应答会挂起），可用
   `ZGRAPH_DSH_PERMISSION=allow_once|reject_once|cancel` 显式覆盖；不写 token/key。
 - DSH 二进制：`DSH_BIN` > `PATH` 中的 `dsh` > 常见安装位置；**不硬编码**为唯一路径。
+  `initialize` 断言 `protocolVersion == 1` 且 `agentInfo.name` 以 `deepseek-harness`
+  开头（防止 `DSH_BIN` 指向错误二进制）。
+
+已知偏差（F5e 修；本波不改 Rust）：
+- ACP 不提供 input/output token → `result` **省略 `usage`**（不伪造）。harness
+  `plugin.rs::parse_usage(None)` 当前回退 `Usage::zero()`（source=Provider），会把
+  “不可得”显示为 0；这是已知偏差，F5e 在 Rust plugin/CLI 侧标 `Unavailable`。
+- `usage_update`（used/size）只是上下文占用，直接忽略（不映射到 token）。
 
 环境变量（诊断/测试/部署）：
 - `DSH_BIN`：dsh 可执行文件；缺省自动查找。
@@ -504,8 +512,14 @@ class AcpClient:
                 f"unsupported ACP protocolVersion {version!r} (expected {ACP_PROTOCOL_VERSION})",
             )
         self.agent_info = result.get("agentInfo") if isinstance(result.get("agentInfo"), dict) else {}
+        name = self.agent_info.get("name")
+        if not isinstance(name, str) or not name.startswith("deepseek-harness"):
+            raise AcpError(
+                "version",
+                f"unexpected ACP agentInfo.name {name!r} (expected prefix 'deepseek-harness')",
+            )
         auth_methods = result.get("authMethods")
-        log(f"initialize ok protocolVersion={version} authMethods={auth_methods!r}")
+        log(f"initialize ok protocolVersion={version} agentInfo.name={name} authMethods={auth_methods!r}")
         self.initialized = True
 
     def new_session(self, cwd: str, timeout: float) -> str:
@@ -776,6 +790,8 @@ class AcpAdapter:
             return
         stop_reason = result.get("stopReason")
         stop_literal = map_stop_reason(stop_reason if isinstance(stop_reason, str) else "end_turn")
+        # 已知偏差（F5e）：ACP 无 token 计数 → 省略 usage 字段；plugin.rs 当前把
+        # None 映射为 Usage::zero()（非 Unavailable），F5e 在 Rust 侧修正。
         send(
             {
                 "v": PROTOCOL_VERSION,

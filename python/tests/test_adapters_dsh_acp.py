@@ -139,9 +139,10 @@ def main():
         log({"server": method, "id": mid})
         if method == "initialize":
             version = 2 if MODE == "version" else 1
+            name = "other-agent" if MODE == "wrong_agent" else "deepseek-harness-acp"
             send({"jsonrpc": "2.0", "id": mid,
                   "result": {"protocolVersion": version,
-                             "agentInfo": {"name": "deepseek-harness-acp"},
+                             "agentInfo": {"name": name},
                              "authMethods": []}})
         elif method == "session/new":
             log({"session_new": message.get("params")})
@@ -385,6 +386,20 @@ def test_version_mismatch_maps_to_version_error(tmp_path: Path) -> None:
     assert out[-1]["type"] == "error"
     assert out[-1]["reason"] == "version"
     assert not any(frame.get("type") == "result" for frame in out)
+
+
+def test_wrong_agent_name_maps_to_version_error(tmp_path: Path) -> None:
+    """REV-128 补充：agentInfo.name 非 deepseek-harness 前缀 → 拒绝错误二进制。"""
+    binary = _fake_acp(tmp_path)
+    env = _env(tmp_path, binary, mode="wrong_agent")
+    out, _err, code = _run_adapter(env, _run_frames())
+    assert code == 0
+    assert out[-1]["type"] == "error"
+    assert out[-1]["reason"] == "version"
+    assert "agentInfo.name" in out[-1]["message"]
+    assert not any(frame.get("type") == "result" for frame in out)
+    entries = _log_entries(tmp_path / "acp.log")
+    assert not any("session_new" in entry for entry in entries), "must not create session"
 
 
 def test_spawn_failure_maps_to_spawn_failed(tmp_path: Path) -> None:
