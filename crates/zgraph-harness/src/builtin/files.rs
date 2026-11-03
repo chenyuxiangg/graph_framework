@@ -19,7 +19,7 @@ use crate::constants::{
     BUILTIN_TOOL_TIMEOUT_MS, BUILTIN_WRITE_MAX_BYTES,
 };
 use crate::error::HarnessError;
-use crate::tools::{ToolDef, ToolFailure};
+use crate::tools::{validate_tool_arguments, ToolDef, ToolFailure};
 
 /// 工具名（冻结；DR-013 §0/§3）。
 pub(crate) const TOOL_READ: &str = "builtin__read";
@@ -195,6 +195,70 @@ impl BuiltinToolSet {
             .unwrap_or(false);
         metadata.truncated |= payload_truncated;
         Ok(BuiltinCallOutput { content, metadata })
+    }
+
+    /// v0.5/F1a（DR-017 §1/§4）：reexec 只读工具白名单（顺序固定；副作用工具不在内）。
+    pub const REEXEC_READONLY_TOOLS: [&'static str; 4] = [
+        TOOL_READ,
+        crate::builtin::search::TOOL_GREP,
+        crate::builtin::search::TOOL_GLOB,
+        TOOL_DIFF,
+    ];
+
+    /// 工具名是否属于 reexec 只读白名单。
+    pub fn is_reexec_readonly_tool(tool_name: &str) -> bool {
+        Self::REEXEC_READONLY_TOOLS.contains(&tool_name)
+    }
+
+    /// v0.5/F1a（DR-017 §1）：**reexec 只读工具**重跑入口（供 F1b CLI 回放使用）。
+    ///
+    /// - 白名单：`builtin__read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/
+    ///   `bash` → `reexec_side_effect_forbidden`；其它（MCP/Python/未注册）→
+    ///   `reexec_unsupported`；
+    /// - 参数经既有 `ToolDef` + [`crate::tools::validate_tool_arguments`] 校验；
+    /// - **复用只读实现**：不写文件、不 spawn 进程、不产生副作用、不写 trace/sink、
+    ///   不更新预算；jail/workspace/allow-path 使用本 [`BuiltinToolSet`] 构造时的
+    ///   配置（未启用文件工具 → 拒绝，**绝不回退当前目录**）；
+    /// - 返回**完整** `Value`（不套 32 KiB 结果 cap；F1b 用 trace `result_sha256`
+    ///   比对漂移）。
+    pub fn reexec_readonly(&self, tool_name: &str, args: &Value) -> Result<Value, ToolFailure> {
+        if matches!(
+            tool_name,
+            TOOL_WRITE | TOOL_EDIT | TOOL_APPLY_PATCH | crate::builtin::bash::TOOL_BASH
+        ) {
+            return Err(ToolFailure::new(
+                "reexec_side_effect_forbidden",
+                format!("tool '{tool_name}' has side effects and cannot be re-executed"),
+            ));
+        }
+        if !Self::is_reexec_readonly_tool(tool_name) {
+            return Err(ToolFailure::new(
+                "reexec_unsupported",
+                format!("tool '{tool_name}' is not in the reexec read-only whitelist"),
+            ));
+        }
+        // 未注入文件工具（如仅 --allow-bash 的集合）：拒绝，不回退默认目录。
+        let Some(definition) = self
+            .defs
+            .iter()
+            .find(|definition| definition.name == tool_name)
+        else {
+            return Err(ToolFailure::new(
+                "reexec_unsupported",
+                format!(
+                    "tool '{tool_name}' is not registered (builtin file tools are not enabled)"
+                ),
+            ));
+        };
+        validate_tool_arguments(definition, args)?;
+        // 复用只读实现：仅 4 个纯读工具；无写盘/spawn/sink/trace/budget 副作用。
+        match tool_name {
+            TOOL_READ => self.read(args),
+            crate::builtin::search::TOOL_GREP => self.grep(args),
+            crate::builtin::search::TOOL_GLOB => self.glob(args),
+            TOOL_DIFF => self.diff(args),
+            _ => unreachable!("whitelist checked above"),
+        }
     }
 
     /// D5b1/REV-110 N1：bash 执行前可记录的元数据摘要（command/cwd/profile_sha256）。
@@ -1540,5 +1604,290 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "rollback restores original permissions");
+    }
+    // ------------------------------------------------------------------
+    // v0.5/F1a：reexec 只读工具 runner（DR-017 §1/§4）
+    // ------------------------------------------------------------------
+
+    fn normal_value(set: &BuiltinToolSet, tool_name: &str, args: Value) -> Value {
+        let text = set.call(tool_name, &args).expect("normal call ok");
+        serde_json::from_str(&text).expect("normal call JSON")
+    }
+
+    fn workspace_snapshot(root: &Path) -> Vec<(String, u64, String)> {
+        fn walk(root: &Path, current: &Path, out: &mut Vec<(String, u64, String)>) {
+            let Ok(entries) = std::fs::read_dir(current) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("relative")
+                        .display()
+                        .to_string();
+                    out.push((relative, bytes.len() as u64, sha256_hex(&bytes)));
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        walk(root, root, &mut entries);
+        entries.sort();
+        entries
+    }
+
+    #[test]
+    fn reexec_read_supports_offset_and_limit() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("a.txt"), "l0\nl1\nl2\nl3\n").expect("write");
+        let args = json!({"path": "a.txt", "offset": 1, "limit": 2});
+        let value = set.reexec_readonly(TOOL_READ, &args).expect("reexec read");
+        assert_eq!(value["content"], json!("l1\nl2"));
+        assert_eq!(value["lines"], json!(2));
+        assert_eq!(value["total_lines"], json!(4));
+        assert_eq!(value, normal_value(&set, TOOL_READ, args));
+    }
+
+    #[test]
+    fn reexec_grep_covers_regex_fixed_and_glob_filter() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("a.rs"), "needle one\nA.B\n").expect("a");
+        std::fs::write(workspace.path().join("b.txt"), "needle two\n").expect("b");
+        for args in [
+            json!({"pattern": "needle", "path": "."}),
+            json!({"pattern": "A.B", "fixed_strings": true}),
+            json!({"pattern": "needle", "glob": "**/*.rs"}),
+        ] {
+            let value = set
+                .reexec_readonly(crate::builtin::search::TOOL_GREP, &args)
+                .expect("reexec grep");
+            assert_eq!(
+                value,
+                normal_value(&set, crate::builtin::search::TOOL_GREP, args.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn reexec_glob_lists_sorted_paths() {
+        let (workspace, set) = set();
+        std::fs::create_dir_all(workspace.path().join("dir")).expect("dir");
+        std::fs::write(workspace.path().join("z.rs"), "").expect("z");
+        std::fs::write(workspace.path().join("a.rs"), "").expect("a");
+        std::fs::write(workspace.path().join("dir/b.rs"), "").expect("b");
+        let args = json!({"pattern": "**/*.rs"});
+        let value = set
+            .reexec_readonly(crate::builtin::search::TOOL_GLOB, &args)
+            .expect("reexec glob");
+        assert_eq!(
+            value["paths"],
+            json!(["a.rs", "dir/b.rs", "z.rs"]),
+            "{value}"
+        );
+        assert_eq!(
+            value,
+            normal_value(&set, crate::builtin::search::TOOL_GLOB, args)
+        );
+    }
+
+    #[test]
+    fn reexec_diff_previews_without_writing() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("d.txt"), "one\ntwo\n").expect("write");
+        let args = json!({"path": "d.txt", "old_string": "two", "new_string": "TWO"});
+        let value = set.reexec_readonly(TOOL_DIFF, &args).expect("reexec diff");
+        assert_eq!(value["changed"], json!(true));
+        assert!(value["diff"].as_str().expect("diff").contains("+TWO"));
+        assert_eq!(value, normal_value(&set, TOOL_DIFF, args));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("d.txt")).expect("read"),
+            "one\ntwo\n"
+        );
+    }
+
+    #[test]
+    fn reexec_rejects_side_effect_tools() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("a.txt"), "x").expect("write");
+        let cases = [
+            (
+                TOOL_WRITE,
+                json!({"path": "a.txt", "content": "y", "overwrite": true}),
+            ),
+            (
+                TOOL_EDIT,
+                json!({"path": "a.txt", "old_string": "x", "new_string": "y"}),
+            ),
+            (
+                TOOL_APPLY_PATCH,
+                json!({"patch": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-x\n+y\n"}),
+            ),
+            (
+                crate::builtin::bash::TOOL_BASH,
+                json!({"command": "echo hi"}),
+            ),
+        ];
+        for (tool_name, args) in cases {
+            let error = set.reexec_readonly(tool_name, &args).expect_err(tool_name);
+            assert_eq!(error.reason, "reexec_side_effect_forbidden", "{tool_name}");
+        }
+        // 拒绝不产生副作用。
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("a.txt")).expect("read"),
+            "x"
+        );
+    }
+
+    #[test]
+    fn reexec_rejects_unknown_tools_and_missing_file_tool_configuration() {
+        let (workspace, set) = set();
+        for tool_name in ["mcp__fake__echo", "echo", "builtin__unknown"] {
+            let error = set
+                .reexec_readonly(tool_name, &json!({}))
+                .expect_err(tool_name);
+            assert_eq!(error.reason, "reexec_unsupported", "{tool_name}");
+        }
+        // 仅 bash 的集合（文件工具未启用）→ 拒绝，不回退当前目录。
+        let runner = crate::test_support::FakeSandboxRunner::new();
+        let bash_only = BuiltinToolSet::new_with_runner(
+            &std::fs::canonicalize(workspace.path()).expect("canonical"),
+            &[],
+            false,
+            runner,
+        )
+        .expect("bash-only set");
+        let error = bash_only
+            .reexec_readonly(TOOL_READ, &json!({"path": "a.txt"}))
+            .expect_err("file tools disabled");
+        assert_eq!(error.reason, "reexec_unsupported");
+        assert!(error.message.contains("not enabled"), "{}", error.message);
+    }
+
+    #[test]
+    fn reexec_validates_arguments_and_jail_boundaries() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("a.txt"), "needle").expect("write");
+        assert_eq!(
+            set.reexec_readonly(TOOL_READ, &json!({"path": "missing.txt"}))
+                .expect_err("missing")
+                .reason,
+            "not_found"
+        );
+        assert_eq!(
+            set.reexec_readonly(TOOL_READ, &json!({"path": "a.txt", "limit": 0}))
+                .expect_err("limit")
+                .reason,
+            "invalid_args"
+        );
+        assert_eq!(
+            set.reexec_readonly(crate::builtin::search::TOOL_GREP, &json!({"pattern": "("}))
+                .expect_err("regex")
+                .reason,
+            "invalid_regex"
+        );
+        assert_eq!(
+            set.reexec_readonly(TOOL_READ, &json!({"path": "../outside"}))
+                .expect_err("escape")
+                .reason,
+            "path_escape"
+        );
+    }
+
+    #[test]
+    fn reexec_has_no_side_effects_and_is_deterministic() {
+        let (workspace, set) = set();
+        std::fs::write(workspace.path().join("a.txt"), "needle one\n").expect("a");
+        std::fs::write(workspace.path().join("d.txt"), "one\ntwo\n").expect("d");
+        let before = workspace_snapshot(workspace.path());
+        let calls = [
+            (TOOL_READ, json!({"path": "a.txt"})),
+            (
+                crate::builtin::search::TOOL_GREP,
+                json!({"pattern": "needle", "path": "."}),
+            ),
+            (
+                crate::builtin::search::TOOL_GLOB,
+                json!({"pattern": "*.txt"}),
+            ),
+            (
+                TOOL_DIFF,
+                json!({"path": "d.txt", "old_string": "two", "new_string": "TWO"}),
+            ),
+        ];
+        let mut first_round = Vec::new();
+        for (tool_name, args) in &calls {
+            first_round.push(
+                set.reexec_readonly(tool_name, args)
+                    .expect("reexec positive"),
+            );
+        }
+        for (index, (tool_name, args)) in calls.iter().enumerate() {
+            let again = set.reexec_readonly(tool_name, args).expect("reexec again");
+            assert_eq!(again, first_round[index], "determinism");
+        }
+        let after = workspace_snapshot(workspace.path());
+        assert_eq!(before, after, "reexec must not modify the workspace");
+        assert!(before
+            .iter()
+            .all(|(path, _, _)| !path.contains("zgraph-tmp")));
+        assert!(workspace.path().join(".tmp").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn reexec_returns_full_untruncated_value() {
+        let (workspace, set) = set();
+        let lines: Vec<String> = (0..400)
+            .map(|index| format!("needle-{index}-{}", "x".repeat(200)))
+            .collect();
+        std::fs::write(workspace.path().join("wide.txt"), lines.join("\n")).expect("write");
+        let args = json!({"pattern": "needle", "path": ".", "max_results": 1000});
+        let value = set
+            .reexec_readonly(crate::builtin::search::TOOL_GREP, &args)
+            .expect("reexec grep");
+        assert_eq!(value["total"], json!(400), "full result retained");
+        assert_eq!(value["matches"].as_array().expect("matches").len(), 400);
+        // 正常工具结果受 32 KiB cap（会截断）；reexec 返回完整 Value 供 sha 比对。
+        let normal_text = set
+            .call(crate::builtin::search::TOOL_GREP, &args)
+            .expect("normal grep");
+        assert!(normal_text.len() <= crate::constants::BUILTIN_RESULT_MAX_BYTES);
+        let normal: Value = serde_json::from_str(&normal_text).expect("normal json");
+        assert_eq!(normal["truncated"], json!(true));
+        assert!(
+            normal["matches"].as_array().expect("normal matches").len() < 400,
+            "normal result is truncated"
+        );
+    }
+    #[test]
+    fn reexec_reads_allow_path_read_only_without_modifying_it() {
+        let workspace = TempDir::new().expect("workspace");
+        let allow = TempDir::new().expect("allow");
+        std::fs::write(allow.path().join("ro.txt"), "allow-seed\n").expect("allow file");
+        let allow_canonical = std::fs::canonicalize(allow.path()).expect("canonical");
+        let set = BuiltinToolSet::new(
+            &std::fs::canonicalize(workspace.path()).expect("canonical"),
+            std::slice::from_ref(&allow_canonical),
+        )
+        .expect("set");
+        let path = allow_canonical.join("ro.txt").display().to_string();
+        let value = set
+            .reexec_readonly(TOOL_READ, &json!({"path": path}))
+            .expect("reexec allow-path read");
+        // read 结果按行拼接（无尾随换行）。
+        assert_eq!(value["content"], json!("allow-seed"));
+        // 只读：reexec 不修改 allow-path（write 工具本身也不在白名单）。
+        assert_eq!(
+            std::fs::read_to_string(allow_canonical.join("ro.txt")).expect("read"),
+            "allow-seed\n"
+        );
+        assert_eq!(
+            set.reexec_readonly(TOOL_WRITE, &json!({"path": path, "content": "x"}))
+                .expect_err("write forbidden")
+                .reason,
+            "reexec_side_effect_forbidden"
+        );
     }
 }
