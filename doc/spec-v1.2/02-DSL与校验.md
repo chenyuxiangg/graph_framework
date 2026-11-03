@@ -986,3 +986,5 @@ $ echo $?    # 2
 | 符号句柄 | `RegisteredGateOp`（内置 gate）/ `PythonSymbolRef`（格式信息）/ `ResolvedSymbols` 快照（04 §4.7），与 `CompiledGraph` 分离 | 04 |
 | `AgentCallConfig.input_mapping` 语义 | 端口名 → Agent 输入字段，05 消费 | 05 |
 | `graph_hash` 存储列 | 06 `runs.graph_hash` | 06 |
+
+> **v0.5（M10）V1 设计冻结草案（2026-11-03，REV-115）**：`--replay-tools=reexec`/预算参数/`--allow-write-path` 均属 CLI/Harness/trace，**DSL 仍 1.0/R1–R18/19 码、不参与 `graph_hash`**；默认（无新参数）图/校验/hash/run/trace 逐字节不变。

@@ -181,9 +181,9 @@
 | ISSUE-173 | P3 | harness/sandbox | v0.4 D1：构建工具（cargo/node/uv）默认不可执行（`process-exec` 收窄）；`--allow-exec-path` 目录级 opt-in；`cc` 需 `-isysroot`；只读 allow-path ≠ 可执行 | 用户构建任务默认失败/权限风险 | 文档明确默认不可用；`--allow-exec-path` 显式 opt-in（目录级）；issues 跟踪真实需求 | open | 2026-11-02 |
 | ISSUE-174 | P3 | trace/replay | v0.4 D1：回放默认 recorded-only（不执行任何工具）；`reexec` 接口保留、v0.5 落地（只读+pre_sha256 漂移检查）；v7 字段 32/16 KiB、无 blobs | 回放范围/一致性风险 | v0.4 只做 recorded；AC-24 g 无副作用证明；reexec v0.5 另评审 | open | 2026-11-02 |
 | ISSUE-175 | P3 | harness/tools | v0.4 D1：`--allow-path` 统一为**只读**；不提供 `--allow-write-path`（外部可写需改 `--workspace-dir`） | 需外部可写目录的用户受限（设计权衡） | 后续 v0.5 评估 `--allow-write-path`（独立开关+文档警示）；当前文档明确替代方案 | open | 2026-11-02 |
-| ISSUE-176 | P3 | kernel/test | v0.4 期间观察到 `kernel_cancel` 时序 flake（重跑通过；非 v0.4 引入） | CI 偶发失败 | 独立复现/加宽时序断言或重试；D5c 连跑 2 次未复现 | open | 2026-11-03 |
-| ISSUE-177 | P3 | e2e/test | `ac09` 并行 timing 偶发 flake（负载相关；v0.3 已知） | CI 偶发失败 | 沿用重跑；后续加宽时序/隔离 | open | 2026-11-03 |
-| ISSUE-178 | P3 | e2e/test | Codex adapter e2e 在并行负载下偶发 flake（fake 二进制/超时） | CI 偶发失败 | D5c 全量连跑 2 次通过；后续隔离/加宽超时 | open | 2026-11-03 |
-| ISSUE-179 | P3 | trace/storage | `tool_calls` 当前无 FK 级联删除清理（run 删除不会自动清 tool_calls；与 v6 既有表清理策略一致） | 长期 DB 膨胀/孤儿行 | v0.5 评估 `ON DELETE CASCADE` 或清理命令；当前文档/发布说明标注 | open | 2026-11-03 |
-| ISSUE-180 | P3 | harness/sandbox | bash 真实隔离仅 macOS；嵌套 CI 只覆盖 fail-closed；用户普通终端 `verify-sandbox.sh` 证据待补 | 发布已知限制（不能声称已全环境验证） | release notes 标注；用户终端跑脚本补证据；Linux/Windows 不支持 | open | 2026-11-03 |
-| ISSUE-181 | P3 | process/release | v0.3 残余 ISSUE-156–175 复核：多数仍 open（skills L2/正文、MCP P2、codex/DSH 环境、v0.4 新限制）；v0.4 发布不阻塞 | 台账需清理 | v0.5 集中清理/逐项 fixed 或延后 | open | 2026-11-03 |
+| ISSUE-176 | P3 | kernel/test | v0.4 期间观察到 `kernel_cancel` 时序 flake（重跑通过；非 v0.4 引入） | CI 偶发失败 | 独立复现/加宽时序断言或重试；D5c 连跑 2 次未复现 v0.5 F4 计划清理/复核 | open | 2026-11-03 |
+| ISSUE-177 | P3 | e2e/test | `ac09` 并行 timing 偶发 flake（负载相关；v0.3 已知） | CI 偶发失败 | 沿用重跑；后续加宽时序/隔离 v0.5 F4 计划清理/复核 | open | 2026-11-03 |
+| ISSUE-178 | P3 | e2e/test | Codex adapter e2e 在并行负载下偶发 flake（fake 二进制/超时） | CI 偶发失败 | D5c 全量连跑 2 次通过；后续隔离/加宽超时 v0.5 F4 计划清理/复核 | open | 2026-11-03 |
+| ISSUE-179 | P3 | trace/storage | `tool_calls` 当前无 FK 级联删除清理（run 删除不会自动清 tool_calls；与 v6 既有表清理策略一致） | 长期 DB 膨胀/孤儿行 | v0.5 评估 `ON DELETE CASCADE` 或清理命令；当前文档/发布说明标注 v0.5 F4 计划清理/复核 | open | 2026-11-03 |
+| ISSUE-180 | P3 | harness/sandbox | bash 真实隔离仅 macOS；嵌套 CI 只覆盖 fail-closed；用户普通终端 `verify-sandbox.sh` 证据待补 | 发布已知限制（不能声称已全环境验证） | release notes 标注；用户终端跑脚本补证据；Linux/Windows 不支持 v0.5 F4 计划清理/复核 | open | 2026-11-03 |
+| ISSUE-181 | P3 | process/release | v0.3 残余 ISSUE-156–175 复核：多数仍 open（skills L2/正文、MCP P2、codex/DSH 环境、v0.4 新限制）；v0.4 发布不阻塞 | 台账需清理 | v0.5 集中清理/逐项 fixed 或延后 v0.5 F4 计划清理/复核 | open | 2026-11-03 |

@@ -2,13 +2,14 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.4.0（M9）**发布收口（D6）**：内置工具/workspace 沙箱/trace v7 已合并 main（`8897053`，D2–D5c）；tag `v0.4.0`/`dist/RELEASE_NOTES-v0.4.0.md` 待发布流程与用户授权；性能 [`doc/perf-baseline-v0.4.txt`](perf-baseline-v0.4.txt)。
+**当前阶段**：v0.5（M10）**F0 设计冻结进行中**（分支 `docs/docs-v05-design`，REV-115）：reexec/ISSUE 清理/sandbox 增强/真实 Codex·DSH/可观测成本；v0.6=W3b durable resume（DR-021）；W5 已取消（DR-015）。v0.4.0 已发布。
 
 **进行中任务**
-- 无。
+- docs `docs/docs-v05-design`（REV-115，作者 docs-dev）：DR-016–020 + spec 00/02/05/06/07/08 草案 + AC-25–28；DR-020/Codex·DSH 段待两个源码仓 spike 结论补。
 
 **下一步**
-- v0.5 候选：真实 Codex/DSH 验证 + ISSUE 清理 + `reexec` 等（**W5 已取消**，用户 2026-11-03，DR-015；不含 W5）；REV-113 通过 → merge → dist/tag/GitHub Release（用户授权后）。
+- F0 评审通过 → F1 reexec → F2 sandbox 增强 → F3 可观测/成本 → F4 ISSUE 清理 → F5 真实 Codex/DSH → F6 发布 v0.5.0；v0.6 W3b。
 
 **阻塞**
-- 无硬阻塞；tag/GitHub Release 需用户发布前最终授权 + 新 token；bash 真实隔离证据需用户普通终端运行 `verify-sandbox.sh`（嵌套环境仅覆盖 fail-closed）。
+- 两个源码仓 spike（openai/codex、deepseek-ai/deepseek-harness）结论待 Lead 转发；不阻塞 DR-016–019/spec 框架。
+- 发布 tag/GitHub Release 需用户授权与新 token；v0.5 不升 trace v8；bash 用户终端证据 ISSUE-180 发布前补。

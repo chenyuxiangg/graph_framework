@@ -1530,3 +1530,28 @@ pub trait AgentProvider: Send + Sync {
 ### 5.15.5 结果上限（as-built）
 
 read 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB；write/edit/apply_patch 输入 ≤1 MiB、结果 ≤32 KiB；grep 1000 条/扫描单文件 2 MiB/结果 ≤32 KiB；glob 默认 1000/上限 5000/结果 ≤32 KiB；bash command ≤8 KiB、timeout 120s（max 600s）、stdout/stderr 各 16 KiB head+tail（drain 2 MiB）；`tool_calls` args/result/error 各 32 KiB、command 8 KiB、path 4 KiB、单 run 10000 行；超限 `truncated` + 全量 sha256。
+
+---
+
+## 5.16 v0.5 冻结草案：reexec 回放 / 预算 / sandbox 增强（2026-11-03，REV-115；待实现回写）
+
+> **V1 设计冻结草案**；实现 F1–F3（DR-016）。默认（无新参数）行为/trace/replay 不变；工具/预算/写入白名单均 opt-in。
+
+### 5.16.1 reexec 回放（DR-017）
+
+- `--mode=tools --replay-tools=reexec` **显式**；缺省 `recorded`（v0.4 行为不变，绝不执行工具）。
+- 只读白名单 `builtin__read`/`grep`/`glob`/`diff`；`write`/`edit`/`apply_patch`/`bash` **拒绝**（exit 2）；MCP/Python/外部 harness 仍 recorded。
+- 漂移：重跑结果 vs 记录 `result_sha256`，不符 → `REPLAY_TOOL_RECORD_MISMATCH`（exit 3）；truncated/缺记录 fail-closed；**不升 v8**（不新增 pre_sha 列）。
+- 回放使用同 `--workspace-dir`/`--allow-path`/`--allow-builtin-tools`；不同配置预期 mismatch。
+
+### 5.16.2 可观测/成本（DR-018）
+
+- 维度 run/node/agent；数据源既有 `llm_calls.usage` + 时间戳；费用需可选 `--pricing <file>`（不内置价格）。
+- 预算 `--max-tokens`/`--max-cost`（默认关）；每次 LLM 调用后检查；超限立即停止，run `Failed` + `BUDGET_EXCEEDED` + `Other("budget_exceeded")`；v0.5 不可续。
+- 输出 additive（`RunFinished.metrics`/`trace --stats`/人类行）；不新增表/列、不升 v8；无配置默认不变。
+
+### 5.16.3 sandbox 增强（DR-019）
+
+- `--allow-write-path <dir>`（可重复、目录级、canonicalize）独立于只读 `--allow-path`；profile `file-write*` + jail 写授权；不可 `/`；与 workspace 重叠/嵌套允许（幂等）；写优先于同目录只读。
+- 构建工具：`--allow-exec-path`（process-exec+file-read）显式；cargo/node/uv 需路径/HOME/TMPDIR/缓存；`cc -isysroot` 文档；不改变默认系统只读集合。
+- 预检非法 → `HARNESS_CONFIG_LOAD{reason:"allow_write_path_invalid"}`（exit 3）；默认无新开关行为与 v0.4 一致。
