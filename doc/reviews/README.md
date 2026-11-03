@@ -112,6 +112,7 @@
 | [REV-111](REV-111-cli-tool-replay.md) | 2026-11-02 | cli（含 harness 小扩展/e2e 机械） | `feat/cli-tool-replay` | **通过**（v0.4 D5b2：bridge 落库+二次脱敏/context/source-status fail-closed、trace human+NDJSON ToolCall/stats>0、replay --mode=tools recorded 校验/无副作用探针、真链路 1 行；首轮有条件通过 → `d4da442` 关闭 C1 `--replay-tools` events/outputs 忽略 + sink 预算/告警/P3；cli 249/0、tool_replay 16/0、workspace 1187/0/3、clippy/fmt/check/no-default 绿；P3 剩余 D6 见记录 §3/§8） | reviewer-a |
 | [REV-113](REV-113-process-v04-release.md) | 2026-11-03 | process/docs | `chore/process-v04-release` | **通过**（v0.4.0 发布收口：version 0.4.0/7 lock、release --locked/--version、perf 5-trial 与 Lead 一致、spec as-built/PROVENANCE 7640/8055 9/9、e2e 166/23/2 + 29 用例、workspace 1216/0/3、pytest 183；首轮有条件通过 → `af8303a` 关闭 C1（harness 340 五处）/P3 ①–⑤；见记录 §6/§8） | reviewer-a |
 | [REV-114](REV-114-docs-w5-removal.md) | 2026-11-03 | docs | `docs/docs-w5-removal` | **通过**（取消 W5：DR-015 + README/progress/spec00/DR-004/007/008/012/SOP/index/issues 状态注记；docs-only、check.sh 绿、历史保留；首轮有条件通过 → `a632806` 关闭 index 三处/P3 ①–③；见记录 §6/§8） | reviewer-a |
+| [REV-115](REV-115-docs-v05-design.md) | 2026-11-03 | docs | `docs/docs-v05-design` | **有条件通过**（v0.5 F0：DR-016–020 + spec 00/02/05 §5.16/06 §6.16/07 AC-25–28/08 §8.14；docs-only、check.sh 绿、spike 事实一致；P1 C1 reexec 错误码混用；P2 C2 Codex 状态/索引、C3 BUDGET_EXCEEDED/reason 登记、C4 Codex 命令；P3 见记录 §3/§6） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
