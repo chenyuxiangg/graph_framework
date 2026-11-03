@@ -86,3 +86,15 @@ bash scripts/dev/check.sh                      # CHECK PASSED
 - P3-1/P3-2/P3-3 由 D6/F3b 决定（实例命名、stop_reason trace/CLI 面、BudgetExceeded 错误字段）；不阻塞 F3a2。
 - F3b（cli-dev）将切换 `BUDGET_EXCEEDED` 断言并接 CLI 输出；F3a2 可 merge。
 - 机械 CLI 适配已由 Lead 批准；无其它跨模块行为。
+
+## 8. 第二评审 · 跨模块（harness/CLI 机械）（Lead 追加，2026-11-03）
+
+- **评审人**：`lead`（**≠ 作者** `kernel-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`518ef34..5ec1464`）：
+  1. `crates/zgraph-kernel/**`（types/run/trace + tests）——BUDGET_EXCEEDED 域码、NodeError 变体、RunFinishedInfo/RunOutcome additive stop_reason；
+  2. `crates/zgraph-harness/{agent_loop,executor,observability}.rs`——响应后预算检查；
+  3. `crates/zgraph-cli/{bridge,run_cmd}.rs`——**仅 3 行机械编译适配**（BudgetExceeded match arm + 2 测试字面量 stop_reason: None，Lead 批准，无行为）。
+- **核对结论（通过）**：错误码 append-only、不复用 RUN_*/NODE_*、不新增 HarnessErrorKind；trace v7 schema/DDL 不变；无预算默认路径不检查/输出不变；CLI 机械适配无逻辑/断言改动。
+- **Lead 亲自验证**：`git diff 518ef34..5ec1464 --stat` 仅 kernel 3 源 + 新测试、harness 3 源、cli 2 文件（3 行机械）；`cargo test --workspace --offline` = 1278/0/3；kernel 153/0；harness 383/0/1；`--version`/clippy/fmt/check 均绿。
+- **裁决/后续**：InstanceStatus 命名（Crashed vs Failed）由 D6 统一；stop_reason 仅在 kernel 内存面（trace v7 不变），F3b 从 RunOutcome 读取并展示；`node_error_json` additive 字段由 F3b/D6 决定。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
