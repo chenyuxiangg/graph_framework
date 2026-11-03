@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1 条件 C1**（分支基于 `568c0f3`，未含已合并 main `118ef69`（F5e/REV-129）；main 不是 HEAD 祖先，merge.sh「基于最新 main」门禁会失败——需 rebase 到 `118ef69`）；P2=0；P3 3 项（F5f 嵌套 skip/F5d-b 真 key 未跑、计数/baseline F6、版本诊断方式）不阻塞。adapter 9 项修复、gated 真机 mock 3 例、CI ac28g、计数与门禁主体成立。
+> **结论历史**：首轮（基准 `0bd5312`，分支基于 `568c0f3`）为「**有条件通过**」——P1 C1 分支未 rebase 到含 F5e 的 main `118ef69`。作者 rebase 后 HEAD `35e5609`（实现 `ae5662d`；main 成为祖先，实现 diff 仍 6 files + REV-130/README），评审人复核 ancestry/diff/门禁/gated（§8），C1 closed，结论改**通过**。
+>
+> 首轮意见（历史保留）：P0=0；adapter 9 项/gated 真机 mock 3 例/CI ac28g 成立；P3 真机限制/F6 计数/版本诊断。
 
 ### 1.1 已核对成立
 
@@ -92,10 +94,37 @@ ZGRAPH_REAL_CODEX=1 ZGRAPH_CODEX_BIN=/tmp/codex-npm/node_modules/.bin/codex \
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 分支 rebase 到 main 118ef69 | **open** | main 成为 HEAD 祖先；diff 6 files；门禁+e2e 2 次 |
+| C1 分支 rebase 到 main 118ef69 | **closed（35e5609，实现 ae5662d）** | `git merge-base HEAD main=118ef69`，main 为 HEAD 祖先；实现 diff 仍 6 files + REV-130/README；门禁/gated 复跑通过 |
 
 ## 7. 遗留问题
 
-- C1 关闭前不 merge；P3-1 F5f/F5d-b 限制、P3-2 计数/baseline F6 记录。
+- C1 closed；P3-1 F5f/F5d-b 限制、P3-2 计数/baseline F6 记录；不阻塞。
 - adapter 跨模块改动由 Lead 第二评审；真机 mock 证据已复核（text/cancel 通过，F5f 嵌套 skip）。
 - 后续 F6 v0.5.0 发布收口。
+
+## 8. 条件关闭复核（2026-11-04）
+
+复核提交：`35e5609`（rebase 后；实现 `ae5662d`，父 `118ef69`；实现 diff 6 files，额外仅 REV-130 记录/README）。评审人执行：
+
+```bash
+git merge-base HEAD main                     # 118ef69
+git merge-base --is-ancestor main HEAD       # yes
+git diff --stat main...HEAD                  # 6 实现文件 + REV-130/README
+bash scripts/dev/check.sh                    # CHECK PASSED
+for i in 1 2; do cargo test -p zgraph-e2e; done  # 174/0/5 ignored ×2
+cargo test --workspace                       # 1295/0/6 ignored
+python -m pytest                             # 203 passed/2 skipped
+cargo clippy ... -D warnings / fmt --check   # 绿
+ZGRAPH_REAL_CODEX=1 ZGRAPH_CODEX_BIN=/tmp/codex-npm/node_modules/.bin/codex \
+  cargo test -p zgraph-e2e --test codex_mock_v05 -- --ignored --nocapture
+# => 3 passed（text/cancel；F5f nested Seatbelt 显式 skip）
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C1 ancestry | ✅ `merge-base=118ef69`；main 为 HEAD 祖先；无冲突 |
+| diff | ✅ F5d 实现仍 6 files；额外仅 REV-130 评审记录/README；无产品代码越界 |
+| 门禁 | ✅ e2e 174/0/5 ×2、workspace 1295/0/6、pytest 203/2、clippy/fmt/check 绿 |
+| gated 真机 | ✅ 真实 codex 0.166.0 + mock：text/cancel 通过；F5f 嵌套显式 skip；无 env 时显式 skip（不伪造） |
+
+**最终状态**：C1 closed；P3 留 F6；建议 Lead merge F5d → F6 v0.5.0 发布收口。

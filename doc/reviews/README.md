@@ -120,7 +120,7 @@
 | [REV-124](REV-124-kernel-flake-tests.md) | 2026-11-03 | kernel/worker（测试） | `fix/kernel-flake-tests` | **通过**（F4a flake 加固：SYNC_TIMEOUT 20s/PID_GONE 15s/非空 pid/ps 诊断；timeout·handshake 600/300ms→2s 仍 ≪5s sleep；5.5s 延迟确定性回归；worker 71/0、kernel 150/0、workspace 1255/0/3、重点 ×10、clippy/fmt/check 绿；仅 4 测试文件无产品代码；P3/ISSUE 清单见 §3/§7） | reviewer-a |
 | [REV-125](REV-125-e2e-flakes.md) | 2026-11-03 | e2e | `test/e2e-flakes` | **通过**（F4b：ISSUE-177 best-of-3 交错采样阈值/断言不变；ISSUE-178 PATH/CODEX_HOME/TMPDIR 隔离+同 binary 串行+120s 环境预算+15s 有界；e2e 173/24/2×3、ac09/ac20h ×10、workspace 1254/0/3、clippy/fmt/check 绿；仅 2 测试文件、无产品代码；P3/ISSUE 清单见 §3/§7） | reviewer-a |
 | [REV-126](REV-126-kernel-budget-stop.md) | 2026-11-03 | kernel（含 harness 小改/CLI 机械） | `feat/kernel-budget-stop` | **通过**（F3a2：响应后检查最后越界也 fail；BUDGET_EXCEEDED append-only + stop_reason + 无 Running/不可续/trace v7；CLI 机械适配；kernel 153/harness 383/cli 257/workspace 1278×2/pytest 183/clippy/fmt/check 绿；P3 见 §3） | reviewer-a |
-| [REV-130](REV-130-e2e-codex-mock.md) | 2026-11-04 | e2e/py-worker（adapter 跨模块） | `test/e2e-codex-mock` | **有条件通过**（F5d：adapter 9 项修复/tool 映射/零密钥 mock gated 真机 3 例、CI ac28g；e2e 174/0/5×2、workspace 1290/6、pytest 203/2、clippy/fmt/check 绿；P1 C1 分支未 rebase 到 main 118ef69（F5e）；P3 F5f/F5d-b/F6 计数见 §3） | reviewer-a |
+| [REV-130](REV-130-e2e-codex-mock.md) | 2026-11-04 | e2e/py-worker（adapter 跨模块） | `test/e2e-codex-mock` | **通过**（F5d：adapter 9 项修复/tool 映射/零密钥 mock gated 真机 3 例、CI ac28g；e2e 174/0/5×2、workspace 1295/0/6、pytest 203/2、clippy/fmt/check 绿；首轮有条件通过 → rebase main 118ef69 后关闭 C1；P3 F5f/F5d-b/F6 计数见 §3/§8） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
