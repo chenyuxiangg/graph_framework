@@ -79,3 +79,12 @@ bash scripts/dev/check.sh                    # PASSED
 - **P3 N6–N8**：trace 外部无统计、混合 source、跨模块第二评审。
 - F5d（Codex mock）在 e2e-dev 进行中，另行评审。
 - 无 P0/P1；F5e 可 merge。
+
+## 7. 第二评审 · 跨模块（CLI）（Lead 追加，2026-11-04）
+
+- **评审人**：`lead`（**≠ 作者** `dsl-dev`；Lead 已批准跨模块 CLI 输出小改，按 AGENTS §2 追加第二评审）
+- **范围**（`568c0f3..1711c64`）：`crates/zgraph-harness/src/{plugin,executor,llm/types}.rs`（外部 subprocess 无 usage → `UsageSource::Unavailable`，不再 zero/Provider；统计 unknown/warnings、不计预算）；`crates/zgraph-cli/src/run_cmd.rs` + `tests/observability.rs`（`available`/`unavailable` 标注、人类行不显示伪 0、默认/内置逐字节不变）。
+- **核对结论（通过）**：不伪造 token/cost（Unavailable 不计预算、trace 不出现伪造 token 键）；默认与内置 provider 输出不变；CLI 标注 additive；测试覆盖 parse_usage(None/空)/executor/CLI 端到端。
+- **Lead 亲自验证**：`git diff 568c0f3..1711c64 --stat` 仅 harness 3 源 + cli 2 文件；`cargo test --workspace --offline` = 1294/0/3；harness 386/0/1；pytest 195/2 skipped；check.sh PASSED。
+- **裁决/后续**：external 后缀保守（D6 可按 source 精化）；JSON 0 字段+available=false 为 schema 兼容接受；外部+max-tokens 无预算约束力文档记录；max-cost 外部 fail-closed 不变；外部无 llm_calls → trace 无 token 属预期。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
