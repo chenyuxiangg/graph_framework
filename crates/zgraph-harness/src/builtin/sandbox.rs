@@ -106,11 +106,8 @@ const PROFILE_TEMPLATE: &str = r#"(version 1)
 ;;; ---------- workspace: 读写 ----------
 (allow file-read* file-write* file-test-existence (subpath "@WORKSPACE@"))
 
-; ---------- 只读白名单（--allow-path） ----------
+;;; ---------- 只读白名单（--allow-path） ----------
 @ALLOW_PATHS@
-
-;;; ---------- 可写白名单（--allow-write-path；读+写） ----------
-@WRITE_PATHS@
 
 ;;; ---------- exec 目录读取（--allow-exec-path 同步授予该目录只读） ----------
 @EXEC_READS@
@@ -210,11 +207,18 @@ pub(crate) fn render_profile(
     } else {
         "(deny network*)"
     };
+    // REV-120 C1：`write_paths=[]` 时必须与 v0.4 输出**逐字节一致**——可写块仅在
+    // 非空时条件插入；模板本身保持 v0.4 冻结字节（`;;;` 注释、无额外空行/块）。
+    let mut allow_block = allow_lines.join("\n");
+    if !write_lines.is_empty() {
+        allow_block
+            .push_str("\n\n;;; ---------- 可写白名单（--allow-write-path；读+写） ----------\n");
+        allow_block.push_str(&write_lines.join("\n"));
+    }
     let text = fill_template(&[
         ("@WORKSPACE@", workspace.as_str()),
         ("@EXEC_PATHS@", exec_lines.as_str()),
-        ("@ALLOW_PATHS@", allow_lines.join("\n").as_str()),
-        ("@WRITE_PATHS@", write_lines.join("\n").as_str()),
+        ("@ALLOW_PATHS@", allow_block.as_str()),
         ("@EXEC_READS@", exec_reads.join("\n").as_str()),
         ("@NETWORK@", network),
     ]);
@@ -1424,5 +1428,120 @@ mod tests {
             "(allow file-read* file-write* file-test-existence (subpath \"{cache_text}\"))"
         )));
         assert!(rendered.text.contains("(allow network*)"));
+    }
+    // ------------------------------------------------------------------
+    // REV-120 C1：无 write-path 时 profile 与 v0.4 逐字节一致（golden）
+    // ------------------------------------------------------------------
+
+    /// v0.4 冻结 profile（固定合成路径替换后）的 sha256 golden。
+    ///
+    /// 生成口径（v0.4 模板 + 单次替换）：
+    /// workspace="/private/tmp/zgraph-f2-golden-ws"、exec_paths=""、allow_paths=""、
+    /// exec_reads=""、network="(deny network*)"。v0.5 无 `--allow-write-path` 时必须
+    /// 完全一致（否则既有 bash trace 的 `sandbox_profile_sha256` 会漂移）。
+    const V04_PROFILE_GOLDEN_SHA: &str =
+        "a6ea5e48b2074a4af22c7e3c4e984c15a9eda661bb984c7680c43f4674758370";
+
+    fn v04_golden_profile() -> String {
+        fill_template(&[
+            ("@WORKSPACE@", "/private/tmp/zgraph-f2-golden-ws"),
+            ("@EXEC_PATHS@", ""),
+            ("@ALLOW_PATHS@", ""),
+            ("@EXEC_READS@", ""),
+            ("@NETWORK@", "(deny network*)"),
+        ])
+    }
+
+    #[test]
+    fn empty_write_paths_profile_matches_v04_golden_sha() {
+        let golden = v04_golden_profile();
+        assert_eq!(sha256_hex(golden.as_bytes()), V04_PROFILE_GOLDEN_SHA);
+        // v0.4 注释/空行形态保留。
+        assert!(golden.contains(";;; ---------- 只读白名单（--allow-path） ----------"));
+        assert!(
+            golden.contains(";;; ---------- 网络（默认全拒；--allow-network 时放开） ----------")
+        );
+        assert!(!golden.contains("可写白名单"));
+        assert!(!golden.contains("@WRITE_PATHS@"));
+
+        // 真实路径渲染（write_paths=[]）与同一路径的“v0.4 参考渲染”逐字节一致。
+        let (_dir, workspace) = temp_canonical();
+        let rendered = render_profile(&SandboxProfileConfig {
+            workspace: workspace.clone(),
+            allow_paths: Vec::new(),
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect("render default");
+        let workspace_text = workspace.to_string_lossy().to_string();
+        let reference = fill_template(&[
+            ("@WORKSPACE@", workspace_text.as_str()),
+            ("@EXEC_PATHS@", ""),
+            ("@ALLOW_PATHS@", ""),
+            ("@EXEC_READS@", ""),
+            ("@NETWORK@", "(deny network*)"),
+        ]);
+        assert_eq!(
+            rendered.text, reference,
+            "default profile must be byte-identical to v0.4"
+        );
+        assert_eq!(rendered.sha256, sha256_hex(reference.as_bytes()));
+        assert!(!rendered.text.contains("可写白名单"));
+
+        // 同一配置重复渲染 sha 稳定（D4 bash trace 的 profile sha 不漂移）。
+        let again = render_profile(&SandboxProfileConfig {
+            workspace,
+            allow_paths: Vec::new(),
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect("render default again");
+        assert_eq!(again.sha256, rendered.sha256);
+        assert_eq!(again.text, rendered.text);
+    }
+
+    #[test]
+    fn write_paths_add_block_once_and_change_profile_sha() {
+        let (_dir, workspace) = temp_canonical();
+        let (_write_dir, write) = temp_canonical();
+        let base = render_profile(&SandboxProfileConfig {
+            workspace: workspace.clone(),
+            allow_paths: Vec::new(),
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect("render base");
+        let with_write = render_profile(&SandboxProfileConfig {
+            workspace,
+            allow_paths: Vec::new(),
+            write_paths: vec![write.clone()],
+            exec_paths: Vec::new(),
+            allow_network: false,
+        })
+        .expect("render write");
+        assert_ne!(
+            with_write.sha256, base.sha256,
+            "write path changes profile sha"
+        );
+        assert_eq!(
+            with_write.text.matches("可写白名单").count(),
+            1,
+            "writable block inserted exactly once"
+        );
+        assert!(with_write.text.contains(&format!(
+            "(allow file-read* file-write* file-test-existence (subpath \"{}\"))",
+            write.to_string_lossy()
+        )));
+        // 原有 `;;;` 注释形态不被破坏。
+        assert!(with_write
+            .text
+            .contains(";;; ---------- 只读白名单（--allow-path） ----------"));
+        // 写出顺序：只读块仍在可写块之前。
+        let allow_pos = with_write.text.find("只读白名单").expect("allow comment");
+        let write_pos = with_write.text.find("可写白名单").expect("write comment");
+        assert!(allow_pos < write_pos);
     }
 }
