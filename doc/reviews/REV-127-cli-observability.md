@@ -117,3 +117,22 @@ bash scripts/dev/check.sh           # PASSED
 
 ### F3a2 合并义务（后续条件，不阻塞本次通过）
 - F3a2 先合并时，F3b 必须 rebase：预算超限断言由占位切到 `BUDGET_EXCEEDED` + `stop_reason Other("budget_exceeded")`；`trace --stats` cost/`budget_stop` 断言补齐；CLI 不写 kernel metrics。由 cli-dev 在合并前/后执行。
+
+## 8. F3a2 rebase 义务关闭（2026-11-04，`3d30abb`，parent `16e3b4b`；main `d2661ce`）
+
+**复核结论：F3a2 rebase 义务已关闭；结论保持通过。** `3d30abb` 仅 `run_cmd.rs`/`trace_cmd.rs`/`tests/observability.rs`（+91/−15）；worktree 干净；无 Cargo。
+
+- **预算超限断言切换**：`token_budget_stops_run_with_budget_usage` 用 `--record=full`，断言 `payload["status"]=="Failed"`、`error.code=="BUDGET_EXCEEDED"`、`stop_reason=="budget_exceeded"`；usage `llm_calls=1`、`budget_stop.kind=="tokens"`；不再依赖 `NodeError::Internal` 消息。
+- **trace --stats budget_stop**：从持久化 `runs.error_code`（仅 `BUDGET_EXCEEDED`）派生 additive `budget_stop`；JSON `{"stop_reason":"budget_exceeded"}`、人类 `budget_stop budget_exceeded`。`trace --stats` Failed run 退出码 1（与既有语义一致）。
+- **cost 缺席不伪造**：trace 未持久化 pricing；`cost_usd` 仅在 `RunFinished` additive metrics 存在时输出；本场景断言 `cost_usd` 不存在；`llm_calls/token_usage` 从 `llm_calls` 记录可得。
+- **CLI 不写 kernel metrics**：仅展示 `RunOutcome`/`RunStats`；未新增写路径。
+- **默认路径**：`stop_reason` 仅预算超限时插入（`RunOutcome.stop_reason` 非预算为 None）；无 observability flags 的 `--json`/trace stats 仍无 usage/llm/stop_reason 键。
+- **门禁（`3d30abb`）**：
+```bash
+cargo test -p zgraph-cli            # 268 passed / 0 failed
+cargo test --workspace              # 1289 passed / 0 failed / 3 ignored
+pytest -q                           # exit 0；183 passed
+cargo clippy/fmt/check/no-default   # clean
+bash scripts/dev/check.sh           # PASSED
+```
+- 残余 P2（graph 级 DB 口径、外部 usage_json 形状、by_node 维度、新 reason D6）仍按 §7 留后续；F3a2 机械适配已闭环。
