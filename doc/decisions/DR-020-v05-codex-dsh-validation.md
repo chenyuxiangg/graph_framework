@@ -166,3 +166,9 @@ codex exec --json --skip-git-repo-check -o /tmp/codex-out.json "reply with exact
 
 - **F5a** `dsh_acp.py` ACP transport + fake ACP 单测（CI）→ **F5b** 真实 DSH 握手（无 key）→ **F5c** 全链路（key 门控）→ **F5d** Codex 三层（CI mock 零密钥/真 key/取消；FINAL（tool 事件勘误））→ **F5f** 可选工具执行。
 - 每层独立提交/评审；不阻塞 F1–F4；F5c 缺 key 时如实标注不伪造。
+
+## 8. 实现执行记录（as-built，2026-11-04，REV-131；只追加）
+
+- F5a DSH ACP transport `7668fdf`+`fe8dcce`（REV-128）：initialize/session/new/prompt/update/cancel/close/permission；单测 16；真实握手（无 key）/F5b、全链路 F5c 需 key。
+- F5d Codex 零密钥 mock `ae5662d`（REV-130）：CODEX_HOME mock + 本地 SSE；`f5d_a` 文本链、`f5d_c` 取消 3s、`f5f` 工具事件门控（skip 非嵌套/danger-full-access）；F5e usage unavailable `4533d44`（REV-129）。
+- 已验证：Codex mock 3（1 skip）；DSH ACP 16；全链路/真实 key 未验证如实标注。

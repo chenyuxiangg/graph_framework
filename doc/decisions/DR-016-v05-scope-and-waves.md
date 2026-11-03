@@ -117,3 +117,9 @@ F0 docs 设计冻结（本批，REV-115）
 | 5 | allow-write-path 重叠/嵌套 | 与 workspace 相同/嵌套允许（幂等）；不可为 `/`；文档警示；不与 allow-path 合并 |
 | 6 | AC-28 环境门控/证据 | `#[ignore]` + env（如 `ZGRAPH_REAL_CODEX=1`/`ZGRAPH_REAL_DSH=1`）；发布材料记录构建/运行/限制，不可用如实标注 |
 | 7 | F1/F2 顺序 | F1 先（trace/cli 为主），F2 后（harness 同模块串行） |
+
+## 8. 实现执行记录（as-built，2026-11-04，REV-131；只追加）
+
+- F1a/F1b/F1c reexec（REV-116/118/121；`1d3c6a0`/`26adfab`/`d49a705`）；F2 sandbox（REV-120；`4f99f1b`+`7b0387d`）；F3a1/F3a2/F3b 预算/观测（REV-123/126/127；`69216e1`/`c1744aa`/`16f6a7d`/`57e3a60`/`3d30abb`）；F4 flake 加固（REV-124/125；`e9706b0`/`843e3be`）；F5a DSH ACP（REV-128；`7668fdf`）、F5e usage unavailable（REV-129；`4533d44`）、F5d Codex mock（REV-130；`ae5662d`）；合并 `071f29e`。
+- 测试：workspace 1295/0/6；e2e 25 target/174/0/5 ignored；pytest 203/2 skipped；F1c reexec 7、Codex mock 3、DSH ACP 16 单测。
+- 已知限制：F5c 全链路需用户 key；F5f 工具执行需非嵌套/danger-full-access；DSH/Codex 版本 pin；外部 usage 不可得；W3b→v0.6。

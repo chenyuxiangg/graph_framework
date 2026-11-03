@@ -95,3 +95,9 @@
 | 3 | 停止语义 | **已裁决：每次 LLM 请求前 + run 结束汇总检查**；立即停止；Failed + `BUDGET_EXCEEDED` + `Other("budget_exceeded")`；v0.5 不可续、trace/instances 终态一致 |
 | 4 | 字段位置 | **已裁决：复用 `RunFinished.metrics`/`llm_calls`/`--stats`；不新建表、不升 v8**（无预算/无 pricing 输出不变） |
 | 5 | 未知 usage/价格 | warning + 不臆造；不 fail run |
+
+## 8. 实现执行记录（as-built，2026-11-04，REV-131；只追加）
+
+- F3a1 harness 计费/用量/预算 `69216e1`（REV-123）；F3a2 kernel 预算停止 `c1744aa`/`16f6a7d`（REV-126）；F3b CLI 接线 `57e3a60`/`4a1676c`/`3d30abb`（REV-127）；F5e 外部 usage unavailable `4533d44`（REV-129）。
+- 实现：`BUDGET_EXCEEDED` + `Other("budget_exceeded")`、不可续；`--pricing` 配置价/缺模型 fail-closed、外部 `cost_unavailable_external_harness`；metrics/`--stats` additive；不新建表/不 v8；无预算默认不变。
+- 测试：CLI observability 9 + harness observability 12。

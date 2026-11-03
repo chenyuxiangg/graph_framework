@@ -1533,9 +1533,9 @@ read 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB；write
 
 ---
 
-## 5.16 v0.5 冻结草案：reexec 回放 / 预算 / sandbox 增强（2026-11-03，REV-115；待实现回写）
+## 5.16 v0.5（M10）实现回写：reexec / 预算 / sandbox 增强（as-built，2026-11-04，REV-131）
 
-> **V1 设计冻结草案**；实现 F1–F3（DR-016）。默认（无新参数）行为/trace/replay 不变；工具/预算/写入白名单均 opt-in。
+> **as-built**：F1a/F1b/F1c（REV-116/118/121）、F2（REV-120）、F3（REV-123/126/127）、F5a/F5d/F5e（REV-128/129/130）已合并 main `071f29e`。默认（无新参数）行为/trace/replay 不变；工具/预算/写入白名单均 opt-in。**实测：reexec e2e 7 用例（`tests/e2e/reexec_v05.rs`）、Codex mock e2e 3（`codex_mock_v05.rs`）；DSH ACP 单测 16（`python/tests/test_adapters_dsh_acp.py`）；预算/统计 CLI 9（`crates/zgraph-cli/tests/observability.rs`）+ harness 单测。**
 
 ### 5.16.1 reexec 回放（DR-017）
 
@@ -1562,7 +1562,7 @@ read 1 MiB 文件/扫描、10000 行（默认 2000）、结果 ≤32 KiB；write
 - **DSH（FINAL）**：public/MIT TS/pnpm monorepo（~349MB **developer preview**）；本机带宽无法 clone/build（不阻塞）；本机 Desktop **0.2.1-rc.3** 自带同一套 `dsh`+`dsh-acp`+ACP SDK **1.4.0**，rc.5 形状一致（`npx @deepseek-ai/dsh@0.2.1-rc.5 --profile acp`）；源码构建 Node ≥24.9 + pnpm 11.28.5。
 - **入口**：`dsh --profile acp`（ACP v1 stdio 首选）、`--profile headless "job"`、`--profile sdk`（非 ACP）；传输 **JSON-RPC 2.0 NDJSON**（每行一条，**无 Content-Length**）。
 - **实测（无 key，隔离 DSH_HOME）**：initialize v1/agentInfo/authMethods[]（1.44s）；session/new（cwd 绝对路径/mcpServers=[]）→ sessionId+configOptions（model deepseek-official/deepseek-v4-flash/reasoning high，0.06s）；prompt → -32603 no API key（无模型请求）；unknown session -32602；close `{}`；EOF exit0。
-- **F5a adapter**：`dsh_acp.py` 仅 hello/error 骨架 → **~200–300 行 + 单测**：initialize/session/new/prompt、`session/update`、`session/cancel`、`session/close`、**应答 `session/request_permission`**（否则挂起）；映射 message_chunk→delta（committed/coarse）/thought→reasoning/tool_call→tool_start/tool_call_update→tool_end；**progress 无对应**；`usage_update` 仅 used/size **不能伪造 token/成本**；stopReason→EndTurn/MaxTokens/Other("cancelled")。
+- **F5a（已实现，REV-128）**：`dsh_acp.py` ACP transport 已落地（initialize/session/new/prompt、`session/update`、`session/cancel`、`session/close`、**应答 `session/request_permission`**）；映射 message_chunk→delta（committed/coarse）/thought→reasoning/tool_call→tool_start/tool_call_update→tool_end；**progress 无对应**；`usage_update` 仅 used/size **不能伪造 token/成本**（F5e：外部 harness 标注 usage unavailable / `cost_unavailable_external_harness`）；stopReason→EndTurn/MaxTokens/Other("cancelled")。单测 16（含 permission/取消/会话复用）。
 - **取消**：zgraph cancel → ACP `session/cancel`，等 prompt 返回 cancelled、不发 result；**2s 宽限**内退出，否则 SIGKILL 进程组；hello_ok 立即回、ACP init 懒执行；cwd 用一次性 scratch（DSH 工具会写文件/执行命令）；`DSH_HOME` 首次启动需可写。
 - **验证分层**：**F5a** fake ACP CI；**F5b** 真实 DSH 握手（无 key，`#[ignore]`+`ZGRAPH_REAL_DSH=1`）；**F5c** 全链路（需 `DEEPSEEK_API_KEY`，用户授权）；**F5d** Codex 三层（CI mock 零密钥/真 key/取消；FINAL（tool 事件勘误））；**F5f** 可选非嵌套工具执行。CI 不 clone；证据如实、不伪造。
 - **Codex（FINAL，tool 事件更正）**：源码构建不可行（网络带宽）→ **npm 预编译 `npm i @openai/codex@0.166.0`**（源码等价 `codex-rs && cargo build --release -p codex-cli --bin codex`）。**零密钥 CI**：`$CODEX_HOME/config.toml` mock provider（`model_provider="mock"`、`base_url=http://127.0.0.1:PORT/v1`、`wire_api="responses"`、`env_key="MOCK_API_KEY"` 只要求有值）+ 本地 mock Responses SSE；`codex exec --json --skip-git-repo-check -o <file> "reply with exactly: hello"`；adapter **不传 `-c`**（走 CODEX_HOME/config.toml）。实测 hello_ok + result `hello from mock`/EndTurn/usage(11,7,18,2)、cached=4 丢弃。**tool 事件可得（更正）**：`-s danger-full-access` 下 `item.started`/`item.completed` 的 `command_execution`（command/aggregated_output/exit_code/status）可映射 **tool_start/tool_end（ok==exit_code）**；旧结论是嵌套 sandbox exit71 假阴性。**默认 sandbox 在嵌套环境静默打死工具执行且无事件（假绿风险）** → 工具验证必须 `-s danger-full-access`/非嵌套（F5f 可选）；F5d-a mock 不执行工具。F5d 修 9 项：turn.completed 清 failed、`--ephemeral`、command_execution→tool 映射、ARG_MAX 1MB 文档、iterations=1/usage 累计口径、pin 0.166.0、认证分层、取消 3s 内无孤儿、节点超时 >60s。

@@ -73,3 +73,8 @@
 | 3 | 构建工具聚合开关 | **已裁决：不新增**；显式 `--allow-exec-path`+`--allow-path`+`--allow-write-path` |
 | 4 | 默认系统集合 | **不变**（spike profile 冻结） |
 | 5 | 预检错误面 | `HARNESS_CONFIG_LOAD{reason:"allow_write_path_invalid"}`；exit 3 |
+
+## 6. 实现执行记录（as-built，2026-11-04，REV-131；只追加）
+
+- F2 `4f99f1b`+`7b0387d`（REV-120）：`--allow-write-path` profile/jail/预检、构建工具链路径/`cc -isysroot` 文档；v0.4 golden profile 逐字节一致（无开关时）。
+- 测试：jail 6 write-path 单测 + profile golden。

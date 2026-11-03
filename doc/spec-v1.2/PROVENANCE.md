@@ -268,20 +268,32 @@
     - **台账**：issues ISSUE-176–181（kernel_cancel/ac09 parallel/codex adapter flake、trace 无 FK 清理、真实终端沙箱证据、v0.3 残余复核）。
     - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **7640 行**；00–08 numstat **161/129（净 32）**；全 spec 目录 numstat **186/142（净 44）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 8055 行））。
 
+28. **v0.5（M10）实现回写批次**（2026-11-04，REV-131；分支 `chore/process-v05-release`，base = 本地 `main` `071f29e`；docs-only + 版本 bump）：
+    - **来源（已合并实现）**：F1a `1d3c6a0`、F1b `26adfab`、F1c `d49a705`（REV-116/118/121）；F2 `4f99f1b`+`7b0387d`（REV-120）；F3a1 `69216e1`、F3a2 `c1744aa`+`16f6a7d`、F3b `57e3a60`+`4a1676c`/`3d30abb`（REV-123/126/127）；F4 `e9706b0`/`843e3be`（REV-124/125）；F5a `7668fdf`+`fe8dcce`、F5e `4533d44`、F5d `ae5662d`（REV-128/129/130）；合并 `071f29e`。
+    - **00/02**：v0.5 as-built banner；`BUDGET_EXCEEDED` 域码 + reason 闭集（`budget_invalid`/`allow_write_path_invalid`/`cost_unavailable_external_harness` 等）；DSL 仍 1.0/19 码、不参与 hash。
+    - **05 §5.16**：reexec 最终（候选/非候选/输出/错误码）、预算/成本最终、sandbox 增强最终、DSH ACP transport + Codex FINAL 验证/F5a–f（as-built）。
+    - **06 §6.16**：reexec recorded/reexec、`replay_mode`/`drift` additive、MISSING/TRUNCATED/MISMATCH 区分（行缺失 vs 字段损坏）、预算 metrics/stop_reason；trace v7 不变、不 v8。
+    - **07**：AC-25（reexec e2e 7）、AC-26（sandbox 单测）、AC-27（预算/观测 9 CLI + harness）、AC-28（DSH 16/Codex mock 3；F5c/F5f 门控）as-built；baseline 25 target/174/0/5。
+    - **08 §8.14**：final source-breaking（CLI flags `--replay-tools/--pricing/--max-tokens/--max-cost/--allow-write-path`、`BUDGET_EXCEEDED`、reasons、reexec additive、无 v8）。
+    - **版本/发布**：Cargo.toml/lock `0.5.0`；release `--locked`+`--version`=`zgraph 0.5.0 (DSL 1.0)`；性能 [`perf-baseline-v0.5.txt`](../perf-baseline-v0.5.txt)（7-trial 门禁通过）；产物/tag 待发布流程（用户授权）。
+    - **测试证据**：workspace **1295/0/6**、e2e **25 target/174/0/5 ignored**、pytest **203/2 skipped**、harness **386/0/1**、cli **270/0/0**。
+    - **台账**：issues 176/177/178/181 fixed；179/180/163/164 open+notes；新增 ISSUE-182–185（F5c/F5f/版本 pin/外部 usage 限制）。
+    - 本批次后按 §3 重新实测 SHA-256/行数（00–08 合计 **7791 行**；00–08 numstat **53/62（净 -9）**；全 spec 目录 numstat **65/62（净 3）**；含 README/PROVENANCE/REFERENCES 合计以 `wc -l` 为准（当前 8218 行））。
+
 ## 3. 文件清单（SHA-256 + 行数）
 | 文件 | SHA-256 | 行数 |
 |---|---|---|
-| `00-总纲.md` | f10b3ad7fac42438c64e3ae21bceea2113fea34df6c9f7eab3b855915f09b7f3 | 399 |
+| `00-总纲.md` | 32193d767e2b26a9ff532aaea788c13486bf5582dbda3b4aeed71db45d008993 | 402 |
 | `01-领域模型与状态机.md` | 8037a3c0b3dac86e73348c498e3b4a2f117347661f9dc42da8ca9776d17c74b3 | 447 |
-| `02-DSL与校验.md` | b81770c67614cc4521046032437709e102213412abe003c5de18f3e8abf5d6b5 | 988 |
+| `02-DSL与校验.md` | 98b3ea2f2d588b6c685f32b617fb63060576591da6f4855af2605130d08184d8 | 992 |
 | `03-调度器与生命周期.md` | fd132ad0dfbdba09d9852ac29b15d4ca5a1d510c84d752cd55d8f536b1b8d864 | 685 |
 | `04-节点接口与扩展点.md` | 63a788bbfe94c15716bed9160716ad3b0c50e4c4aea8d5ea5dbc9a637574e9bb | 940 |
-| `05-AgentHarness.md` | ae31265d7abaae4099da43a11f8850995840c1adaa4dfeff3a8097b77547e650 | 1532 |
-| `06-存储与可观测.md` | 652faf15acbb0277798a148819a50d5bdf86b8cdf9e9064069ae2d1fc01810ce | 1385 |
-| `07-验收用例.md` | a5e436bb03224a5265ca6519aded735eb86bc89da8dc1652a2dee31d29a1620a | 617 |
-| `08-审计关闭矩阵.md` | cb0d99c94cd07be3b25d3b64e06f75c44cc91f13b3230666f39e8870a1d4afc1 | 647 |
+| `05-AgentHarness.md` | b8a6c111cc82dc4a650df62053317a9aaf34c6cae786dc29de10c74cfa99f6e6 | 1569 |
+| `06-存储与可观测.md` | da513d16014d247394c912b79257290a39e8ff9626f99d421b64074bd64dc582 | 1404 |
+| `07-验收用例.md` | 0800320a909d2c5c9972fe94596460a072a782c2d1f7f8753ce503c6cded4b5d | 681 |
+| `08-审计关闭矩阵.md` | f74c082113c7e8824db2600065d1f4da4534e38583f99186fa63d6da9c58b8ee | 671 |
 
-> 00–08 合计 **7640 行**（`wc -l` 口径；2026-11-03 **v0.4（M9）实现回写批次后**实测（REV-113；**00–08 numstat +161/−129（净 +32）**；**全 spec 目录 numstat +186/−142（净 +44）**；见 §2 第 27 条）；此前 v0.3 实现回写 7419 行/§2 第 26 条；W4b as-built 7154 行/§2 第 25 条；W4a 设计冻结 + REV-096 收口 7202 行/§2 第 24 条；W3a as-built 6886 行；W3a0 6815 行；W2b 6491 行；W2a 6385 行；W2a0 6308 行；W1 6051 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 8055 行）。
+> 00–08 合计 **7791 行**（`wc -l` 口径；2026-11-04 **v0.5（M10）实现回写批次后**实测（REV-131；**00–08 numstat +53/−62（净 −9）**；**全 spec 目录 numstat +65/−62（净 +3）**；见 §2 第 28 条）；此前 v0.4 实现回写 7640 行/§2 第 27 条；v0.3 实现回写 7419 行/§2 第 26 条；W4b as-built 7154 行/§2 第 25 条；W4a 设计冻结 + REV-096 收口 7202 行/§2 第 24 条；W3a as-built 6886 行；W3a0 6815 行；W2b 6491 行；W2a 6385 行；W2a0 6308 行；W1 6051 行）。含 `README.md`、`PROVENANCE.md`、`REFERENCES.md` 后总行数以 `wc -l` 为准（当前 8218 行）。
 
 > **历史批次审计留痕（不覆盖）**：M4 Harness 回写批次后 00–08 合计 **5818 行**（`wc -l` 口径；评审时 base `origin/main` `fda996c`，合并 rebase 至 `12ab2f6`）；M5 全部回写批次后合计 **5958 行**（2026-10-30，REV-035，base 含 REV-025–034/038 的本地 `main`）。
 

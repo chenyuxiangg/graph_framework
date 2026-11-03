@@ -2,13 +2,13 @@
 
 > 更新规则：任务开始 / 完成 / 阻塞 / 交接时更新；只保留当前状态（历史看 git 与 `doc/reviews/`）；全文件 ≤ 30 行。
 
-**当前阶段**：v0.5（M10）**F1c 已实测/合并（REV-121）+ REV-122 文档修正**：F0（REV-115）、F1a/F1b/F1c reexec（REV-116/118/121）均已通过；`docs/docs-v05-reexec-sha` 修正缺 sha 语义（REV-122）；v0.6=W3b。
+**当前阶段**：v0.5.0（M10）**发布收口（F6）**：reexec/预算观测/sandbox 增强/DSH·Codex 验证/F4 flake 已合并 main `071f29e`；tag `v0.5.0`/`dist/RELEASE_NOTES-v0.5.0.md` 待发布流程与用户授权；性能 [`doc/perf-baseline-v0.5.txt`](perf-baseline-v0.5.txt)。
 
 **进行中任务**
-- docs `docs/docs-v05-reexec-sha`（REV-122，作者 docs-dev）：DR-017/05 §5.16.1/06 §6.16.1/07 AC-25/08 明确**行存在字段缺失/损坏 → MISMATCH；MISSING 仅行缺失/streaming 多于记录**。
+- 无。
 
 **下一步**
-- REV-122 通过 → F2 sandbox 增强 → F3 可观测/成本 → F4 ISSUE 清理 → F5 Codex/DSH 验证 → F6 发布 v0.5.0。
+- v0.6（W3b durable resume + 剩余 ISSUE）；REV-131 通过 → merge → dist/tag/GitHub Release（用户授权+新 PAT）。
 
 **阻塞**
-- 发布 tag/GitHub Release 需用户授权与新 token；v0.5 不升 trace v8；bash 用户终端证据 ISSUE-180 发布前补。
+- 无硬阻塞；tag/GitHub Release 需用户最终授权+新 PAT；F5c 全链路/真 key 与 F5f 工具执行需用户环境，发布材料如实标注。

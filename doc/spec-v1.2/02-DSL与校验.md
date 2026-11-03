@@ -988,3 +988,5 @@ $ echo $?    # 2
 | `graph_hash` 存储列 | 06 `runs.graph_hash` | 06 |
 
 > **v0.5（M10）V1 设计冻结草案（2026-11-03，REV-115）**：`--replay-tools=reexec`/预算参数/`--allow-write-path` 均属 CLI/Harness/trace，**DSL 仍 1.0/R1–R18/19 码、不参与 `graph_hash`**；默认（无新参数）图/校验/hash/run/trace 逐字节不变。
+
+> **v0.5（M10）实现回写（2026-11-04，REV-131）**：**DSL 仍 1.0/R1–R18/19 码**；reexec/预算/sandbox/Codex·DSH 验证均属 CLI/Harness/trace，**不参与图 schema/`graph_hash`**；默认（无新参数）图/校验/hash/run/trace 逐字节不变。

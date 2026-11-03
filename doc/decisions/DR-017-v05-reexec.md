@@ -92,3 +92,9 @@ v7 `tool_calls` 已有 `args_sha256`/`result_sha256`，无输入文件 pre_sha25
 | 3 | exit2 范围 | 仅缺 `--allow-builtin-tools`/显式 `--workspace-dir` |
 | 4 | 输出 additive | reexec 模式加 `replay_mode`/`drift=false`；recorded 不变；mismatch 不输出 drift=true |
 | 5 | trace API | `zgraph_trace::tool_result_sha256`；不升 v8 |
+
+## 8. 实现执行记录（as-built，2026-11-04，REV-131；只追加）
+
+- F1a read-only runner `1d3c6a0`（REV-116）→ F1b CLI `26adfab`（REV-118）→ F1c e2e `d49a705`（REV-121）；REV-122 文档口径（缺 sha=MISMATCH/行缺失=MISSING）。
+- 实现：候选 builtin read/grep/glob/diff+ok 重跑比对 `result_sha256`；非候选复用记录/不执行；exit2 仅缺 flags；非法 workspace CONFIG_LOAD exit3；recorded 逐字节不变；reexec additive `replay_mode`/`drift=false`；`tool_result_sha256` 公共 API；不 v8。
+- e2e `tests/e2e/reexec_v05.rs` 7/0。

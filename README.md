@@ -10,25 +10,27 @@
 - 语义基准：[`doc/spec-v1.2/`](doc/spec-v1.2/README.md)
 - 文档索引：[`doc/index.md`](doc/index.md)；流程约束：[`AGENTS.md`](AGENTS.md)
 
-## 当前状态：v0.4.0（发布执行中；M0–M9：内置工具 + workspace 沙箱 + trace v7）
+## 当前状态：v0.5.0（发布执行中；M0–M10：reexec + 预算/观测 + sandbox 增强 + 真实 Codex/DSH 验证）
 
-**v0.4.0（M9）**：内置工具、严格 workspace jail、macOS OS 沙箱与工具级 trace/replay 已实现并合并（D1–D5c）。
+**v0.5.0（M10）**：在 v0.4 内置工具/沙箱/trace v7 基础上，交付 5 项（F1–F5）：
 
-- **内置工具（opt-in）**：`builtin__read/write/edit/apply_patch/diff/grep/glob/bash`（Rust；工具名 `builtin__*`）。
-- **严格 jail**：`--workspace-dir`（缺省 `.`，canonicalize）内读写；`--allow-path` 为**只读**白名单；写目标仅 workspace；越界/symlink/`..` 拒绝。
-- **bash OS 沙箱**：macOS `sandbox-exec`（spike 79 行 profile）；网络默认 deny（`--allow-network` 全开）；`--allow-exec-path` 扩展可执行目录；嵌套 Seatbelt/沙箱不可用 **fail-closed**（预检 exit 3、不产生 run），不提供无沙箱 fallback。
-- **trace v7**：新增 `tool_calls` 表（`error_sha256`/bash 审计字段）；`--mode=tools` 默认 **recorded-only 回放**（绝不执行工具/副作用）；`reexec` v0.4 未实现（exit 2，v0.5）。
+- **reexec 工具回放（opt-in）**：`--mode=tools --replay-tools=reexec`；仅候选 `builtin__read/grep/glob/diff` + `status=ok` 重跑并比对 `result_sha256`；副作用/MCP/Python/失败行**复用记录、绝不执行**；默认 `recorded` 逐字节不变；不升 v8。
+- **可观测/成本**：run/node/agent token/耗时/费用；`--pricing <file>`（不内置价）；`--max-tokens`/`--max-cost` 默认关，超限 `BUDGET_EXCEEDED` + `Other("budget_exceeded")`（不可续）；外部 harness usage unavailable 如实标注。
+- **sandbox 增强**：`--allow-write-path` 独立可写白名单（profile+jail、不可 `/`、同目录写优先）；`--allow-exec-path`/构建工具链路径、`cc -isysroot` 文档；默认无新开关行为不变。
+- **真实 Codex/DSH 验证**：DSH ACP transport 已落地（单测 16；真实握手无 key 可跑；全链路需 `DEEPSEEK_API_KEY`）；Codex **零密钥 mock CI**（CODEX_HOME + 本地 Responses SSE；3 e2e，1 skip）；F5f 工具事件需非嵌套 `-s danger-full-access`。
+- **F4**：kernel/worker/e2e flake 加固（ISSUE-176/177/178 fixed）。
 - **CLI 示例**：
   ```bash
   zgraph run graph.json --fake-llm --allow-builtin-tools --workspace-dir ./ws
-  zgraph run graph.json --fake-llm --allow-builtin-tools --allow-bash --workspace-dir ./ws
-  zgraph replay --run <run_id> --mode=tools --replay-tools=recorded
+  zgraph replay --run <run_id> --mode=tools --replay-tools=reexec --allow-builtin-tools --workspace-dir ./ws
+  zgraph run graph.json --fake-llm --max-tokens 10000 --pricing prices.json
+  zgraph run graph.json --fake-llm --allow-builtin-tools --allow-bash --allow-write-path ./cache --workspace-dir ./ws
   ```
-- **测试（已实测）**：`cargo test -p zgraph-harness` **340/0/1**；`cargo test --workspace` **1216/0/3**；pytest **183**；e2e **23 target / 166/0/2**（v0.4 29 用例/5 target = D5c 28 + REV-112 补 1；v0.3 137 + v0.4 29 = 166）。
-- **性能**：[`doc/perf-baseline-v0.4.txt`](doc/perf-baseline-v0.4.txt)（5-trial：AC-01 +0.0%、AC-12 −0.7%、SOP smoke +0.0%，门禁通过；full-60 validate +6.7%、运行期 ISSUE-112 例外）。
-- **发布产物/状态**：`dist/zgraph-v0.4.0-*.tar.gz` + sha256、`dist/RELEASE_NOTES-v0.4.0.md` 由 Lead/发布流程构建；tag `v0.4.0`（**发布流程执行中**，用户授权后创建）；GitHub Release 由发布流程创建。
-- **已知限制**：bash 仅 macOS（嵌套/不可用 fail-closed；真实隔离证据需用户普通终端 `crates/zgraph-harness/scripts/verify-sandbox.sh`）；cargo/node 等构建工具默认不可执行；hardlink/TOCTOU 残余风险；trace 无 FK 删除清理；`reexec` v0.5；**W5 共享评审队列已取消**（用户 2026-11-03，[DR-015](doc/decisions/DR-015-v05-roadmap-and-w5-removal.md)）；ISSUE-176+ 台账见 [issues](doc/issues.md)。
-- **下一步**：v0.5 候选（真实 Codex/DSH 验证 + ISSUE 清理 + `reexec` 等，**不含 W5**；W5 已取消见 [DR-015](doc/decisions/DR-015-v05-roadmap-and-w5-removal.md)）；详见 [DR-012](doc/decisions/DR-012-v04-scope-and-waves.md) / [progress](doc/progress.md)。
+- **测试（已实测）**：`cargo test --workspace` **1295/0/6**；e2e **25 target / 174/0/5 ignored**（含 v0.5 reexec 7 / Codex mock 3）；pytest **203/2 skipped**（collect 205）；`cargo test -p zgraph-harness` **386/0/1**；`cargo test -p zgraph-cli` **270/0/0**。
+- **性能**：[`doc/perf-baseline-v0.5.txt`](doc/perf-baseline-v0.5.txt)（7-trial：AC-01 −1.5%、AC-12 +0.3%、SOP smoke +5.5%，门禁通过；full-60 validate 0.0%、运行期 ISSUE-112 例外；首轮负载噪声已注）。
+- **发布产物/状态**：`dist/zgraph-v0.5.0-*.tar.gz` + sha256、`dist/RELEASE_NOTES-v0.5.0.md` 由发布流程构建；tag `v0.5.0`（**发布执行中**，用户授权后创建）；GitHub Release 由发布流程创建。
+- **已知限制**：DSH 全链路需 `DEEPSEEK_API_KEY`（用户授权）；Codex 真 key/F5f 工具执行需非嵌套环境；bash 真实隔离需用户普通终端 `verify-sandbox.sh`；外部 harness usage/cost unavailable（不伪造）；cargo/node 默认不可执行；hardlink/TOCTOU 残余；trace 无 FK 清理；W3b durable resume→**v0.6**；ISSUE 台账见 [issues](doc/issues.md)。
+- **下一步**：v0.6（W3b durable resume + 剩余 ISSUE）；详见 [DR-016](doc/decisions/DR-016-v05-scope-and-waves.md) / [progress](doc/progress.md)。
 
 ## 快速开始
 
