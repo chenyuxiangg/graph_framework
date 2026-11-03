@@ -9,11 +9,13 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（首轮有条件通过 → C1 由 `029ba20` 关闭；P2 全量测试已补，见 §7）
 
-P0=0；**P1=1**；P2=5；P3=4。白名单/拒绝面/参数校验/jail 复用/无写盘/无 spawn/无 trace-sink-budget/确定性/allow-path 测试均通过；harness **350/0/1**（默认与 features）、workspace **1226/0/3**、cli **249**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。白名单/拒绝面/参数校验/jail 复用/无写盘/无 spawn/无 trace-sink-budget/确定性/allow-path 均通过；最终 harness **352/0/1**（默认与 features）、workspace **1228/0/3**、cli **249**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
-需关闭：
+> **首轮历史（保留）**：`db50f12` 首轮为有条件通过——C1 reexec read/diff 复用内部 32 KiB 截断、全量测试只覆盖 grep。`029ba20` 已关闭 C1 并补 read/diff/glob 全量测试（见 §7）。
+
+首轮条件：
 
 - **C1 read/diff 并未返回「完整未截断 Value」**：`reexec_readonly` 直接复用 `self.read` / `self.diff`。`read` 内部已把 `content` 截到 `BUILTIN_RESULT_MAX_BYTES-256`（32 KiB 级）并置 `truncated=true`；`diff` 内部同样 `truncate_utf8(diff_text, ...)`。因此 reexec 的 read/diff 大结果仍是截断值，与任务「返回完整 Value（未截断；F1b 用 trace sha 比对）」及 DR-017 的 sha 比对目标不符。现有 `reexec_returns_full_untruncated_value` 只覆盖 **grep**（grep 自身不套 32 KiB，只有 `limit_result` 在正常 call 侧截断），未覆盖 read/diff。
 
@@ -21,7 +23,7 @@ P0=0；**P1=1**；P2=5；P3=4。白名单/拒绝面/参数校验/jail 复用/无
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C1） | 白名单/拒绝/参数/jail/确定性成立；read/diff 全量契约不成立 |
+| 功能正确性 | ✅ | 白名单/拒绝/参数/jail/确定性成立；C1 全量路径已由 `029ba20` 关闭 |
 | 结构合理性 | ✅ | 集中在 `BuiltinToolSet` 的 reexec API；复用只读实现；无新模块/依赖 |
 | 逻辑性 | ✅（P2） | 拒绝面、jail、无副作用、确定性符合 DR；P2 见 §3 |
 | 可读性 | ✅（P3） | 文档注释/测试名清晰；P3 测试/文档补齐 |
@@ -86,3 +88,32 @@ bash scripts/dev/check.sh                    # PASSED
 - **P2 N1–N5**：全量测试、jail 配置自证、trace/sink/budget 断言、F1b truncated 策略、新 reason D6。
 - **P3 N6–N9**：测试/文档/默认路径/性能。
 - 无 P0；C1 未关闭前不可 merge。
+
+## 7. 条件关闭复核（2026-11-03，`029ba20`，parent `8319efb`）
+
+**复核结论：通过**。`029ba20` 仅 `builtin/files.rs` +122/−10；工作区干净；无 Cargo/其它模块。
+
+### C1（reexec read/diff 全量）
+- `read()` → `read_impl(args, true)`；`diff()` → `diff_impl(args, true)`；正常 call 保持 32 KiB cap + `truncated=true`。
+- 新增 `read_full()`/`diff_full()`（`apply_result_cap=false`）供 `reexec_readonly`；返回完整 `content`/`diff`，`truncated=false`，无 `…[truncated]`。
+- 测试 `reexec_read_and_diff_return_full_untruncated_values`：>40 KiB read 逐字节等于原文、正常 call 仍截断带 marker；长 diff 全量、正常 diff 仍截断；`reexec_glob_returns_full_paths_beyond_result_cap`：glob 500 条全量 vs 正常 32 KiB 截断；grep 400 条全量既有测试保留。**全部通过**。
+- **C1 关闭**；正常 call 无回归（既有 `read_enforces_file_and_result_caps`/`diff_previews...`/全量门禁均绿）。
+
+### P2 复核
+- read/diff/glob 全量测试已补；grep 全量保留。
+- 残余 P2（不阻断）：jail/workspace/allow-path 配置自证留 F1b（F1a API 只接收已构造 `BuiltinToolSet`）；trace/sink/budget 未做显式注入计数断言（代码路径不调用，F1b 集成验证）；F1b 需 truncated=1 → `REPLAY_TOOL_RECORD_TRUNCATED`、sha 序列化一致、显式同 workspace/allow-path；新 reason D6 回写。
+
+### 最终门禁（`029ba20`）
+```bash
+cargo test -p zgraph-harness                 # 353 tests：352 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp  # 353 tests：352 passed / 0 failed / 1 ignored
+cargo test --workspace                       # 89 targets：1228 passed / 0 failed / 3 ignored
+cargo test -p zgraph-cli                     # 249 passed / 0 failed
+pytest -q                                    # exit 0；183 passed
+cargo clippy --workspace --all-targets --locked -- -D warnings  # clean
+cargo fmt --all -- --check                   # clean
+cargo check -p zgraph-harness --no-default-features  # clean
+bash scripts/dev/check.sh                    # PASSED
+```
+- 仅 1 file；无 Cargo；默认路径无回归；`git status` 空。
+- 稳定性：workspace 本轮全绿（作者 3 连跑中 run1 命中既有 kernel_cancel flake，隔离 3/3；本分支仅 files.rs，无 kernel 改动，归既有 flake 观察）。
