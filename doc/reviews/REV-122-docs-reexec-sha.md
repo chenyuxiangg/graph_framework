@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1 条件 C1**（分支仍基于 `21846d8`，未包含已合并 main `ec7da51` 的 F1c/REV-121；`main` 不是 HEAD 祖先，merge.sh 的「基于最新 main」门禁会失败——需 rebase 到 `ec7da51`）；**P2 条件 C2**（`progress` 仍写「F1c e2e/REV-121 评审中」，`spec07 AC-25` 仍写「F1c e2e 待/完整 e2e F1c」；与 F1c 已合并事实不一致，rebase 后需更新）。文档内容修正本身正确（与 F1c `ac25e` 实测/validate 顺序一致）；C1/C2 为流程/状态同步，关闭后通过。
+> **结论历史**：首轮（基准 `f14a2fc`/基于 `21846d8`）为「**有条件通过**」——P1 C1 分支未 rebase 到含 F1c 的 main `ec7da51`；P2 C2 progress/AC-25 仍写 F1c 待。作者 rebase 并 `989a062` 补 C2/P3 后，评审人复核 ancestry/diff/progress/AC-25/check.sh（§8），C1/C2 closed，结论改**通过**。
+>
+> 首轮意见（历史保留）：文档语义修正正确（缺 sha=MISMATCH、行缺失=MISSING，与 F1c `ac25e`/validate 一致）；C1/C2 流程/状态同步。
 
 ### 1.1 已核对成立
 
@@ -87,11 +89,33 @@ bash scripts/dev/check.sh                    # CHECK PASSED
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 分支 rebase 到 main ec7da51 | **open** | main 成为 HEAD 祖先；diff docs-only；check.sh |
-| C2 progress/spec07 AC-25 更新 F1c 已合并/REV-121 | **open** | 无「F1c e2e 待/评审中」；check.sh |
+| C1 分支 rebase 到 main ec7da51 | **closed（989a062）** | `git merge-base HEAD main=ec7da51`，main 为 HEAD 祖先；diff 含 7 docs + 评审记录，无代码/测试 |
+| C2 progress/spec07 AC-25 更新 F1c 已合并/REV-121 | **closed（989a062）** | progress 改「F1c 已实测/合并（REV-121）」；AC-25 矩阵「F1c e2e 已实测，REV-121」；无「F1c 待/评审中」 |
+| P3-1–P3-3 | **部分 closed（989a062）** | index DR-017 补 REV-122/F1c 最终口径；F1b 注释留 F6 文档注明（路径笔误留 P3） |
 
 ## 7. 遗留问题
 
-- C1/C2 关闭前不 merge；P3-1–P3-3 可随 rebase/D6 小修，不阻塞。
+- C1/C2 closed；P3-1（DR-017 F6 注记把 `tests/tool_reexec.rs` 写成 `src/tool_reexec.rs`）与 AC-25 详情标题仍「F1b 实现/F1c 完整 e2e」措辞留 D6 小修，不阻塞。
 - 文档语义修正正确（缺 sha=MISMATCH、行缺失=MISSING），无代码修改；F1c 已由 REV-121 通过。
-- 分支 rebase 后需确保 `doc/index.md` reviews 122 与 main 的 REV-120/121 行不冲突。
+- 分支已 rebase 到 main，可 merge；之后 F2/F3。
+
+## 8. 条件关闭复核（2026-11-03）
+
+复核提交：`989a062`（父 `3673af2`；分支已 rebase 到 main `ec7da51`；diff 7 docs + 评审记录）。评审人执行：
+
+```bash
+git merge-base HEAD main                     # ec7da51
+git merge-base --is-ancestor main HEAD       # yes（main 为祖先）
+git diff --stat main...HEAD                  # 9 files（7 docs + REV-122 记录/README），无代码/测试
+bash scripts/dev/check.sh                    # CHECK PASSED
+grep -n "F1c.*待\|F1c.*评审中" doc/progress.md doc/spec-v1.2/07-验收用例.md  # 当前状态清零
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C1 ancestry | ✅ `merge-base=ec7da51`；main 是 HEAD 祖先；分支含 F1c/REV-121；diff 无代码/测试 |
+| C2 F1c 状态 | ✅ progress「F1c 已实测/合并（REV-121）」；AC-25 矩阵「F1c e2e 已实测，REV-121」；下一步 F2 |
+| P3 | ✅ index DR-017 补 REV-122/F1c 最终口径；F6 注记路径笔误（`src/` vs `tests/tool_reexec.rs`）留 D6 小修；不阻塞 |
+| 范围/门禁 | ✅ docs + 评审记录；check.sh PASSED；worktree 干净 |
+
+**最终状态**：C1/C2 closed；建议 Lead merge → F2/F3。
