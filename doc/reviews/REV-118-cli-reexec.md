@@ -83,3 +83,14 @@ bash scripts/dev/check.sh                   # CHECK PASSED
 - **D6 必改**：DR-017/05 §5.16.1/06 §6.16.1/07 AC-25 旧「副作用 exit2」改为「副作用/MCP/Python/失败行复用记录（`replay_mode=recorded`），绝不执行」；`REPLAY_TOOL_RECORD_MISMATCH` 仅 drift/坏记录。
 - F1c 补 AC-25 e2e 与 P3-2 覆盖；`drift` 字段口径 D6 定。
 - 跨模块 trace helper + e2e 机械由 Lead 第二评审。
+
+## 8. 第二评审 · 跨模块（trace/e2e 机械）（Lead 追加，2026-11-03）
+
+- **评审人**：`lead`（**≠ 作者** `cli-dev`；Lead 已批准跨模块改动，按 AGENTS §2 追加第二评审）
+- **范围**（`a67639b..0b4a2fc`）：
+  1. trace 小扩展：`crates/zgraph-trace/src/toolcall.rs` + `lib.rs` 公开 `tool_result_sha256(&Value)`（writer normalize 复用、落库字节不变、无 v8/新列）；
+  2. e2e 机械：`tests/e2e/trace_tools_v04.rs` AC-24h 改 v0.5 口径（缺前置 flag → exit2；events/outputs 不变断言保留；完整 AC-25 验收归 F1c）。
+- **核对结论（通过）**：trace helper 仅为同口径复用（无行为/格式变化）；e2e 仅期望口径更新（未放宽 events/outputs 断言）；无 kernel/其它模块改动；无 Cargo 变更。
+- **Lead 亲自验证**：`git diff a67639b..0b4a2fc --stat` 仅 cli replay/tests + trace toolcall/lib + e2e 1 文件（+ REV 记录）；`cargo test --workspace --offline` = 1234/0/3；`cargo test -p zgraph-cli --offline` = 255/0；`tool_result_sha256` 与 writer `result_sha256` 一致性用例通过。
+- **裁决/后续**：实现口径（副作用/MCP/Python/失败行复用记录、不执行、不 exit2）为准；D6 修订 DR-017/05/06/07/AC-25 旧文（「副作用→exit2」）；F1c 补 AC-25 e2e（含 MCP/failed/bash 行）；`drift` additive 字段保留并在 06 明确。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
