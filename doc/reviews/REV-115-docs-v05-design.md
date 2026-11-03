@@ -129,3 +129,15 @@ grep -rn "待 spike" doc/decisions doc/spec-v1.2 doc/index.md doc/progress.md # 
 | 范围/门禁 | ✅ 仅 12 个 docs 文件；无代码/测试/既有评审/依赖/token/dist；check.sh PASSED |
 
 **最终状态**：C1–C4/P3 主体 closed；建议 Lead 附加第二评审 → merge F0 → F1（reexec）。
+
+## 10. 第二评审 · 设计一致性（Lead 追加，2026-11-03）
+
+- **评审人**：`lead`（**≠ 作者** `docs-dev`；按 AGENTS §2 追加第二评审）
+- **范围**：`9480fa4..d263e40`（DR-016–020 + spec 00/02/05 §5.16/06 §6.16/07 AC-25–28/08 §8.14 + index/progress/issues），及两份 spike 报告 `/tmp/codex-repo-spike.md`、`/tmp/dsh-repo-spike.md`。
+- **核对结论（通过）**：
+  1. 范围/波次与用户决策一致（v0.5 五项全做、v0.6 W3b、W5 取消）；F5a–f 与 spike 能力分层一致；
+  2. Lead 裁决已全部落盘：reexec 四只读工具 + 结果 sha 比对 + `REPLAY_TOOL_RECORD_MISMATCH`；`--pricing` 文件、预算停/不可续、无 pricing/未知模型/DSH 成本不可得 fail-closed；metrics 复用不升 v8；`--allow-write-path` 独立/目录级/系统目录拒绝；AC-28 门控与不伪造；
+  3. spike 事实一致性：DSH ACP v1 NDJSON/握手/无 key -32603/request_permission/cancel 2s/usage 不可得；Codex npm 0.166.0/零密钥 CODEX_HOME mock/`--skip-git-repo-check -o`/turn.completed 清 failed/`--ephemeral`/无 command_execution item/嵌套 exit71；
+  4. 兼容红线：默认路径不变、DSL 不变、trace v7 不升、错误码只追加；docs-only；check.sh 通过。
+- **后续（F1 起）**：F1a harness reexec runner（只读工具、jail、无副作用，REV-116）→ F1b CLI `--replay-tools=reexec` + sha 比对/错误码（REV-117）→ F2 sandbox 增强 → F3 可观测成本 → F4 ISSUE 清理 → F5 真实 Codex/DSH 验证（F5a ACP transport 等）→ F6 发布。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
