@@ -252,8 +252,9 @@ async fn kernel_cancel_kills_worker_process_group() {
     common::wait_for_node_running(&sink, "work").await;
     // 等 fixture 真正开始执行（自身与孙进程的 pid 都落盘）再取消，
     // 否则可能在写 pid 前就被 abort，后续「孙进程无残留」断言失去意义。
-    common::wait_for_file(&paths.worker).await;
-    common::wait_for_file(&paths.child).await;
+    // 用「非空 pid 文件」等待（避免 exists() 命中半写文件/提前取消，ISSUE-176）。
+    common::wait_for_pid_file(&paths.worker).await;
+    common::wait_for_pid_file(&paths.child).await;
     assert!(
         handle.control(RunControl::Cancel),
         "cancel command accepted"
@@ -262,6 +263,41 @@ async fn kernel_cancel_kills_worker_process_group() {
     assert_eq!(outcome.status, RunStatus::Cancelled);
     assert!(outcome.metrics.killed_workers >= 1);
 
+    let worker_pid = common::read_pid(&paths.worker);
+    let child_pid = common::read_pid(&paths.child);
+    common::assert_pid_gone(&worker_pid, common::PID_GONE_TIMEOUT).await;
+    common::assert_pid_gone(&child_pid, common::PID_GONE_TIMEOUT).await;
+}
+
+/// ISSUE-176 / REV-124 回归：孙进程 pid 落盘被并行负载延迟 >5s 时，
+/// 取消测试必须等待「非空 pid 文件」而不是用固定 5s 预算误报；
+/// 取消后仍断言进程组（worker+grandchild）全部回收。
+#[tokio::test]
+async fn kernel_cancel_waits_for_delayed_child_pid_file() {
+    let paths = common::PidPaths::new();
+    let graph = common::linear_graph("wfaults", "sleep_forever", None);
+    let input = json!({
+        "pid_file": paths.worker.display().to_string(),
+        "child_pid_file": paths.child.display().to_string()
+    });
+    let spec = common::linear_spec(graph, input);
+    let sink = Arc::new(MemoryTraceSink::new());
+    let executor = common::executor_with_env(
+        RUN_TIMEOUT,
+        vec![(
+            "ZGRAPH_FIXTURE_CHILD_DELAY_MS".to_string(),
+            "5500".to_string(),
+        )],
+    );
+    let handle = start_run(None, spec, executor, sink.clone()).expect("run should start");
+    common::wait_for_node_running(&sink, "work").await;
+    common::wait_for_pid_file(&paths.worker).await;
+    // 旧实现固定 5s 预算会在此提前 panic（fixture 延迟 5.5s 落盘）。
+    common::wait_for_pid_file(&paths.child).await;
+    assert!(handle.control(RunControl::Cancel), "cancel accepted");
+    let outcome = handle.wait().await;
+    assert_eq!(outcome.status, RunStatus::Cancelled);
+    assert!(outcome.metrics.killed_workers >= 1);
     let worker_pid = common::read_pid(&paths.worker);
     let child_pid = common::read_pid(&paths.child);
     common::assert_pid_gone(&worker_pid, common::PID_GONE_TIMEOUT).await;

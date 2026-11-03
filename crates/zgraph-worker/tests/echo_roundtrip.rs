@@ -70,7 +70,10 @@ async fn echo_worker_roundtrip() {
 async fn worker_timeout_kills_and_reaps_process() {
     let temp = tempfile::tempdir().expect("tempdir");
     let pid_file = temp.path().join("worker.pid");
-    let config = worker_config(Duration::from_millis(600));
+    // 测试预算（v0.5 F4a）：并行全量负载下 Python 冷启动可能 >600ms，导致进程在写
+    // pid 前就被超时 kill（REV-124 复现）；2s 仍远小于 fixture 的 5s sleep，
+    // 超时语义（kill + reap）未变。
+    let config = worker_config(Duration::from_secs(2));
     let request = sample_request(
         "zgraph_worker.slow",
         "run",
@@ -84,10 +87,7 @@ async fn worker_timeout_kills_and_reaps_process() {
         "expected timeout, got {err:?}"
     );
 
-    let pid: String = std::fs::read_to_string(&pid_file)
-        .expect("worker must write pid before sleeping")
-        .trim()
-        .to_string();
+    let pid = read_pid_with_budget(&pid_file);
     assert_pid_reaped(&pid);
 }
 
@@ -115,7 +115,9 @@ async fn hello_timeout_kills_and_reaps_process() {
         script.to_string(),
         pid_file.display().to_string(),
     ];
-    config.hello_timeout = Duration::from_millis(300);
+    // 同上：并行负载下 Python 冷启动可能 >300ms（probe 未写 pid 即被杀，REV-124）；
+    // 2s 仍远小于 probe 的 5s sleep，handshake 超时语义未变。
+    config.hello_timeout = Duration::from_secs(2);
     let request = sample_request("unused", "run", serde_json::json!({}));
     let err = run_worker(&config, &request)
         .await
@@ -124,15 +126,33 @@ async fn hello_timeout_kills_and_reaps_process() {
         WorkerFailure::Protocol(protocol) => assert_eq!(protocol.code, "NODE_WORKER_HANDSHAKE"),
         other => panic!("expected handshake error, got {other:?}"),
     }
-    let pid: String = std::fs::read_to_string(&pid_file)
-        .expect("probe must write pid")
-        .trim()
-        .to_string();
+    let pid = read_pid_with_budget(&pid_file);
     assert_pid_reaped(&pid);
 }
 
+/// 有界等待 pid 文件非空（并行负载/慢机；超时 panic 带诊断）。
+fn read_pid_with_budget(path: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let pid = text.trim().to_string();
+            if !pid.is_empty() {
+                return pid;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pid file {} not written with content in 20s ({:?})",
+            path.display(),
+            std::fs::metadata(path).map(|metadata| metadata.len())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// 有界等待进程被 reap（15s）+ 失败诊断；僵尸/泄漏仍失败。
 fn assert_pid_reaped(pid: &str) {
-    for _ in 0..40 {
+    for _ in 0..300 {
         let alive = std::process::Command::new("kill")
             .args(["-0", pid])
             .status()
@@ -143,7 +163,12 @@ fn assert_pid_reaped(pid: &str) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("pid {pid} still alive (zombie/not reaped)");
+    let ps = std::process::Command::new("ps")
+        .args(["-p", pid, "-o", "pid=,ppid=,stat=,command="])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+    panic!("pid {pid} still alive after 15s (zombie/not reaped); ps: {ps}");
 }
 
 #[tokio::test]

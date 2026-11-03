@@ -99,6 +99,10 @@ def sleep_forever(inputs: dict[str, Any], ctx: WorkerContext) -> dict[str, Any]:
         child = subprocess.Popen(  # noqa: S603 - fixture 只在自己的进程组里派 sleep
             [sys.executable, "-c", "import time\ntime.sleep(60)"]
         )
+        # 测试专用：模拟并行负载下孙进程 pid 落盘延迟（默认 0，不影响产品语义）。
+        delay_ms = float(os.environ.get("ZGRAPH_FIXTURE_CHILD_DELAY_MS", "0") or "0")
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
         with open(child_file, "w", encoding="utf-8") as handle:
             handle.write(str(child.pid))
     time.sleep(60)

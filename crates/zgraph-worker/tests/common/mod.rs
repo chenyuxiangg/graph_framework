@@ -16,7 +16,14 @@ use zgraph_kernel::{
 use zgraph_worker::{SupervisorConfig, WorkerConfig, WorkerExecutor};
 
 /// fixture 等待 pid 消失的上限（D1：超时 kill 后 5s 内无残留）。
-pub const PID_GONE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 进程回收等待预算（并行全量测试/慢机下 Python 冷启动与 kill/reap 可能 >5s；
+/// 仍为**有界**轮询，不改变产品超时语义）。
+pub const PID_GONE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// fixture 同步等待预算（pid 文件/节点 Running）。v0.5 F4a：workspace 并行负载下
+/// Python 冷启动可能超过旧 5s（ISSUE-176/REV-124），统一提升为有界 20s；
+/// 仅测试同步预算，不弱化任何产品超时/取消断言。
+pub const SYNC_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// 仓库根目录（`crates/zgraph-worker` 上两级）。
 pub fn repo_root() -> PathBuf {
@@ -121,9 +128,9 @@ impl Default for PidPaths {
     }
 }
 
-/// 读 pid 文件（等待 fixture 写入，最长 5s）。
+/// 读 pid 文件（等待 fixture 写入；有界 `SYNC_TIMEOUT`，超时输出文件诊断）。
 pub fn read_pid(path: &std::path::Path) -> String {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
     loop {
         if let Ok(text) = std::fs::read_to_string(path) {
             let pid = text.trim().to_string();
@@ -133,11 +140,47 @@ pub fn read_pid(path: &std::path::Path) -> String {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "pid file {} not written in time",
-            path.display()
+            "pid file {} not written in {SYNC_TIMEOUT:?} ({})",
+            path.display(),
+            file_diagnostics(path)
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// pid 文件写出诊断（存在性/长度/内容，失败 panic 用；不含敏感信息）。
+fn file_diagnostics(path: &std::path::Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(metadata) => format!("exists, {} bytes", metadata.len()),
+        Err(error) => format!("missing: {error}"),
+    }
+}
+
+/// 等待 **非空** pid 文件出现（避免只 `exists()` 时读到空文件/半写内容）。
+pub async fn wait_for_pid_file(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if !text.trim().is_empty() {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "pid file {} not written with content in {SYNC_TIMEOUT:?} ({})",
+        path.display(),
+        file_diagnostics(path)
+    );
+}
+
+/// `ps` 诊断行（进程仍在时的 stat/command；失败 panic 用）。
+fn pid_diagnostics(pid: &str) -> String {
+    std::process::Command::new("ps")
+        .args(["-p", pid, "-o", "pid=,ppid=,stat=,command="])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_else(|error| format!("ps failed: {error}"))
 }
 
 /// pid 是否已被回收（`kill -0` 失败即消失；stderr 静音避免测试噪声）。
@@ -163,24 +206,31 @@ pub async fn assert_pid_gone(pid: &str, timeout: Duration) {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("pid {pid} still alive after {timeout:?} (zombie or leaked child)");
+    panic!(
+        "pid {pid} still alive after {timeout:?} (zombie or leaked child); ps: {}",
+        pid_diagnostics(pid)
+    );
 }
 
-/// 轮询等待文件出现（fixture 同步用；最多 5s）。
+/// 轮询等待文件出现（fixture 同步用；有界 `SYNC_TIMEOUT` + 诊断）。
 pub async fn wait_for_file(path: &std::path::Path) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
         if path.exists() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("{} not created in time", path.display());
+    panic!(
+        "{} not created in {SYNC_TIMEOUT:?} ({})",
+        path.display(),
+        file_diagnostics(path)
+    );
 }
 
 /// 轮询等待某节点进入 Running（最多 5s）。
 pub async fn wait_for_node_running(sink: &MemoryTraceSink, node_id: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
     loop {
         let running = sink.snapshots().iter().any(|snapshot| {
             snapshot.node_id == node_id && snapshot.status == InstanceStatus::Running
@@ -190,7 +240,7 @@ pub async fn wait_for_node_running(sink: &MemoryTraceSink, node_id: &str) {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "node {node_id} never reached Running"
+            "node {node_id} never reached Running in {SYNC_TIMEOUT:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -326,6 +376,16 @@ pub fn linear_spec(graph: Arc<CompiledGraph>, input: Value) -> RunSpec {
 /// 构造 worker 执行器（默认并发上限）。
 pub fn executor(timeout: Duration) -> Arc<WorkerExecutor> {
     Arc::new(WorkerExecutor::new(supervisor_config(timeout)))
+}
+
+/// 带额外 fixture 环境变量的执行器（flake 回归测试专用；不影响产品配置）。
+pub fn executor_with_env(
+    timeout: Duration,
+    extra_env: Vec<(String, String)>,
+) -> Arc<WorkerExecutor> {
+    let mut config = worker_config(timeout);
+    config.env.extend(extra_env);
+    Arc::new(WorkerExecutor::new(SupervisorConfig::from_worker(config)))
 }
 
 /// 跑完一个 run，返回 outcome 与 memory sink。
