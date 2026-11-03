@@ -250,6 +250,9 @@ pub struct RunFinishedInfo {
     pub error: Option<RunError>,
     /// run 指标。
     pub metrics: RunMetrics,
+    /// v0.5 F3a2：预算停止的 `stop_reason`（`"budget_exceeded"`；非预算停止 `None`）。
+    /// trace 落库不新增列（不升 v8），仅内存 sink/库调用方可观测。
+    pub stop_reason: Option<String>,
     /// 结束时刻（UTC RFC3339 毫秒 Z）。
     pub at: String,
 }

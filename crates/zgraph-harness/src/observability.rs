@@ -406,8 +406,20 @@ impl RunObservability {
         }
     }
 
+    /// v0.5 F3a2（DR-018 §3）：每次响应 usage **累计后**检查（`>=` 上限）。
+    ///
+    /// 与 [`Self::check_before_call`] 同判定；用于「最后一次响应越界也立即 Failed」，
+    /// 不等下一次请求。
+    pub fn check_after_call(&self) -> Result<(), BudgetStop> {
+        self.check_budget()
+    }
+
     /// 每次 LLM 请求**发起前**检查（`>=` 上限；超限 → 结构化 [`BudgetStop`]）。
     pub fn check_before_call(&self) -> Result<(), BudgetStop> {
+        self.check_budget()
+    }
+
+    fn check_budget(&self) -> Result<(), BudgetStop> {
         if !self.budget.is_enabled() {
             return Ok(());
         }

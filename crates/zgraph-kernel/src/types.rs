@@ -65,6 +65,12 @@ pub const CODE_RUN_DEADLOCK: &str = "RUN_DEADLOCK";
 /// 用户取消。
 pub const CODE_RUN_CANCELLED: &str = "RUN_CANCELLED";
 
+/// v0.5 F3a2（DR-018 §3）：run 预算超限（domain code，append-only；不复用 RUN_*/NODE_*）。
+pub const CODE_BUDGET_EXCEEDED: &str = "BUDGET_EXCEEDED";
+
+/// v0.5 F3a2：预算超限的 `stop_reason` 载荷（映射 harness `StopReason::Other("budget_exceeded")`）。
+pub const STOP_REASON_BUDGET_EXCEEDED: &str = "budget_exceeded";
+
 /// `foreach.items_port` 的值不是 JSON array（W4a；展开前 run 级失败，无 item 实例）。
 pub const CODE_RUN_FOREACH_ITEMS_NOT_ARRAY: &str = "RUN_FOREACH_ITEMS_NOT_ARRAY";
 
@@ -567,6 +573,16 @@ pub enum NodeError {
         /// 本次激活实际放行的出边数（`GateEvaluation.passed == true` 计数）。
         actual: u32,
     },
+    /// v0.5 F3a2（DR-018 §3）：run 预算超限（`BUDGET_EXCEEDED` domain code，append-only）。
+    ///
+    /// 由 Harness `RunFailure::BudgetExceeded` 映射：node/instance `Failed` → run `Failed` +
+    /// `error_code=BUDGET_EXCEEDED` + `stop_reason="budget_exceeded"`；不新增
+    /// `HarnessErrorKind`，也不复用 `RUN_*`/`NODE_*`。
+    #[error("budget exceeded: {message}")]
+    BudgetExceeded {
+        /// 人类可读描述（token/cost 已用与上限；不含密钥）。
+        message: String,
+    },
 }
 
 impl NodeError {
@@ -582,6 +598,7 @@ impl NodeError {
             Self::Internal { .. } => CODE_NODE_INTERNAL,
             Self::NodeWorker { kind, .. } => kind.code(),
             Self::FanoutExceeded { .. } => CODE_NODE_FANOUT_EXCEEDED,
+            Self::BudgetExceeded { .. } => CODE_BUDGET_EXCEEDED,
         }
     }
 }
@@ -749,6 +766,19 @@ mod tests {
         assert_eq!(HumanDecision::Approved.as_str(), "approved");
         assert_eq!(HumanDecision::Rejected.as_str(), "rejected");
     }
+    /// v0.5 F3a2（DR-018 §3）：预算超限是 append-only domain code（不复用 RUN_*/NODE_*）。
+    #[test]
+    fn budget_exceeded_uses_domain_code_not_harness_kind() {
+        let error = NodeError::BudgetExceeded {
+            message: "used 10 >= max_tokens 10".to_string(),
+        };
+        assert_eq!(error.code(), CODE_BUDGET_EXCEEDED);
+        assert_eq!(CODE_BUDGET_EXCEEDED, "BUDGET_EXCEEDED");
+        assert!(!CODE_BUDGET_EXCEEDED.starts_with("RUN_"));
+        assert!(!CODE_BUDGET_EXCEEDED.starts_with("NODE_"));
+        assert!(!CODE_BUDGET_EXCEEDED.starts_with("HARNESS_"));
+    }
+
     /// v0.3/V4（DR-011 §6）：外部 harness 只追加第 9 个 `HarnessErrorKind::Plugin`，
     /// 错误码 `HARNESS_PLUGIN_ERROR`；既有 kind 码不变（append-only）。
     #[test]

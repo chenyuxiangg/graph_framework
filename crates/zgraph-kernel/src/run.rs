@@ -68,11 +68,12 @@ use crate::trace::{
 use crate::types::{
     json_type_name, now_rfc3339, Attempt, EdgeIdx, HumanDecision, InstanceId, InstanceStatus,
     ItemIndex, NodeError, NodeId, PortName, RecordMode, RunError, RunId, RunMetrics, RunStartError,
-    RunStatus, CODE_NODE_FANOUT_EXCEEDED, CODE_NODE_INTERNAL, CODE_NODE_TIMEOUT,
-    CODE_NODE_TYPE_UNSUPPORTED, CODE_RUN_DEADLOCK, CODE_RUN_DELIVERY_TO_TERMINAL,
-    CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID, CODE_RUN_FOREACH_ITEMS_EXCEEDED,
-    CODE_RUN_FOREACH_ITEMS_NOT_ARRAY, CODE_RUN_FOREACH_ITEM_INCOMPLETE,
-    CODE_RUN_FOREACH_ITEM_KEY_DUPLICATE, CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR,
+    RunStatus, CODE_BUDGET_EXCEEDED, CODE_NODE_FANOUT_EXCEEDED, CODE_NODE_INTERNAL,
+    CODE_NODE_TIMEOUT, CODE_NODE_TYPE_UNSUPPORTED, CODE_RUN_DEADLOCK,
+    CODE_RUN_DELIVERY_TO_TERMINAL, CODE_RUN_ENTRY_INPUT_MISSING, CODE_RUN_ENTRY_INVALID,
+    CODE_RUN_FOREACH_ITEMS_EXCEEDED, CODE_RUN_FOREACH_ITEMS_NOT_ARRAY,
+    CODE_RUN_FOREACH_ITEM_INCOMPLETE, CODE_RUN_FOREACH_ITEM_KEY_DUPLICATE,
+    CODE_RUN_ILLEGAL_TRANSITION, CODE_STORAGE_ERROR, STOP_REASON_BUDGET_EXCEEDED,
 };
 
 // ---------------------------------------------------------------------------
@@ -203,6 +204,9 @@ pub struct RunOutcome {
     pub error: Option<RunError>,
     /// run 指标。
     pub metrics: RunMetrics,
+    /// v0.5 F3a2：预算停止的 `stop_reason`（`"budget_exceeded"`，等价
+    /// harness `StopReason::Other("budget_exceeded")`）；非预算停止为 `None`。
+    pub stop_reason: Option<String>,
     /// 启动时刻（UTC RFC3339 毫秒 Z）。
     pub started_at: String,
     /// 结束时刻（UTC RFC3339 毫秒 Z）。
@@ -267,6 +271,7 @@ impl RunHandle {
                     format!("run task terminated unexpectedly: {error}"),
                 )),
                 metrics: RunMetrics::default(),
+                stop_reason: None,
                 started_at: now_rfc3339(),
                 finished_at: now_rfc3339(),
             },
@@ -2819,6 +2824,7 @@ impl RunLoop {
             output_summary: self.run_output.clone(),
             error: None,
             metrics: self.metrics(),
+            stop_reason: None,
             at: finished_at,
         };
         let _ = self.emitter.finish(info);
@@ -2844,6 +2850,7 @@ impl RunLoop {
             output_summary: None,
             error: Some(error.clone()),
             metrics: self.metrics(),
+            stop_reason: Self::stop_reason_for(Some(&error)),
             at: finished_at,
         };
         let _ = self.emitter.finish(info);
@@ -2875,6 +2882,7 @@ impl RunLoop {
             // 不写领域 error_code：storage 错误不进入 events/runs 的错误列（D3）。
             error: None,
             metrics: self.metrics(),
+            stop_reason: None,
             at: finished_at,
         };
         let _ = self.emitter.finish(info);
@@ -2901,6 +2909,7 @@ impl RunLoop {
             output_summary: None,
             error: None,
             metrics: self.metrics(),
+            stop_reason: None,
             at: finished_at,
         };
         let _ = self.emitter.finish(info);
@@ -2983,8 +2992,16 @@ impl RunLoop {
         }
     }
 
+    /// v0.5 F3a2：由 run error 推导 `stop_reason`（仅预算超限产生）。
+    fn stop_reason_for(error: Option<&RunError>) -> Option<String> {
+        error
+            .filter(|error| error.code == CODE_BUDGET_EXCEEDED)
+            .map(|_| STOP_REASON_BUDGET_EXCEEDED.to_string())
+    }
+
     /// 构造与 `RunFinished` 一致的 outcome。
     fn build_outcome(&self, status: RunStatus, error: Option<RunError>) -> RunOutcome {
+        let stop_reason = Self::stop_reason_for(error.as_ref());
         RunOutcome {
             run_id: self.run_id.clone(),
             status,
@@ -2995,6 +3012,7 @@ impl RunLoop {
             },
             error,
             metrics: self.metrics(),
+            stop_reason,
             started_at: self.started_at.clone(),
             finished_at: self.finished_at.clone().unwrap_or_else(now_rfc3339),
         }

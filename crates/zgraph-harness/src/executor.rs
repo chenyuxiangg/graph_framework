@@ -3193,14 +3193,14 @@ mod tests {
         );
         let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
         assert_eq!(outcome.status, RunStatus::Failed, "{:?}", outcome.error);
+        let error = outcome.error.as_ref().expect("budget error");
+        assert_eq!(error.code, "BUDGET_EXCEEDED", "{:?}", outcome.error);
         assert!(
-            outcome
-                .error
-                .as_ref()
-                .is_some_and(|error| error.message.contains("budget_exceeded")),
-            "{:?}",
-            outcome.error
+            error.message.contains("budget"),
+            "message: {}",
+            error.message
         );
+        assert_eq!(outcome.stop_reason.as_deref(), Some("budget_exceeded"));
         // 超限后不再发起请求：只发出第 1 次 LLM 请求。
         assert_eq!(fake.requests().len(), 1);
         let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
@@ -3209,6 +3209,49 @@ mod tests {
         let stop = stats.budget_stop.as_ref().expect("budget stop");
         assert_eq!(stop.kind, crate::BudgetStopKind::Tokens);
         assert_eq!(stop.used_tokens, 100);
+        executor.close_provider().await;
+    }
+
+    /// v0.5 F3a2（DR-018 §3）：**最后一次响应** usage 累计越界也要立即 Failed，
+    /// 不能等下一次请求（F3a1 请求前检查会漏掉 EndTurn 收尾响应）。
+    #[tokio::test]
+    async fn token_budget_after_response_stops_even_on_final_response() {
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([text_with_usage(
+                "done",
+                known_usage(60, 40)
+            )])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_budget(
+                crate::BudgetConfig {
+                    max_tokens: Some(100),
+                    max_cost: None,
+                },
+            ),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(
+            outcome.status,
+            RunStatus::Failed,
+            "must not complete: {:?}",
+            outcome
+        );
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("BUDGET_EXCEEDED")
+        );
+        assert_eq!(outcome.stop_reason.as_deref(), Some("budget_exceeded"));
+        assert_eq!(
+            fake.requests().len(),
+            1,
+            "no request after the over-limit final response"
+        );
+        let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
+        assert_eq!(stats.run.total_tokens, 100);
         executor.close_provider().await;
     }
 
@@ -3240,6 +3283,11 @@ mod tests {
         );
         let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
         assert_eq!(outcome.status, RunStatus::Failed, "{:?}", outcome.error);
+        assert_eq!(
+            outcome.error.as_ref().map(|error| error.code.as_str()),
+            Some("BUDGET_EXCEEDED")
+        );
+        assert_eq!(outcome.stop_reason.as_deref(), Some("budget_exceeded"));
         assert_eq!(fake.requests().len(), 1);
         let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
         assert_eq!(stats.run.cost_usd, Some(0.5));

@@ -114,9 +114,10 @@ impl RunFailure {
             Self::Cancelled => NodeError::Cancelled,
             Self::InstanceTimeout { elapsed_ms } => NodeError::Timeout { elapsed_ms },
             Self::Harness(error) => error.into_node_error(),
-            // F3a2 替换为 kernel `BUDGET_EXCEEDED` 映射；本波保留可识别消息。
-            Self::BudgetExceeded(stop) => NodeError::Internal {
-                message: format!("budget_exceeded: {}", stop.message),
+            // v0.5 F3a2（DR-018 §3）：kernel 域码 `BUDGET_EXCEEDED`（append-only；
+            // 不新增 HarnessErrorKind）。
+            Self::BudgetExceeded(stop) => NodeError::BudgetExceeded {
+                message: stop.message,
             },
             Self::Internal { message } => NodeError::Internal { message },
         }
@@ -218,6 +219,11 @@ pub(crate) async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, RunFailu
                 &response.usage,
                 duration_ms,
             );
+            // v0.5 F3a2（DR-018 §3）：响应后检查——本次 usage 累计已 `>=` 上限时立即停止，
+            // 不等待下一次请求（最后一次响应越界也 Failed）。
+            if let Err(stop) = observability.check_after_call() {
+                return Err(RunFailure::BudgetExceeded(stop));
+            }
         }
         if let Some(output) = state.handle_response(&run, response).await? {
             return Ok(output);
