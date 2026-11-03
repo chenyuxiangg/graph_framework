@@ -114,6 +114,7 @@
 | [REV-114](REV-114-docs-w5-removal.md) | 2026-11-03 | docs | `docs/docs-w5-removal` | **通过**（取消 W5：DR-015 + README/progress/spec00/DR-004/007/008/012/SOP/index/issues 状态注记；docs-only、check.sh 绿、历史保留；首轮有条件通过 → `a632806` 关闭 index 三处/P3 ①–③；见记录 §6/§8） | reviewer-a |
 | [REV-115](REV-115-docs-v05-design.md) | 2026-11-03 | docs | `docs/docs-v05-design` | **通过**（v0.5 F0：DR-016–020 + spec 00/02/05 §5.16/06 §6.16/07 AC-25–28/08 §8.14；docs-only、check.sh 绿、spike 事实一致；首轮有条件通过 → `554aad0` 关闭 C1 错误码/C2 Codex 状态索引/C3 预算码 reason/C4 Codex 命令；见记录 §6/§8） | reviewer-a |
 | [REV-117](REV-117-docs-v05-codex-fix.md) | 2026-11-03 | docs | `docs/docs-v05-codex-fix` | **通过**（Codex spike FINAL 勘误：tool 事件在 `-s danger-full-access`/非嵌套可得→tool_start/tool_end、ok=exit_code==0；嵌套默认 sandbox 静默 exit71 假绿；F5d 9 项/AC-28 g/i/j/零密钥命令；docs-only 9 文件、check.sh 绿、spike 344 行一致；P3 3 项见记录 §3） | reviewer-a |
+| [REV-118](REV-118-cli-reexec.md) | 2026-11-03 | cli（含 trace helper/e2e 机械） | `feat/cli-reexec` | **通过**（v0.5 F1b：`--replay-tools=reexec` 显式/前置 flag/只读四工具/result_sha 漂移 MISMATCH/副作用·MCP·Python 行复用记录/events·outputs 忽略/recorded 不变；trace 公共 sha 与 writer 同口径；cli 255/0、tool_reexec 6/0、workspace 1234/0、clippy/fmt/check/no-default 绿；P3 D6 文档口径见 §3/§7） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
