@@ -1,6 +1,6 @@
 # DR-020 · v0.5 真实 Codex/DSH 验证方案
 
-> **状态**：**DSH FINAL 已冻结**（spike 报告 `/tmp/dsh-repo-spike.md`，327 行）；**Codex 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待**。
+> **状态**：**DSH FINAL 已冻结**（spike 报告 `/tmp/dsh-repo-spike.md`，327 行）；**Codex FINAL（tool 事件勘误）；F5d 实现/真 key 待**。
 > **日期**：2026-11-03 · **作者**：docs-dev · **关联**：DR-011（外部 harness）、DR-016、DR-018、DR-019、07 AC-20/28、v0.5 F5a–d
 > **原则**：真实构建/运行、证据可复现、不可用如实标注、**不伪造**；不写密钥/不使用用户 `~/.dsh` 凭据。
 
@@ -8,12 +8,12 @@
 
 | 项 | 结论（DSH FINAL） | Codex |
 |---|---|---|
-| 源码 | https://github.com/deepseek-ai/deepseek-harness （public/MIT；TypeScript/pnpm monorepo；~349MB developer preview） | https://github.com/openai/codex（中期已落盘（`74bba4f`）；F5d FINAL/真 key 待） |
-| 本环境构建 | 本机带宽无法 clone/build，**不阻塞**：本机 Desktop **0.2.1-rc.3** 自带同一套 `dsh`+`dsh-acp`+ACP SDK 1.4.0；rc.5 npm 代码形状一致；`npx @deepseek-ai/dsh@0.2.1-rc.5 --profile acp`；源码构建 **Node ≥24.9 + pnpm 11.28.5** | Codex 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待 |
-| 入口 | **`dsh --profile acp`**（ACP v1 stdio 首选）；`--profile headless "job"`（one-shot 无流式）；`--profile sdk`（非 ACP） | Codex 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待 |
-| 传输 | **JSON-RPC 2.0 NDJSON**（每行一条；**无 Content-Length**） | 中期已确认（codex exec --json） |
-| 实测（无 key，隔离 DSH_HOME） | initialize/session/new/close/EOF/unknown session 均通过；prompt → **-32603 no API key**（无模型请求） | Codex 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待 |
-| 验证 | **分层 F5a CI fake ACP / F5b 真实握手无 key / F5c 全链路需 key；F5d Codex 三层（CI mock 零密钥/真 key/取消）+ F5f 可选工具执行** | **中期已通（零密钥 e2e）** |
+| 源码 | https://github.com/deepseek-ai/deepseek-harness （public/MIT；TypeScript/pnpm monorepo；~349MB developer preview） | https://github.com/openai/codex（FINAL（tool 事件勘误）；F5d 实现/真 key 待） |
+| 本环境构建 | 本机带宽无法 clone/build，**不阻塞**：本机 Desktop **0.2.1-rc.3** 自带同一套 `dsh`+`dsh-acp`+ACP SDK 1.4.0；rc.5 npm 代码形状一致；`npx @deepseek-ai/dsh@0.2.1-rc.5 --profile acp`；源码构建 **Node ≥24.9 + pnpm 11.28.5** | Codex FINAL（tool 事件勘误）；F5d 实现/真 key 待 |
+| 入口 | **`dsh --profile acp`**（ACP v1 stdio 首选）；`--profile headless "job"`（one-shot 无流式）；`--profile sdk`（非 ACP） | Codex FINAL（tool 事件勘误）；F5d 实现/真 key 待 |
+| 传输 | **JSON-RPC 2.0 NDJSON**（每行一条；**无 Content-Length**） | FINAL 已确认（codex exec --json） |
+| 实测（无 key，隔离 DSH_HOME） | initialize/session/new/close/EOF/unknown session 均通过；prompt → **-32603 no API key**（无模型请求） | Codex FINAL（tool 事件勘误）；F5d 实现/真 key 待 |
+| 验证 | **分层 F5a CI fake ACP / F5b 真实握手无 key / F5c 全链路需 key；F5d Codex 三层（CI mock 零密钥/真 key/取消）+ F5f 可选工具执行** | **FINAL（零密钥 e2e + tool 事件勘误）** |
 | AC-28 | a–f（§5） | 待补 |
 
 ## 1. DSH FINAL 事实（spike 2026-11-03）
@@ -56,7 +56,7 @@
 | **F5a** adapter transport + fake ACP server | `dsh_acp.py` initialize/session/update/permission/cancel/close 映射单测 | 默认 CI | 是 |
 | **F5b 真实 DSH 握手** | 真 `dsh --profile acp` initialize/session/new/close/EOF/unknown session/无 key prompt 降级 | `#[ignore]` + **`ZGRAPH_REAL_DSH=1`** | 是（无 key） |
 | **F5c 全链路** | 真 prompt "Reply with exactly: ok" → ≥1 agent_message_chunk、stopReason=end_turn、`result.content="ok"`、run/trace/replay | `#[ignore]` + `ZGRAPH_REAL_DSH=1` + **`DEEPSEEK_API_KEY`**（用户提供/授权） | 需 key |
-| **F5d Codex 三层** | CI mock 零密钥 e2e / 真实 key 全链路 / 取消；**F5f** 可选工具执行 | 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待 | 零密钥可跑 |
+| **F5d Codex 三层** | CI mock 零密钥 e2e / 真实 key 全链路 / 取消；**F5f** 可选工具执行 | FINAL（tool 事件勘误）；F5d 实现/真 key 待 | 零密钥可跑 |
 
 - **CI 不 clone 仓库**；F5b 用本机安装/npx；F5c 需 key（用户授权，不写密钥）；发布材料记录构建/运行/限制，不可用如实标注。
 - 阶段 B 命令（可复现）：
@@ -67,7 +67,7 @@ export DEEPSEEK_API_KEY=...            # 仅 F5c 需要；用户授权，不写�
 dsh --profile acp                      # 本机 0.2.1-rc.3；或 npx @deepseek-ai/dsh@0.2.1-rc.5
 ```
 
-## 4. Codex（中期结论：零密钥 e2e 已通）
+## 4. Codex（FINAL：零密钥 e2e 已通 + tool 事件可得）
 
 ### 4.1 构建/安装
 
@@ -96,32 +96,38 @@ dsh --profile acp                      # 本机 0.2.1-rc.3；或 npx @deepseek-a
 - SIGTERM → killpg → pid 消失、无孤儿；stdin 关闭后 exit0（符合 `plugin.rs` 契约）。
 - 取消宽限沿用 2s→SIGKILL（DR-011）。
 
-### 4.4 adapter 缺口（F5d 修）
+### 4.4 adapter 修复项（F5d FINAL，9 项）
 
-| # | 级别 | 问题 | 修法 |
+| # | 级别 | 问题/更正 | 修法 |
 |---|---|---|---|
 | 1 | 中 | 任一顶层 `{"type":"error"}` 置 failed 且 `turn.completed` 不重置 → 重连后成功也误报（真机见 5 次 Reconnecting） | **`turn.completed` 清 failed** |
-| 2 | 中 | 未传 `--ephemeral` → CODEX_HOME 写 sessions/rollout + 4 sqlite（6 run 5.6MB） | **加 `--ephemeral`** |
-| 3 | 低 | prompt 走 argv（ARG_MAX 1MB；900KB 可过，>1MB E2BIG） | 文档标注（或临时文件，若 codex 支持） |
-| 4 | 低 | `iterations=1` 与 codex 内部多轮不符；usage 累计（22/14） | 文档口径（iterations 降级；usage 累计按 v0.3 字段） |
-| 5 | 低 | `exec --json` 无 `command_execution` item → tool_start/tool_end 不可得（codex 限制，非 adapter bug） | 文档标注；不伪造 tool 事件 |
-| 6 | 低 | reasoning 可得但 adapter 丢弃，与 `capabilities.reasoning=false` 一致 | 文档/保持 |
+| 2 | 中 | 未传 `--ephemeral` → CODEX_HOME 写 sessions/rollout + 4 sqlite（6 run 5.6MB，输入落持久层） | **加 `--ephemeral`** |
+| 3 | **高（更正）** | **tool 事件可得**：`-s danger-full-access` 下 `exec --json` 发 `item.started`/`item.completed` 的 `command_execution`（command/aggregated_output/exit_code/status）→ 可映射 **tool_start/tool_end**；旧结论「不可得」是嵌套 sandbox exit71 的假阴性 | **补 command_execution→tool_start/tool_end 映射**（`ok == exit_code`；不伪造） |
+| 4 | 低 | prompt 走 argv（ARG_MAX 1MB；900KB 可过，>1MB E2BIG） | 文档标注（或临时文件，若 codex 支持） |
+| 5 | 低 | `iterations=1` 与 codex 内部多轮不符；usage 累计（22/14） | 文档口径（iterations 降级；usage 累计按 v0.3 字段） |
+| 6 | 低 | 版本漂移 | **pin `@openai/codex@0.166.0`**；差异需重测 |
+| 7 | 中 | 认证分层：默认 provider 需 `codex login`/`OPENAI_API_KEY`；自定义 mock provider 零密钥（`env_key` 只有值即可） | 认证分层文档/CI mock；不写真实 key |
+| 8 | 中 | 取消/生命周期 | SIGTERM→killpg→无孤儿、stdin close exit0；**取消后 3s 内进程消失** |
+| 9 | 中 | 节点超时不够 | **节点超时 >60s**（重试分钟级）；避免误杀 |
+
+> **tool 事件更正（重要）**：默认 sandbox 在嵌套环境会**静默**打死工具执行且**无事件**（假绿风险）；验证「codex 改代码/执行命令」必须 **`-s danger-full-access` 或容器外（非嵌套）**；CI mock provider 不需要工具执行。
 
 ### 4.5 嵌套 sandbox 风险
 
-- codex 自带 `sandbox-exec` 在嵌套环境 **exit 71**；验证「codex 改代码」需 `-s danger-full-access` 或容器外跑。
-- **CI mock provider 不需要工具执行**；真实工具执行验证列为 **F5f 可选**（非嵌套用户终端/容器，文档/手动，不伪造）。
+- codex 自带 `sandbox-exec` 在嵌套环境 **exit 71**；**默认 sandbox 下工具执行被静默打死且无事件**（不能据此断言「无 tool 事件」）。
+- 工具执行验证：**F5f**（非嵌套用户终端/容器，`-s danger-full-access` 或容器外；文档/手动，不伪造）。
+- **CI mock provider 不需要工具执行**；F5d-a 不做工具；F5f 可选。
 
-### 4.6 F5d/F5f 分层
+### 4.6 F5d/F5f 分层（FINAL）
 
 | 层 | 内容 | 门控 | CI |
 |---|---|---|---|
-| **F5d-a** | CI mock provider 零密钥确定性 e2e（CODEX_HOME config + 本地 mock SSE；断言 hello_ok/result/usage/cached 丢弃） | 默认 CI（无需 key） | 是 |
+| **F5d-a** | CI mock provider 零密钥确定性 e2e（CODEX_HOME config + 本地 mock SSE；断言 hello_ok/result/usage(11,7,18,2)/cached 丢弃/streaming=false/content==-o 文件） | 默认 CI（无需 key） | 是 |
 | **F5d-b** | 真实 key 全链路（`#[ignore]` + `OPENAI_API_KEY` 或 `codex login`；可选，不阻塞发布） | `#[ignore]` + env | 需 key |
-| **F5d-c** | 取消 pid/无孤儿（CI 可跑） | 默认 CI | 是 |
-| **F5f**（可选） | 非嵌套环境 `-s danger-full-access` 验证 codex 工具执行 | 手动/用户终端 | 否 |
+| **F5d-c** | 取消 pid/无孤儿（CI 可跑；**3s 内进程消失**）+ 未认证 exit_nonzero 不挂死 | 默认 CI | 是 |
+| **F5f**（可选） | **非嵌套环境 `-s danger-full-access`** 验证 codex 工具执行（≥1 对 tool_start/tool_end、`ok==exit_code`） | 手动/用户终端 | 否 |
 
-## 5. AC-28（设计冻结；DSH FINAL + Codex 中期已落盘；F5 实测）
+## 5. AC-28（设计冻结；DSH FINAL + Codex FINAL（tool 事件勘误）；F5 实测）
 
 | # | 断言 |
 |---|---|
@@ -131,10 +137,10 @@ dsh --profile acp                      # 本机 0.2.1-rc.3；或 npx @deepseek-a
 | d | F5b 无 key 降级：prompt → -32603 no API key（**无模型请求**）；不伪造成功；adapter 缺口/映射文档化 |
 | e | F5c 全链路（需 `DEEPSEEK_API_KEY`，用户授权）：prompt "Reply with exactly: ok" → ≥1 agent_message_chunk、stopReason=end_turn、`result.content="ok"`、run/trace/replay；不可用如实标注 |
 | f | 门控：`#[ignore]` + `ZGRAPH_REAL_DSH=1`/`ZGRAPH_REAL_CODEX=1`；CI 不 clone；发布材料证据齐全；**usage_update 不伪造 token/成本** |
-| g | **F5d-a Codex 零密钥 CI**：`CODEX_HOME/config.toml` mock provider + 本地 mock Responses SSE；执行 **`codex exec --json --skip-git-repo-check -o <file> "reply with exactly: hello"`**；断言 hello_ok/result `hello from mock`/stop_reason EndTurn/usage(11,7,18,2)/cached=4 丢弃；**无需 key** |
+| g | **F5d-a Codex 零密钥 CI**：`CODEX_HOME/config.toml` mock provider + 本地 mock Responses SSE；执行 **`codex exec --json --skip-git-repo-check -o <file> "reply with exactly: hello"`**；断言 hello_ok/result `hello from mock`/EndTurn/usage(11,7,18,2)/cached=4 丢弃/**streaming=false**/**usage.input_tokens>0 且无缓存字段**/**content==`-o` 文件**；**无需 key** |
 | h | **F5d-b 真实 key 全链路**（`#[ignore]`+`OPENAI_API_KEY`/`codex login`，可选不阻塞发布）；不可用如实标注 |
-| i | **F5d-c 取消**：SIGTERM→killpg→pid 消失/无孤儿；stdin close exit0 |
-| j | **F5f 可选**：非嵌套环境 `-s danger-full-access` 验证 codex 工具执行（文档/手动，不伪造；CI mock 不需要） |
+| i | **F5d-c 取消/认证**：SIGTERM→killpg→**3s 内 pid 消失/无孤儿**；stdin close exit0；**未认证 exit_nonzero 不挂死** |
+| j | **F5f 可选**：**非嵌套环境 `-s danger-full-access`** 验证 codex 工具执行；**≥1 对 tool_start/tool_end 且 `ok==exit_code`**；默认 sandbox 在嵌套环境静默无事件（假绿风险）→ 不据此断言；文档/手动，不伪造 |
 
 **可复现命令（Codex 零密钥 CI；F5d-a）**：
 
@@ -156,7 +162,7 @@ codex exec --json --skip-git-repo-check -o /tmp/codex-out.json "reply with exact
 | usage 成本不可得 | `usage_update` 仅 used/size，非 input/output tokens | **DR-018/019 注明：外部 DSH 成本不可统计/不伪造**；仅 token 若 provider 另报 |
 | 无 API key | F5c 无法验证 | 分层；key 门控；如实标注 |
 
-## 7. 波次（F5 拆分；F5d Codex 中期已落盘，F5d FINAL/真 key 待）
+## 7. 波次（F5 拆分；F5d Codex FINAL（tool 事件勘误），F5d FINAL/真 key 待）
 
-- **F5a** `dsh_acp.py` ACP transport + fake ACP 单测（CI）→ **F5b** 真实 DSH 握手（无 key）→ **F5c** 全链路（key 门控）→ **F5d** Codex 三层（CI mock 零密钥/真 key/取消；中期已落盘）→ **F5f** 可选工具执行。
+- **F5a** `dsh_acp.py` ACP transport + fake ACP 单测（CI）→ **F5b** 真实 DSH 握手（无 key）→ **F5c** 全链路（key 门控）→ **F5d** Codex 三层（CI mock 零密钥/真 key/取消；FINAL（tool 事件勘误））→ **F5f** 可选工具执行。
 - 每层独立提交/评审；不阻塞 F1–F4；F5c 缺 key 时如实标注不伪造。

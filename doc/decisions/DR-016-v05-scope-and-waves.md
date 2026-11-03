@@ -1,6 +1,6 @@
 # DR-016 · v0.5（M10）范围与波次（reexec / ISSUE 清理 / sandbox 增强 / 真实 Codex·DSH / 可观测成本；v0.6=W3b）
 
-> **状态**：V1 设计冻结（REV-115；**DSH FINAL 已落盘、Codex 中期已落盘（`74bba4f`）；F5d FINAL/真 key 待**）。
+> **状态**：V1 设计冻结（REV-115；**DSH FINAL、Codex FINAL（tool 事件勘误）已落盘；F5d 实现/真 key 待**）。
 > **日期**：2026-11-03 · **作者**：docs-dev · **关联**：DR-017/018/019/020、DR-012/013/014/015、task-95/96
 > **用户决策（task-95）**：v0.5 六项全选，分 **v0.5.0（5 项）** + **v0.6.0（W3b durable resume）**；W5 已取消（DR-015）。
 
@@ -60,7 +60,7 @@ F0 docs 设计冻结（本批，REV-115）
 | F2 | `feat/harness-sandbox-enhance` | harness-dev / reviewer-a | `--allow-write-path`、构建工具链、profile/jail、AC-26 负例 | F0；与 F1 串行 |
 | F3 | `feat/observability-cost` | harness/trace/cli-dev / reviewer-b（跨模块 Lead 批准） | usage/token/费用/耗时聚合、预算 flags/停止语义、trace additive | F0 |
 | F4 | `fix/issue-cleanup-v05` | 各模块作者 / reviewer-a/b | ISSUE-176–181 清理/复核 | F0 |
-| F5 | `test/real-codex-dsh`：**F5a** adapter+fake ACP → **F5b** 真实 DSH 握手 → **F5c** 全链路（key）→ **F5d** Codex 三层（CI mock 零密钥/真 key/取消）+ **F5f** 可选工具执行（非嵌套） | e2e-dev/research / reviewer-a | 源码/本机验证、证据、环境门控、不伪造（每层独立提交） | F0 + DSH spike（Codex 中期已通） |
+| F5 | `test/real-codex-dsh`：**F5a** adapter+fake ACP → **F5b** 真实 DSH 握手 → **F5c** 全链路（key）→ **F5d** Codex 三层（CI mock 零密钥/真 key/取消）+ **F5f** 可选工具执行（非嵌套） | e2e-dev/research / reviewer-a | 源码/本机验证、证据、环境门控、不伪造（每层独立提交） | F0 + DSH spike（Codex FINAL） |
 | F6 | `chore/process-v05-release` + `docs/docs-v05-spec` | docs-dev / reviewer-b | 版本/基线/README/progress/as-built/REV 发布 | F1–F5 |
 
 ## 3. 发布条件（v0.5.0）
@@ -101,6 +101,7 @@ F0 docs 设计冻结（本批，REV-115）
 | 预算误停 | 价格配置错误/超限误判 | 默认关；tokens 权威、cost 需价格表；超限状态/错误码明确；文档 |
 | allow-write-path 逃逸 | 可写白名单扩大攻击面 | 目录级 canonicalize；profile + jail 双强制；默认关；文档警示；AC-26 负例 |
 | Codex/DSH 构建失败/认证 | 源码依赖重/需密钥 | 环境门控 `#[ignore]`/env；如实记录不可用；不伪造；adapter 骨架已存在 |
+| Codex 默认 sandbox 假绿 | 嵌套环境默认 sandbox 静默打死工具执行且无事件，易误判「tool 事件不可得」 | **tool 验证必须 `-s danger-full-access`/非嵌套**；F5f 可选；F5d-a mock 不执行工具；文档标注 |
 | ISSUE 清理引入回归 | flake 加固改断言/超时 | 每项独立评审；测试基线只缩不增；F4 独立分支 |
 | 跨模块改动 | F1/F3/F5 跨 crate | Lead 批准 + 第二评审；串行/隔离 worktree |
 | v0.6 依赖 | durable resume 内核级 | v0.5 不阻塞；v0.6 另立 DR-021/独立评审 |

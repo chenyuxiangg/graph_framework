@@ -29,7 +29,7 @@
 
 - token 以 `llm_calls.usage`（prompt/completion/total/reasoning）为准；缺失 usage → 该调用计入「未知 token」并在输出 warning（不臆造 0）。
 - **外部 DSH 限制（DR-020 FINAL）**：ACP `usage_update` 只有 used/size（上下文用量），**不能**填 input/output tokens；v0.5 外部 DSH 的 token/成本**不可统计**，输出标注「unavailable（DSH usage 不提供）」；不伪造、不计入预算（预算只对可统计的内置 LLM 调用生效）。
-- **外部 Codex 限制（DR-020 中期）**：usage 累计（多次 turn 累计，22/14 例）；`cached_input_tokens` 丢弃（v0.3 口径）；`iterations=1` 为降级口径；成本按记录 usage 计算，不按内部轮次推断。
+- **外部 Codex 限制（DR-020 FINAL）**：usage 累计（多次 turn 累计，22/14 例）；`cached_input_tokens` 丢弃（v0.3 口径）；`iterations=1` 为降级口径；成本按记录 usage 计算，不按内部轮次推断；tool 事件在 `-s danger-full-access`/非嵌套可得（不影响 usage 口径）。
 - 耗时：已有 `started_at/finished_at/duration_ms`（LLM/tool）；run wall 由 trace 时间戳计算。
 - 费用：`cost = prompt_tokens/1e6*input_price + completion_tokens/1e6*output_price`；缓存/推理 token 按现有字段能力处理（未知价格→不可用）。
 - 不写 token/密钥；不记录 prompt/response 全文（既有口径）。
