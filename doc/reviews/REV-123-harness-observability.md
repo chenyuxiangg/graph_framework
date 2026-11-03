@@ -9,9 +9,9 @@
 
 ## 1. 结论
 
-**结论：有条件通过**（C1/P2 已由 `e9ac29f` 关闭；**C2 仅部分关闭，仍为 P1**，见 §7）
+**结论：通过**（首轮有条件通过 → C1/P2 由 `e9ac29f`、C2 残项由 `4a93bc3` 关闭；见 §7）
 
-P0=0；**P1=1**；P2 残余；P3 后续。PricingTable 解析/费用公式、预算累计/请求前检查/不可续、run/node/agent 聚合、Unavailable/Estimated 口径、默认无预算无输出回归均通过；最终 harness **378/0/1**（默认/features）、workspace **1269/0/3**、cli **257/0**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余（不阻断，见 §7）；P3 后续。PricingTable 解析/费用公式、预算累计/请求前检查/不可续、run/node/agent 聚合、Unavailable/Estimated 口径、默认无预算无输出回归均通过；最终 harness **378/0/1**（默认/features）、workspace **1269/0/3**、cli **257/0**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
 > **首轮历史（保留）**：`5feed3f` 首轮 P1=2（C1 非 USD、C2 max_cost 缺模型）；`e9ac29f` 已关闭 C1 + P2（预算 >0），但 C2 的多 Agent 模型加载期校验仍缺（见 §7）。
 
@@ -93,20 +93,29 @@ bash scripts/dev/check.sh                    # PASSED
 - **P3 N6–N9**：非 USD 测试、map 清理、F3b 输出、既有 flake。
 - 无 P0；C1/C2 未关闭前不可 merge。
 
-## 7. 部分关闭复核（2026-11-03，`e9ac29f`，parent `73755e4`）
+## 7. 条件关闭复核（2026-11-03，`e9ac29f` + `4a93bc3`）
 
-**复核结论：仍为有条件通过；C1/P2 关闭，C2（多 Agent 模型）未完全关闭。**
+**复核结论：通过。** C1/P2 由 `e9ac29f` 关闭；C2 多模型残项由 `4a93bc3`（仅 executor +253）关闭；worktree 干净。
 
-- **C1 已关闭**：`PricingTable` 解析期仅接受 `currency=USD`（非 USD → `pricing_invalid`），删除 `is_usd`/`pricing_currency_mismatch` 分支；EUR 负例通过。无 `max_cost` 时也不会产生非 USD `cost_usd`。
-- **P2 已关闭**：`BudgetConfig.validate` 要求 `max_tokens/max_cost > 0`（0/负数/NaN → `budget_invalid`）；`invalid_budget_values_are_config_errors_before_requests` 覆盖 0/0.0/NaN/负值并断言零请求。
-- **C2 部分关闭（P1 仍成立）**：`executor.rs::observability_for_job(&job, model)` 在**当前 job** 执行前校验 `pricing.has_model(current_agent_model)`，单 Agent 集成测试（`max_cost_missing_agent_model_is_config_error_before_requests`）零请求通过；但校验以 **AgentCallJob/当前节点** 为单位，**不是 run 加载期扫描全部 AgentConfig 模型**。多 agent 图若第一个 agent 模型有价、第二个缺价：图会先执行第一个 agent 并发出 LLM 请求，直到第二个 agent 的 job 才 `HARNESS_CONFIG_LOAD{pricing_missing_model}`——不满足 Lead REV-123 C2「所有 Agent 模型有价、缺失→CONFIG_LOAD 且零请求」。现有 `TWO_AGENT_GRAPH` 测试仅覆盖同一 `deepseek-chat` 模型，未覆盖两模型。**需在 run 入口/加载阶段校验该 run 所有 AgentConfig 的 model 均有价，或明确缩小 C2 口径并获批；补双模型（first priced / second missing）零请求测试。**
-- **最终门禁（`e9ac29f`）**：
+### C1（非 USD）
+- `PricingTable` 解析期仅接受 `currency=USD`（非 USD → `pricing_invalid`），删除 `is_usd`/`pricing_currency_mismatch` 分支；EUR 负例通过；无 `max_cost` 不再产出非 USD `cost_usd`。**关闭**。
+
+### P2（预算 >0）
+- `max_tokens/max_cost` 必须 >0；0/负/NaN→`budget_invalid`；`invalid_budget_values_are_config_errors_before_requests` 覆盖零请求。**关闭**。
+
+### C2（多 Agent 模型）
+- 新增 additive `HarnessExecutor::with_required_models`（及 alias），`max_cost` 下必须提供。
+- `NodeExecutor::execute` 入口、任何 Agent 加载/LLM 请求前调用 `validate_run_pricing()`，顺序：`budget_invalid` → `pricing_required_for_max_cost` → `pricing_models_required`（未提供 required） → `pricing_missing_model`（任一缺价）；全部 `HARNESS_CONFIG_LOAD`、零请求。
+- 测试：`multi_model_requires_all_models_priced_before_any_request`（`TWO_MODEL_GRAPH` first deepseek-chat priced / second-model missing → `pricing_missing_model` + `fake.requests().is_empty()`）；`max_cost_without_required_models_is_config_error_before_requests`（`pricing_models_required` 零请求）；`max_cost_all_models_priced_runs_normally`（全有价完成、2 请求）；`required_models_not_enforced_without_max_cost`（无 max_cost 不校验、默认完成）。**C2 关闭**。
+
+### 最终门禁（`4a93bc3`）
 ```bash
-cargo test -p zgraph-harness                 # 379 tests：378 passed / 0 failed / 1 ignored
-cargo test -p zgraph-harness --features mcp  # 379 tests：378 passed / 0 failed / 1 ignored
-cargo test --workspace                       # 91 targets：1269 passed / 0 failed / 3 ignored
+cargo test -p zgraph-harness                 # 383 tests：382 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp  # 383 tests：382 passed / 0 failed / 1 ignored
+cargo test --workspace                       # 91 targets：1273 passed / 0 failed / 3 ignored
 cargo test -p zgraph-cli                     # 257 passed / 0 failed
 pytest -q                                    # exit 0；183 passed
 cargo clippy/fmt/check/no-default            # clean
 ```
-- 范围：`e9ac29f` 仅 `observability.rs`/`executor.rs` +148/−43；无 Cargo；`git status` 空。
+- 范围：`4a93bc3` 仅 `executor.rs` +253；无 Cargo；`git status` 空。
+- **F3b 义务**：CLI 必须从 graph 的全部 AgentConfig 收集模型并调用 `with_required_models`；空集合不得作为“已提供”绕过（F3b 测试补）。其余 P2（retry 逐请求、subprocess unavailable、by_node node_id、F3a2 stop 映射）留后续波次。
