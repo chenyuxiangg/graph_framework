@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0、P1=0；**P2 条件 C1/C2**（`doc/progress.md` 仍写「REV-119 期望 MISMATCH / 待确认」，与 Lead 裁决 MISSING 相反；`DR-016` 风险/AC-25 矩阵仍写「副作用工具拒绝 exit2」，与 F1b 非候选复用口径不一致）；P3 2 项（v0.4 历史行口径/索引细节）。DR-017/05/06/07/08/index 主体已对齐实现；C1/C2 为 docs 小修，关闭后通过。
+> **结论历史**：首轮（基准 `dc35666`）为「**有条件通过**」——P2 C1 progress 仍写「期望 MISMATCH」、C2 DR-016 旧「副作用 exit2」。作者 `f1050a9` 关闭 C1/C2/P3 后，评审人复核 progress/DR-016 grep + check.sh（§8），C1/C2 closed，结论改**通过**。
+>
+> 首轮意见（历史保留）：P0/P1=0；DR-017/05/06/07/08/index 主体已对齐 F1b；C1/C2 docs 小修。
 
 ### 1.1 已核对成立
 
@@ -79,11 +81,34 @@ grep -n "候选行\|非候选\|MISSING\|exit2\|replay_mode\|drift" DR-017/spec 0
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 progress 缺 sha 裁决改为 MISSING/已关闭 | **open** | `doc/progress.md:15`；check.sh |
-| C2 DR-016 风险/AC-25 改非候选复用口径 | **open** | `DR-016:81/91`；check.sh |
+| C1 progress 缺 sha 裁决改为 MISSING/已关闭 | **closed（f1050a9）** | `doc/progress.md` 删除「期望 MISMATCH/待确认」行；进度 14 行；grep 清零 |
+| C2 DR-016 风险/AC-25 改非候选复用口径 | **closed（f1050a9）** | `DR-016:81` 非候选复用/不执行/不报 exit2 + exit2 仅缺 flags + 非法 workspace exit3；`:91` AC-25 同步 |
+| P3-1/P3-2 历史行注记 | **closed（f1050a9）** | `spec07:602` AC-24h 标「v0.4 历史；v0.5 见 AC-25」；`spec08:640` 标「v0.4 历史；v0.5 见 §8.14」 |
 
 ## 7. 遗留问题
 
-- C1/C2 关闭前不 merge；P3-1/P3-2 历史行可同批或后续 docs 小修。
-- 实现不改代码（Lead 裁决）；F1c 补 AC-25 完整 e2e；F2 待。
+- C1/C2/P3 已关闭；实现不改代码（Lead 裁决）；F1c 补 AC-25 完整 e2e；F2 待。
 - 无代码/测试影响；docs-only。
+
+## 8. 条件关闭复核（2026-11-03）
+
+复核提交：`f1050a9`（父 `c4a72d2`；docs-only 4 文件 progress/DR-016/07/08，+4/−5）。评审人执行：
+
+```bash
+git status --porcelain                       # 空
+git diff --stat c4a72d2..f1050a9             # 4 files +4/−5（docs-only）
+bash scripts/dev/check.sh                    # CHECK PASSED
+grep -rn "期望 MISMATCH\|待.*确认\|副作用.*exit *2\|副作用工具拒绝" doc/progress.md \
+  doc/decisions/DR-016-v05-scope-and-waves.md doc/spec-v1.2/07-验收用例.md \
+  doc/spec-v1.2/08-审计关闭矩阵.md            # 旧口径清零（仅新正确语义/无关历史）
+wc -l doc/progress.md                        # 14（≤30）
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C1 progress | ✅ 「期望 MISMATCH/待确认」行删除；progress 14 行；缺 sha=MISSING 口径与 DR/spec 一致 |
+| C2 DR-016 | ✅ §5 风险改「非候选复用/不执行/不报 exit2；exit2 仅缺 flags；非法 workspace CONFIG_LOAD exit3」；AC-25 矩阵同步 |
+| P3 spec07/08 | ✅ AC-24h 与 §8.13 旧 exit2 行加「v0.4 历史；v0.5 见 AC-25/§8.14」注记 |
+| 范围/门禁 | ✅ 仅 4 个 docs 文件；无代码/测试/既有评审/token/dist；check.sh PASSED |
+
+**最终状态**：C1/C2/P3 closed；建议 Lead merge → F1c e2e/F2。
