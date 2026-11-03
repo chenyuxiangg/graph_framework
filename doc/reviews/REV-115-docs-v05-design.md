@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0；**P1 条件 C1**（reexec mismatch 错误码在 DR-017/DR-016/spec 中混用 `REPLAY_TOOL_MISMATCH` / `REPLAY_TOOL_RECORD_MISMATCH`，F1 实现前必须统一）；**P2 条件 C2–C4**（Codex spike 状态仍写「待 spike」且 index DR-020 行粘连；`BUDGET_EXCEEDED`/`allow_write_path_invalid` 未进 00 码/reason 表；DR-020 Codex 零密钥命令缺 prompt/`--skip-git-repo-check`）；P3 若干。范围/波次/预算/reexec/sandbox/真实 Codex·DSH 方案与 AC-25–28 主体成立；spike 事实与命令抽查一致、无密钥。
+> **结论历史**：首轮（基准 `74bba4f`）为「**有条件通过**」——P1 C1 reexec 错误码混用；P2 C2 Codex 状态/索引、C3 新码/reason 登记、C4 Codex 命令。作者 `554aad0` 关闭 C1–C4 + P3 后，评审人复核 grep/码表/命令/索引 + check.sh（§8），C1–C4 closed，结论改**通过**。
+>
+> 首轮意见（历史保留）：P0=0；范围/波次/预算/reexec/sandbox/真实 Codex·DSH/AC-25–28 主体成立；spike 事实/命令一致、无密钥。
 
 ### 1.1 已核对成立
 
@@ -93,14 +95,37 @@ bash scripts/dev/check.sh                  # CHECK PASSED
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 reexec mismatch 码统一为 `REPLAY_TOOL_RECORD_MISMATCH` | **open** | DR-016/017/spec 全量统一；grep 无 `REPLAY_TOOL_MISMATCH` |
-| C2 Codex spike 状态/索引/进度更新 + index DR-020 拆行 | **open** | DR-016/020/spec00/05/07/index/progress；check.sh |
-| C3 `BUDGET_EXCEEDED`/`allow_write_path_invalid` 登记 + max-cost 无 pricing 语义 | **open** | 00 §0.4/reason/AC-27 d；spec08 同步 |
-| C4 Codex 零密钥命令补 prompt/`--skip-git-repo-check` | **open** | DR-020 §5 与 AC-28 g；与 spike 命令一致 |
+| C1 reexec mismatch 码统一为 `REPLAY_TOOL_RECORD_MISMATCH` | **closed（554aad0）** | DR-016/017/spec/DR-014 全量统一；当前文档 grep `REPLAY_TOOL_MISMATCH` 0 命中（仅历史评审记录保留首轮引用） |
+| C2 Codex spike 状态/索引/进度更新 + index DR-020 拆行 | **closed（554aad0）** | DR-016/020、spec00/05/07、index、progress 均改「Codex 中期已落盘（74bba4f）；F5d FINAL/真 key 待」；index DR-020/architecture 已拆行；旧「待 spike」在 v0.5 文档清零（历史 v0.3 research 除外） |
+| C3 `BUDGET_EXCEEDED`/`allow_write_path_invalid` 登记 + max-cost 无 pricing 语义 | **closed（554aad0）** | 00 §0.4 加 `BUDGET_EXCEEDED` 域码行；spec05 §5.16.2/5.16.3 + 00 banner 加 `allow_write_path_invalid`；`--max-cost` 无 pricing/pricing 缺模型/外部 DSH 成本不可得 → 启动前配置错误 fail-closed，AC-27 d 同步 |
+| C4 Codex 零密钥命令补 prompt/`--skip-git-repo-check` | **closed（554aad0）** | DR-020 §5/AC-28 g 与 spec07 §AC-28 g/命令块均改为 `codex exec --json --skip-git-repo-check -o <file> "reply with exactly: hello"` + mock SSE/CODEX_HOME |
+| P3-1/2/3（F5a–f、系统目录拒绝、AC-26 去重） | **closed（554aad0）** | DR-016 AC-28 F5a–f；DR-019 系统目录统一拒绝 `allow_write_path_invalid`；AC-26 c 去重 `/`；P3-4 常量/浮点、DR-020 §0 表 AC-28 a–f 行留 D6 小修（不阻塞） |
 
 ## 7. 遗留问题
 
-- C1–C4 关闭前不 merge；P3-1–P3-7 可同批或 D6 as-built 处理。
+- C1–C4 已关闭；P3-4（`BUDGET_CHECK_BEFORE_EACH_LLM_CALL=true` 常量命名/浮点边界）与 DR-020 §0 表 AC-28「a–f」行随 D6 as-built 小修（不阻塞）。
 - 设计分支 docs-only，无 workspace 测试；F1–F5 实现后补真链路/门禁。
 - 真实环境限制：DSH 全链路需 `DEEPSEEK_API_KEY`（用户授权），Codex 真 key 可选；CI 用 fake ACP/mock provider，不伪造、不写密钥。
 - PROVENANCE 设计阶段不动；D6 实现回写时更新。
+
+## 8. 条件关闭复核（2026-11-03）
+
+复核提交：`554aad0`（父 `806e82a`；docs-only 12 文件，+43/−41；无代码/测试/评审记录/依赖改动）。评审人执行：
+
+```bash
+git status --porcelain                       # 空
+git diff --stat 806e82a..554aad0             # 12 files +43/−41（docs-only）
+bash scripts/dev/check.sh                    # CHECK PASSED
+grep -rn "REPLAY_TOOL_MISMATCH" doc README.md  # 仅历史评审记录；当前决策/spec 0 命中
+grep -rn "待 spike" doc/decisions doc/spec-v1.2 doc/index.md doc/progress.md # 当前 v0.5 0 命中
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C1 错误码 | ✅ DR-014/DR-016/DR-017/spec 全统一 `REPLAY_TOOL_RECORD_MISMATCH`；无独立旧码 |
+| C2 状态/索引 | ✅ Codex 中期已落盘（74bba4f）状态同步；index DR-020 与 architecture 拆行；无当前「待 spike」 |
+| C3 码/reason/预算 | ✅ 00 §0.4 `BUDGET_EXCEEDED` 行；`allow_write_path_invalid` 在 00 banner/spec05 §5.16.3；max-cost 无 pricing/缺模型/DSH 不可得 → 启动前配置错误 fail-closed，AC-27 d 同步 |
+| C4 命令 | ✅ DR-020 §5/AC-28 g 与 spec07 命令块补 prompt/`--skip-git-repo-check`/`-o`，与 spike 一致 |
+| 范围/门禁 | ✅ 仅 12 个 docs 文件；无代码/测试/既有评审/依赖/token/dist；check.sh PASSED |
+
+**最终状态**：C1–C4/P3 主体 closed；建议 Lead 附加第二评审 → merge F0 → F1（reexec）。
