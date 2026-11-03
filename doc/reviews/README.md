@@ -116,6 +116,7 @@
 | [REV-117](REV-117-docs-v05-codex-fix.md) | 2026-11-03 | docs | `docs/docs-v05-codex-fix` | **通过**（Codex spike FINAL 勘误：tool 事件在 `-s danger-full-access`/非嵌套可得→tool_start/tool_end、ok=exit_code==0；嵌套默认 sandbox 静默 exit71 假绿；F5d 9 项/AC-28 g/i/j/零密钥命令；docs-only 9 文件、check.sh 绿、spike 344 行一致；P3 3 项见记录 §3） | reviewer-a |
 | [REV-118](REV-118-cli-reexec.md) | 2026-11-03 | cli（含 trace helper/e2e 机械） | `feat/cli-reexec` | **通过**（v0.5 F1b：`--replay-tools=reexec` 显式/前置 flag/只读四工具/result_sha 漂移 MISMATCH/副作用·MCP·Python 行复用记录/events·outputs 忽略/recorded 不变；trace 公共 sha 与 writer 同口径；cli 255/0、tool_reexec 6/0、workspace 1234/0、clippy/fmt/check/no-default 绿；P3 D6 文档口径见 §3/§7） | reviewer-a |
 | [REV-119](REV-119-docs-reexec-clarify.md) | 2026-11-03 | docs | `docs/docs-v05-reexec-clarify` | **通过**（reexec 口径对齐 F1b：候选/非候选复用/exit2 范围/additive/MISSING=缺 sha；DR-017/05/06/07/08/index 一致；首轮有条件通过 → `f1050a9` 关闭 C1 progress/C2 DR-016/P3 历史注记；见记录 §6/§8） | reviewer-a |
+| [REV-122](REV-122-docs-reexec-sha.md) | 2026-11-03 | docs | `docs/docs-v05-reexec-sha` | **有条件通过**（reexec 缺 sha 修正：行存在字段缺失/损坏→MISMATCH；MISSING 仅行缺失/streaming 多于记录；与 F1c ac25e/validate 一致；P1 C1 分支未 rebase 到含 F1c 的 main ec7da51；P2 C2 progress/AC-25 F1c 状态待同步；见记录 §3/§6） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
