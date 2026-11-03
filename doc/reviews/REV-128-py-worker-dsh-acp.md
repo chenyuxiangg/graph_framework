@@ -79,3 +79,12 @@ bash scripts/dev/check.sh         # PASSED
 - **P2 N1–N7**：帧/args 上限、HOME 隔离、init cancel、reuse_key、cleanup finally、真机覆盖。
 - **P3 N8–N10**：版本/name 漂移、sandbox 真机、SIGKILL scratch。
 - 无 P0/P1；F5a 可 merge（先 rebase），F5c/F5e 后续波次。
+
+## 8. 第二评审 · 跨模块（py-worker）（Lead 追加，2026-11-04）
+
+- **评审人**：`lead`（**≠ 作者** `dsl-dev`；Lead 已批准跨模块 python/py-worker 改动，按 AGENTS §2 追加第二评审）
+- **范围**（`518ef34..83ec643`）：`python/zgraph_worker/adapters/dsh_acp.py`（骨架→~980 行 ACP client/bridge）、`python/tests/test_adapters_dsh_acp.py`（fake ACP server + 条件真机用例 + wrong_agent）；无 Rust/Cargo/CLI 改动。
+- **核对结论（通过）**：ACP v1 NDJSON 协议/映射/permission/cancel/错误面与 DR-020 F5a 一致；DSH_HOME/TMPDIR 隔离、不用用户凭据、不写 key；真机无 key 握手证据真实（initialize/session new/close/EOF + prompt -32603 映射），未伪造模型请求；测试计数 195/2 skipped（默认）、197（REAL_DSH），既有 183 不回归。
+- **Lead 亲自验证**：`git diff 518ef34..83ec643 --stat` 仅 2 py 文件（+~1300）；`python -m pytest python/tests` 默认 195/2 skipped；`ZGRAPH_REAL_DSH=1` 定向 17/0；`check.sh` PASSED。
+- **裁决/后续**：usage 不可得偏差（Rust `parse_usage(None)`→zero）由 F5e 修；真 permission/tool/usage/cancel 由 F5c（真 key）覆盖；permission 仅 stderr 为已知限制；merge 前 rebase。
+- **结论**：**通过（第二评审）**。分支满足合并前置。
