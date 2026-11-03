@@ -9,11 +9,13 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**（首轮有条件通过 → C1 由 `436a2de` 关闭；P2 残余及 F3a2 rebase 义务见 §7，均不阻断）
 
-P0=0；**P1=1**；P2=6；P3=4。flag/预检、多模型收集、外部 subprocess fail-closed、usage/trace stats additive、默认输出不变、F3a1 接口透传均通过；cli **267/0**、workspace **1284/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=0**；P2 残余；P3 后续。flag/预检、多模型收集、外部 subprocess fail-closed、usage/trace stats additive、默认输出不变、F3a1 接口透传均通过；最终 cli **268/0**、workspace **1285/0/3**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
-需关闭：
+> **首轮历史（保留）**：`c0a8ea4` 首轮为有条件通过——C1 `--max-tokens -1` 被 parser 当 exit2；`436a2de` 已关闭（见 §7）。
+
+首轮条件：
 
 - **C1 `--max-tokens` 负值走用法错误 exit2，而非 `budget_invalid` exit3**：`parse_u64_option` 把 `-1` 当语法错误；任务-121/DR-018 要求 budget ≤0/NaN/Inf → `budget_invalid` 配置错误 exit3（`--max-cost -1` 已正确 exit3，`--max-tokens 0` 也 exit3）。现有 `parse_rejects_invalid_budget_syntax` 把 `--max-tokens -1` 固化为 parser 错误，与要求冲突。
 
@@ -21,7 +23,7 @@ P0=0；**P1=1**；P2=6；P3=4。flag/预检、多模型收集、外部 subproces
 
 | 维度 | 结论 | 依据 |
 |---|---|---|
-| 功能正确性 | ⚠️（C1） | 预检/多模型/usage/stats 主体成立；负 token budget 错误分类不符 |
+| 功能正确性 | ✅ | 预检/多模型/usage/stats 成立；C1 负 token budget 已由 `436a2de` 关闭 |
 | 结构合理性 | ✅ | flags→Observability→preflight→executor 透传清晰；仅 cli；trace additive 分离 |
 | 逻辑性 | ✅（P2） | graph 全模型去重、外部 fail-closed、默认不变、additive 输出均正确 |
 | 可读性 | ✅（P3） | usage/reason/注释清楚；P3 测试/文档 |
@@ -84,3 +86,34 @@ bash scripts/dev/check.sh           # PASSED
 - **P2 N1–N6**：graph 级 DB 口径、外部 usage 形状、NaN/Inf CLI、F3a2 cost、占位预算 stop、env pricing。
 - **P3 N7–N10**：D6 文档/新 reason/rebase。
 - 无 P0；C1 未关闭前不可 merge。
+
+## 7. 条件关闭复核（2026-11-03，`436a2de`，parent `f19ab3c`）
+
+**复核结论：通过。** `436a2de` 仅 `run_cmd.rs`（+35/−14）与 `tests/observability.rs`（+90）；无 Cargo；工作区干净。
+
+### C1（负 max-tokens）
+- `RunArgs.max_tokens` 改为 `Option<i64>`，`parse_i64_option`：负值进入配置预检，不再 parser exit2；真正语法错仍 exit2。
+- `resolve_observability` 对 `Some(value<=0)` 返回 `HARNESS_CONFIG_LOAD{reason:"budget_invalid"}` exit3（含 -1/-987654）；在 DB 打开前。
+- 测试：`max-tokens-negative`、`max-tokens-large-negative` exit3 不建 DB；`parse_rejects_invalid_budget_syntax` 只保留 `abc` 语法错，负值 parse 成功；`--max-cost 0/-1/NaN/inf/-inf` exit3 不建 DB；`$ZGRAPH_PRICING` env 兜底/flag 优先/缺失 exit3 测试通过。
+- **C1 关闭**。
+
+### P2 残余（不阻断）
+- **graph 级预检 DB 口径**：多模型/外部 harness/`pricing_missing_model` 在 `open_writer` 之后（flags 级 pricing/budget 才保证不建 DB）；任务仅明确 flags 级不建 DB，graph 级测试注释“DB 可能已建”。D6 明确。
+- **外部 `--json.usage` 形状**：`usage=None` 时 `{available:false,reason}`，不含 run/by_node/by_agent/warnings/budget_stop；代码注释/测试留 D6。
+- `trace --stats` cost 依赖 F3a2 `RunFinished.metrics`；F3a2 合并后补 cost/budget_stop 断言。
+- 预算超限当前仍 `NodeError::Internal` 占位；F3a2 合并后 rebase 到 `BUDGET_EXCEEDED` + `Other("budget_exceeded")`。
+- `$ZGRAPH_PRICING` 已补；`record=full` 才有 trace llm stats（文档口径）。
+- by_node node_id、新 reason 回写等 D6/P3。
+
+### 最终门禁（`436a2de`）
+```bash
+cargo test -p zgraph-cli            # 268 passed / 0 failed
+cargo test --workspace              # 92 targets：1285 passed / 0 failed / 3 ignored
+pytest -q                           # exit 0；183 passed
+cargo clippy/fmt/check/no-default   # clean
+bash scripts/dev/check.sh           # PASSED
+```
+- 仅 cli 2 files；无 Cargo；`git status` 空；默认无 flags 输出不变。
+
+### F3a2 合并义务（后续条件，不阻塞本次通过）
+- F3a2 先合并时，F3b 必须 rebase：预算超限断言由占位切到 `BUDGET_EXCEEDED` + `stop_reason Other("budget_exceeded")`；`trace --stats` cost/`budget_stop` 断言补齐；CLI 不写 kernel metrics。由 cli-dev 在合并前/后执行。
