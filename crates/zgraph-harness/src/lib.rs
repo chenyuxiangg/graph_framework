@@ -58,6 +58,7 @@ mod error;
 mod executor;
 mod llm;
 pub mod mcp;
+mod observability;
 mod plugin;
 mod provider;
 mod record;
@@ -92,6 +93,10 @@ pub use mcp::RealMcpFactory;
 pub use mcp::{
     McpCallOutcome, McpClient, McpClientError, McpClientErrorKind, McpClientFactory, McpConfig,
     McpPlan, McpRun, McpServerSpec, McpTool, McpTransport,
+};
+pub use observability::{
+    AgentUsageKey, BudgetConfig, BudgetStop, BudgetStopKind, ModelPrice, NodeUsageKey,
+    PricingTable, RunObservability, RunUsageStats, UsageTotals,
 };
 pub use plugin::SubprocessProvider;
 pub use provider::{

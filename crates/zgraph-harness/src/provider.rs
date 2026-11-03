@@ -103,6 +103,8 @@ pub struct ProviderRequest<'a> {
     pub builtin: Option<&'a Arc<BuiltinToolSet>>,
     /// v0.4/D2：工具调用记录 sink（D5 v7 预留；`None` = no-op）。
     pub tool_call_sink: Option<&'a Arc<dyn ToolCallRecordSink>>,
+    /// v0.5/F3a1：run 级计费/用量/预算（`None` = 未启用）。
+    pub observability: Option<Arc<crate::observability::RunObservability>>,
 }
 
 /// Agent 执行后端抽象（DR-011 §1）。
@@ -154,6 +156,7 @@ impl AgentProvider for BuiltinProvider {
             skill_view_budget: request.skill_view_budget,
             builtin: request.builtin,
             tool_call_sink: request.tool_call_sink,
+            observability: request.observability.as_ref(),
         };
         run_agent(run).await
     }
@@ -260,6 +263,7 @@ mod tests {
             mcp: None,
             builtin: None,
             tool_call_sink: None,
+            observability: None,
         };
         let output = provider.run(request).await.expect("builtin run");
         assert_eq!(output.content, "builtin-output");

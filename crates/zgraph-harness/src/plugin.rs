@@ -1494,6 +1494,7 @@ if output:
                 mcp: None,
                 builtin: None,
                 tool_call_sink: None,
+                observability: None,
             }
         }
     }

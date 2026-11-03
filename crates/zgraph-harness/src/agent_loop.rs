@@ -39,6 +39,7 @@ use crate::llm::{
     LlmError, LlmErrorKind, LlmMessage, LlmPhase, LlmProvider, LlmRequest, LlmResponse, ModelRef,
     StopReason, ToolCall, Usage,
 };
+use crate::observability::{AgentUsageKey, BudgetStop, NodeUsageKey, RunObservability};
 use crate::record::{
     error_response_snapshot, record_safely, request_snapshot, success_response_snapshot,
     LlmCallRecorder, LlmCallSnapshot, LLM_CALL_STATUS_ERROR, LLM_CALL_STATUS_OK,
@@ -94,6 +95,11 @@ pub enum RunFailure {
     },
     /// Harness 错误 → `NodeError::Harness { kind, detail }`。
     Harness(HarnessError),
+    /// v0.5/F3a1（DR-018 §3）：预算超限（结构化 `BUDGET_EXCEEDED` 语义）。
+    ///
+    /// F3a2 负责 kernel 映射（run `Failed` + `BUDGET_EXCEEDED` + stop_reason
+    /// `Other("budget_exceeded")`）；本波仅在 harness 内部提前停止、不发起请求。
+    BudgetExceeded(BudgetStop),
     /// 框架不变量违反（消息序列非法等）→ `NodeError::Internal`。
     Internal {
         /// 人类可读描述。
@@ -108,6 +114,10 @@ impl RunFailure {
             Self::Cancelled => NodeError::Cancelled,
             Self::InstanceTimeout { elapsed_ms } => NodeError::Timeout { elapsed_ms },
             Self::Harness(error) => error.into_node_error(),
+            // F3a2 替换为 kernel `BUDGET_EXCEEDED` 映射；本波保留可识别消息。
+            Self::BudgetExceeded(stop) => NodeError::Internal {
+                message: format!("budget_exceeded: {}", stop.message),
+            },
             Self::Internal { message } => NodeError::Internal { message },
         }
     }
@@ -155,6 +165,8 @@ pub(crate) struct AgentRun<'a> {
     pub(crate) builtin: Option<&'a Arc<BuiltinToolSet>>,
     /// v0.4/D2：工具调用记录 sink（D5 v7 预留；默认 `None` = no-op）。
     pub(crate) tool_call_sink: Option<&'a Arc<dyn ToolCallRecordSink>>,
+    /// v0.5/F3a1：run 级计费/用量/预算（`None` = 未启用；统计仍由 executor 可选收集）。
+    pub(crate) observability: Option<&'a Arc<RunObservability>>,
 }
 
 /// D5b2：工具调用记录的执行上下文（run/实例/节点/attempt；由 [`HarnessCtx`] 提供）。
@@ -174,7 +186,14 @@ pub(crate) async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, RunFailu
     let mut state = LoopState::new(&run)?;
     loop {
         state.check_iteration_limits(&run)?;
+        // DR-018 §3：每次 LLM 请求**发起前**检查预算（`>=` 上限）；超限不发起。
+        if let Some(observability) = run.observability {
+            if let Err(stop) = observability.check_before_call() {
+                return Err(RunFailure::BudgetExceeded(stop));
+            }
+        }
         state.begin_iteration(&run)?;
+        let llm_started = std::time::Instant::now();
         let response = invoke_with_retry(
             &run,
             &state.messages,
@@ -185,6 +204,21 @@ pub(crate) async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, RunFailu
         )
         .await?;
         state.usage_total.accumulate(&response.usage);
+        if let Some(observability) = run.observability {
+            let duration_ms = u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            observability.record_llm_call(
+                NodeUsageKey {
+                    instance_id: run.ctx.instance_id().to_string(),
+                    attempt: run.ctx.attempt(),
+                },
+                AgentUsageKey {
+                    agent_id: run.agent.config.id.clone(),
+                    model: run.agent.model_ref().name.clone(),
+                },
+                &response.usage,
+                duration_ms,
+            );
+        }
         if let Some(output) = state.handle_response(&run, response).await? {
             return Ok(output);
         }
@@ -1368,6 +1402,7 @@ mod tests {
             mcp: None,
             builtin: None,
             tool_call_sink: None,
+            observability: None,
         })
         .await
     }
@@ -1405,6 +1440,7 @@ mod tests {
             mcp: None,
             builtin: Some(&builtin),
             tool_call_sink: sink,
+            observability: None,
         })
         .await
     }
@@ -2636,6 +2672,7 @@ STEP TWO",
             mcp: None,
             builtin: None,
             tool_call_sink: sink,
+            observability: None,
         })
         .await
     }

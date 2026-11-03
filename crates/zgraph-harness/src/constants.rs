@@ -331,3 +331,6 @@ pub const BASH_PREFLIGHT_TIMEOUT_MS: u64 = 10_000;
 
 /// `sandbox-exec` 固定路径（DR-013 §5.2：不依赖 PATH）。
 pub const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
+
+/// v0.5/F3a1（DR-018 §3）：预算超限 domain 错误码（append-only；F3a2 映射 kernel）。
+pub const CODE_BUDGET_EXCEEDED: &str = "BUDGET_EXCEEDED";

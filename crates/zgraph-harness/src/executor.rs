@@ -33,6 +33,7 @@ use crate::constants::DEFAULT_NODE_TIMEOUT_MS;
 use crate::ctx::HarnessCtx;
 use crate::error::HarnessError;
 use crate::llm::LlmProvider;
+use crate::observability::{BudgetConfig, PricingTable, RunObservability, RunUsageStats};
 use crate::plugin::SubprocessProvider;
 use crate::provider::{AgentProvider, BuiltinProvider, ProviderRequest, ProviderTrace};
 use crate::record::LlmCallRecorder;
@@ -102,6 +103,12 @@ pub struct HarnessExecutor {
     builtin_tools: Option<Arc<BuiltinToolSet>>,
     /// v0.4/D2：工具调用记录 sink（D5 v7 预留；默认 `None` = no-op）。
     tool_call_sink: Option<Arc<dyn crate::tools::ToolCallRecordSink>>,
+    /// v0.5/F3a1：可选价格表（`--pricing`；默认 `None` = 不计算费用）。
+    pricing: Option<Arc<PricingTable>>,
+    /// v0.5/F3a1：预算上限（默认关；`max_cost` 需要 `pricing`）。
+    budget: BudgetConfig,
+    /// v0.5/F3a1：`run_id` → run 级计费/用量/预算状态（跨 agent_call 累计）。
+    run_observability: Mutex<HashMap<String, Arc<RunObservability>>>,
 }
 
 /// 单 run 的 MCP 会话状态（executor 内部）。
@@ -129,6 +136,9 @@ impl HarnessExecutor {
             subprocess_provider: SubprocessProvider::new(),
             builtin_tools: None,
             tool_call_sink: None,
+            pricing: None,
+            budget: BudgetConfig::default(),
+            run_observability: Mutex::new(HashMap::new()),
         }
     }
 
@@ -155,6 +165,9 @@ impl HarnessExecutor {
             subprocess_provider: SubprocessProvider::new(),
             builtin_tools: None,
             tool_call_sink: None,
+            pricing: None,
+            budget: BudgetConfig::default(),
+            run_observability: Mutex::new(HashMap::new()),
         }
     }
 
@@ -179,6 +192,9 @@ impl HarnessExecutor {
             subprocess_provider: SubprocessProvider::new(),
             builtin_tools: None,
             tool_call_sink: None,
+            pricing: None,
+            budget: BudgetConfig::default(),
+            run_observability: Mutex::new(HashMap::new()),
         }
     }
 
@@ -203,6 +219,9 @@ impl HarnessExecutor {
             subprocess_provider: SubprocessProvider::new(),
             builtin_tools: None,
             tool_call_sink: None,
+            pricing: None,
+            budget: BudgetConfig::default(),
+            run_observability: Mutex::new(HashMap::new()),
         }
     }
 
@@ -261,6 +280,92 @@ impl HarnessExecutor {
     ) -> Self {
         self.tool_call_sink = Some(sink);
         self
+    }
+
+    /// v0.5/F3a1（DR-018 §2）：注入价格表（`--pricing`；不内置价格）。
+    ///
+    /// 未知模型 → 该调用费用不可用 + warning（不 fail run）；`max_cost` 预算需要
+    /// 价格表（缺 → 执行期配置错误，F3b CLI 启动前预检）。
+    pub fn with_pricing(mut self, pricing: Arc<PricingTable>) -> Self {
+        self.pricing = Some(pricing);
+        self
+    }
+
+    /// v0.5/F3a1（DR-018 §3）：注入预算上限（默认关；`max_tokens`/`max_cost`）。
+    ///
+    /// 超限检查发生在**每次 LLM 请求前**（`>=`），停止而不发起该请求；结构化结果
+    /// 经 `RunFailure::BudgetExceeded` 返回（F3a2 映射 kernel `BUDGET_EXCEEDED`）。
+    pub fn with_budget(mut self, budget: BudgetConfig) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// v0.5/F3a1：本 run 的统计快照（run/node/agent token/耗时/调用数/费用）。
+    ///
+    /// addditive API（F3b trace/`--stats` 消费）；未知 run = `None`。
+    pub fn run_usage_stats(&self, run_id: &str) -> Option<RunUsageStats> {
+        let guard = match self.run_observability.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard
+            .get(run_id)
+            .map(|observability| observability.snapshot())
+    }
+
+    /// v0.5/F3a1：本 run 的可观测/预算状态（F3b 可读取 budget stop/warnings）。
+    pub fn run_observability(&self, run_id: &str) -> Option<Arc<RunObservability>> {
+        let guard = match self.run_observability.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.get(run_id).cloned()
+    }
+
+    /// v0.5/F3a1：取/建 run 级可观测状态（同一 run 的所有 agent_call 共享）。
+    fn observability_for(&self, run_id: &str) -> Arc<RunObservability> {
+        let mut runs = match self.run_observability.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        runs.entry(run_id.to_string())
+            .or_insert_with(|| RunObservability::new(self.pricing.clone(), self.budget))
+            .clone()
+    }
+
+    /// v0.5/F3a1：预算配置前置校验（`max_cost` 需要 USD 价格表；F3b 也会启动前预检）。
+    fn observability_for_job(
+        &self,
+        job: &AgentCallJob,
+    ) -> Result<Arc<RunObservability>, NodeError> {
+        self.budget
+            .validate()
+            .map_err(|error| error.into_node_error())?;
+        if self.budget.max_cost.is_some() {
+            let Some(pricing) = self.pricing.as_ref() else {
+                return Err(HarnessError::config_load(
+                    "pricing_required_for_max_cost",
+                    Some("<pricing>"),
+                    Some("$.max_cost"),
+                    Some(serde_json::json!("--pricing <file> (USD)")),
+                    None,
+                    "--max-cost requires --pricing (no built-in prices)",
+                )
+                .into_node_error());
+            };
+            if !pricing.is_usd() {
+                return Err(HarnessError::config_load(
+                    "pricing_currency_mismatch",
+                    Some("<pricing>"),
+                    Some("$.currency"),
+                    Some(serde_json::json!("USD")),
+                    Some(serde_json::json!(pricing.currency())),
+                    "--max-cost requires a USD pricing table",
+                )
+                .into_node_error());
+            }
+        }
+        Ok(self.observability_for(job.ctx.run_id()))
     }
 
     /// v0.3/V3：注入 MCP 客户端工厂（测试 seam；生产用默认 rmcp 工厂）。
@@ -608,6 +713,7 @@ impl HarnessExecutor {
                 job.resolved_timeout_ms,
             ));
         }
+        let observability = self.observability_for_job(&job)?;
         let request = ProviderRequest {
             agent: &agent.config,
             inputs: mapped_agent_inputs(&job, &agent.config),
@@ -634,6 +740,7 @@ impl HarnessExecutor {
             mcp: mcp_run.as_deref(),
             builtin: self.builtin_tools.as_ref(),
             tool_call_sink: self.tool_call_sink.as_ref(),
+            observability: Some(observability),
         };
         let provider: &dyn AgentProvider = match harness_kind {
             HarnessKind::Builtin => &self.builtin_provider,
@@ -2908,6 +3015,268 @@ mod tests {
         let bash = records[0].bash.as_ref().expect("bash metadata");
         assert!(bash.stdout.len() <= crate::constants::BASH_STDOUT_MAX_BYTES);
         assert!(bash.stdout.contains("…[truncated]…"));
+        executor.close_provider().await;
+    }
+    // ------------------------------------------------------------------
+    // v0.5/F3a1：计费/用量/预算（DR-018 §1–§3）
+    // ------------------------------------------------------------------
+
+    fn known_usage(prompt: u32, completion: u32) -> Value {
+        json!({
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
+                "reasoning_tokens": 0
+            }
+        })
+    }
+
+    fn tool_call_with_usage(call_id: &str, usage: Value) -> Value {
+        let mut call = json!({
+            "kind": "tool_calls",
+            "content": null,
+            "tool_calls": [{"call_id": call_id, "name": "now", "args": {}}]
+        });
+        merge_usage(&mut call, usage);
+        call
+    }
+
+    fn text_with_usage(content: &str, usage: Value) -> Value {
+        let mut call = json!({"kind": "text", "content": content});
+        merge_usage(&mut call, usage);
+        call
+    }
+
+    fn merge_usage(call: &mut Value, usage: Value) {
+        if let Some(usage) = usage.get("usage") {
+            call["usage"] = usage.clone();
+        }
+    }
+
+    fn pricing_table() -> Arc<crate::PricingTable> {
+        Arc::new(
+            crate::PricingTable::parse_json(
+                r#"{"currency":"USD","models":{"deepseek-chat":{"input_per_mtok":1.0,"output_per_mtok":2.0}}}"#,
+            )
+            .expect("pricing"),
+        )
+    }
+
+    #[tokio::test]
+    async fn token_budget_stops_before_next_request() {
+        let dir = assets(agent_config("parser", &["now"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                tool_call_with_usage("c1", known_usage(60, 40)),
+                json!({"kind": "tool_calls", "content": null,
+                       "tool_calls": [{"call_id": "c2", "name": "now", "args": {}}]}),
+                json!({"kind": "text", "content": "never"})
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(
+            FakeToolRunner::new()
+                .tool(tool_def("now"))
+                .behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_budget(
+                crate::BudgetConfig {
+                    max_tokens: Some(100),
+                    max_cost: None,
+                },
+            ),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Failed, "{:?}", outcome.error);
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("budget_exceeded")),
+            "{:?}",
+            outcome.error
+        );
+        // 超限后不再发起请求：只发出第 1 次 LLM 请求。
+        assert_eq!(fake.requests().len(), 1);
+        let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
+        assert_eq!(stats.run.llm_calls, 1);
+        assert_eq!(stats.run.total_tokens, 100);
+        let stop = stats.budget_stop.as_ref().expect("budget stop");
+        assert_eq!(stop.kind, crate::BudgetStopKind::Tokens);
+        assert_eq!(stop.used_tokens, 100);
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn cost_budget_stops_with_pricing() {
+        let dir = assets(agent_config("parser", &["now"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                tool_call_with_usage("c1", known_usage(500_000, 0)),
+                json!({"kind": "tool_calls", "content": null,
+                       "tool_calls": [{"call_id": "c2", "name": "now", "args": {}}]}),
+                json!({"kind": "text", "content": "never"})
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(
+            FakeToolRunner::new()
+                .tool(tool_def("now"))
+                .behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_pricing(pricing_table())
+                .with_budget(crate::BudgetConfig {
+                    max_tokens: None,
+                    max_cost: Some(0.5),
+                }),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Failed, "{:?}", outcome.error);
+        assert_eq!(fake.requests().len(), 1);
+        let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
+        assert_eq!(stats.run.cost_usd, Some(0.5));
+        let stop = stats.budget_stop.as_ref().expect("budget stop");
+        assert_eq!(stop.kind, crate::BudgetStopKind::Cost);
+        assert_eq!(stop.used_cost_usd, Some(0.5));
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn max_cost_without_pricing_is_config_error() {
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(
+                json!([{"kind": "text", "content": "never"}]),
+            ))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_budget(
+                crate::BudgetConfig {
+                    max_tokens: None,
+                    max_cost: Some(1.0),
+                },
+            ),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor, json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Failed);
+        let error = outcome.error.expect("error");
+        assert_eq!(error.code, "HARNESS_CONFIG_LOAD");
+        assert!(error.message.contains("pricing_required_for_max_cost"));
+        assert!(
+            fake.requests().is_empty(),
+            "config error before any LLM call"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_accumulates_across_agent_calls_in_same_run() {
+        let dir = assets(agent_config("parser", &["now"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                // worker1：一次文本响应（usage 60）。
+                text_with_usage("first", known_usage(60, 0)),
+                // worker2：先 tool_call（usage 60）→ 下一轮前预算 120 >= 100 停止。
+                tool_call_with_usage("c2", known_usage(60, 0)),
+                json!({"kind": "text", "content": "never"})
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(
+            FakeToolRunner::new()
+                .tool(tool_def("now"))
+                .behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner)).with_budget(
+                crate::BudgetConfig {
+                    max_tokens: Some(100),
+                    max_cost: None,
+                },
+            ),
+        );
+        let (outcome, _trace) = run_graph(TWO_AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Failed, "{:?}", outcome.error);
+        // worker1 1 次 + worker2 第 1 次 = 2；worker2 第二请求前超限不发起。
+        assert_eq!(fake.requests().len(), 2);
+        let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
+        assert_eq!(stats.run.llm_calls, 2);
+        assert_eq!(stats.run.total_tokens, 120);
+        assert!(stats.by_node.len() >= 2, "two agent_call nodes aggregated");
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn stats_accumulate_without_budget_and_unknown_model_warns() {
+        let dir = assets(agent_config("parser", &["now"]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([
+                tool_call_with_usage("c1", known_usage(10, 5)),
+                text_with_usage("done", known_usage(20, 10))
+            ])))
+            .expect("script"),
+        );
+        let runner = Arc::new(
+            FakeToolRunner::new()
+                .tool(tool_def("now"))
+                .behavior("now", FakeToolBehavior::Return(json!({"now": "t"}))),
+        );
+        // 无预算；价格表不含模型 → 费用不可用 + warning，run 仍成功。
+        let unknown_pricing = Arc::new(
+            crate::PricingTable::parse_json(
+                r#"{"currency":"USD","models":{"other-model":{"input_per_mtok":1.0,"output_per_mtok":1.0}}}"#,
+            )
+            .expect("pricing"),
+        );
+        let executor = Arc::new(
+            HarnessExecutor::new(settings(dir.path(), &fake, &runner))
+                .with_pricing(unknown_pricing),
+        );
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed, "{:?}", outcome.error);
+        let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
+        assert_eq!(stats.run.llm_calls, 2);
+        assert_eq!(stats.run.prompt_tokens, 30);
+        assert_eq!(stats.run.completion_tokens, 15);
+        assert_eq!(stats.run.total_tokens, 45);
+        assert_eq!(stats.run.unpriced_calls, 2);
+        assert!(stats.run.cost_usd.is_none());
+        assert_eq!(stats.by_node.len(), 1);
+        assert_eq!(stats.by_agent.len(), 1);
+        assert!(stats.budget_stop.is_none());
+        assert!(
+            stats
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no pricing")),
+            "{:?}",
+            stats.warnings
+        );
+        executor.close_provider().await;
+    }
+
+    #[tokio::test]
+    async fn no_budget_default_path_has_no_budget_stop() {
+        let dir = assets(agent_config("parser", &[]), "role");
+        let fake = Arc::new(
+            FakeLlmProvider::from_script(fake_script(json!([text_with_usage(
+                "hello",
+                known_usage(3, 2)
+            )])))
+            .expect("script"),
+        );
+        let runner = Arc::new(FakeToolRunner::new());
+        let executor = Arc::new(HarnessExecutor::new(settings(dir.path(), &fake, &runner)));
+        let (outcome, _trace) = run_graph(AGENT_GRAPH, executor.clone(), json!("hi")).await;
+        assert_eq!(outcome.status, RunStatus::Completed);
+        let stats = executor.run_usage_stats(&outcome.run_id).expect("stats");
+        assert_eq!(stats.run.total_tokens, 5);
+        assert!(stats.budget_stop.is_none());
         executor.close_provider().await;
     }
 }
