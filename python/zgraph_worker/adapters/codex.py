@@ -15,6 +15,29 @@
   进程组再退出（`start_new_session=True` 的 Codex 子进程不残留）；
 - REV-099 N5：Codex `stderr` 由后台线程持续排空（head/tail 各 4 KiB，防管道写满死锁）。
 
+v0.5/F5d（DR-020 Codex FINAL）：
+- `--ephemeral`：不落 sessions/rollout/sqlite（CODEX_HOME 保持干净，避免输入持久层）；
+- **tool 事件**：`-s danger-full-access`（或容器外非嵌套）下 Codex 会发
+  `item.started/item.completed[type=command_execution]`，映射为
+  `tool_start{call_id=item.id, tool="command_execution", args_summary:{command}}` +
+  `tool_end{call_id, ok=(exit_code==0), result_summary:{exit_code,status,output_tail}}`；
+  **无 command_execution 时不发任何 tool 事件**（默认 sandbox 在嵌套环境静默无事件，
+  不得据此伪造）；
+- 顶层 `error` 事件置 failed；**`turn.completed` 清除 failed**（Codex 重连后成功
+  不应误报）；
+- `iterations` 固定 **1**（codex exec 内部可能多轮，无对应字段；**usage 是
+  turn.completed 的累计值**，v0.3 usage 字段口径不丢信息）；`cached_input_tokens`
+  丢弃（协议无缓存维度）；
+- 版本 pin **`@openai/codex@0.166.0`**；运行前 `codex --version` 写 stderr 诊断，
+  版本不符仅 warn（不改变协议/不阻断）；
+- **ARG_MAX**：prompt 经 argv 传递（`codex exec ... <prompt>`）；macOS ARG_MAX
+  ≈1 MiB，**超大 prompt 可能 E2BIG**（本适配器按 DR-020 不做临时文件回退）；
+- **认证分层**：默认 provider 需 `codex login` / `OPENAI_API_KEY`；自定义
+  mock provider（CODEX_HOME/config.toml `model_providers.<name>.env_key`）只需
+  环境变量有值即可零密钥（CI mock 用）；
+- **节点超时**：codex 冷启动+重试可能分钟级，建议 `node_timeout_ms > 60000`
+  （e2e/F5d 用 120000）；取消宽限沿用 2s→SIGKILL（DR-011/DR-020）。
+
 用法（由 AgentConfig.harness 配置）：
 
     {"kind":"subprocess","command":"python3",
@@ -43,11 +66,14 @@ PROTOCOL_VERSION = 1
 PROVIDER = "codex_exec"
 CANCEL_GRACE_SECONDS = 2.0
 READ_POLL_SECONDS = 0.05
+PINNED_CODEX_VERSION = "0.166.0"
+TOOL_OUTPUT_PREVIEW_CHARS = 512
 MAX_PREVIEW_CHARS = 512
 STDERR_CAPTURE_BYTES = 4096
 
 ACTIVE_PROCESS: Optional[subprocess.Popen[str]] = None
 STOP_REQUESTED = False
+DIAGNOSED_VERSION = False
 
 
 class StderrCapture:
@@ -111,6 +137,38 @@ def codex_binary() -> str:
     return resolved if resolved is not None else configured
 
 
+def codex_version(binary: str) -> str:
+    """执行 `codex --version` 取版本（失败/超时 → 空串；不阻断 run）。"""
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    text = (result.stdout or "").strip() or (result.stderr or "").strip()
+    return text.splitlines()[0] if text else ""
+
+
+def diagnose_version(binary: str) -> None:
+    """把 codex 版本写到 stderr（F5d 诊断；不改变协议输出）。"""
+    version = codex_version(binary)
+    sys.stderr.write(
+        f"zgraph codex adapter: version={version or 'unknown'} "
+        f"(pinned {PINNED_CODEX_VERSION})\n"
+    )
+    sys.stderr.flush()
+    if version and PINNED_CODEX_VERSION not in version:
+        sys.stderr.write(
+            "zgraph codex adapter: warn: codex version differs from pinned "
+            f"{PINNED_CODEX_VERSION}; event shape may drift (re-run F5d)\n"
+        )
+        sys.stderr.flush()
+
+
 def build_prompt(inputs: Dict[str, Any]) -> str:
     """把 agent 输入（已映射字段）序列化为 Codex prompt（确定性键序）。"""
     return json.dumps(inputs, ensure_ascii=False, sort_keys=True)
@@ -122,6 +180,8 @@ def build_command(binary: str, prompt: str, output_file: str) -> List[str]:
         binary,
         "exec",
         "--json",
+        # v0.5/F5d：不落 session/rollout/sqlite（DR-020 #2）。
+        "--ephemeral",
         "--skip-git-repo-check",
         "--output-last-message",
         output_file,
@@ -218,6 +278,10 @@ def parse_thread_events(lines: List[str]) -> Dict[str, Any]:
         "failed": False,
         "error": "",
         "schema_violation": False,
+        # v0.5/F5d（DR-020 #3）：command_execution 的 tool_start/tool_end（按出现顺序）。
+        "tool_events": [],
+        # 已发过 tool_start 的 item.id（completed 不重复发 start；无 started 时补配对）。
+        "tool_started": set(),
     }
     for line in lines:
         line = line.strip()
@@ -233,18 +297,81 @@ def parse_thread_events(lines: List[str]) -> Dict[str, Any]:
             continue
         kind = event.get("type")
         if kind == "turn.completed":
+            # DR-020 #1：重连后成功（turn.completed）必须清除先前顶层 error 的 failed。
             outcome["completed"] = True
             outcome["usage"] = event.get("usage")
+            outcome["failed"] = False
+            outcome["error"] = ""
         elif kind in ("turn.failed", "error"):
             outcome["failed"] = True
             outcome["error"] = _error_message(event)
+        elif kind == "item.started":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "command_execution":
+                _record_tool_start(item, outcome)
         elif kind == "item.completed":
             item = event.get("item")
-            if isinstance(item, dict) and item.get("type") == "agent_message":
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "agent_message":
                 text = item.get("text")
                 if isinstance(text, str):
                     outcome["content"] = text
+            elif item.get("type") == "command_execution":
+                _record_tool_end(item, outcome)
+    outcome.pop("tool_started", None)
     return outcome
+
+
+def _tool_command(item: Dict[str, Any]) -> str:
+    """`command_execution.command` → str（非字符串 → 空串）。"""
+    command = item.get("command")
+    return command if isinstance(command, str) else ""
+
+
+def _record_tool_start(item: Dict[str, Any], outcome: Dict[str, Any]) -> None:
+    """`command_execution` started → tool_start（无 id 则不伪造）。"""
+    call_id = item.get("id")
+    if not isinstance(call_id, str) or not call_id:
+        return
+    started = outcome["tool_started"]
+    if call_id in started:
+        return
+    started.add(call_id)
+    outcome["tool_events"].append(
+        {
+            "kind": "tool_start",
+            "call_id": call_id,
+            "tool": "command_execution",
+            "args_summary": {"command": _tool_command(item)},
+        }
+    )
+
+
+def _record_tool_end(item: Dict[str, Any], outcome: Dict[str, Any]) -> None:
+    """`command_execution` completed → tool_end（ok=(exit_code==0)）；无 started 时补 start。"""
+    call_id = item.get("id")
+    if not isinstance(call_id, str) or not call_id:
+        return
+    # Codex 可能只给 completed（不同版本/中断路径）：用真实 completed 数据补配对，
+    # 不编造 command/exit_code。
+    _record_tool_start(item, outcome)
+    exit_code = item.get("exit_code")
+    ok = isinstance(exit_code, int) and exit_code == 0
+    output = item.get("aggregated_output")
+    output_text = output if isinstance(output, str) else ""
+    outcome["tool_events"].append(
+        {
+            "kind": "tool_end",
+            "call_id": call_id,
+            "ok": ok,
+            "result_summary": {
+                "exit_code": exit_code,
+                "status": item.get("status"),
+                "output_tail": output_text[-TOOL_OUTPUT_PREVIEW_CHARS:],
+            },
+        }
+    )
 
 
 def read_output_file(path: str) -> str:
@@ -339,6 +466,9 @@ def execute_run(run_frame: Dict[str, Any]) -> None:
     if shutil.which(binary) is None:
         _send_error("spawn_failed", "codex binary not found (user-provided; set CODEX_BIN or PATH)")
         return
+    if not DIAGNOSED_VERSION:
+        diagnose_version(binary)
+        globals()["DIAGNOSED_VERSION"] = True
     capture = StderrCapture()
     with tempfile.NamedTemporaryFile(prefix="zgraph-codex-", suffix=".txt") as output:
         try:
@@ -363,6 +493,9 @@ def execute_run(run_frame: Dict[str, Any]) -> None:
             _send_error("exit_nonzero", detail)
             return
         content = read_output_file(output.name) or outcome["content"]
+        # v0.5/F5d：先发真实 tool 事件（若有），再发 result（协议要求事件在 result 前）。
+        for event in outcome["tool_events"]:
+            send({"v": PROTOCOL_VERSION, "type": "event", **event})
         send(
             {
                 "v": PROTOCOL_VERSION,
@@ -407,6 +540,9 @@ def main() -> int:
             return 0
         if kind == "run":
             execute_run(frame)
+            if STOP_REQUESTED:
+                # v0.5/F5d（DR-020 #8）：SIGTERM 已置停止标志 → 不再阻塞等下一帧。
+                return 0
 
 
 if __name__ == "__main__":

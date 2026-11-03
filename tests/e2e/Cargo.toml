@@ -128,3 +128,7 @@ path = "v04_regression.rs"
 [[test]]
 name = "reexec_v05"
 path = "reexec_v05.rs"
+
+[[test]]
+name = "codex_mock_v05"
+path = "codex_mock_v05.rs"

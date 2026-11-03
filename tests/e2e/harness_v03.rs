@@ -51,6 +51,134 @@ fn serial_guard() -> MutexGuard<'static, ()> {
 }
 
 // ---------------------------------------------------------------------------
+// AC-28 g（CI 补充，无需真实 codex）：真实 adapter 映射 command_execution + error→completed
+// ---------------------------------------------------------------------------
+
+/// 真实 `codex.py` adapter + 假 `codex` 二进制（不发真实二进制）：
+/// - 顶层 `error` 后 `turn.completed` → 必须成功（F5d #1 清 failed）；
+/// - `command_execution` started/completed → tool_start/tool_end（F5d #3，ok=exit_code==0）；
+/// - 外部 harness 工具事件只进 streaming（不写 v7 `tool_calls`，v0.3 边界）。
+#[test]
+fn ac28g_codex_adapter_maps_command_execution_and_recovers_from_error() {
+    let _serial = serial_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    let codex = bin_dir.join("codex");
+    // 用 /bin/sh 假 codex：完全避开 shebang python3/PATH 依赖（只测 adapter 映射）。
+    std::fs::write(
+        &codex,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.166.0"
+  exit 0
+fi
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output-last-message) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat <<'JSON'
+{"type":"thread.started","thread_id":"t1"}
+{"type":"error","message":"Reconnecting ... 1/5"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"echo hi-from-tool","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"echo hi-from-tool","aggregated_output":"hi-from-tool\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"tool-and-recovered"}}
+{"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7,"reasoning_output_tokens":2,"cached_input_tokens":4}}
+JSON
+if [ -n "$out" ]; then printf '%s' 'tool-and-recovered' > "$out"; fi
+exit 0
+"#,
+    )
+    .expect("write fake codex");
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // 隔离 PATH：仅假 codex 目录 + 系统只读目录（不继承宿主 PATH）。
+    let isolated_path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin_dir.display());
+    let harness = json!({
+        "kind": "subprocess",
+        "command": python_program(),
+        "args": [codex_adapter().display().to_string()],
+        "protocol": "zgraph-harness/1",
+        "env": {
+            "PATH": isolated_path,
+            "CODEX_HOME": dir.path().join("codex-home").display().to_string(),
+            "CODEX_BIN": codex.display().to_string(),
+        },
+    });
+    let mut codex_agent = agent_with_harness(&[], harness);
+    codex_agent["node_timeout_ms"] = json!(120_000);
+    let (output, db, _) = harness_run(
+        dir.path(),
+        &codex_agent,
+        json!([text_call("unused")]),
+        "agent_one.json",
+    );
+    let payload = json_stdout(&output);
+    if payload["status"] != json!("Completed") {
+        let run_id = payload["run_id"].as_str().unwrap_or_default();
+        let detail = v03::instance(&db, run_id, "agent");
+        panic!(
+            "codex adapter tool/error-recovery failed: exit={:?} instance={detail:?} stderr={}",
+            output.status.code(),
+            v03::err(&output)
+        );
+    }
+    let result = &payload["run_output"]["result"];
+    assert_eq!(result["content"], json!("tool-and-recovered"));
+    assert_eq!(result["stop_reason"], json!("EndTurn"));
+    assert_eq!(result["usage"]["prompt_tokens"], json!(11));
+    assert_eq!(result["usage"]["completion_tokens"], json!(7));
+    assert_eq!(result["usage"]["reasoning_tokens"], json!(2));
+    let run_id = payload_run_id(&payload);
+    // streaming：tool_start/tool_end 来自 command_execution（真实 adapter 映射）。
+    let conn = cli_support::read_only_connect(&db);
+    type StreamingToolRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    );
+    let rows: Vec<StreamingToolRow> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT kind, call_id, tool_name, ok, summary FROM streaming_events                  WHERE run_id = ?1 AND kind IN ('tool_call_start','tool_call_end') ORDER BY seq",
+            )
+            .expect("streaming");
+        statement
+            .query_map([run_id.as_str()], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .expect("query")
+            .map(|row| row.expect("row"))
+            .collect()
+    };
+    assert_eq!(rows.len(), 2, "一对 tool_start/tool_end: {rows:?}");
+    assert_eq!(rows[0].0, "tool_call_start");
+    assert_eq!(rows[0].1.as_deref(), Some("item_1"));
+    assert_eq!(rows[0].2.as_deref(), Some("command_execution"));
+    assert_eq!(rows[1].0, "tool_call_end");
+    assert_eq!(rows[1].3, Some(1), "ok = exit_code==0: {rows:?}");
+    // v0.3 边界：外部 harness 工具不写 v7 `tool_calls`。
+    let tool_calls: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+            [run_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("count tool_calls");
+    assert_eq!(tool_calls, 0, "外部 harness 不写 tool_calls（DR-011 §12）");
+}
+
+// ---------------------------------------------------------------------------
 // 辅助
 // ---------------------------------------------------------------------------
 
