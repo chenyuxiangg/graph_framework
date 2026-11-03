@@ -9,11 +9,13 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：有条件通过**（C1/P2 已由 `e9ac29f` 关闭；**C2 仅部分关闭，仍为 P1**，见 §7）
 
-P0=0；**P1=2**；P2=5；P3=4。PricingTable 解析/费用公式、预算累计/请求前检查/不可续、run/node/agent 聚合、Unavailable/Estimated 口径、默认无预算无输出回归均通过；harness **376/0/1**（默认/features）、workspace 重跑 **1267/0/3**、cli **257/0**、pytest **183**、clippy/fmt/check/no-default 全绿。
+P0=0；**P1=1**；P2 残余；P3 后续。PricingTable 解析/费用公式、预算累计/请求前检查/不可续、run/node/agent 聚合、Unavailable/Estimated 口径、默认无预算无输出回归均通过；最终 harness **378/0/1**（默认/features）、workspace **1269/0/3**、cli **257/0**、pytest **183**、clippy/fmt/check/no-default 全绿。
 
-需关闭：
+> **首轮历史（保留）**：`5feed3f` 首轮 P1=2（C1 非 USD、C2 max_cost 缺模型）；`e9ac29f` 已关闭 C1 + P2（预算 >0），但 C2 的多 Agent 模型加载期校验仍缺（见 §7）。
+
+首轮两项条件：
 
 - **C1 非 USD pricing 仍产出 `cost_usd`**：`PricingTable` 只要求 `currency` 非空（`is_usd()` 供 `max_cost` 检查），但 `RunObservability::record_llm_call` 对任何 currency 都调用 `cost_usd()` 并写入 `UsageTotals.cost_usd`；无 `max_cost` 时不报错、无 warning，统计字段名义为 USD 却按其它币种数值。DR-018 §2/任务-117「currency 非 USD 限制」未落实。
 - **C2 `max_cost` 下 pricing 缺配置模型未启动/加载期 fail-closed**：`observability_for_job` 只校验「有 pricing + USD」，未校验 Agent 模型是否有价；实际先发出 LLM 请求，下一次迭代 `check_before_call` 才返回 `CostUnavailable`。DR-018 §2 要求「pricing 缺图中配置模型 / 外部 DSH 成本不可得 → 启动/加载期配置错误（fail-closed）」，当前会先产生一次 LLM 调用。
@@ -90,3 +92,21 @@ bash scripts/dev/check.sh                    # PASSED
 - **P2 N1–N5**：0 语义、重试检查、subprocess unavailable、维度口径、F3a2/F3b 映射。
 - **P3 N6–N9**：非 USD 测试、map 清理、F3b 输出、既有 flake。
 - 无 P0；C1/C2 未关闭前不可 merge。
+
+## 7. 部分关闭复核（2026-11-03，`e9ac29f`，parent `73755e4`）
+
+**复核结论：仍为有条件通过；C1/P2 关闭，C2（多 Agent 模型）未完全关闭。**
+
+- **C1 已关闭**：`PricingTable` 解析期仅接受 `currency=USD`（非 USD → `pricing_invalid`），删除 `is_usd`/`pricing_currency_mismatch` 分支；EUR 负例通过。无 `max_cost` 时也不会产生非 USD `cost_usd`。
+- **P2 已关闭**：`BudgetConfig.validate` 要求 `max_tokens/max_cost > 0`（0/负数/NaN → `budget_invalid`）；`invalid_budget_values_are_config_errors_before_requests` 覆盖 0/0.0/NaN/负值并断言零请求。
+- **C2 部分关闭（P1 仍成立）**：`executor.rs::observability_for_job(&job, model)` 在**当前 job** 执行前校验 `pricing.has_model(current_agent_model)`，单 Agent 集成测试（`max_cost_missing_agent_model_is_config_error_before_requests`）零请求通过；但校验以 **AgentCallJob/当前节点** 为单位，**不是 run 加载期扫描全部 AgentConfig 模型**。多 agent 图若第一个 agent 模型有价、第二个缺价：图会先执行第一个 agent 并发出 LLM 请求，直到第二个 agent 的 job 才 `HARNESS_CONFIG_LOAD{pricing_missing_model}`——不满足 Lead REV-123 C2「所有 Agent 模型有价、缺失→CONFIG_LOAD 且零请求」。现有 `TWO_AGENT_GRAPH` 测试仅覆盖同一 `deepseek-chat` 模型，未覆盖两模型。**需在 run 入口/加载阶段校验该 run 所有 AgentConfig 的 model 均有价，或明确缩小 C2 口径并获批；补双模型（first priced / second missing）零请求测试。**
+- **最终门禁（`e9ac29f`）**：
+```bash
+cargo test -p zgraph-harness                 # 379 tests：378 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp  # 379 tests：378 passed / 0 failed / 1 ignored
+cargo test --workspace                       # 91 targets：1269 passed / 0 failed / 3 ignored
+cargo test -p zgraph-cli                     # 257 passed / 0 failed
+pytest -q                                    # exit 0；183 passed
+cargo clippy/fmt/check/no-default            # clean
+```
+- 范围：`e9ac29f` 仅 `observability.rs`/`executor.rs` +148/−43；无 Cargo；`git status` 空。
