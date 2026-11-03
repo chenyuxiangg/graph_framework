@@ -426,17 +426,22 @@ fn unknown_model_price_is_unavailable_not_zero() {
     );
 }
 
-/// 预算超限（F3a2 未合并时：harness 提前停止，kernel 暂映射 `NodeError::Internal`
-/// 消息 `budget_exceeded`；F3a2 合并后应变为 `BUDGET_EXCEEDED` + stop_reason）。
+/// 预算超限（F3a2 已合并，REV-126）：kernel 映射 `BUDGET_EXCEEDED` +
+/// `stop_reason=budget_exceeded`；harness 在第二次请求前停止；`--stats` 从持久化的
+/// `runs.error_code` 派生 `budget_stop`（不伪造 cost：trace 未持久化 pricing）。
 #[test]
 fn token_budget_stops_run_with_budget_usage() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("trace.db");
-    let args = ac08_args(&db, &["--json", "--max-tokens", "1"]);
+    let args = ac08_args(&db, &["--json", "--record=full", "--max-tokens", "1"]);
     let output = run_cli(&args, dir.path());
     assert_eq!(code(&output), 1, "stderr={}", stderr(&output));
     let payload = json_stdout(&output);
+    let run_id = payload["run_id"].as_str().expect("run_id").to_string();
     assert_eq!(payload["status"], json!("Failed"));
+    // kernel `RunOutcome.error.code` + `stop_reason`（不再依赖 NodeError::Internal 消息）。
+    assert_eq!(payload["error"]["code"], json!("BUDGET_EXCEEDED"));
+    assert_eq!(payload["stop_reason"], json!("budget_exceeded"));
     let usage = &payload["usage"];
     assert_eq!(usage["run"]["llm_calls"], json!(1), "第二次请求前停止");
     assert_eq!(
@@ -444,15 +449,54 @@ fn token_budget_stops_run_with_budget_usage() {
         json!("tokens"),
         "harness 结构化停止: {usage}"
     );
-    // F3a2 占位：kernel 目前把 BudgetExceeded 映射为 Internal("budget_exceeded: ...")。
-    let error = &payload["error"];
+
+    // `trace --stats`：budget_stop 从 runs.error_code 派生（真实持久化数据）；
+    // cost 无持久化 pricing → 不输出（不伪造）。
+    let stats = run_cli(
+        &[
+            "trace".to_string(),
+            run_id.clone(),
+            "--db".to_string(),
+            arg(&db),
+            "--stats".to_string(),
+            "--json".to_string(),
+        ],
+        dir.path(),
+    );
+    // trace 对 Failed run 的既有退出码为 1（不是存储错误）。
+    assert_eq!(code(&stats), 1, "stderr={}", stderr(&stats));
+    let stats_json = json_stdout(&stats);
+    assert_eq!(stats_json["status"], json!("Failed"));
+    assert_eq!(
+        stats_json["budget_stop"]["stop_reason"],
+        json!("budget_exceeded")
+    );
     assert!(
-        error["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("budget_exceeded")
-            || error["code"] == "BUDGET_EXCEEDED",
-        "F3a2 映射前/后均需可识别: {error}"
+        stats_json.get("cost_usd").is_none(),
+        "无 pricing 持久化: {stats_json}"
+    );
+    assert_eq!(stats_json["llm_calls"], json!(1));
+    assert!(
+        stats_json["token_usage"]["total_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "{stats_json}"
+    );
+    let human = run_cli(
+        &[
+            "trace".to_string(),
+            run_id,
+            "--db".to_string(),
+            arg(&db),
+            "--stats".to_string(),
+        ],
+        dir.path(),
+    );
+    assert!(
+        stdout(&human).contains("budget_stop budget_exceeded"),
+        "{}",
+        stdout(&human)
     );
 }
 

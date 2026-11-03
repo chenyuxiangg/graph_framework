@@ -2346,6 +2346,11 @@ fn json_payload(
     if let Some(error) = &outcome.error {
         object.insert("error".to_string(), run_error_json(error));
     }
+    // v0.5/F3a2/F3b：预算停止的 additive `stop_reason`（`budget_exceeded`；非预算停止
+    // 不插入，保持既有输出）。CLI 仅展示 kernel `RunOutcome.stop_reason`，不写 metrics。
+    if let Some(stop_reason) = &outcome.stop_reason {
+        object.insert("stop_reason".to_string(), json!(stop_reason));
+    }
     Value::Object(object)
 }
 

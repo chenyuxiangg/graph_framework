@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{json, Map, Value};
+use zgraph_kernel::{CODE_BUDGET_EXCEEDED, STOP_REASON_BUDGET_EXCEEDED};
 use zgraph_trace::{
     EventQuery, EventRow, ForeachExpansionRow, HumanDecisionRow, RunRow, RunStats, RunStatus,
     ToolCallRow, TraceError, TraceReader,
@@ -749,10 +750,18 @@ fn run_stats(
         Ok(cost) => cost,
         Err(error) => return report_storage_error(&error),
     };
+    // v0.5/F3a2（DR-018 §3）：预算超限持久化在 `runs.error_code`（`BUDGET_EXCEEDED`）→
+    // `--stats` 派生 `budget_stop`（真实数据，不伪造；trace 未持久化 cost/pricing，
+    // 费用仍只在 `RunFinished` additive metrics 存在时展示）。
+    let budget_stop = run
+        .error_code
+        .as_deref()
+        .filter(|code| *code == CODE_BUDGET_EXCEEDED)
+        .map(|_| STOP_REASON_BUDGET_EXCEEDED);
     if options.json {
-        print_stats_json(&stats, tool_calls, &usage, cost_usd);
+        print_stats_json(&stats, tool_calls, &usage, cost_usd, budget_stop);
     } else {
-        print_stats_human(&stats, tool_calls, &usage, cost_usd);
+        print_stats_human(&stats, tool_calls, &usage, cost_usd, budget_stop);
         if truncated {
             println!();
             println!("{}", truncation_note(run));
@@ -865,7 +874,13 @@ fn finished_cost_usd(reader: &TraceReader, run_id: &str) -> Result<Option<f64>, 
 
 /// `--stats` 人类可读输出（06 §6.11.2；v0.4 追加 `tool_calls` 计数，v0.5 追加
 /// token/LLM 耗时/调用数/费用；**仅在有数据时输出**，默认无数据输出不变）。
-fn print_stats_human(stats: &RunStats, tool_calls: usize, usage: &LlmUsage, cost_usd: Option<f64>) {
+fn print_stats_human(
+    stats: &RunStats,
+    tool_calls: usize,
+    usage: &LlmUsage,
+    cost_usd: Option<f64>,
+    budget_stop: Option<&str>,
+) {
     println!(
         "run {} status={} duration={}",
         stats.run_id,
@@ -916,11 +931,20 @@ fn print_stats_human(stats: &RunStats, tool_calls: usize, usage: &LlmUsage, cost
     if let Some(cost) = cost_usd {
         println!("cost {cost:.6} USD");
     }
+    if let Some(stop_reason) = budget_stop {
+        println!("budget_stop {stop_reason}");
+    }
 }
 
 /// `--stats --json` 输出对象（06 §6.11.2；v0.4 追加 `tool_calls`，v0.5 追加
 /// llm/token/费用键；**仅在有数据时输出**）。
-fn print_stats_json(stats: &RunStats, tool_calls: usize, usage: &LlmUsage, cost_usd: Option<f64>) {
+fn print_stats_json(
+    stats: &RunStats,
+    tool_calls: usize,
+    usage: &LlmUsage,
+    cost_usd: Option<f64>,
+    budget_stop: Option<&str>,
+) {
     let kinds: serde_json::Map<String, Value> = stats
         .kinds
         .iter()
@@ -964,6 +988,9 @@ fn print_stats_json(stats: &RunStats, tool_calls: usize, usage: &LlmUsage, cost_
     }
     if let Some(cost) = cost_usd {
         value["cost_usd"] = serde_json::json!(cost);
+    }
+    if let Some(stop_reason) = budget_stop {
+        value["budget_stop"] = serde_json::json!({"stop_reason": stop_reason});
     }
     println!("{value}");
 }
