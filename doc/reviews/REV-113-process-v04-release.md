@@ -13,9 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-P0=0、**P1=0**；**P2 条件 C1**（发布文档中的 harness 测试计数 339 vs 实测 **340**，5 处引用；属发布文档准确性，D6 需修正后再 merge）；P3 若干（spec 00 reason 闭集补全/CLI 码描述、index reviews 细节、README 标题状态）。版本/锁/ release `--locked`/`--version`、perf 基线（5-trial 与 Lead 逐项一致）、spec as-built/PROVENANCE 计数与 SHA、README/progress/issues/test-baseline、范围与红线主体均成立。
+> **结论历史**：首轮（基准 `f3f5d40`）为「**有条件通过**」——P2 C1：发布文档五处 harness 计数写 339/0/1，实测 340/0/1。作者 `af8303a` 关闭 C1 + P3 后，评审人复核五处 340、`grep 339/0/1` 清零、harness 340/0/1（默认/features）、workspace 1216/0/3、check.sh 绿、PROVENANCE 7640/8055 9/9（§8），C1 关闭，结论改**通过**。
+>
+> 首轮意见（历史保留）：P0=0/P1=0；版本/锁/release/perf/spec/PROVENANCE/README 主体成立；C1 计数偏差；P3 文档细节。
 
 ### 1.1 已核对成立
 
@@ -90,10 +92,35 @@ bash scripts/dev/check.sh                  # CHECK PASSED
 
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
-| C1 harness 计数 339→340（5 处） | **open** | README/07 DoD/PROVENANCE/DR-013/test-baseline 统一 340/0/1；重跑 check.sh |
+| C1 harness 计数 339→340（5 处） | **closed（af8303a）** | README:27 / 07 DoD:605 / PROVENANCE:267 / DR-013:334 / test-baseline:10 均改 **340/0/1**；`grep 339/0/1` 清零；harness 默认与 `--features mcp` 均 340/0/1；check.sh 绿 |
+| P3 ①–⑤ | **closed（af8303a）** | 00 reason 闭集补 `path_too_long`/`not_regular_file`/`unsupported_patch`/`io_error`/`unknown_builtin_tool`；`REPLAY_TOOL_RECORD_MISMATCH` 描述改 v0.4 JSON/sha + reexec v0.5 预留；index reviews 补 105–113；README 标题改「发布执行中」；07 AC 行注明实现/e2e 分工 |
 
 ## 7. 遗留问题
 
-- C1 关闭前不 merge；P3-1/P3-2/P3-3/P3-4/P3-5 文档细节可同批修正；P3-6 flake 已登记 ISSUE-176（本次未复现）。
+- C1 与 P3 ①–⑤ 已关闭；P3-6 flake（ISSUE-176）已登记且本次未复现。
 - e2e 166/23/2 与 v0.4 29 用例实测；workspace 1216/0/3、pytest 183 实测；release `--locked`/`--version` 实测；PROVENANCE 7640/8055 9/9 实测一致。
 - 跨模块（版本 Cargo 为 process 模块；主导 docs）由 Lead 追加第二评审；未改 kernel/代码/测试。
+
+## 8. 条件关闭复核（2026-11-03）
+
+复核提交：`af8303a`（父 `fc792c9`；docs-only 7 文件，无代码/测试/评审记录/依赖改动）。评审人执行：
+
+```bash
+git status --porcelain                       # 空
+git diff --stat fc792c9..af8303a             # 7 docs files
+cargo test -p zgraph-harness                 # 340 passed / 0 failed / 1 ignored
+cargo test -p zgraph-harness --features mcp  # 340 passed / 0 failed / 1 ignored
+cargo test --workspace                       # 1216 passed / 0 failed / 3 ignored
+bash scripts/dev/check.sh                    # CHECK PASSED
+grep -rn "339/0/1" README.md doc/test-baseline.txt doc/spec-v1.2/07-验收用例.md \
+  doc/spec-v1.2/PROVENANCE.md doc/decisions/DR-013-v04-builtin-tools-jail.md  # CLEAN
+# PROVENANCE：00–08=7640 行、全 spec=8055 行；9 个文件 SHA-256 复算 9/9 一致
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C1 五处 340 | ✅ README/07 DoD/PROVENANCE/DR-013/test-baseline 均 340/0/1；旧 `339/0/1` grep 清零（仅历史行号 339 的无关命中） |
+| spec 00/07 一致性 | ✅ 00 reason 闭集补 5 值、`REPLAY_TOOL_RECORD_MISMATCH` 描述修正；07 AC-21–24 行注明「实现 REV-106/107/108/109–111、e2e REV-112」；SHA 表 00/07 已重算 9/9 |
+| 发布态/门禁 | ✅ 版本 0.4.0、`--version=zgraph 0.4.0 (DSL 1.0)`、release `--locked` 已验；workspace 1216/0/3、harness 340/0/1、check.sh 绿 |
+
+**最终状态**：C1/P3 ①–⑤ closed；建议 Lead merge → 构建 dist tar/sha/notes → tag `v0.4.0` → GitHub Release。
