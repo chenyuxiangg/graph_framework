@@ -17,7 +17,7 @@
 - **reexec 工具回放（opt-in）**：`--mode=tools --replay-tools=reexec`；仅候选 `builtin__read/grep/glob/diff` + `status=ok` 重跑并比对 `result_sha256`；副作用/MCP/Python/失败行**复用记录、绝不执行**；默认 `recorded` 逐字节不变；不升 v8。
 - **可观测/成本**：run/node/agent token/耗时/费用；`--pricing <file>`（不内置价）；`--max-tokens`/`--max-cost` 默认关，超限 `BUDGET_EXCEEDED` + `Other("budget_exceeded")`（不可续）；外部 harness usage unavailable 如实标注。
 - **sandbox 增强**：`--allow-write-path` 独立可写白名单（profile+jail、不可 `/`、同目录写优先）；`--allow-exec-path`/构建工具链路径、`cc -isysroot` 文档；默认无新开关行为不变。
-- **真实 Codex/DSH 验证**：DSH ACP transport 已落地（单测 16；真实握手无 key 可跑；全链路需 `DEEPSEEK_API_KEY`）；Codex **零密钥 mock CI**（CODEX_HOME + 本地 Responses SSE；3 e2e，1 skip）；F5f 工具事件需非嵌套 `-s danger-full-access`。
+- **真实 Codex/DSH 验证**：DSH ACP transport 已落地（单测 16；真实握手无 key 可跑；全链路需 `DEEPSEEK_API_KEY`）；Codex **零密钥 mock CI**（CODEX_HOME + 本地 Responses SSE；3 gated：2 pass + F5f nested skip）；F5f 工具事件需非嵌套 `-s danger-full-access`。
 - **F4**：kernel/worker/e2e flake 加固（ISSUE-176/177/178 fixed）。
 - **CLI 示例**：
   ```bash

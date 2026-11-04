@@ -186,7 +186,7 @@
 | ISSUE-178 | P3 | e2e/test | Codex adapter e2e 并行负载 flake | CI 偶发失败 | **fixed（v0.5 F4/REV-125）**：隔离/加宽超时 | fixed | 2026-11-03 |
 | ISSUE-179 | P3 | trace/storage | `tool_calls` 当前无 FK 级联删除清理（run 删除不会自动清 tool_calls；与 v6 既有表清理策略一致） | 长期 DB 膨胀/孤儿行 | v0.5 评估 `ON DELETE CASCADE` 或清理命令；当前文档/发布说明标注 v0.5 F4 计划清理/复核 | open（release notes 标注；v0.6 评估清理） | 2026-11-03 |
 | ISSUE-180 | P3 | harness/sandbox | bash 真实隔离仅 macOS；嵌套 CI 只覆盖 fail-closed；用户普通终端 `verify-sandbox.sh` 证据待补 | 发布已知限制（不能声称已全环境验证） | release notes 标注；用户终端跑脚本补证据；Linux/Windows 不支持 v0.5 F4 计划清理/复核 | open | 2026-11-03 |
-| ISSUE-181 | P3 | process/release | v0.3 残余 ISSUE-156–175 复核 | 台账清理 | **fixed（v0.5 F4 复核）**：156–175 逐项 fixed/延后/wontfix；v0.5 新限制拆 ISSUE-182–185 | fixed | 2026-11-03 |
+| ISSUE-181 | P3 | process/release | v0.3 残余 ISSUE-156–175 复核 | 台账清理 | **v0.5 F4 复核完成，但多数未关闭**：156–160/163–166/171–175 等保持 open（状态见各行）；未在 v0.5 关闭，不虚标 fixed；v0.5 新限制拆 ISSUE-182–185 | open | 2026-11-03 |
 | ISSUE-182 | P3 | harness/verification | v0.5：F5c DSH 全链路需 `DEEPSEEK_API_KEY`/用户授权，F5c 未在 CI 验证 | 发布已知限制（不伪造） | release notes 标注；用户环境补证据 | open | 2026-11-04 |
 | ISSUE-183 | P3 | harness/verification | v0.5：F5f Codex 工具事件验证需非嵌套环境 `-s danger-full-access`；默认 sandbox 嵌套静默假绿 | 真实验证受限 | F5f 门控/文档；非嵌套用户终端补证据 | open | 2026-11-04 |
 | ISSUE-184 | P3 | harness/deps | v0.5：DSH developer preview/Codex 0.166.0 版本 pin；升级需重测 protocolVersion/事件 | 兼容性漂移 | pin 版本 + 断言/重测；release notes 标注 | open | 2026-11-04 |
