@@ -13,11 +13,11 @@
 
 ## 1. 结论
 
-**结论：有条件通过**
+**结论：通过**
 
-**结论：有条件通过（fd00962 复核后仍有 C2a/C3 未关闭）**
-
-P0=0、P1=0；首轮 P2 C1/C2。复核 `fd00962` 后：**C1 已关闭**（index 拆行）；**C2b/C2c/C2d 已关闭**（BUDGET 响应后/07 AC-28 as-built/ISSUE-181 改 open 不虚标）；**C2a 未关闭**（00 as-built banner 仍残留旧设计冻结列表）；**新增 C3（P2/P1 级发布一致性）**：`fd00962` 修改了 spec 00/06/07/08 内容但 **PROVENANCE SHA 未重算**，复算 00/06/07/08 **4/9 MISMATCH**（行数仍 7791/8218），与「9/9 CONSISTENT」声明不符。版本/perf/计数/门禁主体成立；C2a+C3 为 docs 小修，关闭后通过。
+> **结论历史**：首轮（`59e1546`）「有条件通过」→ C1/C2 已由 `fd00962` 部分关闭 → C2a/C3 又由 `5ea84fa` 关闭；复核 00 旧段清零、PROVENANCE **9/9 SHA**、行数 7791/8218、计数不变、check.sh PASSED（§9），结论改**通过**。
+>
+> 首轮意见（历史保留）：P0/P1=0；版本/perf/计数门禁主体成立；C1 index 表格、C2 spec as-built/AC-28/issues、C3 PROVENANCE SHA 修复后关闭。
 
 ### 1.1 已核对成立
 
@@ -91,15 +91,15 @@ bash scripts/dev/check.sh                  # CHECK PASSED
 | 条件 | 状态 | 关闭要求 |
 |---|---|---|
 | C1 index perf v0.5 行拆行 | **closed（fd00962）** | `doc/index.md` perf v0.5 与 legacy 已拆行；check.sh |
-| C2a 00 as-built banner 旧设计列表 | **open（fd00962 未完全删除）** | 00:13 仍有 `...详见 DR-016–020。：① reexec ...` 旧设计段；删除 |
+| C2a 00 as-built banner 旧设计列表 | **closed（5ea84fa）** | 00:13 旧 `：① ...` 设计列表整段删除；grep 无命中 |
 | C2b BUDGET 响应后检查 | **closed（fd00962）** | 00:263 改为「请求前+每响应后；最后响应越界也停」 |
 | C2c 07 AC-28 as-built | **closed（fd00962）** | 07:76 改 as-built（F5a/F5b/F5d/F5e 实测；F5c/F5f 门控） |
 | C2d issues 156–175/181 | **closed（fd00962，按文案修正方案）** | ISSUE-181 改 open 并明示「多数未关闭、不虚标 fixed」；156–175 行状态与文案一致 |
-| **C3 PROVENANCE SHA** | **open（新发现）** | 00/06/07/08 内容已改但 SHA 表未重算：复算 **4/9 MISMATCH**；行数 7791/8218 不变，需重算 4 个 SHA |
+| C3 PROVENANCE SHA | **closed（5ea84fa）** | 00/06/07/08 SHA 重算；9/9 CONSISTENT；行数 7791/8218 不变 |
 
 ## 7. 遗留问题
 
-- C2a/C3 关闭前不发布；P3 已由 fd00962 处理（08 标题/index reviews/README/06 注记）。
+- C2a/C3 已由 `5ea84fa` 关闭；P3 已由 fd00962 处理（08 标题/index reviews/README/06 注记）。
 - 发布限制已标注：F5c key、F5f 非嵌套、外部 usage unavailable、DSH/Codex pin、W3b→v0.6、ISSUE-179/180/163/164；F6/notes 需保留。
 - 无代码/测试改动；版本/perf/计数门禁主体通过。
 
@@ -127,4 +127,25 @@ for f in doc/spec-v1.2/0*.md; do ... done
 | C3 | ❌ 00/06/07/08 内容变动后 PROVENANCE SHA 未重算；复算 4/9 MISMATCH；行数仍 7791/8218 |
 | 计数/门禁 | ✅ docs-only 计数不变；check.sh PASSED；版本/perf 未变 |
 
-**当前状态：C2a/C3 open，结论保持「有条件通过」；需 docs-dev 再一个小 commit（删 00 旧段 + 重算 00/06/07/08 SHA）。**
+**该次状态（历史）：C2a/C3 open，结论保持「有条件通过」；随后 `5ea84fa` 关闭。**
+
+## 9. 条件关闭复核（最终，5ea84fa）
+
+复核提交：`5ea84fa`（父 `8ec491d`；docs-only 2 文件：00 + PROVENANCE，+5/−5）。评审人执行：
+
+```bash
+git status --porcelain                 # 空
+git diff --stat 8ec491d..5ea84fa       # 2 docs files +5/−5
+bash scripts/dev/check.sh              # CHECK PASSED
+grep -nF "详见 DR-016–020。：" doc/spec-v1.2/00-总纲.md   # CLEAN（旧设计段已删）
+grep -nE "F5d 实现/真 key 待" doc/spec-v1.2/00-总纲.md     # 无命中
+# PROVENANCE SHA 复算：9/9 OK（00/06/07/08 已重算）；行数 7791/8218 不变
+```
+
+| 项 | 复核结果 |
+|---|---|
+| C2a | ✅ 00:13 as-built banner 已删旧设计列表，仅保留 as-built 描述；旧段 grep 清零 |
+| C3 | ✅ PROVENANCE 00/06/07/08 SHA 重算；复算 **9/9 OK**；行数 7791/8218 不变 |
+| 计数/门禁 | ✅ docs-only 计数不变；check.sh PASSED；版本/perf 未变 |
+
+**最终状态：C1/C2a–C2d/C3 全部 closed；结论改「通过」。** 建议 Lead merge → 构建 dist/RELEASE_NOTES → tag v0.5.0 → GitHub Release（PAT 已就绪）。

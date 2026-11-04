@@ -121,7 +121,7 @@
 | [REV-125](REV-125-e2e-flakes.md) | 2026-11-03 | e2e | `test/e2e-flakes` | **通过**（F4b：ISSUE-177 best-of-3 交错采样阈值/断言不变；ISSUE-178 PATH/CODEX_HOME/TMPDIR 隔离+同 binary 串行+120s 环境预算+15s 有界；e2e 173/24/2×3、ac09/ac20h ×10、workspace 1254/0/3、clippy/fmt/check 绿；仅 2 测试文件、无产品代码；P3/ISSUE 清单见 §3/§7） | reviewer-a |
 | [REV-126](REV-126-kernel-budget-stop.md) | 2026-11-03 | kernel（含 harness 小改/CLI 机械） | `feat/kernel-budget-stop` | **通过**（F3a2：响应后检查最后越界也 fail；BUDGET_EXCEEDED append-only + stop_reason + 无 Running/不可续/trace v7；CLI 机械适配；kernel 153/harness 383/cli 257/workspace 1278×2/pytest 183/clippy/fmt/check 绿；P3 见 §3） | reviewer-a |
 | [REV-130](REV-130-e2e-codex-mock.md) | 2026-11-04 | e2e/py-worker（adapter 跨模块） | `test/e2e-codex-mock` | **通过**（F5d：adapter 9 项修复/tool 映射/零密钥 mock gated 真机 3 例、CI ac28g；e2e 174/0/5×2、workspace 1295/0/6、pytest 203/2、clippy/fmt/check 绿；首轮有条件通过 → rebase main 118ef69 后关闭 C1；P3 F5f/F5d-b/F6 计数见 §3/§8） | reviewer-a |
-| [REV-131](REV-131-process-v05-release.md) | 2026-11-04 | process/docs | `chore/process-v05-release` | **有条件通过**（v0.5.0：version 0.5.0/release --locked/--version、perf 7-trial、workspace 1295/6/e2e 25/174/5/pytest 203/2/harness 386/cli 270；fd00962 关闭 C1/C2b–d，**C2a 00 旧设计段+ C3 PROVENANCE SHA 4/9 未重算仍 open**；见记录 §6/§8） | reviewer-a |
+| [REV-131](REV-131-process-v05-release.md) | 2026-11-04 | process/docs | `chore/process-v05-release` | **通过**（v0.5.0：version 0.5.0/release --locked/--version、perf 7-trial、workspace 1295/6/e2e 25/174/5/pytest 203/2/harness 386/cli 270；首轮有条件通过 → fd00962+5ea84fa 关闭 C1/C2a–d/C3；PROVENANCE 7791/8218 9/9；见记录 §6/§9） | reviewer-a |
 
 命名：`REV-<NNN>-<module>-<slug>.md`；模板见 [`TEMPLATE.md`](TEMPLATE.md)。
 
